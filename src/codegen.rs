@@ -346,6 +346,13 @@ impl<'a> FuncGen<'a> {
 
         match op {
             Operator::Nop => {}
+            // `unreachable` always traps; code after it is dead, so stop
+            // emitting until the enclosing region ends (as for `return`/`br`).
+            Operator::Unreachable => {
+                self.line("panic!(\"unreachable\");".to_string());
+                self.reachable = false;
+                self.dead_nesting = 0;
+            }
             Operator::LocalGet { local_index } => {
                 let ty = self.local_ty(local_index)?;
                 let stable = !self.mutable_locals.contains(&local_index);

@@ -466,8 +466,23 @@ mod tests {
 
     #[test]
     fn result_declared_but_empty_stack_is_rejected() {
-        // A function that declares a result but leaves nothing on the stack
-        // would otherwise produce a body that does not compile.
+        // A function that declares a result but falls off its end with nothing
+        // on the stack must be an error, rather than silently emitting an
+        // empty-bodied `-> i32` function that does not compile.
+        let wasm = wat_to_wasm(
+            r#"
+            (module
+              (func (result i32) (nop)))
+            "#,
+        );
+
+        assert!(transpile(&wasm).is_err());
+    }
+
+    #[test]
+    fn unreachable_body_transpiles_to_a_trap() {
+        // `unreachable` terminates the function, so a declared result needs no
+        // trailing value; the body is a panic (a wasm trap).
         let wasm = wat_to_wasm(
             r#"
             (module
@@ -475,9 +490,8 @@ mod tests {
             "#,
         );
 
-        // `unreachable` is not supported yet, so this must be an error rather
-        // than silently emitting an empty-bodied `-> i32` function.
-        assert!(transpile(&wasm).is_err());
+        let rust = transpile(&wasm).expect("transpile ok");
+        assert!(rust.contains("panic!(\"unreachable\")"), "{rust}");
     }
 
     #[test]
