@@ -368,6 +368,17 @@ impl<'a> FuncGen<'a> {
             Operator::I32And => self.binop_infix("&")?,
             Operator::I32Or => self.binop_infix("|")?,
             Operator::I32Xor => self.binop_infix("^")?,
+            // Division and remainder can trap, so they are materialised at this
+            // program point (see `materialize`); shifts/rotates never trap.
+            Operator::I32DivS => self.div_signed()?,
+            Operator::I32DivU => self.div_rem_unsigned("/")?,
+            Operator::I32RemS => self.rem_signed()?,
+            Operator::I32RemU => self.div_rem_unsigned("%")?,
+            Operator::I32Shl => self.shift_op("wrapping_shl")?,
+            Operator::I32ShrS => self.shift_op("wrapping_shr")?,
+            Operator::I32ShrU => self.unsigned_shift("wrapping_shr")?,
+            Operator::I32Rotl => self.shift_op("rotate_left")?,
+            Operator::I32Rotr => self.shift_op("rotate_right")?,
             Operator::I32Eqz => self.compare_zero()?,
             Operator::I32Eq => self.compare_signed("==")?,
             Operator::I32Ne => self.compare_signed("!=")?,
@@ -390,6 +401,15 @@ impl<'a> FuncGen<'a> {
             Operator::I64And => self.binop_infix("&")?,
             Operator::I64Or => self.binop_infix("|")?,
             Operator::I64Xor => self.binop_infix("^")?,
+            Operator::I64DivS => self.div_signed()?,
+            Operator::I64DivU => self.div_rem_unsigned("/")?,
+            Operator::I64RemS => self.rem_signed()?,
+            Operator::I64RemU => self.div_rem_unsigned("%")?,
+            Operator::I64Shl => self.shift_op("wrapping_shl")?,
+            Operator::I64ShrS => self.shift_op("wrapping_shr")?,
+            Operator::I64ShrU => self.unsigned_shift("wrapping_shr")?,
+            Operator::I64Rotl => self.shift_op("rotate_left")?,
+            Operator::I64Rotr => self.shift_op("rotate_right")?,
             Operator::I64Eqz => self.compare_zero()?,
             Operator::I64Eq => self.compare_signed("==")?,
             Operator::I64Ne => self.compare_signed("!=")?,
@@ -561,6 +581,88 @@ impl<'a> FuncGen<'a> {
                 lhs.code, rhs.code
             ),
             ty: ValType::I32,
+            stable: lhs.stable && rhs.stable,
+        });
+        Ok(())
+    }
+
+    /// A shift or rotate: `lhs.method(rhs as u32)`. `wrapping_shl`/`wrapping_shr`
+    /// and `rotate_left`/`rotate_right` all take the count mod the bit width, so
+    /// this matches wasm's masked shift/rotate count for both i32 and i64.
+    fn shift_op(&mut self, method: &str) -> Result<(), TranspileError> {
+        let rhs = self.pop()?;
+        let lhs = self.pop()?;
+        self.push(Val {
+            code: format!("{}.{method}({} as u32)", lhs.code, rhs.code),
+            ty: lhs.ty,
+            stable: lhs.stable && rhs.stable,
+        });
+        Ok(())
+    }
+
+    /// Bind a possibly-trapping expression (integer div/rem) to a temporary at
+    /// exactly this program point, so the trap fires in program order and is
+    /// not lost if the value is later dropped or skipped by a branch. Pushes
+    /// the resulting stable temporary. This mirrors how `call`/`memory_grow`
+    /// materialise their side-effecting results.
+    fn materialize(&mut self, code: String, ty: ValType) -> Result<(), TranspileError> {
+        let name = self.fresh_temp();
+        self.line(format!("let {name}: {} = {code};", rust_type(ty)?));
+        self.push(Val {
+            code: name,
+            ty,
+            stable: true,
+        });
+        Ok(())
+    }
+
+    /// Signed division. Rust's `/` panics on both a zero divisor and
+    /// `iN::MIN / -1`, matching the two wasm `div_s` traps.
+    fn div_signed(&mut self) -> Result<(), TranspileError> {
+        let rhs = self.pop()?;
+        let lhs = self.pop()?;
+        self.materialize(format!("{} / {}", lhs.code, rhs.code), lhs.ty)
+    }
+
+    /// Signed remainder. `wrapping_rem` panics on a zero divisor and yields 0
+    /// for `iN::MIN % -1`, matching wasm `rem_s`.
+    fn rem_signed(&mut self) -> Result<(), TranspileError> {
+        let rhs = self.pop()?;
+        let lhs = self.pop()?;
+        self.materialize(format!("{}.wrapping_rem({})", lhs.code, rhs.code), lhs.ty)
+    }
+
+    /// Unsigned division (`op` = `/`) or remainder (`op` = `%`): reinterpret both
+    /// operands as the unsigned integer of their width, apply `op` (which panics
+    /// on a zero divisor), then reinterpret back to the signed type.
+    fn div_rem_unsigned(&mut self, op: &str) -> Result<(), TranspileError> {
+        let rhs = self.pop()?;
+        let lhs = self.pop()?;
+        let unsigned = unsigned_type(lhs.ty)?;
+        let signed = rust_type(lhs.ty)?;
+        self.materialize(
+            format!(
+                "(({} as {unsigned}) {op} ({} as {unsigned})) as {signed}",
+                lhs.code, rhs.code
+            ),
+            lhs.ty,
+        )
+    }
+
+    /// A logical (unsigned) shift right: shift the unsigned reinterpretation so
+    /// the high bits fill with zero, then reinterpret back to the signed type.
+    /// Shifts do not trap, so the value stays a (stable) inline expression.
+    fn unsigned_shift(&mut self, method: &str) -> Result<(), TranspileError> {
+        let rhs = self.pop()?;
+        let lhs = self.pop()?;
+        let unsigned = unsigned_type(lhs.ty)?;
+        let signed = rust_type(lhs.ty)?;
+        self.push(Val {
+            code: format!(
+                "(({} as {unsigned}).{method}({} as u32) as {signed})",
+                lhs.code, rhs.code
+            ),
+            ty: lhs.ty,
             stable: lhs.stable && rhs.stable,
         });
         Ok(())
