@@ -186,6 +186,24 @@ fn i64_narrow_stores_and_sign_extension() {
 }
 
 #[test]
+fn rt_helper_prepended_before_instance() {
+    // A stateful module (has memory) becomes a `struct Instance`; a runtime
+    // free-function helper like `f32_min` must still be emitted at module scope
+    // ahead of the struct so the generated code compiles and runs.
+    transpile_compile_run(
+        "rt_stateful",
+        r#"
+        (module
+          (memory 1)
+          (func (param f32 f32) (result f32) (f32.min (local.get 0) (local.get 1))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(1.0f32, 2.0), 1.0);\n    \
+         assert!(inst.func0(f32::NAN, 2.0).is_nan());",
+    );
+}
+
+#[test]
 fn memory_size_and_grow() {
     transpile_compile_run(
         "mem_grow",

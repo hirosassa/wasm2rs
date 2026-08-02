@@ -80,6 +80,33 @@ fn float_comparisons_with_nan() {
 }
 
 #[test]
+fn float_min_max() {
+    // wasm min/max propagate NaN and treat -0.0 as strictly less than +0.0,
+    // unlike Rust's `f32::min`/`max`, so they need dedicated helpers.
+    transpile_compile_run(
+        "minmax",
+        r#"
+        (module
+          (func (param f32 f32) (result f32) (f32.min (local.get 0) (local.get 1)))
+          (func (param f32 f32) (result f32) (f32.max (local.get 0) (local.get 1)))
+          (func (param f64 f64) (result f64) (f64.min (local.get 0) (local.get 1)))
+          (func (param f64 f64) (result f64) (f64.max (local.get 0) (local.get 1))))
+        "#,
+        "assert_eq!(func0(1.0f32, 2.0), 1.0);\n    \
+         assert_eq!(func1(1.0f32, 2.0), 2.0);\n    \
+         assert!(func0(f32::NAN, 1.0).is_nan());\n    \
+         assert!(func1(1.0f32, f32::NAN).is_nan());\n    \
+         assert!(func0(0.0f32, -0.0).is_sign_negative());\n    \
+         assert!(func1(0.0f32, -0.0).is_sign_positive());\n    \
+         assert_eq!(func2(3.0f64, -5.0), -5.0);\n    \
+         assert_eq!(func3(3.0f64, -5.0), 3.0);\n    \
+         assert!(func2(-0.0f64, 0.0).is_sign_negative());\n    \
+         assert!(func3(-0.0f64, 0.0).is_sign_positive());\n    \
+         assert!(func2(f64::NAN, 1.0).is_nan());",
+    );
+}
+
+#[test]
 fn float_unary_math_and_copysign() {
     transpile_compile_run(
         "unary",

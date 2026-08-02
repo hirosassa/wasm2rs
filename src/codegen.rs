@@ -105,10 +105,25 @@ enum Helper {
     Grow,
 }
 
-/// The rendered source of one function plus the memory helpers it relies on.
+/// A free-standing runtime helper function emitted at module scope on demand.
+/// Unlike [`Helper`], these do not touch instance state (memory/globals), so
+/// they are plain `fn`s usable from both stateless and stateful modules — used
+/// for operations whose wasm semantics differ from Rust's built-in operators.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Rt {
+    F32Min,
+    F32Max,
+    F64Min,
+    F64Max,
+}
+
+/// The rendered source of one function plus the helpers it relies on.
 struct GenFn {
     src: String,
+    /// Instance-method memory helpers.
     helpers: HashSet<Helper>,
+    /// Module-scope free-function runtime helpers.
+    rt: HashSet<Rt>,
 }
 
 /// The lint-suppression attribute prefixed to generated functions/impls.
@@ -243,20 +258,33 @@ pub(crate) fn generate_module(
 
     let mut sources = Vec::with_capacity(funcs.len());
     let mut used: HashSet<Helper> = HashSet::new();
+    let mut used_rt: HashSet<Rt> = HashSet::new();
     for (index, f) in funcs.iter().enumerate() {
         // Defined functions are named by their full function index, i.e. after
         // the imported functions in the shared index space.
         let generated = generate_function(imports.len() + index, f, &ctx)?;
         used.extend(generated.helpers);
+        used_rt.extend(generated.rt);
         sources.push(generated.src);
     }
 
-    if !stateful {
-        return Ok(sources.join("\n"));
-    }
-    render_module(
-        &sources, imports, globals, memory, data, table, elements, &used,
-    )
+    // Free-function runtime helpers live at module scope, above the functions
+    // (or the `struct Instance`) that call them, in both module shapes.
+    let rt_helpers = render_rt_helpers(&used_rt);
+
+    let body = if !stateful {
+        sources.join("\n")
+    } else {
+        render_module(
+            &sources, imports, globals, memory, data, table, elements, &used,
+        )?
+    };
+
+    Ok(if rt_helpers.is_empty() {
+        body
+    } else {
+        format!("{rt_helpers}\n{body}")
+    })
 }
 
 fn generate_function(
@@ -291,6 +319,8 @@ struct FuncGen<'a> {
     trailing: Option<String>,
     /// Memory-access helpers this function relies on.
     used_helpers: HashSet<Helper>,
+    /// Free-function runtime helpers this function relies on.
+    used_rt: HashSet<Rt>,
 }
 
 impl<'a> FuncGen<'a> {
@@ -339,6 +369,7 @@ impl<'a> FuncGen<'a> {
             dead_nesting: 0,
             trailing: None,
             used_helpers: HashSet::new(),
+            used_rt: HashSet::new(),
         })
     }
 
@@ -471,6 +502,12 @@ impl<'a> FuncGen<'a> {
             Operator::F32Nearest | Operator::F64Nearest => self.unop_method("round_ties_even")?,
             Operator::F32Sqrt | Operator::F64Sqrt => self.unop_method("sqrt")?,
             Operator::F32Copysign | Operator::F64Copysign => self.binop_method("copysign")?,
+            // `min`/`max` differ from Rust's built-ins: wasm propagates NaN and
+            // orders -0.0 below +0.0, so they route through runtime helpers.
+            Operator::F32Min => self.call_rt_binop(Rt::F32Min)?,
+            Operator::F32Max => self.call_rt_binop(Rt::F32Max)?,
+            Operator::F64Min => self.call_rt_binop(Rt::F64Min)?,
+            Operator::F64Max => self.call_rt_binop(Rt::F64Max)?,
             // Numeric conversions. Integer wrap/extend and int<->float casts map
             // to Rust `as` (which truncates integers and, for float->int, is
             // saturating — matching wasm's `trunc_sat`). `cast_as` is a single
@@ -781,6 +818,21 @@ impl<'a> FuncGen<'a> {
                 "(({} as {unsigned}).{method}({} as u32) as {signed})",
                 lhs.code, rhs.code
             ),
+            ty: lhs.ty,
+            stable: lhs.stable && rhs.stable,
+        });
+        Ok(())
+    }
+
+    /// A binary call to a free-function runtime helper `name(lhs, rhs)` (used
+    /// for float `min`/`max`, whose wasm semantics differ from Rust's). The
+    /// helpers are pure, so the result stays stable when both operands are.
+    fn call_rt_binop(&mut self, rt: Rt) -> Result<(), TranspileError> {
+        let rhs = self.pop()?;
+        let lhs = self.pop()?;
+        self.used_rt.insert(rt);
+        self.push(Val {
+            code: format!("{}({}, {})", rt_name(rt), lhs.code, rhs.code),
             ty: lhs.ty,
             stable: lhs.stable && rhs.stable,
         });
@@ -1525,6 +1577,7 @@ impl<'a> FuncGen<'a> {
         Ok(GenFn {
             src: out,
             helpers: self.used_helpers,
+            rt: self.used_rt,
         })
     }
 }
@@ -2061,4 +2114,64 @@ fn helper_lines(helper: Helper) -> Vec<String> {
             "}",
         ]),
     }
+}
+
+fn rt_name(rt: Rt) -> &'static str {
+    match rt {
+        Rt::F32Min => "f32_min",
+        Rt::F32Max => "f32_max",
+        Rt::F64Min => "f64_min",
+        Rt::F64Max => "f64_max",
+    }
+}
+
+/// All runtime free-function helpers, in a deterministic emission order.
+const RT_ORDER: [Rt; 4] = [Rt::F32Min, Rt::F32Max, Rt::F64Min, Rt::F64Max];
+
+/// Render the used runtime helpers as module-scope free functions, in
+/// [`RT_ORDER`], separated by blank lines. Returns an empty string if none.
+fn render_rt_helpers(used: &HashSet<Rt>) -> String {
+    let mut blocks: Vec<String> = Vec::new();
+    for rt in RT_ORDER {
+        if used.contains(&rt) {
+            blocks.push(rt_lines(rt).join("\n"));
+        }
+    }
+    let mut out = blocks.join("\n\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+/// The source lines of one runtime helper. wasm `min`/`max` return NaN if
+/// either operand is NaN, and when the operands are equal (notably ±0) `min`
+/// yields the negatively-signed and `max` the positively-signed value.
+fn rt_lines(rt: Rt) -> Vec<String> {
+    let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    let name = rt_name(rt);
+    let ty = match rt {
+        Rt::F32Min | Rt::F32Max => "f32",
+        Rt::F64Min | Rt::F64Max => "f64",
+    };
+    // For equal operands, `min` keeps the negative one and `max` the positive
+    // one; the `<`/`>` picks the smaller/larger otherwise.
+    let (equal_pick, order_op) = match rt {
+        Rt::F32Min | Rt::F64Min => ("if a.is_sign_negative() { a } else { b }", "<"),
+        Rt::F32Max | Rt::F64Max => ("if a.is_sign_negative() { b } else { a }", ">"),
+    };
+    owned(&[
+        &format!("fn {name}(a: {ty}, b: {ty}) -> {ty} {{"),
+        "    if a.is_nan() || b.is_nan() {",
+        &format!("        return {ty}::NAN;"),
+        "    }",
+        "    if a == b {",
+        &format!("        {equal_pick}"),
+        &format!("    }} else if a {order_op} b {{"),
+        "        a",
+        "    } else {",
+        "        b",
+        "    }",
+        "}",
+    ])
 }
