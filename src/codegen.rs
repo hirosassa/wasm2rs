@@ -1761,23 +1761,10 @@ impl<'a> FuncGen<'a> {
     }
 
     fn branch(&mut self, depth: u32, cond: Option<Val>) -> Result<(), TranspileError> {
-        let idx = self
-            .frames
-            .len()
-            .checked_sub(1 + depth as usize)
-            .ok_or_else(|| TranspileError::Unsupported("branch depth out of range".into()))?;
-        let is_loop = self.frames[idx].kind == FrameKind::Loop;
-        let label = self.frames[idx].label;
-        // Branching to a loop targets its parameters (its loop-carried
-        // variables); branching to a block or if carries the region's results.
-        let vars = if is_loop {
-            self.frames[idx].loop_param_vars()
-        } else {
-            self.frames[idx].result_vars()
-        };
-        self.frames[idx].targeted = true;
+        // Resolve the target frame's branch keyword and value-carrying variables
+        // (the same resolution `br_table` uses per arm).
+        let (keyword, label, vars) = self.branch_arm(depth)?;
 
-        let keyword = if is_loop { "continue" } else { "break" };
         match cond {
             None => {
                 self.assign_results(&vars)?;
@@ -1821,15 +1808,35 @@ impl<'a> FuncGen<'a> {
         }
         arms.push((None, default));
 
+        // Every `br_table` target has the same arity, so the carried operands
+        // are the same top-of-stack values for every arm; each arm just assigns
+        // them to its own target's variables. After spilling they are stable, so
+        // they can be referenced repeatedly across the arms.
         // The `br_table` selector is interpreted as an unsigned index.
         self.line(format!("match ({}) as u32 {{", selector.code));
         for (case, depth) in arms {
-            let (keyword, label) = self.branch_arm(depth)?;
+            let (keyword, label, vars) = self.branch_arm(depth)?;
             let pattern = match case {
                 Some(n) => format!("{n}u32"),
                 None => "_".to_string(),
             };
-            self.line(format!("    {pattern} => {keyword} 'l{label},"));
+            if vars.is_empty() {
+                self.line(format!("    {pattern} => {keyword} 'l{label},"));
+            } else {
+                let base = self
+                    .stack
+                    .len()
+                    .checked_sub(vars.len())
+                    .ok_or(TranspileError::StackUnderflow)?;
+                let assigns: String = vars
+                    .iter()
+                    .zip(&self.stack[base..])
+                    .map(|(var, value)| format!("{var} = {}; ", value.code))
+                    .collect();
+                self.line(format!(
+                    "    {pattern} => {{ {assigns}{keyword} 'l{label}; }},"
+                ));
+            }
         }
         self.line("}".to_string());
         self.reachable = false;
@@ -1837,35 +1844,32 @@ impl<'a> FuncGen<'a> {
         Ok(())
     }
 
-    /// Resolve a branch-table target depth to a `(keyword, label)` pair and mark
-    /// the target frame as branched to. Value-carrying targets are rejected in
-    /// a `br_table` for now, since each arm would need its own assignment: a
-    /// block/if with a result, or a loop with parameters.
-    fn branch_arm(&mut self, depth: u32) -> Result<(&'static str, usize), TranspileError> {
+    /// Resolve a branch target depth to a `(keyword, label, vars)` triple and
+    /// mark the target frame as branched to (shared by `br`/`br_if`/`br_table`).
+    /// `vars` are the target's value-carrying variables (a block/if's results,
+    /// or a loop's parameters), which the caller assigns before the
+    /// `break`/`continue`. Branching to a loop targets its parameters (its
+    /// loop-carried variables); branching to a block or if carries its results.
+    fn branch_arm(
+        &mut self,
+        depth: u32,
+    ) -> Result<(&'static str, usize, Vec<String>), TranspileError> {
         let idx = self
             .frames
             .len()
             .checked_sub(1 + depth as usize)
             .ok_or_else(|| TranspileError::Unsupported("branch depth out of range".into()))?;
         let frame = &self.frames[idx];
-        if frame.kind != FrameKind::Loop && !frame.results.is_empty() {
-            return Err(TranspileError::Unsupported(
-                "br_table targeting a block with a result".into(),
-            ));
-        }
-        if frame.kind == FrameKind::Loop && !frame.loop_params.is_empty() {
-            return Err(TranspileError::Unsupported(
-                "br_table targeting a loop with parameters".into(),
-            ));
-        }
-        let keyword = if frame.kind == FrameKind::Loop {
-            "continue"
+        let is_loop = frame.kind == FrameKind::Loop;
+        let vars = if is_loop {
+            frame.loop_param_vars()
         } else {
-            "break"
+            frame.result_vars()
         };
+        let keyword = if is_loop { "continue" } else { "break" };
         let label = frame.label;
         self.frames[idx].targeted = true;
-        Ok((keyword, label))
+        Ok((keyword, label, vars))
     }
 
     // ----- calls -----------------------------------------------------------
