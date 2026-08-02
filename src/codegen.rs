@@ -2449,21 +2449,37 @@ fn render_module(
     // Everything inside the `impl` is collected unindented, then indented once.
     let mut inner: Vec<String> = Vec::new();
     let new_param = if has_imports { "imports: H" } else { "" };
-    inner.push(format!("pub fn new({new_param}) -> Self {{"));
-    inner.push("    Self {".to_string());
-    if has_imports {
-        inner.push("        imports,".to_string());
-    }
     // Only active segments are copied at instantiation; passive ones are
     // retained (see the `data{d}` fields) for `memory.init`.
     let active: Vec<&DataSegment> = data.iter().filter(|d| d.offset.is_some()).collect();
-    // Imported memory is host-owned; the instance carries no buffer to
-    // initialise. Active data would have to be written into the host buffer
-    // after construction, which is not supported yet.
-    if mem_imported && !active.is_empty() {
-        return Err(TranspileError::Unsupported(
-            "active data segment with imported memory".into(),
-        ));
+    // Imported memory is host-owned, so its active data cannot be written into a
+    // `memory` field literal; instead the instance is bound and the segments are
+    // copied into the host buffer through `mem_mut()` after construction.
+    let post_init_data = mem_imported && !active.is_empty();
+    let (open, close) = if post_init_data {
+        ("    let mut instance = Self {", "    };")
+    } else {
+        ("    Self {", "    }")
+    };
+
+    // Emit `<target>[off..end].copy_from_slice(&[bytes]);` for each active data
+    // segment; `target` is a defined buffer (`m`) or the host buffer accessor
+    // (`instance.mem_mut()`), and `indent` matches the surrounding block.
+    let copy_active_data = |lines: &mut Vec<String>, target: &str, indent: &str| {
+        for seg in &active {
+            let off = seg.offset.unwrap_or(0) as usize;
+            let end = off + seg.bytes.len();
+            let bytes_lit = byte_array_literal(&seg.bytes);
+            lines.push(format!(
+                "{indent}{target}[{off}..{end}].copy_from_slice(&[{bytes_lit}]);"
+            ));
+        }
+    };
+
+    inner.push(format!("pub fn new({new_param}) -> Self {{"));
+    inner.push(open.to_string());
+    if has_imports {
+        inner.push("        imports,".to_string());
     }
     if let Some(m) = memory.filter(|_| !mem_imported) {
         let bytes = m
@@ -2478,14 +2494,7 @@ fn render_module(
             inner.push(format!(
                 "            let mut m: Vec<u8> = vec![0u8; {bytes}];"
             ));
-            for seg in active {
-                let off = seg.offset.unwrap_or(0) as usize;
-                let end = off + seg.bytes.len();
-                let bytes_lit = byte_array_literal(&seg.bytes);
-                inner.push(format!(
-                    "            m[{off}..{end}].copy_from_slice(&[{bytes_lit}]);"
-                ));
-            }
+            copy_active_data(&mut inner, "m", "            ");
             inner.push("            m".to_string());
             inner.push("        },".to_string());
         }
@@ -2526,7 +2535,14 @@ fn render_module(
             inner.push(format!("        elem{e}: &ELEM{e},"));
         }
     }
-    inner.push("    }".to_string());
+    inner.push(close.to_string());
+    if post_init_data {
+        // Copy each active data segment into the host-owned buffer in order.
+        // An out-of-bounds write panics here, faithfully reproducing a wasm
+        // instantiation trap when a segment does not fit the host memory.
+        copy_active_data(&mut inner, "instance.mem_mut()", "    ");
+        inner.push("    instance".to_string());
+    }
     inner.push("}".to_string());
 
     // Uniform memory accessors so the load/store/bulk helpers are identical for

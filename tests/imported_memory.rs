@@ -93,6 +93,59 @@ fn imported_memory_load_out_of_bounds_traps() {
 }
 
 #[test]
+fn imported_memory_active_data_initialises_host_buffer() {
+    // An active data segment on imported memory is written into the host buffer
+    // at instantiation (`Instance::new`), so a later load reads those bytes.
+    let wat = r#"
+        (module
+          (import "env" "mem" (memory 1))
+          (data (i32.const 8) "\01\02\03\04")
+          (func (param i32) (result i32) (i32.load8_u (local.get 0))))
+        "#;
+    let extra = format!(
+        "{HOST_1_PAGE}\n\
+         fn main() {{\n    \
+         let host = Host {{ mem: vec![0u8; 65536] }};\n    \
+         let mut inst = Instance::new(host);\n    \
+         assert_eq!(inst.func0(8), 1);\n    \
+         assert_eq!(inst.func0(11), 4);\n    \
+         assert_eq!(inst.func0(7), 0);\n    \
+         assert_eq!(inst.func0(12), 0);\n    \
+         }}"
+    );
+    let bin = compile("active_data", wat, &extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "imported memory active data init failed");
+}
+
+#[test]
+fn imported_memory_multiple_active_data_segments_apply_in_order() {
+    // Two overlapping active data segments must be applied in declaration order:
+    // the second segment (offset 10) overwrites the tail of the first (offset 8).
+    let wat = r#"
+        (module
+          (import "env" "mem" (memory 1))
+          (data (i32.const 8) "\01\02\03\04")
+          (data (i32.const 10) "\09\09")
+          (func (param i32) (result i32) (i32.load8_u (local.get 0))))
+        "#;
+    let extra = format!(
+        "{HOST_1_PAGE}\n\
+         fn main() {{\n    \
+         let host = Host {{ mem: vec![0u8; 65536] }};\n    \
+         let mut inst = Instance::new(host);\n    \
+         assert_eq!(inst.func0(8), 1);\n    \
+         assert_eq!(inst.func0(9), 2);\n    \
+         assert_eq!(inst.func0(10), 9);\n    \
+         assert_eq!(inst.func0(11), 9);\n    \
+         }}"
+    );
+    let bin = compile("active_data_order", wat, &extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "imported memory active data order failed");
+}
+
+#[test]
 fn imported_memory_grow_extends_the_host_buffer() {
     // `memory.grow` on imported memory grows the host `Vec`; a store into the
     // new page then round-trips.
