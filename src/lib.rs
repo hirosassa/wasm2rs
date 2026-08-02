@@ -265,16 +265,16 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
         })
         .collect();
 
-    codegen::generate_module(
-        &imports,
-        &funcs,
-        &types,
-        &globals,
-        memory.as_ref(),
-        &data,
-        table.as_ref(),
-        &elements,
-    )
+    codegen::generate_module(&codegen::ModuleParts {
+        imports: &imports,
+        funcs: &funcs,
+        types: &types,
+        globals: &globals,
+        memory: memory.as_ref(),
+        data: &data,
+        table: table.as_ref(),
+        elements: &elements,
+    })
 }
 
 /// Resolve an import's type to a function signature, rejecting non-function

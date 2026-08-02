@@ -230,23 +230,39 @@ impl ModuleCtx<'_> {
     }
 }
 
+/// The borrowed, raw inputs describing one module, as gathered by the parser.
+///
+/// Bundling them keeps the module-level entry points (`generate_module` and
+/// `render_module`) to a small, stable argument list; the derived translation
+/// context ([`ModuleCtx`]) is computed from these.
+pub(crate) struct ModuleParts<'a> {
+    pub(crate) imports: &'a [ImportInfo],
+    pub(crate) funcs: &'a [FuncInput<'a>],
+    pub(crate) types: &'a [TypeSig],
+    pub(crate) globals: &'a [GlobalInfo],
+    pub(crate) memory: Option<&'a MemInfo>,
+    pub(crate) data: &'a [DataSegment],
+    pub(crate) table: Option<&'a TableInfo>,
+    pub(crate) elements: &'a [ElemSegment],
+}
+
 /// Translate a whole module into Rust source.
 ///
 /// A module that declares linear memory, a table or globals carries mutable
 /// state, so it is emitted as a `pub struct Instance` with the functions as
 /// `&mut self` methods. A stateless module keeps its functions as free
 /// `pub fn`s, matching the earlier phases exactly.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn generate_module(
-    imports: &[ImportInfo],
-    funcs: &[FuncInput<'_>],
-    types: &[TypeSig],
-    globals: &[GlobalInfo],
-    memory: Option<&MemInfo>,
-    data: &[DataSegment],
-    table: Option<&TableInfo>,
-    elements: &[ElemSegment],
-) -> Result<String, TranspileError> {
+pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, TranspileError> {
+    let ModuleParts {
+        imports,
+        funcs,
+        types,
+        globals,
+        memory,
+        table,
+        ..
+    } = *parts;
+
     let has_memory = memory.is_some();
     let has_table = table.is_some();
     let has_imports = !imports.is_empty();
@@ -283,9 +299,7 @@ pub(crate) fn generate_module(
     let body = if !stateful {
         sources.join("\n")
     } else {
-        render_module(
-            &sources, imports, globals, memory, data, table, elements, &used,
-        )?
+        render_module(parts, &sources, &used)?
     };
 
     Ok(if rt_helpers.is_empty() {
@@ -1824,17 +1838,21 @@ const HELPER_ORDER: [Helper; 24] = [
 /// Render the `struct Instance` and its `impl` for a stateful module. When the
 /// module imports functions, a `pub trait Imports` is emitted and `Instance`
 /// becomes generic over a host `H: Imports` that it stores and dispatches to.
-#[allow(clippy::too_many_arguments)]
 fn render_module(
+    parts: &ModuleParts<'_>,
     sources: &[String],
-    imports: &[ImportInfo],
-    globals: &[GlobalInfo],
-    memory: Option<&MemInfo>,
-    data: &[DataSegment],
-    table: Option<&TableInfo>,
-    elements: &[ElemSegment],
     used: &HashSet<Helper>,
 ) -> Result<String, TranspileError> {
+    let ModuleParts {
+        imports,
+        globals,
+        memory,
+        data,
+        table,
+        elements,
+        ..
+    } = *parts;
+
     let mut lines: Vec<String> = Vec::new();
 
     let has_imports = !imports.is_empty();
