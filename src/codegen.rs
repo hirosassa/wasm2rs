@@ -122,6 +122,7 @@ enum Helper {
     MemoryFill,
     MemoryCopy,
     TableCopy,
+    TableFill,
 }
 
 /// A free-standing runtime helper function emitted at module scope on demand.
@@ -660,8 +661,8 @@ impl<'a> FuncGen<'a> {
             Operator::MemorySize { .. } => self.memory_size()?,
             Operator::MemoryGrow { .. } => self.memory_grow()?,
             // Bulk-memory ops consume three i32s (dest, src/value, len) and
-            // produce nothing. `table.fill` is deferred: its value operand is a
-            // funcref, which needs reference types.
+            // produce nothing (`table.fill`, whose value is a funcref, is with
+            // the other table instructions below).
             Operator::MemoryFill { mem } => self.memory_fill(mem)?,
             Operator::MemoryCopy { dst_mem, src_mem } => self.memory_copy(dst_mem, src_mem)?,
             Operator::TableCopy {
@@ -680,6 +681,13 @@ impl<'a> FuncGen<'a> {
             Operator::RefNull { hty } => self.ref_null(hty)?,
             Operator::RefFunc { function_index } => self.ref_func(function_index),
             Operator::RefIsNull => self.ref_is_null()?,
+            // Table instructions. A table entry and a `funcref` operand are both
+            // `u32` function indices (`u32::MAX` is null).
+            Operator::TableGet { table } => self.table_get(table)?,
+            Operator::TableSet { table } => self.table_set(table)?,
+            Operator::TableSize { table } => self.table_size(table)?,
+            Operator::TableGrow { table } => self.table_grow(table)?,
+            Operator::TableFill { table } => self.table_fill(table)?,
             Operator::Drop => {
                 self.pop()?;
             }
@@ -1240,6 +1248,91 @@ impl<'a> FuncGen<'a> {
         self.line(format!(
             "self.table_copy(({}) as u32, ({}) as u32, ({}) as u32);",
             dest.code, src.code, len.code
+        ));
+        Ok(())
+    }
+
+    /// `table.get`: push the funcref at the given index. An out-of-bounds index
+    /// panics on the slice access (a trap). The value is non-stable because a
+    /// later `table.set`/`table.grow` can change it.
+    fn table_get(&mut self, table: u32) -> Result<(), TranspileError> {
+        self.require_table()?;
+        self.require_zero_index(table, "table.get")?;
+        let index = self.pop()?;
+        self.push(Val {
+            code: format!("self.table[({}) as u32 as usize]", index.code),
+            ty: ValType::FUNCREF,
+            stable: false,
+        });
+        Ok(())
+    }
+
+    /// `table.set`: write a funcref at the given index. Out-of-bounds panics (a
+    /// trap). Spilled first since it mutates the table.
+    fn table_set(&mut self, table: u32) -> Result<(), TranspileError> {
+        self.require_table()?;
+        self.require_zero_index(table, "table.set")?;
+        self.spill_nonstable()?;
+        let value = self.pop()?;
+        let index = self.pop()?;
+        self.line(format!(
+            "self.table[({}) as u32 as usize] = ({}) as u32;",
+            index.code, value.code
+        ));
+        Ok(())
+    }
+
+    /// `table.size`: push the current table length. Non-stable because
+    /// `table.grow` can change it.
+    fn table_size(&mut self, table: u32) -> Result<(), TranspileError> {
+        self.require_table()?;
+        self.require_zero_index(table, "table.size")?;
+        self.push(Val {
+            code: "(self.table.len() as i32)".to_string(),
+            ty: ValType::I32,
+            stable: false,
+        });
+        Ok(())
+    }
+
+    /// `table.grow`: append `delta` (an unsigned count) copies of the init
+    /// funcref and push the old length. A table is indexed by `u32`, so it holds
+    /// at most `u32::MAX` entries; per the spec, a delta that would exceed that
+    /// (e.g. a "negative" delta, i.e. a huge unsigned count) pushes -1 rather
+    /// than attempting an impossible allocation. Spilled first since it mutates
+    /// the table.
+    fn table_grow(&mut self, table: u32) -> Result<(), TranspileError> {
+        self.require_table()?;
+        self.require_zero_index(table, "table.grow")?;
+        self.spill_nonstable()?;
+        let delta = self.pop()?;
+        let init = self.pop()?;
+        let name = self.fresh_temp();
+        self.line(format!(
+            "let {name}: i32 = {{ let n = ({}) as u32 as usize; let old = self.table.len(); \
+             match old.checked_add(n) {{ \
+             Some(len) if len <= u32::MAX as usize => {{ self.table.resize(len, ({}) as u32); old as i32 }} \
+             _ => -1, }} }};",
+            delta.code, init.code
+        ));
+        self.push(Val {
+            code: name,
+            ty: ValType::I32,
+            stable: true,
+        });
+        Ok(())
+    }
+
+    /// `table.fill`: write the init funcref into `[dest, dest+len)`. The range is
+    /// bounds-checked before any write (a trap on overflow, no partial write).
+    fn table_fill(&mut self, table: u32) -> Result<(), TranspileError> {
+        self.require_table()?;
+        self.require_zero_index(table, "table.fill")?;
+        let (dest, val, len) = self.pop_bulk_operands()?;
+        self.used_helpers.insert(Helper::TableFill);
+        self.line(format!(
+            "self.table_fill(({}) as u32, ({}) as u32, ({}) as u32);",
+            dest.code, val.code, len.code
         ));
         Ok(())
     }
@@ -1923,6 +2016,7 @@ fn helper_name(helper: Helper) -> &'static str {
         Helper::MemoryFill => "memory_fill",
         Helper::MemoryCopy => "memory_copy",
         Helper::TableCopy => "table_copy",
+        Helper::TableFill => "table_fill",
     }
 }
 
@@ -2089,7 +2183,7 @@ pub(crate) fn const_expr_to_rust(expr: &ConstExpr<'_>) -> Result<String, Transpi
 }
 
 /// All memory helpers, in a deterministic emission order.
-const HELPER_ORDER: [Helper; 27] = [
+const HELPER_ORDER: [Helper; 28] = [
     Helper::LoadI32,
     Helper::Load8U,
     Helper::Load8S,
@@ -2117,6 +2211,7 @@ const HELPER_ORDER: [Helper; 27] = [
     Helper::MemoryFill,
     Helper::MemoryCopy,
     Helper::TableCopy,
+    Helper::TableFill,
 ];
 
 /// Render the `struct Instance` and its `impl` for a stateful module. When the
@@ -2528,6 +2623,12 @@ fn helper_lines(helper: Helper) -> Vec<String> {
             "    let s = src as usize;",
             "    let d = dest as usize;",
             "    self.table.copy_within(s..s + len as usize, d);",
+            "}",
+        ]),
+        Helper::TableFill => owned(&[
+            "fn table_fill(&mut self, dest: u32, val: u32, len: u32) {",
+            "    let d = dest as usize;",
+            "    self.table[d..d + len as usize].fill(val);",
             "}",
         ]),
     }
