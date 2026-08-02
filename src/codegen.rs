@@ -17,7 +17,9 @@
 use std::collections::HashSet;
 use std::mem;
 
-use wasmparser::{BlockType, ConstExpr, FunctionBody, MemArg, Operator, ValType};
+use wasmparser::{
+    AbstractHeapType, BlockType, ConstExpr, FunctionBody, HeapType, MemArg, Operator, ValType,
+};
 
 use crate::TranspileError;
 
@@ -43,9 +45,13 @@ pub(crate) struct TableInfo {
 
 /// One element segment: function indices for the table. `offset` is `Some` for
 /// an active segment (written at that constant offset during instantiation) and
-/// `None` for a passive one (retained for `table.init`).
+/// `None` for a passive one (retained for `table.init`). A `declared` segment
+/// (neither active nor passive) has no runtime effect but still occupies a slot
+/// so that `table.init`/`elem.drop` indices stay aligned with the wasm element
+/// index space.
 pub(crate) struct ElemSegment {
     pub offset: Option<u32>,
+    pub declared: bool,
     pub funcs: Vec<u32>,
 }
 
@@ -305,7 +311,10 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         has_memory,
         has_table,
         data_passive: data.iter().map(|d| d.offset.is_none()).collect(),
-        elem_passive: elements.iter().map(|e| e.offset.is_none()).collect(),
+        elem_passive: elements
+            .iter()
+            .map(|e| e.offset.is_none() && !e.declared)
+            .collect(),
         is_method: stateful,
     };
 
@@ -666,6 +675,11 @@ impl<'a> FuncGen<'a> {
             Operator::DataDrop { data_index } => self.data_drop(data_index)?,
             Operator::TableInit { elem_index, table } => self.table_init(elem_index, table)?,
             Operator::ElemDrop { elem_index } => self.elem_drop(elem_index)?,
+            // Reference types: a `funcref` is a `u32` function index on the
+            // operand stack (`u32::MAX` is null).
+            Operator::RefNull { hty } => self.ref_null(hty)?,
+            Operator::RefFunc { function_index } => self.ref_func(function_index),
+            Operator::RefIsNull => self.ref_is_null()?,
             Operator::Drop => {
                 self.pop()?;
             }
@@ -1303,6 +1317,49 @@ impl<'a> FuncGen<'a> {
         Ok(())
     }
 
+    /// `ref.null t`: push a null reference. Only `funcref` is supported (an
+    /// `externref` has no `u32` representation here).
+    fn ref_null(&mut self, hty: HeapType) -> Result<(), TranspileError> {
+        let is_func = matches!(
+            hty,
+            HeapType::Abstract {
+                ty: AbstractHeapType::Func,
+                ..
+            }
+        );
+        if !is_func {
+            return Err(TranspileError::Unsupported(format!(
+                "ref.null of non-funcref type {hty:?}"
+            )));
+        }
+        self.push(Val {
+            code: "u32::MAX".to_string(),
+            ty: ValType::FUNCREF,
+            stable: true,
+        });
+        Ok(())
+    }
+
+    /// `ref.func f`: push the funcref for function `f` (its full index).
+    fn ref_func(&mut self, function_index: u32) {
+        self.push(Val {
+            code: format!("{function_index}u32"),
+            ty: ValType::FUNCREF,
+            stable: true,
+        });
+    }
+
+    /// `ref.is_null`: pop a funcref and push 1 if it is null, else 0.
+    fn ref_is_null(&mut self) -> Result<(), TranspileError> {
+        let r = self.pop()?;
+        self.push(Val {
+            code: format!("i32::from({} == u32::MAX)", r.code),
+            ty: ValType::I32,
+            stable: r.stable,
+        });
+        Ok(())
+    }
+
     // ----- control flow ----------------------------------------------------
 
     fn frame_result(
@@ -1929,6 +1986,9 @@ fn rust_type(ty: ValType) -> Result<&'static str, TranspileError> {
         ValType::I64 => Ok("i64"),
         ValType::F32 => Ok("f32"),
         ValType::F64 => Ok("f64"),
+        // A `funcref` is a function index (`u32::MAX` is null), matching the
+        // table's element representation.
+        ValType::Ref(rt) if rt.is_func_ref() => Ok("u32"),
         other => Err(TranspileError::Unsupported(format!("value type {other:?}"))),
     }
 }
@@ -1952,6 +2012,8 @@ fn unsigned_type(ty: ValType) -> Result<&'static str, TranspileError> {
 fn default_value(ty: ValType) -> &'static str {
     match ty {
         ValType::F32 | ValType::F64 => "0.0",
+        // A default `funcref` is null.
+        ValType::Ref(rt) if rt.is_func_ref() => "u32::MAX",
         _ => "0",
     }
 }
@@ -2107,7 +2169,7 @@ fn render_module(
         }
     }
     for (e, seg) in elements.iter().enumerate() {
-        if seg.offset.is_none() {
+        if seg.offset.is_none() && !seg.declared {
             let funcs_lit = seg
                 .funcs
                 .iter()
@@ -2144,7 +2206,7 @@ fn render_module(
         }
     }
     for (e, seg) in elements.iter().enumerate() {
-        if seg.offset.is_none() {
+        if seg.offset.is_none() && !seg.declared {
             lines.push(format!("    elem{e}: &'static [u32],"));
         }
     }
@@ -2222,7 +2284,7 @@ fn render_module(
         }
     }
     for (e, seg) in elements.iter().enumerate() {
-        if seg.offset.is_none() {
+        if seg.offset.is_none() && !seg.declared {
             inner.push(format!("        elem{e}: &ELEM{e},"));
         }
     }

@@ -190,10 +190,17 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                             Some(codegen::const_expr_u32(offset_expr)?)
                         }
                         ElementKind::Passive => None,
+                        // A declared segment has no runtime effect (it only
+                        // permits `ref.func`), but still occupies an element
+                        // index, so retain an empty placeholder to keep
+                        // `table.init`/`elem.drop` indices aligned.
                         ElementKind::Declared => {
-                            return Err(TranspileError::Unsupported(
-                                "declared element segment".into(),
-                            ));
+                            elements.push(codegen::ElemSegment {
+                                offset: None,
+                                declared: true,
+                                funcs: Vec::new(),
+                            });
+                            continue;
                         }
                     };
                     let funcs = match element.items {
@@ -210,7 +217,11 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                             ));
                         }
                     };
-                    elements.push(codegen::ElemSegment { offset, funcs });
+                    elements.push(codegen::ElemSegment {
+                        offset,
+                        declared: false,
+                        funcs,
+                    });
                 }
             }
             Payload::GlobalSection(reader) => {
