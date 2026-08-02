@@ -103,6 +103,9 @@ enum Helper {
     Store16I64,
     Store32I64,
     Grow,
+    MemoryFill,
+    MemoryCopy,
+    TableCopy,
 }
 
 /// A free-standing runtime helper function emitted at module scope on demand.
@@ -621,6 +624,15 @@ impl<'a> FuncGen<'a> {
             Operator::I64Store32 { memarg } => self.store(Helper::Store32I64, memarg)?,
             Operator::MemorySize { .. } => self.memory_size()?,
             Operator::MemoryGrow { .. } => self.memory_grow()?,
+            // Bulk-memory ops consume three i32s (dest, src/value, len) and
+            // produce nothing. `table.fill` is deferred: its value operand is a
+            // funcref, which needs reference types.
+            Operator::MemoryFill { mem } => self.memory_fill(mem)?,
+            Operator::MemoryCopy { dst_mem, src_mem } => self.memory_copy(dst_mem, src_mem)?,
+            Operator::TableCopy {
+                dst_table,
+                src_table,
+            } => self.table_copy(dst_table, src_table)?,
             Operator::Drop => {
                 self.pop()?;
             }
@@ -1032,6 +1044,28 @@ impl<'a> FuncGen<'a> {
         }
     }
 
+    fn require_table(&self) -> Result<(), TranspileError> {
+        if self.ctx.has_table {
+            Ok(())
+        } else {
+            Err(TranspileError::Unsupported(
+                "table instruction without a table section".into(),
+            ))
+        }
+    }
+
+    /// Require that a bulk-memory/table operand references memory/table 0, the
+    /// only one supported until multi-memory/multi-table lands.
+    fn require_zero_index(&self, index: u32, what: &str) -> Result<(), TranspileError> {
+        if index == 0 {
+            Ok(())
+        } else {
+            Err(TranspileError::Unsupported(format!(
+                "{what} on a non-zero index"
+            )))
+        }
+    }
+
     fn load(&mut self, helper: Helper, ty: ValType, memarg: MemArg) -> Result<(), TranspileError> {
         self.require_memory()?;
         let offset = memarg_offset(memarg)?;
@@ -1093,6 +1127,55 @@ impl<'a> FuncGen<'a> {
             ty: ValType::I32,
             stable: true,
         });
+        Ok(())
+    }
+
+    /// Pop the three `i32` operands (dest, src/value, len) of a bulk operation,
+    /// spilling first since the operation mutates memory/table. Returned in
+    /// source order: `(dest, mid, len)`.
+    fn pop_bulk_operands(&mut self) -> Result<(Val, Val, Val), TranspileError> {
+        self.spill_nonstable()?;
+        let len = self.pop()?;
+        let mid = self.pop()?;
+        let dest = self.pop()?;
+        Ok((dest, mid, len))
+    }
+
+    fn memory_fill(&mut self, mem: u32) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        self.require_zero_index(mem, "memory.fill")?;
+        let (dest, val, len) = self.pop_bulk_operands()?;
+        self.used_helpers.insert(Helper::MemoryFill);
+        self.line(format!(
+            "self.memory_fill(({}) as u32, {}, ({}) as u32);",
+            dest.code, val.code, len.code
+        ));
+        Ok(())
+    }
+
+    fn memory_copy(&mut self, dst_mem: u32, src_mem: u32) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        self.require_zero_index(dst_mem, "memory.copy")?;
+        self.require_zero_index(src_mem, "memory.copy")?;
+        let (dest, src, len) = self.pop_bulk_operands()?;
+        self.used_helpers.insert(Helper::MemoryCopy);
+        self.line(format!(
+            "self.memory_copy(({}) as u32, ({}) as u32, ({}) as u32);",
+            dest.code, src.code, len.code
+        ));
+        Ok(())
+    }
+
+    fn table_copy(&mut self, dst_table: u32, src_table: u32) -> Result<(), TranspileError> {
+        self.require_table()?;
+        self.require_zero_index(dst_table, "table.copy")?;
+        self.require_zero_index(src_table, "table.copy")?;
+        let (dest, src, len) = self.pop_bulk_operands()?;
+        self.used_helpers.insert(Helper::TableCopy);
+        self.line(format!(
+            "self.table_copy(({}) as u32, ({}) as u32, ({}) as u32);",
+            dest.code, src.code, len.code
+        ));
         Ok(())
     }
 
@@ -1656,6 +1739,9 @@ fn helper_name(helper: Helper) -> &'static str {
         Helper::Store16I64 => "store16_i64",
         Helper::Store32I64 => "store32_i64",
         Helper::Grow => "memory_grow",
+        Helper::MemoryFill => "memory_fill",
+        Helper::MemoryCopy => "memory_copy",
+        Helper::TableCopy => "table_copy",
     }
 }
 
@@ -1808,7 +1894,7 @@ pub(crate) fn const_expr_to_rust(expr: &ConstExpr<'_>) -> Result<String, Transpi
 }
 
 /// All memory helpers, in a deterministic emission order.
-const HELPER_ORDER: [Helper; 24] = [
+const HELPER_ORDER: [Helper; 27] = [
     Helper::LoadI32,
     Helper::Load8U,
     Helper::Load8S,
@@ -1833,6 +1919,9 @@ const HELPER_ORDER: [Helper; 24] = [
     Helper::Store16I64,
     Helper::Store32I64,
     Helper::Grow,
+    Helper::MemoryFill,
+    Helper::MemoryCopy,
+    Helper::TableCopy,
 ];
 
 /// Render the `struct Instance` and its `impl` for a stateful module. When the
@@ -2157,6 +2246,29 @@ fn helper_lines(helper: Helper) -> Vec<String> {
             "    }",
             "    self.memory.resize((new_pages as usize) * 65536, 0);",
             "    old_pages as i32",
+            "}",
+        ]),
+        // Bulk operations. An out-of-bounds range panics on the slice access or
+        // `copy_within` (a wasm trap); `copy_within` is memmove, so overlapping
+        // source and destination copy correctly.
+        Helper::MemoryFill => owned(&[
+            "fn memory_fill(&mut self, dest: u32, val: i32, len: u32) {",
+            "    let d = dest as usize;",
+            "    self.memory[d..d + len as usize].fill(val as u8);",
+            "}",
+        ]),
+        Helper::MemoryCopy => owned(&[
+            "fn memory_copy(&mut self, dest: u32, src: u32, len: u32) {",
+            "    let s = src as usize;",
+            "    let d = dest as usize;",
+            "    self.memory.copy_within(s..s + len as usize, d);",
+            "}",
+        ]),
+        Helper::TableCopy => owned(&[
+            "fn table_copy(&mut self, dest: u32, src: u32, len: u32) {",
+            "    let s = src as usize;",
+            "    let d = dest as usize;",
+            "    self.table.copy_within(s..s + len as usize, d);",
             "}",
         ]),
     }
