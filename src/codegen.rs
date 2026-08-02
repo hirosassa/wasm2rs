@@ -186,8 +186,12 @@ struct Frame {
     label: usize,
     /// Set when some `br`/`br_if`/`br_table` targets this frame.
     targeted: bool,
-    /// Result variable and type, when the region yields a value.
-    result: Option<(String, ValType)>,
+    /// One `(variable, type)` per result the region yields, in source order.
+    results: Vec<(String, ValType)>,
+    /// The region's entry parameters (stable operands left on the stack), kept
+    /// so an `if`'s `else` arm can restore them after the `then` arm consumes
+    /// them.
+    entry_params: Vec<Val>,
     /// Operand-stack height of the enclosing scope (values below this frame).
     parent_height: usize,
     /// The output buffer of the enclosing scope, restored when the frame ends.
@@ -198,6 +202,13 @@ struct Frame {
     then_reachable: bool,
     /// For `if`: the Rust condition expression.
     cond: Option<String>,
+}
+
+impl Frame {
+    /// The result variable names, in source order.
+    fn result_vars(&self) -> Vec<String> {
+        self.results.iter().map(|(var, _)| var.clone()).collect()
+    }
 }
 
 /// Module-wide context shared by every function's code generation.
@@ -1469,26 +1480,43 @@ impl<'a> FuncGen<'a> {
 
     // ----- control flow ----------------------------------------------------
 
-    fn frame_result(
-        &mut self,
+    /// Resolve a block type to its `(parameter types, result types)`.
+    fn block_signature(
+        &self,
         blockty: BlockType,
-    ) -> Result<Option<(String, ValType)>, TranspileError> {
+    ) -> Result<(Vec<ValType>, Vec<ValType>), TranspileError> {
         match blockty {
-            BlockType::Empty => Ok(None),
-            BlockType::Type(ty) => {
-                let name = self.fresh_temp();
-                // Initialise to a default so every path is definitely assigned.
-                self.line(format!(
-                    "let mut {name}: {} = {};",
-                    rust_type(ty)?,
-                    default_value(ty)
-                ));
-                Ok(Some((name, ty)))
-            }
-            BlockType::FuncType(_) => {
-                Err(TranspileError::Unsupported("block with parameters".into()))
+            BlockType::Empty => Ok((Vec::new(), Vec::new())),
+            BlockType::Type(ty) => Ok((Vec::new(), vec![ty])),
+            BlockType::FuncType(idx) => {
+                let sig = self
+                    .ctx
+                    .types
+                    .get(idx as usize)
+                    .ok_or_else(|| TranspileError::Unsupported("block: unknown type".into()))?;
+                Ok((sig.params.clone(), sig.results.clone()))
             }
         }
+    }
+
+    /// Allocate one default-initialised `let mut` variable per result type so
+    /// every control path is definitely assigned before the region's value is
+    /// read.
+    fn alloc_results(
+        &mut self,
+        result_types: &[ValType],
+    ) -> Result<Vec<(String, ValType)>, TranspileError> {
+        let mut results = Vec::with_capacity(result_types.len());
+        for &ty in result_types {
+            let name = self.fresh_temp();
+            self.line(format!(
+                "let mut {name}: {} = {};",
+                rust_type(ty)?,
+                default_value(ty)
+            ));
+            results.push((name, ty));
+        }
+        Ok(results)
     }
 
     fn open_frame(&mut self, kind: FrameKind, blockty: BlockType) -> Result<(), TranspileError> {
@@ -1510,17 +1538,31 @@ impl<'a> FuncGen<'a> {
         blockty: BlockType,
         cond: Option<String>,
     ) -> Result<(), TranspileError> {
+        let (param_types, result_types) = self.block_signature(blockty)?;
+        if kind == FrameKind::Loop && !param_types.is_empty() {
+            return Err(TranspileError::Unsupported("loop with parameters".into()));
+        }
         self.spill_nonstable()?;
-        let result = self.frame_result(blockty)?;
+        // The parameters are the top operands; they stay on the stack as the
+        // region's initial values, so the enclosing scope ends below them.
+        let parent_height = self
+            .stack
+            .len()
+            .checked_sub(param_types.len())
+            .ok_or(TranspileError::StackUnderflow)?;
+        let entry_params = self.stack[parent_height..].to_vec();
+        // Result variables are declared in the enclosing buffer, before the
+        // region, so a `br` out of it (or its fall-through) can assign them.
+        let results = self.alloc_results(&result_types)?;
         let label = self.label_counter;
         self.label_counter += 1;
-        let parent_height = self.stack.len();
         let parent_buffer = mem::take(&mut self.cur);
         self.frames.push(Frame {
             kind,
             label,
             targeted: false,
-            result,
+            results,
+            entry_params,
             parent_height,
             parent_buffer,
             then_buffer: None,
@@ -1530,10 +1572,21 @@ impl<'a> FuncGen<'a> {
         Ok(())
     }
 
-    /// Assign the fall-through result of the current frame, if it has one.
+    /// Assign the current frame's results from the top operands (in source
+    /// order, popped last-first).
     fn assign_fallthrough_result(&mut self) -> Result<(), TranspileError> {
-        let target = self.frames.last().and_then(|f| f.result.clone());
-        if let Some((var, _)) = target {
+        let vars = self
+            .frames
+            .last()
+            .map(Frame::result_vars)
+            .unwrap_or_default();
+        self.assign_results(&vars)
+    }
+
+    /// Pop one value per variable and assign them, so `vars[i]` receives the
+    /// i-th source-order operand.
+    fn assign_results(&mut self, vars: &[String]) -> Result<(), TranspileError> {
+        for var in vars.iter().rev() {
             let value = self.pop()?;
             self.line(format!("{var} = {};", value.code));
         }
@@ -1556,7 +1609,11 @@ impl<'a> FuncGen<'a> {
         frame.then_reachable = reachable;
         frame.then_buffer = Some(then_lines);
         let parent_height = frame.parent_height;
+        let entry_params = frame.entry_params.clone();
+        // The `then` arm consumed the parameters; the `else` arm starts with the
+        // same (stable) parameter values on the stack.
         self.stack.truncate(parent_height);
+        self.stack.extend(entry_params);
         self.reachable = true;
         Ok(())
     }
@@ -1567,10 +1624,8 @@ impl<'a> FuncGen<'a> {
         };
 
         // Fall-through result assignment (for blocks/loops and the else arm).
-        if let (true, Some((var, _))) = (self.reachable, &frame.result) {
-            let value = self.pop()?;
-            let var = var.clone();
-            self.line(format!("{var} = {};", value.code));
+        if self.reachable {
+            self.assign_results(&frame.result_vars())?;
         }
 
         let body = mem::take(&mut self.cur);
@@ -1582,7 +1637,7 @@ impl<'a> FuncGen<'a> {
         self.cur.extend(rendered);
 
         self.stack.truncate(frame.parent_height);
-        if let Some((var, ty)) = frame.result {
+        for (var, ty) in frame.results {
             self.push(Val {
                 code: var,
                 ty,
@@ -1626,6 +1681,18 @@ impl<'a> FuncGen<'a> {
                     .ok_or_else(|| TranspileError::Unsupported("if without condition".into()))?;
                 let (then_lines, else_lines) = match &frame.then_buffer {
                     Some(then_lines) => (then_lines.clone(), Some(body)),
+                    // No explicit `else`, but the region yields results: the
+                    // implicit else forwards the parameters as the results
+                    // (validation guarantees matching arity and types).
+                    None if !frame.results.is_empty() => {
+                        let forward = frame
+                            .results
+                            .iter()
+                            .zip(&frame.entry_params)
+                            .map(|((var, _), param)| format!("{var} = {};", param.code))
+                            .collect();
+                        (body, Some(forward))
+                    }
                     None => (body, None),
                 };
 
@@ -1660,42 +1727,42 @@ impl<'a> FuncGen<'a> {
         let is_loop = self.frames[idx].kind == FrameKind::Loop;
         let label = self.frames[idx].label;
         // Branching to a loop targets its (empty) parameters; branching to a
-        // block or if carries the region's result value.
-        let result = if is_loop {
-            None
+        // block or if carries the region's result values.
+        let vars = if is_loop {
+            Vec::new()
         } else {
-            self.frames[idx].result.clone()
+            self.frames[idx].result_vars()
         };
         self.frames[idx].targeted = true;
 
         let keyword = if is_loop { "continue" } else { "break" };
         match cond {
             None => {
-                if let Some((var, _)) = result {
-                    let value = self.pop()?;
-                    self.line(format!("{var} = {};", value.code));
-                }
+                self.assign_results(&vars)?;
                 self.line(format!("{keyword} 'l{label};"));
                 self.reachable = false;
                 self.dead_nesting = 0;
             }
+            Some(cond) if vars.is_empty() => {
+                self.line(format!("if {} != 0 {{ {keyword} 'l{label}; }}", cond.code));
+            }
             Some(cond) => {
-                if let Some((var, _)) = result {
-                    // The result value stays on the stack for the fall-through
-                    // path, so materialise it and reference the temporary.
-                    self.spill_nonstable()?;
-                    let value = self
-                        .stack
-                        .last()
-                        .cloned()
-                        .ok_or(TranspileError::StackUnderflow)?;
-                    self.line(format!("if {} != 0 {{", cond.code));
-                    self.line(format!("    {var} = {};", value.code));
-                    self.line(format!("    {keyword} 'l{label};"));
-                    self.line("}".to_string());
-                } else {
-                    self.line(format!("if {} != 0 {{ {keyword} 'l{label}; }}", cond.code));
+                // The result values stay on the stack for the fall-through
+                // path, so materialise them and reference the temporaries.
+                self.spill_nonstable()?;
+                let base = self
+                    .stack
+                    .len()
+                    .checked_sub(vars.len())
+                    .ok_or(TranspileError::StackUnderflow)?;
+                let values: Vec<String> =
+                    self.stack[base..].iter().map(|v| v.code.clone()).collect();
+                self.line(format!("if {} != 0 {{", cond.code));
+                for (var, value) in vars.iter().zip(&values) {
+                    self.line(format!("    {var} = {value};"));
                 }
+                self.line(format!("    {keyword} 'l{label};"));
+                self.line("}".to_string());
             }
         }
         Ok(())
@@ -1738,7 +1805,7 @@ impl<'a> FuncGen<'a> {
             .checked_sub(1 + depth as usize)
             .ok_or_else(|| TranspileError::Unsupported("branch depth out of range".into()))?;
         let frame = &self.frames[idx];
-        if frame.kind != FrameKind::Loop && frame.result.is_some() {
+        if frame.kind != FrameKind::Loop && !frame.results.is_empty() {
             return Err(TranspileError::Unsupported(
                 "br_table targeting a block with a result".into(),
             ));
