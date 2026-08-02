@@ -7,7 +7,9 @@
 
 mod codegen;
 
-use wasmparser::{CompositeInnerType, FuncType, Parser, Payload, ValType};
+use wasmparser::{
+    CompositeInnerType, ElementItems, ElementKind, FuncType, Parser, Payload, TableInit, ValType,
+};
 
 /// An error that can occur while transpiling a wasm module.
 #[derive(Debug)]
@@ -60,6 +62,8 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
     let mut bodies: Vec<wasmparser::FunctionBody> = Vec::new();
     let mut globals: Vec<codegen::GlobalInfo> = Vec::new();
     let mut memory: Option<codegen::MemInfo> = None;
+    let mut table: Option<codegen::TableInfo> = None;
+    let mut elements: Vec<codegen::ElemSegment> = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
@@ -108,6 +112,69 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                     });
                 }
             }
+            Payload::TableSection(reader) => {
+                for table_entry in reader {
+                    let table_entry = table_entry?;
+                    let ty = table_entry.ty;
+                    if !ty.element_type.is_func_ref() {
+                        return Err(TranspileError::Unsupported("non-funcref table".into()));
+                    }
+                    if ty.table64 || ty.shared {
+                        return Err(TranspileError::Unsupported("64-bit or shared table".into()));
+                    }
+                    if table.is_some() {
+                        return Err(TranspileError::Unsupported("multiple tables".into()));
+                    }
+                    // Only a null-initialised table is supported; its entries
+                    // come from active element segments.
+                    if !matches!(table_entry.init, TableInit::RefNull) {
+                        return Err(TranspileError::Unsupported(
+                            "table with an initializer expression".into(),
+                        ));
+                    }
+                    let min = u32::try_from(ty.initial)
+                        .map_err(|_| TranspileError::Unsupported("table too large".into()))?;
+                    table = Some(codegen::TableInfo { min });
+                }
+            }
+            Payload::ElementSection(reader) => {
+                for element in reader {
+                    let element = element?;
+                    let offset = match &element.kind {
+                        ElementKind::Active {
+                            table_index,
+                            offset_expr,
+                        } => {
+                            if table_index.unwrap_or(0) != 0 {
+                                return Err(TranspileError::Unsupported(
+                                    "element segment for a non-zero table".into(),
+                                ));
+                            }
+                            codegen::const_expr_u32(offset_expr)?
+                        }
+                        _ => {
+                            return Err(TranspileError::Unsupported(
+                                "passive or declared element segment".into(),
+                            ));
+                        }
+                    };
+                    let funcs = match element.items {
+                        ElementItems::Functions(reader) => {
+                            let mut indices = Vec::new();
+                            for index in reader {
+                                indices.push(index?);
+                            }
+                            indices
+                        }
+                        ElementItems::Expressions(..) => {
+                            return Err(TranspileError::Unsupported(
+                                "element segment with expression items".into(),
+                            ));
+                        }
+                    };
+                    elements.push(codegen::ElemSegment { offset, funcs });
+                }
+            }
             Payload::GlobalSection(reader) => {
                 for global in reader {
                     let global = global?;
@@ -143,7 +210,24 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
         });
     }
 
-    codegen::generate_module(&funcs, &globals, memory.as_ref())
+    // The module's function types, so `call_indirect` can resolve its declared
+    // type index back to a signature.
+    let types: Vec<codegen::TypeSig> = signatures
+        .iter()
+        .map(|s| codegen::TypeSig {
+            params: s.params.clone(),
+            results: s.results.clone(),
+        })
+        .collect();
+
+    codegen::generate_module(
+        &funcs,
+        &types,
+        &globals,
+        memory.as_ref(),
+        table.as_ref(),
+        &elements,
+    )
 }
 
 fn signature_from(func_ty: &FuncType) -> Signature {
@@ -410,6 +494,36 @@ impl Instance {
                  {ATTR}pub fn func1(l0: i32) -> i32 {{\n    \
                  let v0: i32 = func0(l0, 10i32);\n    v0\n}}"
             ),
+        );
+    }
+
+    #[test]
+    fn call_indirect_dispatches_through_table_match() {
+        let wasm = wat_to_wasm(
+            r#"
+            (module
+              (type $unary (func (param i32) (result i32)))
+              (table 1 funcref)
+              (elem (i32.const 0) $id)
+              (func $id (param i32) (result i32) (local.get 0))
+              (func $go (param i32 i32) (result i32)
+                (call_indirect (type $unary) (local.get 1) (local.get 0))))
+            "#,
+        );
+
+        let rust = transpile(&wasm).expect("transpile ok");
+
+        // The table is a `Vec<u32>` of function indices seeded from the element
+        // segment, and dispatch is a `match` that traps on a null/wrong entry.
+        assert!(rust.contains("table: Vec<u32>,"), "{rust}");
+        assert!(rust.contains("t[0] = 0u32;"), "{rust}");
+        assert!(
+            rust.contains("match self.table[") && rust.contains("0u32 => self.func0("),
+            "{rust}"
+        );
+        assert!(
+            rust.contains("_ => panic!(\"indirect call type mismatch\")"),
+            "{rust}"
         );
     }
 

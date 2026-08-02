@@ -35,6 +35,26 @@ pub(crate) struct MemInfo {
     pub min_pages: u64,
 }
 
+/// Metadata about the module's function table (a single `funcref` table). The
+/// declared maximum is not tracked; growth beyond `min` is not supported yet.
+pub(crate) struct TableInfo {
+    pub min: u32,
+}
+
+/// One active element segment: function indices written into the table
+/// starting at a constant `offset`.
+pub(crate) struct ElemSegment {
+    pub offset: u32,
+    pub funcs: Vec<u32>,
+}
+
+/// A function type from the type section: its parameter and result types. Used
+/// to resolve a `call_indirect`'s declared type back to a signature.
+pub(crate) struct TypeSig {
+    pub params: Vec<ValType>,
+    pub results: Vec<ValType>,
+}
+
 /// One function to translate: its signature plus its body.
 pub(crate) struct FuncInput<'a> {
     pub params: &'a [ValType],
@@ -113,16 +133,22 @@ struct Frame {
 /// the earlier phases exactly.
 pub(crate) fn generate_module(
     funcs: &[FuncInput<'_>],
+    types: &[TypeSig],
     globals: &[GlobalInfo],
     memory: Option<&MemInfo>,
+    table: Option<&TableInfo>,
+    elements: &[ElemSegment],
 ) -> Result<String, TranspileError> {
     let has_memory = memory.is_some();
-    let stateful = has_memory || !globals.is_empty();
+    let has_table = table.is_some();
+    let stateful = has_memory || has_table || !globals.is_empty();
 
     let mut sources = Vec::with_capacity(funcs.len());
     let mut used: HashSet<Helper> = HashSet::new();
     for (index, f) in funcs.iter().enumerate() {
-        let generated = generate_function(index, f, funcs, globals, has_memory, stateful)?;
+        let generated = generate_function(
+            index, f, funcs, types, globals, has_memory, has_table, stateful,
+        )?;
         used.extend(generated.helpers);
         sources.push(generated.src);
     }
@@ -130,15 +156,18 @@ pub(crate) fn generate_module(
     if !stateful {
         return Ok(sources.join("\n"));
     }
-    render_module(&sources, globals, memory, &used)
+    render_module(&sources, globals, memory, table, elements, &used)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_function<'a>(
     index: usize,
     input: &FuncInput<'_>,
     funcs: &'a [FuncInput<'a>],
+    types: &'a [TypeSig],
     globals: &[GlobalInfo],
     has_memory: bool,
+    has_table: bool,
     is_method: bool,
 ) -> Result<GenFn, TranspileError> {
     let result = match input.results {
@@ -152,8 +181,10 @@ fn generate_function<'a>(
         result,
         input.body,
         funcs,
+        types,
         globals,
         has_memory,
+        has_table,
         is_method,
     )?;
     func.run(input.body)?;
@@ -167,10 +198,15 @@ struct FuncGen<'a> {
     /// Every function in the module, indexed by function index, so a `call`
     /// can read its callee's signature (arity and result).
     funcs: &'a [FuncInput<'a>],
+    /// Every function type in the module, so `call_indirect` can resolve its
+    /// declared type index back to a signature.
+    types: &'a [TypeSig],
     /// Per-global `(type, mutable)`, indexed by global index.
     globals: Vec<(ValType, bool)>,
     /// Whether the module declares linear memory (so `self.memory` exists).
     has_memory: bool,
+    /// Whether the module declares a table (so `self.table` exists).
+    has_table: bool,
     /// Whether this function is emitted as a `&mut self` method.
     is_method: bool,
     result: Option<ValType>,
@@ -191,13 +227,16 @@ struct FuncGen<'a> {
 }
 
 impl<'a> FuncGen<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         params: &[ValType],
         result: Option<ValType>,
         body: &FunctionBody<'_>,
         funcs: &'a [FuncInput<'a>],
+        types: &'a [TypeSig],
         globals: &[GlobalInfo],
         has_memory: bool,
+        has_table: bool,
         is_method: bool,
     ) -> Result<Self, TranspileError> {
         let mut local_types = params.to_vec();
@@ -229,8 +268,10 @@ impl<'a> FuncGen<'a> {
             local_types,
             mutable_locals,
             funcs,
+            types,
             globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
             has_memory,
+            has_table,
             is_method,
             result,
             stack: Vec::new(),
@@ -321,6 +362,10 @@ impl<'a> FuncGen<'a> {
             }
             Operator::BrTable { targets } => self.branch_table(targets)?,
             Operator::Call { function_index } => self.call(function_index)?,
+            Operator::CallIndirect {
+                type_index,
+                table_index,
+            } => self.call_indirect(type_index, table_index)?,
             Operator::Return => self.emit_return()?,
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
@@ -939,6 +984,108 @@ impl<'a> FuncGen<'a> {
         Ok(())
     }
 
+    fn call_indirect(&mut self, type_index: u32, table_index: u32) -> Result<(), TranspileError> {
+        if !self.has_table {
+            return Err(TranspileError::Unsupported(
+                "call_indirect without a table".into(),
+            ));
+        }
+        if table_index != 0 {
+            return Err(TranspileError::Unsupported(
+                "call_indirect on a non-zero table".into(),
+            ));
+        }
+        let sig = self
+            .types
+            .get(type_index as usize)
+            .ok_or_else(|| TranspileError::Unsupported("call_indirect: unknown type".into()))?;
+        let result = match sig.results.as_slice() {
+            [] => None,
+            [ty] => Some(*ty),
+            _ => {
+                return Err(TranspileError::Unsupported(
+                    "multi-value call_indirect result".into(),
+                ));
+            }
+        };
+        // The functions any table entry could resolve to: exactly those whose
+        // signature equals the declared type (no subtyping, so a structural
+        // match is a type match).
+        let targets: Vec<usize> = self
+            .funcs
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                f.params == sig.params.as_slice() && f.results == sig.results.as_slice()
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        // Freeze operands (arguments and the table index) before the call, both
+        // to share them across every match arm and to pin any earlier value
+        // against the callee's side effects (spill-before-mutation).
+        self.spill_nonstable()?;
+        let index = self.pop()?;
+        let mut args = Vec::with_capacity(sig.params.len());
+        for _ in 0..sig.params.len() {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+        let arg_list = args
+            .into_iter()
+            .map(|a| a.code)
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // No function has the requested type, so every entry mismatches: the
+        // call always traps and control cannot continue past it.
+        if targets.is_empty() {
+            self.line("panic!(\"indirect call type mismatch\");".to_string());
+            self.reachable = false;
+            self.dead_nesting = 0;
+            return Ok(());
+        }
+
+        // A `match` on the table entry, emitted line by line so `indent` aligns
+        // it. When the call yields a value the opening line binds a temporary;
+        // otherwise the `match` stands alone as a statement.
+        //
+        // An out-of-bounds index panics on the slice access (a trap); a null or
+        // wrong-type entry falls through to the catch-all panic (also a trap).
+        let result = match result {
+            Some(ty) => {
+                let name = self.fresh_temp();
+                self.line(format!(
+                    "let {name}: {} = match self.table[({}) as u32 as usize] {{",
+                    rust_type(ty)?,
+                    index.code
+                ));
+                Some((name, ty))
+            }
+            None => {
+                self.line(format!(
+                    "match self.table[({}) as u32 as usize] {{",
+                    index.code
+                ));
+                None
+            }
+        };
+        for i in &targets {
+            self.line(format!("    {i}u32 => self.func{i}({arg_list}),"));
+        }
+        self.line("    _ => panic!(\"indirect call type mismatch\"),".to_string());
+        self.line("};".to_string());
+
+        if let Some((name, ty)) = result {
+            self.push(Val {
+                code: name,
+                ty,
+                stable: true,
+            });
+        }
+        Ok(())
+    }
+
     fn emit_return(&mut self) -> Result<(), TranspileError> {
         match self.result {
             Some(_) => {
@@ -1125,6 +1272,29 @@ fn i64_literal(value: i64) -> String {
     }
 }
 
+/// Evaluate a constant offset expression (a single `i32.const`) to a `u32`,
+/// as used for an active element segment's table offset.
+pub(crate) fn const_expr_u32(expr: &ConstExpr<'_>) -> Result<u32, TranspileError> {
+    let mut value: Option<u32> = None;
+    for op in expr.get_operators_reader() {
+        match op? {
+            Operator::I32Const { value: v } => {
+                value =
+                    Some(u32::try_from(v).map_err(|_| {
+                        TranspileError::Unsupported("negative table offset".into())
+                    })?);
+            }
+            Operator::End => {}
+            other => {
+                return Err(TranspileError::Unsupported(format!(
+                    "element offset: {other:?}"
+                )));
+            }
+        }
+    }
+    value.ok_or_else(|| TranspileError::Unsupported("empty element offset".into()))
+}
+
 /// Translate a global's constant initializer expression to a Rust expression.
 pub(crate) fn const_expr_to_rust(expr: &ConstExpr<'_>) -> Result<String, TranspileError> {
     let mut value: Option<String> = None;
@@ -1167,6 +1337,8 @@ fn render_module(
     sources: &[String],
     globals: &[GlobalInfo],
     memory: Option<&MemInfo>,
+    table: Option<&TableInfo>,
+    elements: &[ElemSegment],
     used: &HashSet<Helper>,
 ) -> Result<String, TranspileError> {
     let mut lines: Vec<String> = Vec::new();
@@ -1175,6 +1347,10 @@ fn render_module(
     lines.push("pub struct Instance {".to_string());
     if memory.is_some() {
         lines.push("    memory: Vec<u8>,".to_string());
+    }
+    if table.is_some() {
+        // A table entry is a function index; `u32::MAX` marks a null funcref.
+        lines.push("    table: Vec<u32>,".to_string());
     }
     for (i, g) in globals.iter().enumerate() {
         lines.push(format!("    g{i}: {},", rust_type(g.ty)?));
@@ -1195,6 +1371,26 @@ fn render_module(
             .checked_mul(65536)
             .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
         inner.push(format!("        memory: vec![0u8; {bytes}],"));
+    }
+    if let Some(t) = table {
+        if elements.is_empty() {
+            inner.push(format!("        table: vec![u32::MAX; {}],", t.min));
+        } else {
+            // Start every slot null, then apply each active element segment.
+            inner.push("        table: {".to_string());
+            inner.push(format!(
+                "            let mut t: Vec<u32> = vec![u32::MAX; {}];",
+                t.min
+            ));
+            for seg in elements {
+                for (k, f) in seg.funcs.iter().enumerate() {
+                    let idx = seg.offset as usize + k;
+                    inner.push(format!("            t[{idx}] = {f}u32;"));
+                }
+            }
+            inner.push("            t".to_string());
+            inner.push("        },".to_string());
+        }
     }
     for (i, g) in globals.iter().enumerate() {
         inner.push(format!("        g{i}: {},", g.init));

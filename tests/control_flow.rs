@@ -19,6 +19,8 @@ fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
     std::fs::write(&src, &program).expect("write generated source");
 
     let compile = Command::new("rustc")
+        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
+        .current_dir(&dir)
         .arg(&src)
         .arg("--edition")
         .arg("2021")
