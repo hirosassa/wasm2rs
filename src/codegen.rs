@@ -62,6 +62,13 @@ pub(crate) struct TypeSig {
     pub results: Vec<ValType>,
 }
 
+/// An imported function: its signature. Imported functions occupy the low end
+/// of the function index space and are dispatched through the injected host.
+pub(crate) struct ImportInfo {
+    pub params: Vec<ValType>,
+    pub results: Vec<ValType>,
+}
+
 /// One function to translate: its signature plus its body.
 pub(crate) struct FuncInput<'a> {
     pub params: &'a [ValType],
@@ -134,8 +141,9 @@ struct Frame {
 
 /// Module-wide context shared by every function's code generation.
 struct ModuleCtx<'a> {
-    /// Every function, indexed by function index, so a `call` can read its
-    /// callee's signature (arity and result).
+    /// Imported functions, occupying function indices `0..imports.len()`.
+    imports: &'a [ImportInfo],
+    /// Locally-defined functions, occupying the indices after the imports.
     funcs: &'a [FuncInput<'a>],
     /// Every function type, so `call_indirect` can resolve its declared type
     /// index back to a signature.
@@ -150,13 +158,49 @@ struct ModuleCtx<'a> {
     is_method: bool,
 }
 
+impl ModuleCtx<'_> {
+    /// The number of functions in the shared index space (imports then defined),
+    /// i.e. the range of valid full indices.
+    fn func_count(&self) -> usize {
+        self.imports.len() + self.funcs.len()
+    }
+
+    /// The signature `(params, results)` of the function at full index `fidx`,
+    /// spanning imports then defined functions.
+    fn full_sig(&self, fidx: usize) -> Option<(&[ValType], &[ValType])> {
+        let n_imports = self.imports.len();
+        if fidx < n_imports {
+            let im = &self.imports[fidx];
+            Some((&im.params, &im.results))
+        } else {
+            let f = self.funcs.get(fidx - n_imports)?;
+            Some((f.params, f.results))
+        }
+    }
+
+    /// The Rust call expression for invoking the function at full index `fidx`
+    /// with the given comma-separated argument list. Imported functions are
+    /// dispatched through the injected host; defined ones are (method) calls.
+    fn call_expr(&self, fidx: usize, arg_list: &str) -> String {
+        if fidx < self.imports.len() {
+            format!("self.imports.import{fidx}({arg_list})")
+        } else if self.is_method {
+            format!("self.func{fidx}({arg_list})")
+        } else {
+            format!("func{fidx}({arg_list})")
+        }
+    }
+}
+
 /// Translate a whole module into Rust source.
 ///
 /// A module that declares linear memory, a table or globals carries mutable
 /// state, so it is emitted as a `pub struct Instance` with the functions as
 /// `&mut self` methods. A stateless module keeps its functions as free
 /// `pub fn`s, matching the earlier phases exactly.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_module(
+    imports: &[ImportInfo],
     funcs: &[FuncInput<'_>],
     types: &[TypeSig],
     globals: &[GlobalInfo],
@@ -167,9 +211,13 @@ pub(crate) fn generate_module(
 ) -> Result<String, TranspileError> {
     let has_memory = memory.is_some();
     let has_table = table.is_some();
-    let stateful = has_memory || has_table || !globals.is_empty();
+    let has_imports = !imports.is_empty();
+    // Imports must be held by an instance, so a module that has them (or any
+    // other mutable state) becomes a `struct Instance` with method functions.
+    let stateful = has_memory || has_table || has_imports || !globals.is_empty();
 
     let ctx = ModuleCtx {
+        imports,
         funcs,
         types,
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
@@ -181,7 +229,9 @@ pub(crate) fn generate_module(
     let mut sources = Vec::with_capacity(funcs.len());
     let mut used: HashSet<Helper> = HashSet::new();
     for (index, f) in funcs.iter().enumerate() {
-        let generated = generate_function(index, f, &ctx)?;
+        // Defined functions are named by their full function index, i.e. after
+        // the imported functions in the shared index space.
+        let generated = generate_function(imports.len() + index, f, &ctx)?;
         used.extend(generated.helpers);
         sources.push(generated.src);
     }
@@ -189,7 +239,9 @@ pub(crate) fn generate_module(
     if !stateful {
         return Ok(sources.join("\n"));
     }
-    render_module(&sources, globals, memory, data, table, elements, &used)
+    render_module(
+        &sources, imports, globals, memory, data, table, elements, &used,
+    )
 }
 
 fn generate_function(
@@ -929,13 +981,12 @@ impl<'a> FuncGen<'a> {
     // ----- calls -----------------------------------------------------------
 
     fn call(&mut self, function_index: u32) -> Result<(), TranspileError> {
-        let callee = self
+        let (params, results) = self
             .ctx
-            .funcs
-            .get(function_index as usize)
+            .full_sig(function_index as usize)
             .ok_or_else(|| TranspileError::Unsupported("call to unknown function".into()))?;
-        let param_count = callee.params.len();
-        let result = match callee.results {
+        let param_count = params.len();
+        let result = match results {
             [] => None,
             [ty] => Some(*ty),
             _ => {
@@ -961,8 +1012,7 @@ impl<'a> FuncGen<'a> {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let receiver = if self.ctx.is_method { "self." } else { "" };
-        let call_expr = format!("{receiver}func{function_index}({arg_list})");
+        let call_expr = self.ctx.call_expr(function_index as usize, &arg_list);
         match result {
             // A call is not re-evaluatable, so bind it to a temporary at exactly
             // this point (mirroring `memory_grow`) and push the stable temp.
@@ -1007,16 +1057,11 @@ impl<'a> FuncGen<'a> {
         };
         // The functions any table entry could resolve to: exactly those whose
         // signature equals the declared type (no subtyping, so a structural
-        // match is a type match).
-        let targets: Vec<usize> = self
-            .ctx
-            .funcs
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| {
-                f.params == sig.params.as_slice() && f.results == sig.results.as_slice()
-            })
-            .map(|(i, _)| i)
+        // match is a type match). This spans the whole index space, so a table
+        // entry may resolve to an imported function.
+        let want = Some((sig.params.as_slice(), sig.results.as_slice()));
+        let targets: Vec<usize> = (0..self.ctx.func_count())
+            .filter(|&fidx| self.ctx.full_sig(fidx) == want)
             .collect();
 
         // Freeze operands (arguments and the table index) before the call, both
@@ -1068,8 +1113,9 @@ impl<'a> FuncGen<'a> {
                 None
             }
         };
-        for i in &targets {
-            self.line(format!("    {i}u32 => self.func{i}({arg_list}),"));
+        for &fidx in &targets {
+            let expr = self.ctx.call_expr(fidx, &arg_list);
+            self.line(format!("    {fidx}u32 => {expr},"));
         }
         self.line("    _ => panic!(\"indirect call type mismatch\"),".to_string());
         self.line("};".to_string());
@@ -1330,9 +1376,13 @@ const HELPER_ORDER: [Helper; 9] = [
     Helper::Grow,
 ];
 
-/// Render the `struct Instance` and its `impl` for a stateful module.
+/// Render the `struct Instance` and its `impl` for a stateful module. When the
+/// module imports functions, a `pub trait Imports` is emitted and `Instance`
+/// becomes generic over a host `H: Imports` that it stores and dispatches to.
+#[allow(clippy::too_many_arguments)]
 fn render_module(
     sources: &[String],
+    imports: &[ImportInfo],
     globals: &[GlobalInfo],
     memory: Option<&MemInfo>,
     data: &[DataSegment],
@@ -1342,8 +1392,25 @@ fn render_module(
 ) -> Result<String, TranspileError> {
     let mut lines: Vec<String> = Vec::new();
 
+    let has_imports = !imports.is_empty();
+    if has_imports {
+        lines.extend(import_trait_lines(imports)?);
+        lines.push(String::new());
+    }
+    // A generic parameter carries the host implementation only when needed:
+    // `<H: Imports>` where the parameter is bound (struct/impl header) and
+    // `<H>` where the type is merely named (`Instance<H>`).
+    let (decl_generics, type_generics) = if has_imports {
+        ("<H: Imports>", "<H>")
+    } else {
+        ("", "")
+    };
+
     lines.push("#[allow(dead_code)]".to_string());
-    lines.push("pub struct Instance {".to_string());
+    lines.push(format!("pub struct Instance{decl_generics} {{"));
+    if has_imports {
+        lines.push("    imports: H,".to_string());
+    }
     if memory.is_some() {
         lines.push("    memory: Vec<u8>,".to_string());
     }
@@ -1358,12 +1425,16 @@ fn render_module(
     lines.push(String::new());
 
     lines.push(ALLOW.to_string());
-    lines.push("impl Instance {".to_string());
+    lines.push(format!("impl{decl_generics} Instance{type_generics} {{"));
 
     // Everything inside the `impl` is collected unindented, then indented once.
     let mut inner: Vec<String> = Vec::new();
-    inner.push("pub fn new() -> Self {".to_string());
+    let new_param = if has_imports { "imports: H" } else { "" };
+    inner.push(format!("pub fn new({new_param}) -> Self {{"));
     inner.push("    Self {".to_string());
+    if has_imports {
+        inner.push("        imports,".to_string());
+    }
     if let Some(m) = memory {
         let bytes = m
             .min_pages
@@ -1442,6 +1513,30 @@ fn render_module(
     let mut out = lines.join("\n");
     out.push('\n');
     Ok(out)
+}
+
+/// The `pub trait Imports` declaration: one `import{j}` method per imported
+/// function, taking `&mut self` since a host call may have side effects.
+fn import_trait_lines(imports: &[ImportInfo]) -> Result<Vec<String>, TranspileError> {
+    let mut lines = vec!["pub trait Imports {".to_string()];
+    for (j, im) in imports.iter().enumerate() {
+        let mut params = String::from("&mut self");
+        for (k, ty) in im.params.iter().enumerate() {
+            params.push_str(&format!(", a{k}: {}", rust_type(*ty)?));
+        }
+        let ret = match im.results.as_slice() {
+            [] => String::new(),
+            [ty] => format!(" -> {}", rust_type(*ty)?),
+            _ => {
+                return Err(TranspileError::Unsupported(
+                    "multi-value import result".into(),
+                ));
+            }
+        };
+        lines.push(format!("    fn import{j}({params}){ret};"));
+    }
+    lines.push("}".to_string());
+    Ok(lines)
 }
 
 /// The source lines of one memory helper method (bounds-checked via indexing,
