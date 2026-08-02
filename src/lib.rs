@@ -7,14 +7,14 @@
 
 mod codegen;
 
-use wasmparser::{CompositeInnerType, FuncType, Imports, Parser, Payload, TypeRef, ValType};
+use wasmparser::{CompositeInnerType, FuncType, Parser, Payload, ValType};
 
 /// An error that can occur while transpiling a wasm module.
 #[derive(Debug)]
 pub enum TranspileError {
     /// The wasm binary could not be parsed.
     Parse(wasmparser::BinaryReaderError),
-    /// The module used a feature that Phase 1 does not support yet.
+    /// The module used a feature that is not supported yet.
     Unsupported(String),
     /// The operand stack was empty when a value was required, indicating a
     /// malformed module (or a bug in the transpiler).
@@ -57,8 +57,9 @@ struct Signature {
 pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
     let mut signatures: Vec<Signature> = Vec::new();
     let mut func_type_indices: Vec<u32> = Vec::new();
-    let mut out = String::new();
-    let mut func_index = 0usize;
+    let mut bodies: Vec<wasmparser::FunctionBody> = Vec::new();
+    let mut globals: Vec<codegen::GlobalInfo> = Vec::new();
+    let mut memory: Option<codegen::MemInfo> = None;
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
@@ -79,20 +80,11 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                 }
             }
             Payload::ImportSection(reader) => {
-                // An imported function occupies a function index ahead of the
-                // locally-defined ones, which would desynchronise the `func{n}`
-                // naming from the wasm function index space. Phase 1 does not
-                // model imports, so reject imported functions outright.
-                for group in reader {
-                    match group? {
-                        Imports::Single(_, import) => reject_func_import(import.ty)?,
-                        Imports::Compact1 { items, .. } => {
-                            for item in items {
-                                reject_func_import(item?.ty)?;
-                            }
-                        }
-                        Imports::Compact2 { ty, .. } => reject_func_import(ty)?,
-                    }
+                // Imports (functions, memories, globals, ...) occupy index space
+                // ahead of the locally-defined items and need host wiring, which
+                // is deferred to a later phase; reject any module that uses them.
+                if reader.count() > 0 {
+                    return Err(TranspileError::Unsupported("imports".into()));
                 }
             }
             Payload::FunctionSection(reader) => {
@@ -100,38 +92,58 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                     func_type_indices.push(type_index?);
                 }
             }
-            Payload::CodeSectionEntry(body) => {
-                let type_index = func_type_indices
-                    .get(func_index)
-                    .copied()
-                    .ok_or_else(|| TranspileError::Unsupported("missing function type".into()))?;
-                let sig = signatures.get(type_index as usize).ok_or_else(|| {
-                    TranspileError::Unsupported("function type index out of range".into())
-                })?;
-
-                let code =
-                    codegen::generate_function(func_index, &sig.params, &sig.results, &body)?;
-                if !out.is_empty() {
-                    out.push('\n');
+            Payload::MemorySection(reader) => {
+                for mem in reader {
+                    let mem = mem?;
+                    if mem.memory64 || mem.shared {
+                        return Err(TranspileError::Unsupported(
+                            "64-bit or shared memory".into(),
+                        ));
+                    }
+                    if memory.is_some() {
+                        return Err(TranspileError::Unsupported("multiple memories".into()));
+                    }
+                    memory = Some(codegen::MemInfo {
+                        min_pages: mem.initial,
+                    });
                 }
-                out.push_str(&code);
-                func_index += 1;
+            }
+            Payload::GlobalSection(reader) => {
+                for global in reader {
+                    let global = global?;
+                    let init = codegen::const_expr_to_rust(&global.init_expr)?;
+                    globals.push(codegen::GlobalInfo {
+                        ty: global.ty.content_type,
+                        mutable: global.ty.mutable,
+                        init,
+                    });
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                bodies.push(body);
             }
             _ => {}
         }
     }
 
-    Ok(out)
-}
-
-/// Reject an imported function; other kinds of imports are ignored in Phase 1.
-fn reject_func_import(ty: TypeRef) -> Result<(), TranspileError> {
-    match ty {
-        TypeRef::Func(_) | TypeRef::FuncExact(_) => {
-            Err(TranspileError::Unsupported("imported function".into()))
-        }
-        _ => Ok(()),
+    // Resolve each function body against its declared signature.
+    let mut funcs: Vec<codegen::FuncInput> = Vec::with_capacity(bodies.len());
+    for (i, body) in bodies.iter().enumerate() {
+        let type_index = func_type_indices
+            .get(i)
+            .copied()
+            .ok_or_else(|| TranspileError::Unsupported("missing function type".into()))?;
+        let sig = signatures.get(type_index as usize).ok_or_else(|| {
+            TranspileError::Unsupported("function type index out of range".into())
+        })?;
+        funcs.push(codegen::FuncInput {
+            params: &sig.params,
+            results: &sig.results,
+            body,
+        });
     }
+
+    codegen::generate_module(&funcs, &globals, memory.as_ref())
 }
 
 fn signature_from(func_ty: &FuncType) -> Signature {
@@ -151,7 +163,7 @@ mod tests {
 
     /// The lint-suppression attribute prefixed to every generated function.
     const ATTR: &str =
-        "#[allow(unused_variables, unused_assignments, unused_mut, unused_parens)]\n";
+        "#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens)]\n";
 
     #[test]
     fn i32_add_becomes_wrapping_add() {
@@ -344,6 +356,39 @@ mod tests {
                 "{ATTR}pub fn func0(l0: i32) -> i32 {{\n    let mut l1: i32 = 0;\n    l1 = l0;\n    l1\n}}"
             ),
         );
+    }
+
+    #[test]
+    fn module_with_global_emits_instance_struct() {
+        let wasm = wat_to_wasm(
+            r#"
+            (module
+              (global i32 (i32.const 42))
+              (func (result i32) (global.get 0)))
+            "#,
+        );
+
+        let rust = transpile(&wasm).expect("transpile ok");
+
+        let expected = "\
+#[allow(dead_code)]
+pub struct Instance {
+    g0: i32,
+}
+
+#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens)]
+impl Instance {
+    pub fn new() -> Self {
+        Self {
+            g0: 42i32,
+        }
+    }
+
+    pub fn func0(&mut self) -> i32 {
+        self.g0
+    }
+}";
+        assert_eq!(rust.trim(), expected);
     }
 
     #[test]

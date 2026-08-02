@@ -17,9 +17,54 @@
 use std::collections::HashSet;
 use std::mem;
 
-use wasmparser::{BlockType, FunctionBody, Operator, ValType};
+use wasmparser::{BlockType, ConstExpr, FunctionBody, MemArg, Operator, ValType};
 
 use crate::TranspileError;
+
+/// Metadata about a module global.
+pub(crate) struct GlobalInfo {
+    pub ty: ValType,
+    pub mutable: bool,
+    /// The Rust expression that produces the global's initial value.
+    pub init: String,
+}
+
+/// Metadata about the module's linear memory. The declared maximum is not
+/// tracked; `memory.grow` only enforces the wasm32 hard cap of 65536 pages.
+pub(crate) struct MemInfo {
+    pub min_pages: u64,
+}
+
+/// One function to translate: its signature plus its body.
+pub(crate) struct FuncInput<'a> {
+    pub params: &'a [ValType],
+    pub results: &'a [ValType],
+    pub body: &'a FunctionBody<'a>,
+}
+
+/// A memory-access helper method emitted on the instance `impl` on demand.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Helper {
+    LoadI32,
+    Load8U,
+    Load8S,
+    Load16U,
+    Load16S,
+    StoreI32,
+    Store8,
+    Store16,
+    Grow,
+}
+
+/// The rendered source of one function plus the memory helpers it relies on.
+struct GenFn {
+    src: String,
+    helpers: HashSet<Helper>,
+}
+
+/// The lint-suppression attribute prefixed to generated functions/impls.
+const ALLOW: &str =
+    "#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens)]";
 
 /// A value on the simulated operand stack.
 #[derive(Clone)]
@@ -60,27 +105,69 @@ struct Frame {
     cond: Option<String>,
 }
 
-pub(crate) fn generate_function(
-    index: usize,
-    params: &[ValType],
-    results: &[ValType],
-    body: &FunctionBody<'_>,
+/// Translate a whole module into Rust source.
+///
+/// A module that declares linear memory or globals carries mutable state, so
+/// it is emitted as a `pub struct Instance` with the functions as `&mut self`
+/// methods. A stateless module keeps its functions as free `pub fn`s, matching
+/// the earlier phases exactly.
+pub(crate) fn generate_module(
+    funcs: &[FuncInput<'_>],
+    globals: &[GlobalInfo],
+    memory: Option<&MemInfo>,
 ) -> Result<String, TranspileError> {
-    let result = match results {
+    let has_memory = memory.is_some();
+    let stateful = has_memory || !globals.is_empty();
+
+    let mut sources = Vec::with_capacity(funcs.len());
+    let mut used: HashSet<Helper> = HashSet::new();
+    for (index, f) in funcs.iter().enumerate() {
+        let generated = generate_function(index, f, globals, has_memory, stateful)?;
+        used.extend(generated.helpers);
+        sources.push(generated.src);
+    }
+
+    if !stateful {
+        return Ok(sources.join("\n"));
+    }
+    render_module(&sources, globals, memory, &used)
+}
+
+fn generate_function(
+    index: usize,
+    input: &FuncInput<'_>,
+    globals: &[GlobalInfo],
+    has_memory: bool,
+    is_method: bool,
+) -> Result<GenFn, TranspileError> {
+    let result = match input.results {
         [] => None,
         [ty] => Some(*ty),
         _ => return Err(TranspileError::Unsupported("multi-value results".into())),
     };
 
-    let mut func = FuncGen::new(params, result, body)?;
-    func.run(body)?;
-    func.finish(index, params, result)
+    let mut func = FuncGen::new(
+        input.params,
+        result,
+        input.body,
+        globals,
+        has_memory,
+        is_method,
+    )?;
+    func.run(input.body)?;
+    func.finish(index, input.params, result)
 }
 
 /// State threaded through the translation of a single function body.
 struct FuncGen {
     local_types: Vec<ValType>,
     mutable_locals: HashSet<u32>,
+    /// Per-global `(type, mutable)`, indexed by global index.
+    globals: Vec<(ValType, bool)>,
+    /// Whether the module declares linear memory (so `self.memory` exists).
+    has_memory: bool,
+    /// Whether this function is emitted as a `&mut self` method.
+    is_method: bool,
     result: Option<ValType>,
     stack: Vec<Val>,
     frames: Vec<Frame>,
@@ -94,6 +181,8 @@ struct FuncGen {
     dead_nesting: usize,
     /// The tail expression returned by the function, if any.
     trailing: Option<String>,
+    /// Memory-access helpers this function relies on.
+    used_helpers: HashSet<Helper>,
 }
 
 impl FuncGen {
@@ -101,6 +190,9 @@ impl FuncGen {
         params: &[ValType],
         result: Option<ValType>,
         body: &FunctionBody<'_>,
+        globals: &[GlobalInfo],
+        has_memory: bool,
+        is_method: bool,
     ) -> Result<Self, TranspileError> {
         let mut local_types = params.to_vec();
         for local in body.get_locals_reader()? {
@@ -130,6 +222,9 @@ impl FuncGen {
         Ok(Self {
             local_types,
             mutable_locals,
+            globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
+            has_memory,
+            is_method,
             result,
             stack: Vec::new(),
             frames: Vec::new(),
@@ -139,6 +234,7 @@ impl FuncGen {
             reachable: true,
             dead_nesting: 0,
             trailing: None,
+            used_helpers: HashSet::new(),
         })
     }
 
@@ -189,6 +285,18 @@ impl FuncGen {
             Operator::I32GtU => self.compare_unsigned(">")?,
             Operator::I32LeU => self.compare_unsigned("<=")?,
             Operator::I32GeU => self.compare_unsigned(">=")?,
+            Operator::GlobalGet { global_index } => self.global_get(global_index)?,
+            Operator::GlobalSet { global_index } => self.global_set(global_index)?,
+            Operator::I32Load { memarg } => self.load(Helper::LoadI32, memarg)?,
+            Operator::I32Load8U { memarg } => self.load(Helper::Load8U, memarg)?,
+            Operator::I32Load8S { memarg } => self.load(Helper::Load8S, memarg)?,
+            Operator::I32Load16U { memarg } => self.load(Helper::Load16U, memarg)?,
+            Operator::I32Load16S { memarg } => self.load(Helper::Load16S, memarg)?,
+            Operator::I32Store { memarg } => self.store(Helper::StoreI32, memarg)?,
+            Operator::I32Store8 { memarg } => self.store(Helper::Store8, memarg)?,
+            Operator::I32Store16 { memarg } => self.store(Helper::Store16, memarg)?,
+            Operator::MemorySize { .. } => self.memory_size()?,
+            Operator::MemoryGrow { .. } => self.memory_grow()?,
             Operator::Drop => {
                 self.pop()?;
             }
@@ -375,6 +483,115 @@ impl FuncGen {
             .ok_or_else(|| TranspileError::Unsupported("local index out of range".into()))
     }
 
+    // ----- globals ---------------------------------------------------------
+
+    fn global(&self, global_index: u32) -> Result<(ValType, bool), TranspileError> {
+        self.globals
+            .get(global_index as usize)
+            .copied()
+            .ok_or_else(|| TranspileError::Unsupported("global index out of range".into()))
+    }
+
+    fn global_get(&mut self, global_index: u32) -> Result<(), TranspileError> {
+        let (ty, mutable) = self.global(global_index)?;
+        self.push(Val {
+            code: format!("self.g{global_index}"),
+            ty,
+            // A mutable global can be changed by a later `global.set`.
+            stable: !mutable,
+        });
+        Ok(())
+    }
+
+    fn global_set(&mut self, global_index: u32) -> Result<(), TranspileError> {
+        let (_, mutable) = self.global(global_index)?;
+        if !mutable {
+            return Err(TranspileError::Unsupported(
+                "set of immutable global".into(),
+            ));
+        }
+        self.spill_nonstable()?;
+        let value = self.pop()?;
+        self.line(format!("self.g{global_index} = {};", value.code));
+        Ok(())
+    }
+
+    // ----- linear memory ---------------------------------------------------
+
+    fn require_memory(&self) -> Result<(), TranspileError> {
+        if self.has_memory {
+            Ok(())
+        } else {
+            Err(TranspileError::Unsupported(
+                "memory instruction without a memory section".into(),
+            ))
+        }
+    }
+
+    fn load(&mut self, helper: Helper, memarg: MemArg) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        let offset = memarg_offset(memarg)?;
+        let addr = self.pop()?;
+        self.used_helpers.insert(helper);
+        self.push(Val {
+            code: format!(
+                "self.{}(({}) as u32, {offset}u32)",
+                helper_name(helper),
+                addr.code
+            ),
+            ty: ValType::I32,
+            // The result depends on memory contents, which a store can change.
+            stable: false,
+        });
+        Ok(())
+    }
+
+    fn store(&mut self, helper: Helper, memarg: MemArg) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        let offset = memarg_offset(memarg)?;
+        // Memory is about to change; fix any operand that reads from it.
+        self.spill_nonstable()?;
+        let value = self.pop()?;
+        let addr = self.pop()?;
+        self.used_helpers.insert(helper);
+        self.line(format!(
+            "self.{}(({}) as u32, {offset}u32, {});",
+            helper_name(helper),
+            addr.code,
+            value.code
+        ));
+        Ok(())
+    }
+
+    fn memory_size(&mut self) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        self.push(Val {
+            code: "((self.memory.len() / 65536) as i32)".to_string(),
+            ty: ValType::I32,
+            // `memory.grow` can change the size.
+            stable: false,
+        });
+        Ok(())
+    }
+
+    fn memory_grow(&mut self) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        self.spill_nonstable()?;
+        let delta = self.pop()?;
+        self.used_helpers.insert(Helper::Grow);
+        let name = self.fresh_temp();
+        self.line(format!(
+            "let {name}: i32 = self.memory_grow({});",
+            delta.code
+        ));
+        self.push(Val {
+            code: name,
+            ty: ValType::I32,
+            stable: true,
+        });
+        Ok(())
+    }
+
     // ----- control flow ----------------------------------------------------
 
     fn frame_result(
@@ -400,6 +617,24 @@ impl FuncGen {
     }
 
     fn open_frame(&mut self, kind: FrameKind, blockty: BlockType) -> Result<(), TranspileError> {
+        self.push_frame(kind, blockty, None)
+    }
+
+    fn open_if(&mut self, blockty: BlockType) -> Result<(), TranspileError> {
+        // The condition is consumed before the surrounding stack is spilled, so
+        // it is popped here rather than inside `push_frame`.
+        let cond = self.pop()?;
+        self.push_frame(FrameKind::If, blockty, Some(format!("{} != 0", cond.code)))
+    }
+
+    /// Spill the operand stack, allocate a label, and push a fresh frame that
+    /// captures the enclosing scope's height and output buffer.
+    fn push_frame(
+        &mut self,
+        kind: FrameKind,
+        blockty: BlockType,
+        cond: Option<String>,
+    ) -> Result<(), TranspileError> {
         self.spill_nonstable()?;
         let result = self.frame_result(blockty)?;
         let label = self.label_counter;
@@ -415,29 +650,7 @@ impl FuncGen {
             parent_buffer,
             then_buffer: None,
             then_reachable: false,
-            cond: None,
-        });
-        Ok(())
-    }
-
-    fn open_if(&mut self, blockty: BlockType) -> Result<(), TranspileError> {
-        let cond = self.pop()?;
-        self.spill_nonstable()?;
-        let result = self.frame_result(blockty)?;
-        let label = self.label_counter;
-        self.label_counter += 1;
-        let parent_height = self.stack.len();
-        let parent_buffer = mem::take(&mut self.cur);
-        self.frames.push(Frame {
-            kind: FrameKind::If,
-            label,
-            targeted: false,
-            result,
-            parent_height,
-            parent_buffer,
-            then_buffer: None,
-            then_reachable: false,
-            cond: Some(format!("{} != 0", cond.code)),
+            cond,
         });
         Ok(())
     }
@@ -698,10 +911,14 @@ impl FuncGen {
         index: usize,
         params: &[ValType],
         result: Option<ValType>,
-    ) -> Result<String, TranspileError> {
+    ) -> Result<GenFn, TranspileError> {
         let mut params_src = String::new();
+        // Stateful modules pass their memory/globals through `&mut self`.
+        if self.is_method {
+            params_src.push_str("&mut self");
+        }
         for (i, ty) in params.iter().enumerate() {
-            if i > 0 {
+            if self.is_method || i > 0 {
                 params_src.push_str(", ");
             }
             let keyword = if self.mutable_locals.contains(&index_u32(i)?) {
@@ -722,20 +939,43 @@ impl FuncGen {
             body.push(trailing);
         }
 
-        // wasm functions may leave parameters or locals unused, and result
-        // temporaries are default-initialised before being assigned on every
-        // exit path; both are inherent to the translation rather than bugs, so
-        // suppress the lints they would otherwise trigger in the output.
-        let mut out = String::from(
-            "#[allow(unused_variables, unused_assignments, unused_mut, unused_parens)]\n",
-        );
+        // For a method the lint-suppression attribute is applied once on the
+        // enclosing `impl`; free functions carry it individually.
+        let mut out = String::new();
+        if !self.is_method {
+            out.push_str(ALLOW);
+            out.push('\n');
+        }
         out.push_str(&format!("pub fn func{index}({params_src}){ret} {{\n"));
         for line in indent(&body) {
             out.push_str(&line);
             out.push('\n');
         }
         out.push_str("}\n");
-        Ok(out)
+        Ok(GenFn {
+            src: out,
+            helpers: self.used_helpers,
+        })
+    }
+}
+
+/// The offset field of a memory access, as a `u32` (32-bit memory only).
+fn memarg_offset(memarg: MemArg) -> Result<u32, TranspileError> {
+    u32::try_from(memarg.offset)
+        .map_err(|_| TranspileError::Unsupported("memory offset too large".into()))
+}
+
+fn helper_name(helper: Helper) -> &'static str {
+    match helper {
+        Helper::LoadI32 => "load_i32",
+        Helper::Load8U => "load8_u",
+        Helper::Load8S => "load8_s",
+        Helper::Load16U => "load16_u",
+        Helper::Load16S => "load16_s",
+        Helper::StoreI32 => "store_i32",
+        Helper::Store8 => "store8",
+        Helper::Store16 => "store16",
+        Helper::Grow => "memory_grow",
     }
 }
 
@@ -814,4 +1054,189 @@ fn i32_literal(value: i32) -> String {
 
 fn index_u32(i: usize) -> Result<u32, TranspileError> {
     u32::try_from(i).map_err(|_| TranspileError::Unsupported("index too large".into()))
+}
+
+fn i64_literal(value: i64) -> String {
+    if value == i64::MIN {
+        "i64::MIN".to_string()
+    } else {
+        format!("{value}i64")
+    }
+}
+
+/// Translate a global's constant initializer expression to a Rust expression.
+pub(crate) fn const_expr_to_rust(expr: &ConstExpr<'_>) -> Result<String, TranspileError> {
+    let mut value: Option<String> = None;
+    for op in expr.get_operators_reader() {
+        match op? {
+            Operator::I32Const { value: v } => value = Some(i32_literal(v)),
+            Operator::I64Const { value: v } => value = Some(i64_literal(v)),
+            Operator::F32Const { value: v } => {
+                value = Some(format!("f32::from_bits({}u32)", v.bits()));
+            }
+            Operator::F64Const { value: v } => {
+                value = Some(format!("f64::from_bits({}u64)", v.bits()));
+            }
+            Operator::End => {}
+            other => {
+                return Err(TranspileError::Unsupported(format!(
+                    "global initializer: {other:?}"
+                )));
+            }
+        }
+    }
+    value.ok_or_else(|| TranspileError::Unsupported("empty global initializer".into()))
+}
+
+/// All memory helpers, in a deterministic emission order.
+const HELPER_ORDER: [Helper; 9] = [
+    Helper::LoadI32,
+    Helper::Load8U,
+    Helper::Load8S,
+    Helper::Load16U,
+    Helper::Load16S,
+    Helper::StoreI32,
+    Helper::Store8,
+    Helper::Store16,
+    Helper::Grow,
+];
+
+/// Render the `struct Instance` and its `impl` for a stateful module.
+fn render_module(
+    sources: &[String],
+    globals: &[GlobalInfo],
+    memory: Option<&MemInfo>,
+    used: &HashSet<Helper>,
+) -> Result<String, TranspileError> {
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push("#[allow(dead_code)]".to_string());
+    lines.push("pub struct Instance {".to_string());
+    if memory.is_some() {
+        lines.push("    memory: Vec<u8>,".to_string());
+    }
+    for (i, g) in globals.iter().enumerate() {
+        lines.push(format!("    g{i}: {},", rust_type(g.ty)?));
+    }
+    lines.push("}".to_string());
+    lines.push(String::new());
+
+    lines.push(ALLOW.to_string());
+    lines.push("impl Instance {".to_string());
+
+    // Everything inside the `impl` is collected unindented, then indented once.
+    let mut inner: Vec<String> = Vec::new();
+    inner.push("pub fn new() -> Self {".to_string());
+    inner.push("    Self {".to_string());
+    if let Some(m) = memory {
+        let bytes = m
+            .min_pages
+            .checked_mul(65536)
+            .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
+        inner.push(format!("        memory: vec![0u8; {bytes}],"));
+    }
+    for (i, g) in globals.iter().enumerate() {
+        inner.push(format!("        g{i}: {},", g.init));
+    }
+    inner.push("    }".to_string());
+    inner.push("}".to_string());
+
+    for helper in HELPER_ORDER {
+        if used.contains(&helper) {
+            inner.push(String::new());
+            inner.extend(helper_lines(helper));
+        }
+    }
+
+    for src in sources {
+        inner.push(String::new());
+        for line in src.lines() {
+            inner.push(line.to_string());
+        }
+    }
+
+    for line in indent(&inner) {
+        lines.push(line);
+    }
+    lines.push("}".to_string());
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    Ok(out)
+}
+
+/// The source lines of one memory helper method (bounds-checked via indexing,
+/// so an out-of-range access panics — mirroring a wasm trap).
+fn helper_lines(helper: Helper) -> Vec<String> {
+    let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    match helper {
+        Helper::LoadI32 => owned(&[
+            "fn load_i32(&self, addr: u32, offset: u32) -> i32 {",
+            "    let a = addr as usize + offset as usize;",
+            "    i32::from_le_bytes([self.memory[a], self.memory[a + 1], self.memory[a + 2], self.memory[a + 3]])",
+            "}",
+        ]),
+        Helper::Load8U => owned(&[
+            "fn load8_u(&self, addr: u32, offset: u32) -> i32 {",
+            "    let a = addr as usize + offset as usize;",
+            "    self.memory[a] as i32",
+            "}",
+        ]),
+        Helper::Load8S => owned(&[
+            "fn load8_s(&self, addr: u32, offset: u32) -> i32 {",
+            "    let a = addr as usize + offset as usize;",
+            "    self.memory[a] as i8 as i32",
+            "}",
+        ]),
+        Helper::Load16U => owned(&[
+            "fn load16_u(&self, addr: u32, offset: u32) -> i32 {",
+            "    let a = addr as usize + offset as usize;",
+            "    u16::from_le_bytes([self.memory[a], self.memory[a + 1]]) as i32",
+            "}",
+        ]),
+        Helper::Load16S => owned(&[
+            "fn load16_s(&self, addr: u32, offset: u32) -> i32 {",
+            "    let a = addr as usize + offset as usize;",
+            "    i16::from_le_bytes([self.memory[a], self.memory[a + 1]]) as i32",
+            "}",
+        ]),
+        Helper::StoreI32 => owned(&[
+            "fn store_i32(&mut self, addr: u32, offset: u32, value: i32) {",
+            "    let a = addr as usize + offset as usize;",
+            "    let b = value.to_le_bytes();",
+            "    self.memory[a] = b[0];",
+            "    self.memory[a + 1] = b[1];",
+            "    self.memory[a + 2] = b[2];",
+            "    self.memory[a + 3] = b[3];",
+            "}",
+        ]),
+        Helper::Store8 => owned(&[
+            "fn store8(&mut self, addr: u32, offset: u32, value: i32) {",
+            "    let a = addr as usize + offset as usize;",
+            "    self.memory[a] = value as u8;",
+            "}",
+        ]),
+        Helper::Store16 => owned(&[
+            "fn store16(&mut self, addr: u32, offset: u32, value: i32) {",
+            "    let a = addr as usize + offset as usize;",
+            "    let b = (value as u16).to_le_bytes();",
+            "    self.memory[a] = b[0];",
+            "    self.memory[a + 1] = b[1];",
+            "}",
+        ]),
+        // `delta` is an unsigned page count. Growth past the wasm32 limit of
+        // 65536 pages (4 GiB) fails, returning -1 as the wasm spec requires;
+        // the declared maximum is not tracked, so only that hard cap applies.
+        Helper::Grow => owned(&[
+            "fn memory_grow(&mut self, delta: i32) -> i32 {",
+            "    let old_pages = (self.memory.len() / 65536) as u64;",
+            "    let new_pages = old_pages + (delta as u32 as u64);",
+            "    if new_pages > 65536 {",
+            "        return -1;",
+            "    }",
+            "    self.memory.resize((new_pages as usize) * 65536, 0);",
+            "    old_pages as i32",
+            "}",
+        ]),
+    }
 }
