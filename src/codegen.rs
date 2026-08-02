@@ -122,7 +122,7 @@ pub(crate) fn generate_module(
     let mut sources = Vec::with_capacity(funcs.len());
     let mut used: HashSet<Helper> = HashSet::new();
     for (index, f) in funcs.iter().enumerate() {
-        let generated = generate_function(index, f, globals, has_memory, stateful)?;
+        let generated = generate_function(index, f, funcs, globals, has_memory, stateful)?;
         used.extend(generated.helpers);
         sources.push(generated.src);
     }
@@ -133,9 +133,10 @@ pub(crate) fn generate_module(
     render_module(&sources, globals, memory, &used)
 }
 
-fn generate_function(
+fn generate_function<'a>(
     index: usize,
     input: &FuncInput<'_>,
+    funcs: &'a [FuncInput<'a>],
     globals: &[GlobalInfo],
     has_memory: bool,
     is_method: bool,
@@ -150,6 +151,7 @@ fn generate_function(
         input.params,
         result,
         input.body,
+        funcs,
         globals,
         has_memory,
         is_method,
@@ -159,9 +161,12 @@ fn generate_function(
 }
 
 /// State threaded through the translation of a single function body.
-struct FuncGen {
+struct FuncGen<'a> {
     local_types: Vec<ValType>,
     mutable_locals: HashSet<u32>,
+    /// Every function in the module, indexed by function index, so a `call`
+    /// can read its callee's signature (arity and result).
+    funcs: &'a [FuncInput<'a>],
     /// Per-global `(type, mutable)`, indexed by global index.
     globals: Vec<(ValType, bool)>,
     /// Whether the module declares linear memory (so `self.memory` exists).
@@ -185,11 +190,12 @@ struct FuncGen {
     used_helpers: HashSet<Helper>,
 }
 
-impl FuncGen {
+impl<'a> FuncGen<'a> {
     fn new(
         params: &[ValType],
         result: Option<ValType>,
         body: &FunctionBody<'_>,
+        funcs: &'a [FuncInput<'a>],
         globals: &[GlobalInfo],
         has_memory: bool,
         is_method: bool,
@@ -222,6 +228,7 @@ impl FuncGen {
         Ok(Self {
             local_types,
             mutable_locals,
+            funcs,
             globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
             has_memory,
             is_method,
@@ -313,6 +320,7 @@ impl FuncGen {
                 self.branch(relative_depth, Some(cond))?;
             }
             Operator::BrTable { targets } => self.branch_table(targets)?,
+            Operator::Call { function_index } => self.call(function_index)?,
             Operator::Return => self.emit_return()?,
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
@@ -876,6 +884,59 @@ impl FuncGen {
         let label = frame.label;
         self.frames[idx].targeted = true;
         Ok((keyword, label))
+    }
+
+    // ----- calls -----------------------------------------------------------
+
+    fn call(&mut self, function_index: u32) -> Result<(), TranspileError> {
+        let callee = self
+            .funcs
+            .get(function_index as usize)
+            .ok_or_else(|| TranspileError::Unsupported("call to unknown function".into()))?;
+        let param_count = callee.params.len();
+        let result = match callee.results {
+            [] => None,
+            [ty] => Some(*ty),
+            _ => {
+                return Err(TranspileError::Unsupported(
+                    "multi-value call result".into(),
+                ));
+            }
+        };
+
+        // A call may read and write memory and globals. Freezing every operand
+        // first both materialises the arguments and pins any earlier value that
+        // must not observe the call's side effects (spill-before-mutation).
+        self.spill_nonstable()?;
+
+        let mut args = Vec::with_capacity(param_count);
+        for _ in 0..param_count {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+        let arg_list = args
+            .into_iter()
+            .map(|a| a.code)
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let receiver = if self.is_method { "self." } else { "" };
+        let call_expr = format!("{receiver}func{function_index}({arg_list})");
+        match result {
+            // A call is not re-evaluatable, so bind it to a temporary at exactly
+            // this point (mirroring `memory_grow`) and push the stable temp.
+            Some(ty) => {
+                let name = self.fresh_temp();
+                self.line(format!("let {name}: {} = {call_expr};", rust_type(ty)?));
+                self.push(Val {
+                    code: name,
+                    ty,
+                    stable: true,
+                });
+            }
+            None => self.line(format!("{call_expr};")),
+        }
+        Ok(())
     }
 
     fn emit_return(&mut self) -> Result<(), TranspileError> {

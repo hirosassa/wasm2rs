@@ -392,6 +392,28 @@ impl Instance {
     }
 
     #[test]
+    fn direct_call_materialises_result_into_temp() {
+        let wasm = wat_to_wasm(
+            r#"
+            (module
+              (func (param i32 i32) (result i32) (i32.add (local.get 0) (local.get 1)))
+              (func (param i32) (result i32) (call 0 (local.get 0) (i32.const 10))))
+            "#,
+        );
+
+        let rust = transpile(&wasm).expect("transpile ok");
+
+        assert_eq!(
+            rust.trim(),
+            format!(
+                "{ATTR}pub fn func0(l0: i32, l1: i32) -> i32 {{\n    l0.wrapping_add(l1)\n}}\n\n\
+                 {ATTR}pub fn func1(l0: i32) -> i32 {{\n    \
+                 let v0: i32 = func0(l0, 10i32);\n    v0\n}}"
+            ),
+        );
+    }
+
+    #[test]
     fn function_without_result_has_no_return_type() {
         let wasm = wat_to_wasm(
             r#"
