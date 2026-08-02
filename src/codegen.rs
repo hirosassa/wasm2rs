@@ -379,6 +379,28 @@ impl<'a> FuncGen<'a> {
             Operator::I32GtU => self.compare_unsigned(">")?,
             Operator::I32LeU => self.compare_unsigned("<=")?,
             Operator::I32GeU => self.compare_unsigned(">=")?,
+            Operator::I64Const { value } => self.push(Val {
+                code: i64_literal(value),
+                ty: ValType::I64,
+                stable: true,
+            }),
+            Operator::I64Add => self.binop_method("wrapping_add")?,
+            Operator::I64Sub => self.binop_method("wrapping_sub")?,
+            Operator::I64Mul => self.binop_method("wrapping_mul")?,
+            Operator::I64And => self.binop_infix("&")?,
+            Operator::I64Or => self.binop_infix("|")?,
+            Operator::I64Xor => self.binop_infix("^")?,
+            Operator::I64Eqz => self.compare_zero()?,
+            Operator::I64Eq => self.compare_signed("==")?,
+            Operator::I64Ne => self.compare_signed("!=")?,
+            Operator::I64LtS => self.compare_signed("<")?,
+            Operator::I64GtS => self.compare_signed(">")?,
+            Operator::I64LeS => self.compare_signed("<=")?,
+            Operator::I64GeS => self.compare_signed(">=")?,
+            Operator::I64LtU => self.compare_unsigned("<")?,
+            Operator::I64GtU => self.compare_unsigned(">")?,
+            Operator::I64LeU => self.compare_unsigned("<=")?,
+            Operator::I64GeU => self.compare_unsigned(">=")?,
             Operator::GlobalGet { global_index } => self.global_get(global_index)?,
             Operator::GlobalSet { global_index } => self.global_set(global_index)?,
             Operator::I32Load { memarg } => self.load(Helper::LoadI32, memarg)?,
@@ -487,9 +509,10 @@ impl<'a> FuncGen<'a> {
     fn binop_method(&mut self, method: &str) -> Result<(), TranspileError> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
+        // Arithmetic/bitwise results keep the operand type (i32 or i64).
         self.push(Val {
             code: format!("{}.{method}({})", lhs.code, rhs.code),
-            ty: ValType::I32,
+            ty: lhs.ty,
             stable: lhs.stable && rhs.stable,
         });
         Ok(())
@@ -500,7 +523,7 @@ impl<'a> FuncGen<'a> {
         let lhs = self.pop()?;
         self.push(Val {
             code: format!("({} {op} {})", lhs.code, rhs.code),
-            ty: ValType::I32,
+            ty: lhs.ty,
             stable: lhs.stable && rhs.stable,
         });
         Ok(())
@@ -530,9 +553,11 @@ impl<'a> FuncGen<'a> {
     fn compare_unsigned(&mut self, op: &str) -> Result<(), TranspileError> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
+        // The operands are reinterpreted as the unsigned integer of their width.
+        let unsigned = unsigned_type(lhs.ty)?;
         self.push(Val {
             code: format!(
-                "i32::from(({} as u32) {op} ({} as u32))",
+                "i32::from(({} as {unsigned}) {op} ({} as {unsigned}))",
                 lhs.code, rhs.code
             ),
             ty: ValType::I32,
@@ -1283,6 +1308,17 @@ fn rust_type(ty: ValType) -> Result<&'static str, TranspileError> {
         ValType::F32 => Ok("f32"),
         ValType::F64 => Ok("f64"),
         other => Err(TranspileError::Unsupported(format!("value type {other:?}"))),
+    }
+}
+
+/// The unsigned integer type used to reinterpret `ty` for unsigned operations.
+fn unsigned_type(ty: ValType) -> Result<&'static str, TranspileError> {
+    match ty {
+        ValType::I32 => Ok("u32"),
+        ValType::I64 => Ok("u64"),
+        other => Err(TranspileError::Unsupported(format!(
+            "unsigned operation on {other:?}"
+        ))),
     }
 }
 
