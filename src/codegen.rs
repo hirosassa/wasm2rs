@@ -48,6 +48,13 @@ pub(crate) struct ElemSegment {
     pub funcs: Vec<u32>,
 }
 
+/// One active data segment: raw bytes written into linear memory starting at a
+/// constant `offset`.
+pub(crate) struct DataSegment {
+    pub offset: u32,
+    pub bytes: Vec<u8>,
+}
+
 /// A function type from the type section: its parameter and result types. Used
 /// to resolve a `call_indirect`'s declared type back to a signature.
 pub(crate) struct TypeSig {
@@ -125,12 +132,6 @@ struct Frame {
     cond: Option<String>,
 }
 
-/// Translate a whole module into Rust source.
-///
-/// A module that declares linear memory or globals carries mutable state, so
-/// it is emitted as a `pub struct Instance` with the functions as `&mut self`
-/// methods. A stateless module keeps its functions as free `pub fn`s, matching
-/// the earlier phases exactly.
 /// Module-wide context shared by every function's code generation.
 struct ModuleCtx<'a> {
     /// Every function, indexed by function index, so a `call` can read its
@@ -149,11 +150,18 @@ struct ModuleCtx<'a> {
     is_method: bool,
 }
 
+/// Translate a whole module into Rust source.
+///
+/// A module that declares linear memory, a table or globals carries mutable
+/// state, so it is emitted as a `pub struct Instance` with the functions as
+/// `&mut self` methods. A stateless module keeps its functions as free
+/// `pub fn`s, matching the earlier phases exactly.
 pub(crate) fn generate_module(
     funcs: &[FuncInput<'_>],
     types: &[TypeSig],
     globals: &[GlobalInfo],
     memory: Option<&MemInfo>,
+    data: &[DataSegment],
     table: Option<&TableInfo>,
     elements: &[ElemSegment],
 ) -> Result<String, TranspileError> {
@@ -181,7 +189,7 @@ pub(crate) fn generate_module(
     if !stateful {
         return Ok(sources.join("\n"));
     }
-    render_module(&sources, globals, memory, table, elements, &used)
+    render_module(&sources, globals, memory, data, table, elements, &used)
 }
 
 fn generate_function(
@@ -1327,6 +1335,7 @@ fn render_module(
     sources: &[String],
     globals: &[GlobalInfo],
     memory: Option<&MemInfo>,
+    data: &[DataSegment],
     table: Option<&TableInfo>,
     elements: &[ElemSegment],
     used: &HashSet<Helper>,
@@ -1360,7 +1369,30 @@ fn render_module(
             .min_pages
             .checked_mul(65536)
             .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
-        inner.push(format!("        memory: vec![0u8; {bytes}],"));
+        if data.is_empty() {
+            inner.push(format!("        memory: vec![0u8; {bytes}],"));
+        } else {
+            // Zero the memory, then copy each active data segment into place.
+            inner.push("        memory: {".to_string());
+            inner.push(format!(
+                "            let mut m: Vec<u8> = vec![0u8; {bytes}];"
+            ));
+            for seg in data {
+                let off = seg.offset as usize;
+                let end = off + seg.bytes.len();
+                let bytes_lit = seg
+                    .bytes
+                    .iter()
+                    .map(|b| format!("{b}u8"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                inner.push(format!(
+                    "            m[{off}..{end}].copy_from_slice(&[{bytes_lit}]);"
+                ));
+            }
+            inner.push("            m".to_string());
+            inner.push("        },".to_string());
+        }
     }
     if let Some(t) = table {
         if elements.is_empty() {

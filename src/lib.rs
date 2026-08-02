@@ -8,7 +8,8 @@
 mod codegen;
 
 use wasmparser::{
-    CompositeInnerType, ElementItems, ElementKind, FuncType, Parser, Payload, TableInit, ValType,
+    CompositeInnerType, DataKind, ElementItems, ElementKind, FuncType, Parser, Payload, TableInit,
+    ValType,
 };
 
 /// An error that can occur while transpiling a wasm module.
@@ -64,6 +65,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
     let mut memory: Option<codegen::MemInfo> = None;
     let mut table: Option<codegen::TableInfo> = None;
     let mut elements: Vec<codegen::ElemSegment> = Vec::new();
+    let mut data: Vec<codegen::DataSegment> = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
@@ -186,6 +188,31 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                     });
                 }
             }
+            Payload::DataSection(reader) => {
+                for segment in reader {
+                    let segment = segment?;
+                    let offset = match &segment.kind {
+                        DataKind::Active {
+                            memory_index,
+                            offset_expr,
+                        } => {
+                            if *memory_index != 0 {
+                                return Err(TranspileError::Unsupported(
+                                    "data segment for a non-zero memory".into(),
+                                ));
+                            }
+                            codegen::const_expr_u32(offset_expr)?
+                        }
+                        DataKind::Passive => {
+                            return Err(TranspileError::Unsupported("passive data segment".into()));
+                        }
+                    };
+                    data.push(codegen::DataSegment {
+                        offset,
+                        bytes: segment.data.to_vec(),
+                    });
+                }
+            }
             Payload::CodeSectionEntry(body) => {
                 bodies.push(body);
             }
@@ -225,6 +252,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
         &types,
         &globals,
         memory.as_ref(),
+        &data,
         table.as_ref(),
         &elements,
     )
@@ -494,6 +522,30 @@ impl Instance {
                  {ATTR}pub fn func1(l0: i32) -> i32 {{\n    \
                  let v0: i32 = func0(l0, 10i32);\n    v0\n}}"
             ),
+        );
+    }
+
+    #[test]
+    fn active_data_segment_copies_bytes_in_new() {
+        let wasm = wat_to_wasm(
+            r#"
+            (module
+              (memory 1)
+              (data (i32.const 4) "\01\02")
+              (func (param i32) (result i32) (i32.load8_u (local.get 0))))
+            "#,
+        );
+
+        let rust = transpile(&wasm).expect("transpile ok");
+
+        // `new()` zeroes the memory then copies the segment bytes into place.
+        assert!(
+            rust.contains("let mut m: Vec<u8> = vec![0u8; 65536];"),
+            "{rust}"
+        );
+        assert!(
+            rust.contains("m[4..6].copy_from_slice(&[1u8, 2u8]);"),
+            "{rust}"
         );
     }
 
