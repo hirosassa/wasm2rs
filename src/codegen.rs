@@ -421,6 +421,39 @@ impl<'a> FuncGen<'a> {
             Operator::I64GtU => self.compare_unsigned(">")?,
             Operator::I64LeU => self.compare_unsigned("<=")?,
             Operator::I64GeU => self.compare_unsigned(">=")?,
+            // Floats: constants are emitted from their exact bit pattern (so
+            // NaN/inf round-trip); arithmetic and comparisons map to native
+            // operators (Rust float compare yields false for NaN, as wasm
+            // requires). `min`/`max` are deferred (special NaN semantics).
+            Operator::F32Const { value } => self.push(Val {
+                code: format!("f32::from_bits({}u32)", value.bits()),
+                ty: ValType::F32,
+                stable: true,
+            }),
+            Operator::F64Const { value } => self.push(Val {
+                code: format!("f64::from_bits({}u64)", value.bits()),
+                ty: ValType::F64,
+                stable: true,
+            }),
+            Operator::F32Add | Operator::F64Add => self.binop_infix("+")?,
+            Operator::F32Sub | Operator::F64Sub => self.binop_infix("-")?,
+            Operator::F32Mul | Operator::F64Mul => self.binop_infix("*")?,
+            Operator::F32Div | Operator::F64Div => self.binop_infix("/")?,
+            Operator::F32Eq | Operator::F64Eq => self.compare_signed("==")?,
+            Operator::F32Ne | Operator::F64Ne => self.compare_signed("!=")?,
+            Operator::F32Lt | Operator::F64Lt => self.compare_signed("<")?,
+            Operator::F32Gt | Operator::F64Gt => self.compare_signed(">")?,
+            Operator::F32Le | Operator::F64Le => self.compare_signed("<=")?,
+            Operator::F32Ge | Operator::F64Ge => self.compare_signed(">=")?,
+            Operator::F32Abs | Operator::F64Abs => self.unop_method("abs")?,
+            Operator::F32Neg | Operator::F64Neg => self.unop_neg()?,
+            Operator::F32Ceil | Operator::F64Ceil => self.unop_method("ceil")?,
+            Operator::F32Floor | Operator::F64Floor => self.unop_method("floor")?,
+            Operator::F32Trunc | Operator::F64Trunc => self.unop_method("trunc")?,
+            // wasm `nearest` rounds halves to even, i.e. `round_ties_even`.
+            Operator::F32Nearest | Operator::F64Nearest => self.unop_method("round_ties_even")?,
+            Operator::F32Sqrt | Operator::F64Sqrt => self.unop_method("sqrt")?,
+            Operator::F32Copysign | Operator::F64Copysign => self.binop_method("copysign")?,
             Operator::GlobalGet { global_index } => self.global_get(global_index)?,
             Operator::GlobalSet { global_index } => self.global_set(global_index)?,
             Operator::I32Load { memarg } => self.load(Helper::LoadI32, memarg)?,
@@ -664,6 +697,28 @@ impl<'a> FuncGen<'a> {
             ),
             ty: lhs.ty,
             stable: lhs.stable && rhs.stable,
+        });
+        Ok(())
+    }
+
+    /// A unary method call `operand.method()` (float math like `abs`, `sqrt`).
+    fn unop_method(&mut self, method: &str) -> Result<(), TranspileError> {
+        let a = self.pop()?;
+        self.push(Val {
+            code: format!("{}.{method}()", a.code),
+            ty: a.ty,
+            stable: a.stable,
+        });
+        Ok(())
+    }
+
+    /// Floating-point negation, parenthesised so it composes as a subexpression.
+    fn unop_neg(&mut self) -> Result<(), TranspileError> {
+        let a = self.pop()?;
+        self.push(Val {
+            code: format!("(-{})", a.code),
+            ty: a.ty,
+            stable: a.stable,
         });
         Ok(())
     }
