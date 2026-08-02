@@ -1,15 +1,13 @@
 //! wasm2rs: convert a WebAssembly binary into standalone Rust source code.
 //!
-//! Phase 1 scope: functions whose parameters, results and locals are all `i32`,
-//! whose bodies use only `i32.const`, `local.get` and a handful of `i32` binary
-//! arithmetic/bitwise operators. Each such function is emitted as a standalone
-//! `pub fn`.
+//! Supported scope: functions whose values are `i32` (params, results, locals),
+//! using `i32.const`, `local.get`/`set`/`tee`, `i32` arithmetic/bitwise/compare
+//! operators and the structured control-flow instructions `block`, `loop`,
+//! `if`/`else`, `br`, `br_if`, `br_table`, `return`, `drop` and `select`.
 
-use std::fmt::Write as _;
+mod codegen;
 
-use wasmparser::{
-    CompositeInnerType, FuncType, Imports, Operator, Parser, Payload, TypeRef, ValType,
-};
+use wasmparser::{CompositeInnerType, FuncType, Imports, Parser, Payload, TypeRef, ValType};
 
 /// An error that can occur while transpiling a wasm module.
 #[derive(Debug)]
@@ -111,7 +109,8 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                     TranspileError::Unsupported("function type index out of range".into())
                 })?;
 
-                let code = emit_function(func_index, sig, &body)?;
+                let code =
+                    codegen::generate_function(func_index, &sig.params, &sig.results, &body)?;
                 if !out.is_empty() {
                     out.push('\n');
                 }
@@ -142,118 +141,6 @@ fn signature_from(func_ty: &FuncType) -> Signature {
     }
 }
 
-/// Render a wasm value type as the corresponding Rust type name.
-fn rust_type(ty: ValType) -> Result<&'static str, TranspileError> {
-    match ty {
-        ValType::I32 => Ok("i32"),
-        ValType::I64 => Ok("i64"),
-        ValType::F32 => Ok("f32"),
-        ValType::F64 => Ok("f64"),
-        other => Err(TranspileError::Unsupported(format!("value type {other:?}"))),
-    }
-}
-
-/// Emit a single standalone Rust function for one wasm function body.
-fn emit_function(
-    index: usize,
-    sig: &Signature,
-    body: &wasmparser::FunctionBody<'_>,
-) -> Result<String, TranspileError> {
-    // Validate the local declarations even though Phase 1 references locals
-    // purely by index; this surfaces a malformed locals section as an error.
-    for local in body.get_locals_reader()? {
-        local?;
-    }
-
-    let expr = emit_body_expr(body)?;
-
-    let mut params = String::new();
-    for (i, ty) in sig.params.iter().enumerate() {
-        if i > 0 {
-            params.push_str(", ");
-        }
-        write!(params, "l{i}: {}", rust_type(*ty)?)?;
-    }
-
-    // The number of values left on the operand stack must match the declared
-    // results, otherwise the emitted function body would not compile.
-    let ret = match (sig.results.as_slice(), &expr) {
-        ([], None) => String::new(),
-        ([ty], Some(_)) => format!(" -> {}", rust_type(*ty)?),
-        ([], Some(_)) => {
-            return Err(TranspileError::Unsupported(
-                "value left on stack in a function with no result".into(),
-            ));
-        }
-        ([_], None) => return Err(TranspileError::StackUnderflow),
-        _ => return Err(TranspileError::Unsupported("multi-value results".into())),
-    };
-
-    let signature = format!("pub fn func{index}({params}){ret}");
-    match expr {
-        Some(e) => Ok(format!("{signature} {{\n    {e}\n}}\n")),
-        None => Ok(format!("{signature} {{\n}}\n")),
-    }
-}
-
-/// Simulate the operand stack over a function body and return the single
-/// expression left on the stack at `End`, if any.
-fn emit_body_expr(body: &wasmparser::FunctionBody<'_>) -> Result<Option<String>, TranspileError> {
-    let mut stack: Vec<String> = Vec::new();
-
-    for op in body.get_operators_reader()? {
-        match op? {
-            Operator::LocalGet { local_index } => {
-                stack.push(format!("l{local_index}"));
-            }
-            Operator::I32Const { value } => {
-                stack.push(i32_literal(value));
-            }
-            Operator::I32Add => binop_method(&mut stack, "wrapping_add")?,
-            Operator::I32Sub => binop_method(&mut stack, "wrapping_sub")?,
-            Operator::I32Mul => binop_method(&mut stack, "wrapping_mul")?,
-            Operator::I32And => binop_infix(&mut stack, "&")?,
-            Operator::I32Or => binop_infix(&mut stack, "|")?,
-            Operator::I32Xor => binop_infix(&mut stack, "^")?,
-            Operator::End => {}
-            other => {
-                return Err(TranspileError::Unsupported(format!("operator {other:?}")));
-            }
-        }
-    }
-
-    Ok(stack.pop())
-}
-
-/// Render an `i32` constant as a valid Rust expression.
-///
-/// `i32::MIN` cannot be written as the literal `-2147483648i32` because Rust
-/// parses that as unary negation of the out-of-range literal `2147483648i32`,
-/// so it is emitted using the associated constant instead.
-fn i32_literal(value: i32) -> String {
-    if value == i32::MIN {
-        "i32::MIN".to_string()
-    } else {
-        format!("{value}i32")
-    }
-}
-
-/// Pop two operands and push a method-call expression `lhs.method(rhs)`.
-fn binop_method(stack: &mut Vec<String>, method: &str) -> Result<(), TranspileError> {
-    let rhs = stack.pop().ok_or(TranspileError::StackUnderflow)?;
-    let lhs = stack.pop().ok_or(TranspileError::StackUnderflow)?;
-    stack.push(format!("{lhs}.{method}({rhs})"));
-    Ok(())
-}
-
-/// Pop two operands and push a parenthesized infix expression `(lhs op rhs)`.
-fn binop_infix(stack: &mut Vec<String>, op: &str) -> Result<(), TranspileError> {
-    let rhs = stack.pop().ok_or(TranspileError::StackUnderflow)?;
-    let lhs = stack.pop().ok_or(TranspileError::StackUnderflow)?;
-    stack.push(format!("({lhs} {op} {rhs})"));
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +148,10 @@ mod tests {
     fn wat_to_wasm(wat: &str) -> Vec<u8> {
         wat::parse_str(wat).expect("valid wat")
     }
+
+    /// The lint-suppression attribute prefixed to every generated function.
+    const ATTR: &str =
+        "#[allow(unused_variables, unused_assignments, unused_mut, unused_parens)]\n";
 
     #[test]
     fn i32_add_becomes_wrapping_add() {
@@ -278,7 +169,7 @@ mod tests {
 
         assert_eq!(
             rust.trim(),
-            "pub fn func0(l0: i32, l1: i32) -> i32 {\n    l0.wrapping_add(l1)\n}",
+            format!("{ATTR}pub fn func0(l0: i32, l1: i32) -> i32 {{\n    l0.wrapping_add(l1)\n}}"),
         );
     }
 
@@ -298,7 +189,7 @@ mod tests {
 
         assert_eq!(
             rust.trim(),
-            "pub fn func0() -> i32 {\n    2i32.wrapping_mul(3i32)\n}",
+            format!("{ATTR}pub fn func0() -> i32 {{\n    2i32.wrapping_mul(3i32)\n}}"),
         );
     }
 
@@ -318,7 +209,7 @@ mod tests {
 
         assert_eq!(
             rust.trim(),
-            "pub fn func0(l0: i32, l1: i32) -> i32 {\n    (l0 & l1)\n}",
+            format!("{ATTR}pub fn func0(l0: i32, l1: i32) -> i32 {{\n    (l0 & l1)\n}}"),
         );
     }
 
@@ -339,9 +230,9 @@ mod tests {
 
         assert_eq!(
             rust.trim(),
-            concat!(
-                "pub fn func0(l0: i32) -> i32 {\n    l0\n}\n\n",
-                "pub fn func1(l0: i32, l1: i32) -> i32 {\n    l0.wrapping_sub(l1)\n}",
+            format!(
+                "{ATTR}pub fn func0(l0: i32) -> i32 {{\n    l0\n}}\n\n\
+                 {ATTR}pub fn func1(l0: i32, l1: i32) -> i32 {{\n    l0.wrapping_sub(l1)\n}}"
             ),
         );
     }
@@ -360,7 +251,10 @@ mod tests {
 
         let rust = transpile(&wasm).expect("transpile ok");
 
-        assert_eq!(rust.trim(), "pub fn func0() -> i32 {\n    i32::MIN\n}",);
+        assert_eq!(
+            rust.trim(),
+            format!("{ATTR}pub fn func0() -> i32 {{\n    i32::MIN\n}}"),
+        );
     }
 
     #[test]
@@ -394,6 +288,65 @@ mod tests {
     }
 
     #[test]
+    fn i32_eq_uses_i32_from() {
+        let wasm = wat_to_wasm(
+            r#"
+            (module
+              (func (param i32 i32) (result i32)
+                (i32.eq (local.get 0) (local.get 1))))
+            "#,
+        );
+
+        let rust = transpile(&wasm).expect("transpile ok");
+
+        assert_eq!(
+            rust.trim(),
+            format!("{ATTR}pub fn func0(l0: i32, l1: i32) -> i32 {{\n    i32::from(l0 == l1)\n}}"),
+        );
+    }
+
+    #[test]
+    fn i32_lt_u_casts_operands_to_u32() {
+        let wasm = wat_to_wasm(
+            r#"
+            (module
+              (func (param i32 i32) (result i32)
+                (i32.lt_u (local.get 0) (local.get 1))))
+            "#,
+        );
+
+        let rust = transpile(&wasm).expect("transpile ok");
+
+        assert_eq!(
+            rust.trim(),
+            format!(
+                "{ATTR}pub fn func0(l0: i32, l1: i32) -> i32 {{\n    i32::from((l0 as u32) < (l1 as u32))\n}}"
+            ),
+        );
+    }
+
+    #[test]
+    fn declared_local_is_initialized_and_assigned() {
+        let wasm = wat_to_wasm(
+            r#"
+            (module
+              (func (param i32) (result i32) (local i32)
+                (local.set 1 (local.get 0))
+                (local.get 1)))
+            "#,
+        );
+
+        let rust = transpile(&wasm).expect("transpile ok");
+
+        assert_eq!(
+            rust.trim(),
+            format!(
+                "{ATTR}pub fn func0(l0: i32) -> i32 {{\n    let mut l1: i32 = 0;\n    l1 = l0;\n    l1\n}}"
+            ),
+        );
+    }
+
+    #[test]
     fn function_without_result_has_no_return_type() {
         let wasm = wat_to_wasm(
             r#"
@@ -404,6 +357,6 @@ mod tests {
 
         let rust = transpile(&wasm).expect("transpile ok");
 
-        assert_eq!(rust.trim(), "pub fn func0(l0: i32) {\n}");
+        assert_eq!(rust.trim(), format!("{ATTR}pub fn func0(l0: i32) {{\n}}"));
     }
 }

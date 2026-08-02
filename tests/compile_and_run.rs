@@ -42,6 +42,9 @@ fn generated_add_compiles_and_produces_correct_result() {
         .arg(&src)
         .arg("--edition")
         .arg("2021")
+        // Deny warnings so the generated code is proven to be warning-free.
+        .arg("-D")
+        .arg("warnings")
         .arg("-o")
         .arg(&bin)
         .output()
