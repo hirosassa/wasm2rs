@@ -249,15 +249,9 @@ fn generate_function(
     input: &FuncInput<'_>,
     ctx: &ModuleCtx<'_>,
 ) -> Result<GenFn, TranspileError> {
-    let result = match input.results {
-        [] => None,
-        [ty] => Some(*ty),
-        _ => return Err(TranspileError::Unsupported("multi-value results".into())),
-    };
-
-    let mut func = FuncGen::new(input.params, result, input.body, ctx)?;
+    let mut func = FuncGen::new(input.params, input.results, input.body, ctx)?;
     func.run(input.body)?;
-    func.finish(index, input.params, result)
+    func.finish(index, input.params, input.results)
 }
 
 /// State threaded through the translation of a single function body.
@@ -266,7 +260,8 @@ struct FuncGen<'a> {
     mutable_locals: HashSet<u32>,
     /// Module-wide context (functions, types, globals, stateful flags).
     ctx: &'a ModuleCtx<'a>,
-    result: Option<ValType>,
+    /// The function's result types (0, 1 or more — a tuple when more than one).
+    results: Vec<ValType>,
     stack: Vec<Val>,
     frames: Vec<Frame>,
     /// The output buffer of the innermost scope currently being emitted into.
@@ -286,7 +281,7 @@ struct FuncGen<'a> {
 impl<'a> FuncGen<'a> {
     fn new(
         params: &[ValType],
-        result: Option<ValType>,
+        results: &[ValType],
         body: &FunctionBody<'_>,
         ctx: &'a ModuleCtx<'a>,
     ) -> Result<Self, TranspileError> {
@@ -319,7 +314,7 @@ impl<'a> FuncGen<'a> {
             local_types,
             mutable_locals,
             ctx,
-            result,
+            results: results.to_vec(),
             stack: Vec::new(),
             frames: Vec::new(),
             cur,
@@ -1263,15 +1258,7 @@ impl<'a> FuncGen<'a> {
             .full_sig(function_index as usize)
             .ok_or_else(|| TranspileError::Unsupported("call to unknown function".into()))?;
         let param_count = params.len();
-        let result = match results {
-            [] => None,
-            [ty] => Some(*ty),
-            _ => {
-                return Err(TranspileError::Unsupported(
-                    "multi-value call result".into(),
-                ));
-            }
-        };
+        let results = results.to_vec();
 
         // A call may read and write memory and globals. Freezing every operand
         // first both materialises the arguments and pins any earlier value that
@@ -1289,21 +1276,13 @@ impl<'a> FuncGen<'a> {
             .collect::<Vec<_>>()
             .join(", ");
 
+        // A call is not re-evaluatable, so bind its result(s) to a temporary at
+        // exactly this point (mirroring `memory_grow`) and push the stable
+        // temporaries. A multi-value result is destructured from a tuple.
         let call_expr = self.ctx.call_expr(function_index as usize, &arg_list);
-        match result {
-            // A call is not re-evaluatable, so bind it to a temporary at exactly
-            // this point (mirroring `memory_grow`) and push the stable temp.
-            Some(ty) => {
-                let name = self.fresh_temp();
-                self.line(format!("let {name}: {} = {call_expr};", rust_type(ty)?));
-                self.push(Val {
-                    code: name,
-                    ty,
-                    stable: true,
-                });
-            }
-            None => self.line(format!("{call_expr};")),
-        }
+        let (prefix, temps) = self.result_binding(&results)?;
+        self.line(format!("{prefix}{call_expr};"));
+        self.push_temps(temps);
         Ok(())
     }
 
@@ -1323,15 +1302,7 @@ impl<'a> FuncGen<'a> {
             .types
             .get(type_index as usize)
             .ok_or_else(|| TranspileError::Unsupported("call_indirect: unknown type".into()))?;
-        let result = match sig.results.as_slice() {
-            [] => None,
-            [ty] => Some(*ty),
-            _ => {
-                return Err(TranspileError::Unsupported(
-                    "multi-value call_indirect result".into(),
-                ));
-            }
-        };
+        let results = sig.results.clone();
         // The functions any table entry could resolve to: exactly those whose
         // signature equals the declared type (no subtyping, so a structural
         // match is a type match). This spans the whole index space, so a table
@@ -1367,52 +1338,89 @@ impl<'a> FuncGen<'a> {
         }
 
         // A `match` on the table entry, emitted line by line so `indent` aligns
-        // it. When the call yields a value the opening line binds a temporary;
-        // otherwise the `match` stands alone as a statement.
+        // it. The opening line binds the result temporary/tuple (or stands alone
+        // as a statement for a result-less call).
         //
         // An out-of-bounds index panics on the slice access (a trap); a null or
         // wrong-type entry falls through to the catch-all panic (also a trap).
-        let result = match result {
-            Some(ty) => {
-                let name = self.fresh_temp();
-                self.line(format!(
-                    "let {name}: {} = match self.table[({}) as u32 as usize] {{",
-                    rust_type(ty)?,
-                    index.code
-                ));
-                Some((name, ty))
-            }
-            None => {
-                self.line(format!(
-                    "match self.table[({}) as u32 as usize] {{",
-                    index.code
-                ));
-                None
-            }
-        };
+        let (prefix, temps) = self.result_binding(&results)?;
+        self.line(format!(
+            "{prefix}match self.table[({}) as u32 as usize] {{",
+            index.code
+        ));
         for &fidx in &targets {
             let expr = self.ctx.call_expr(fidx, &arg_list);
             self.line(format!("    {fidx}u32 => {expr},"));
         }
         self.line("    _ => panic!(\"indirect call type mismatch\"),".to_string());
         self.line("};".to_string());
+        self.push_temps(temps);
+        Ok(())
+    }
 
-        if let Some((name, ty)) = result {
+    /// Build the `let …: … = ` binding prefix for a value producing `results`,
+    /// allocating a fresh temporary per result. Returns the prefix (empty for
+    /// zero results, so the value is emitted as a bare statement) and the
+    /// temporaries to push once the value has been emitted. A multi-value
+    /// result binds a tuple pattern.
+    fn result_binding(
+        &mut self,
+        results: &[ValType],
+    ) -> Result<(String, Vec<(String, ValType)>), TranspileError> {
+        match results {
+            [] => Ok((String::new(), Vec::new())),
+            [ty] => {
+                let name = self.fresh_temp();
+                let prefix = format!("let {name}: {} = ", rust_type(*ty)?);
+                Ok((prefix, vec![(name, *ty)]))
+            }
+            many => {
+                let tys = rust_types(many)?;
+                let names: Vec<String> = many.iter().map(|_| self.fresh_temp()).collect();
+                let prefix = format!("let ({}): ({}) = ", names.join(", "), tys.join(", "));
+                let temps = names.into_iter().zip(many.iter().copied()).collect();
+                Ok((prefix, temps))
+            }
+        }
+    }
+
+    /// Push materialised result temporaries onto the operand stack (stable).
+    fn push_temps(&mut self, temps: Vec<(String, ValType)>) {
+        for (code, ty) in temps {
             self.push(Val {
-                code: name,
+                code,
                 ty,
                 stable: true,
             });
         }
-        Ok(())
+    }
+
+    /// Pop `n` result values (in source order) and format them as a single
+    /// expression (`n == 1`) or a tuple (`n > 1`); `None` for `n == 0`.
+    fn pop_results(&mut self, n: usize) -> Result<Option<String>, TranspileError> {
+        if n == 0 {
+            return Ok(None);
+        }
+        let mut vals = Vec::with_capacity(n);
+        for _ in 0..n {
+            vals.push(self.pop()?);
+        }
+        vals.reverse();
+        let joined = vals
+            .into_iter()
+            .map(|v| v.code)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(Some(if n == 1 {
+            joined
+        } else {
+            format!("({joined})")
+        }))
     }
 
     fn emit_return(&mut self) -> Result<(), TranspileError> {
-        match self.result {
-            Some(_) => {
-                let value = self.pop()?;
-                self.line(format!("return {};", value.code));
-            }
+        match self.pop_results(self.results.len())? {
+            Some(code) => self.line(format!("return {code};")),
             None => self.line("return;".to_string()),
         }
         self.reachable = false;
@@ -1421,16 +1429,10 @@ impl<'a> FuncGen<'a> {
     }
 
     fn end_function(&mut self) -> Result<(), TranspileError> {
-        match (self.result, self.reachable) {
-            (Some(_), true) => {
-                let value = self.pop()?;
-                self.trailing = Some(value.code);
-            }
-            (Some(_), false) => {
-                // Control never falls off the end; a `return`/`br` already
-                // produced the value, so no trailing expression is needed.
-            }
-            (None, _) => {}
+        // If control falls off the end, the remaining stack values are the
+        // results; otherwise a `return`/`br`/`unreachable` already produced them.
+        if self.reachable {
+            self.trailing = self.pop_results(self.results.len())?;
         }
         Ok(())
     }
@@ -1439,7 +1441,7 @@ impl<'a> FuncGen<'a> {
         self,
         index: usize,
         params: &[ValType],
-        result: Option<ValType>,
+        results: &[ValType],
     ) -> Result<GenFn, TranspileError> {
         let mut params_src = String::new();
         // Stateful modules pass their memory/globals through `&mut self`.
@@ -1458,9 +1460,10 @@ impl<'a> FuncGen<'a> {
             params_src.push_str(&format!("{keyword}l{i}: {}", rust_type(*ty)?));
         }
 
-        let ret = match result {
-            Some(ty) => format!(" -> {}", rust_type(ty)?),
-            None => String::new(),
+        let ret = match results {
+            [] => String::new(),
+            [ty] => format!(" -> {}", rust_type(*ty)?),
+            many => format!(" -> ({})", rust_types(many)?.join(", ")),
         };
 
         let mut body = self.cur;
@@ -1561,6 +1564,11 @@ fn rust_type(ty: ValType) -> Result<&'static str, TranspileError> {
         ValType::F64 => Ok("f64"),
         other => Err(TranspileError::Unsupported(format!("value type {other:?}"))),
     }
+}
+
+/// The Rust type name of each value type, in order.
+fn rust_types(tys: &[ValType]) -> Result<Vec<&'static str>, TranspileError> {
+    tys.iter().map(|ty| rust_type(*ty)).collect()
 }
 
 /// The unsigned integer type used to reinterpret `ty` for unsigned operations.
