@@ -42,8 +42,12 @@ pub(crate) struct MemInfo {
 
 /// Metadata about the module's function table (a single `funcref` table). The
 /// declared maximum is not tracked; growth beyond `min` is not supported yet.
+/// When `imported`, the host owns the `Vec<u32>` storage (lent through the
+/// `Imports` trait) and the instance carries no `table` field of its own; the
+/// entries are still this module's function indices, so dispatch is unchanged.
 pub(crate) struct TableInfo {
     pub min: u32,
+    pub imported: bool,
 }
 
 /// One element segment: function indices for the table. `offset` is `Some` for
@@ -238,7 +242,7 @@ struct ModuleCtx<'a> {
     globals: Vec<(ValType, bool)>,
     /// Whether the module declares linear memory (so `self.mem()` exists).
     has_memory: bool,
-    /// Whether the module declares a table (so `self.table` exists).
+    /// Whether the module declares a table (so `self.table()` exists).
     has_table: bool,
     /// Per-data-segment: whether it is passive (so `memory.init`/`data.drop`
     /// can reference it through a `data{d}` field), indexed by data index.
@@ -323,10 +327,12 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
 
     let has_memory = memory.is_some();
     let has_table = table.is_some();
-    // The host is injected whenever anything is imported (functions, globals, or
-    // memory).
-    let has_imports =
-        !imports.is_empty() || !imported_globals.is_empty() || memory.is_some_and(|m| m.imported);
+    // The host is injected whenever anything is imported (functions, globals,
+    // memory, or table).
+    let has_imports = !imports.is_empty()
+        || !imported_globals.is_empty()
+        || memory.is_some_and(|m| m.imported)
+        || table.is_some_and(|t| t.imported);
     // Imports must be held by an instance, so a module that has them (or any
     // other mutable state) becomes a `struct Instance` with method functions.
     let stateful = has_memory || has_table || has_imports || !globals.is_empty();
@@ -1295,7 +1301,7 @@ impl<'a> FuncGen<'a> {
         self.require_zero_index(table, "table.get")?;
         let index = self.pop()?;
         self.push(Val {
-            code: format!("self.table[({}) as u32 as usize]", index.code),
+            code: format!("self.table()[({}) as u32 as usize]", index.code),
             ty: ValType::FUNCREF,
             stable: false,
         });
@@ -1311,7 +1317,7 @@ impl<'a> FuncGen<'a> {
         let value = self.pop()?;
         let index = self.pop()?;
         self.line(format!(
-            "self.table[({}) as u32 as usize] = ({}) as u32;",
+            "self.table_mut()[({}) as u32 as usize] = ({}) as u32;",
             index.code, value.code
         ));
         Ok(())
@@ -1323,7 +1329,7 @@ impl<'a> FuncGen<'a> {
         self.require_table()?;
         self.require_zero_index(table, "table.size")?;
         self.push(Val {
-            code: "(self.table.len() as i32)".to_string(),
+            code: "(self.table().len() as i32)".to_string(),
             ty: ValType::I32,
             stable: false,
         });
@@ -1344,9 +1350,9 @@ impl<'a> FuncGen<'a> {
         let init = self.pop()?;
         let name = self.fresh_temp();
         self.line(format!(
-            "let {name}: i32 = {{ let n = ({}) as u32 as usize; let old = self.table.len(); \
+            "let {name}: i32 = {{ let n = ({}) as u32 as usize; let old = self.table().len(); \
              match old.checked_add(n) {{ \
-             Some(len) if len <= u32::MAX as usize => {{ self.table.resize(len, ({}) as u32); old as i32 }} \
+             Some(len) if len <= u32::MAX as usize => {{ self.table_mut().resize(len, ({}) as u32); old as i32 }} \
              _ => -1, }} }};",
             delta.code, init.code
         ));
@@ -1432,7 +1438,7 @@ impl<'a> FuncGen<'a> {
         self.require_passive(&self.ctx.elem_passive, elem_index, "elem")?;
         let (dest, src, len) = self.pop_bulk_operands()?;
         self.emit_bulk_init(
-            "self.table",
+            "self.table_mut()",
             &format!("self.elem{elem_index}"),
             &dest,
             &src,
@@ -1959,17 +1965,23 @@ impl<'a> FuncGen<'a> {
             return Ok(());
         }
 
-        // A `match` on the table entry, emitted line by line so `indent` aligns
-        // it. The opening line binds the result temporary/tuple (or stands alone
-        // as a statement for a result-less call).
-        //
-        // An out-of-bounds index panics on the slice access (a trap); a null or
-        // wrong-type entry falls through to the catch-all panic (also a trap).
-        let (prefix, temps) = self.result_binding(&results)?;
+        // Read the entry into a local first: for an imported table `table()`
+        // borrows the whole instance (the host), and a match scrutinee's borrow
+        // would live across the arms, clashing with each `&mut self` dispatch.
+        // Copying out the `u32` releases that borrow. An out-of-bounds index
+        // panics on this slice access (a trap).
+        let entry = self.fresh_temp();
         self.line(format!(
-            "{prefix}match self.table[({}) as u32 as usize] {{",
+            "let {entry} = self.table()[({}) as u32 as usize];",
             index.code
         ));
+
+        // A `match` on the table entry, emitted line by line so `indent` aligns
+        // it. The opening line binds the result temporary/tuple (or stands alone
+        // as a statement for a result-less call). A null or wrong-type entry
+        // falls through to the catch-all panic (also a trap).
+        let (prefix, temps) = self.result_binding(&results)?;
+        self.line(format!("{prefix}match {entry} {{"));
         for &fidx in &targets {
             let expr = self.ctx.call_expr(fidx, &arg_list);
             self.line(format!("    {fidx}u32 => {expr},"));
@@ -2373,9 +2385,16 @@ fn render_module(
     let mut lines: Vec<String> = Vec::new();
 
     let mem_imported = memory.is_some_and(|m| m.imported);
-    let has_imports = !imports.is_empty() || !imported_globals.is_empty() || mem_imported;
+    let table_imported = table.is_some_and(|t| t.imported);
+    let has_imports =
+        !imports.is_empty() || !imported_globals.is_empty() || mem_imported || table_imported;
     if has_imports {
-        lines.extend(import_trait_lines(imports, imported_globals, mem_imported)?);
+        lines.extend(import_trait_lines(
+            imports,
+            imported_globals,
+            mem_imported,
+            table_imported,
+        )?);
         lines.push(String::new());
     }
     // A generic parameter carries the host implementation only when needed:
@@ -2421,7 +2440,8 @@ fn render_module(
     if memory.is_some() && !mem_imported {
         lines.push("    memory: Vec<u8>,".to_string());
     }
-    if table.is_some() {
+    // Imported tables live in the host, so the instance owns no storage.
+    if table.is_some() && !table_imported {
         // A table entry is a function index; `u32::MAX` marks a null funcref.
         lines.push("    table: Vec<u32>,".to_string());
     }
@@ -2452,11 +2472,15 @@ fn render_module(
     // Only active segments are copied at instantiation; passive ones are
     // retained (see the `data{d}` fields) for `memory.init`.
     let active: Vec<&DataSegment> = data.iter().filter(|d| d.offset.is_some()).collect();
-    // Imported memory is host-owned, so its active data cannot be written into a
-    // `memory` field literal; instead the instance is bound and the segments are
-    // copied into the host buffer through `mem_mut()` after construction.
+    let active_elem: Vec<&ElemSegment> = elements.iter().filter(|e| e.offset.is_some()).collect();
+    // Imported memory/table are host-owned, so their active data/elements cannot
+    // be written into a `memory`/`table` field literal; instead the instance is
+    // bound and the segments are copied into the host storage through
+    // `mem_mut()`/`table_mut()` after construction.
     let post_init_data = mem_imported && !active.is_empty();
-    let (open, close) = if post_init_data {
+    let post_init_elem = table_imported && !active_elem.is_empty();
+    let post_init = post_init_data || post_init_elem;
+    let (open, close) = if post_init {
         ("    let mut instance = Self {", "    };")
     } else {
         ("    Self {", "    }")
@@ -2473,6 +2497,18 @@ fn render_module(
             lines.push(format!(
                 "{indent}{target}[{off}..{end}].copy_from_slice(&[{bytes_lit}]);"
             ));
+        }
+    };
+
+    // Emit `<target>[idx] = fu32;` for each active element segment entry;
+    // `target` is a defined table (`t`) or the host storage accessor
+    // (`instance.table_mut()`).
+    let copy_active_elems = |lines: &mut Vec<String>, target: &str, indent: &str| {
+        for seg in &active_elem {
+            for (k, f) in seg.funcs.iter().enumerate() {
+                let idx = seg.offset.unwrap_or(0) as usize + k;
+                lines.push(format!("{indent}{target}[{idx}] = {f}u32;"));
+            }
         }
     };
 
@@ -2499,9 +2535,10 @@ fn render_module(
             inner.push("        },".to_string());
         }
     }
-    if let Some(t) = table {
-        let active: Vec<&ElemSegment> = elements.iter().filter(|e| e.offset.is_some()).collect();
-        if active.is_empty() {
+    // An imported table is host-owned (see the post-construction elem copy);
+    // only a defined table gets a `table` field.
+    if let Some(t) = table.filter(|_| !table_imported) {
+        if active_elem.is_empty() {
             inner.push(format!("        table: vec![u32::MAX; {}],", t.min));
         } else {
             // Start every slot null, then apply each active element segment.
@@ -2510,12 +2547,7 @@ fn render_module(
                 "            let mut t: Vec<u32> = vec![u32::MAX; {}];",
                 t.min
             ));
-            for seg in active {
-                for (k, f) in seg.funcs.iter().enumerate() {
-                    let idx = seg.offset.unwrap_or(0) as usize + k;
-                    inner.push(format!("            t[{idx}] = {f}u32;"));
-                }
-            }
+            copy_active_elems(&mut inner, "t", "            ");
             inner.push("            t".to_string());
             inner.push("        },".to_string());
         }
@@ -2536,11 +2568,16 @@ fn render_module(
         }
     }
     inner.push(close.to_string());
-    if post_init_data {
-        // Copy each active data segment into the host-owned buffer in order.
-        // An out-of-bounds write panics here, faithfully reproducing a wasm
-        // instantiation trap when a segment does not fit the host memory.
-        copy_active_data(&mut inner, "instance.mem_mut()", "    ");
+    if post_init {
+        // Copy each active data/element segment into the host-owned storage in
+        // order. An out-of-bounds write panics here, faithfully reproducing a
+        // wasm instantiation trap when a segment does not fit the host storage.
+        if post_init_data {
+            copy_active_data(&mut inner, "instance.mem_mut()", "    ");
+        }
+        if post_init_elem {
+            copy_active_elems(&mut inner, "instance.table_mut()", "    ");
+        }
         inner.push("    instance".to_string());
     }
     inner.push("}".to_string());
@@ -2558,6 +2595,21 @@ fn render_module(
         inner.push(format!("fn mem(&self) -> &[u8] {{ {borrow} }}"));
         inner.push(format!(
             "fn mem_mut(&mut self) -> &mut Vec<u8> {{ {borrow_mut} }}"
+        ));
+    }
+
+    // Uniform table accessors, mirroring the memory ones: a defined table is a
+    // field, an imported one is lent by the host through the `Imports` trait.
+    if let Some(t) = table {
+        let (borrow, borrow_mut) = if t.imported {
+            ("self.imports.table()", "self.imports.table_mut()")
+        } else {
+            ("&self.table", "&mut self.table")
+        };
+        inner.push(String::new());
+        inner.push(format!("fn table(&self) -> &[u32] {{ {borrow} }}"));
+        inner.push(format!(
+            "fn table_mut(&mut self) -> &mut Vec<u32> {{ {borrow_mut} }}"
         ));
     }
 
@@ -2591,12 +2643,19 @@ fn import_trait_lines(
     imports: &[ImportInfo],
     imported_globals: &[ImportedGlobalInfo],
     mem_imported: bool,
+    table_imported: bool,
 ) -> Result<Vec<String>, TranspileError> {
     let mut lines = vec!["pub trait Imports {".to_string()];
     // Imported memory: the host lends its buffer for loads/stores/grow.
     if mem_imported {
         lines.push("    fn memory(&self) -> &[u8];".to_string());
         lines.push("    fn memory_mut(&mut self) -> &mut Vec<u8>;".to_string());
+    }
+    // Imported table: the host lends its `Vec<u32>` for get/set/size/grow and
+    // for indirect-call dispatch (each entry is a function index).
+    if table_imported {
+        lines.push("    fn table(&self) -> &[u32];".to_string());
+        lines.push("    fn table_mut(&mut self) -> &mut Vec<u32>;".to_string());
     }
     for (j, im) in imports.iter().enumerate() {
         let mut params = String::from("&mut self");
@@ -2803,13 +2862,13 @@ fn helper_lines(helper: Helper) -> Vec<String> {
             "fn table_copy(&mut self, dest: u32, src: u32, len: u32) {",
             "    let s = src as usize;",
             "    let d = dest as usize;",
-            "    self.table.copy_within(s..s + len as usize, d);",
+            "    self.table_mut().copy_within(s..s + len as usize, d);",
             "}",
         ]),
         Helper::TableFill => owned(&[
             "fn table_fill(&mut self, dest: u32, val: u32, len: u32) {",
             "    let d = dest as usize;",
-            "    self.table[d..d + len as usize].fill(val);",
+            "    self.table_mut()[d..d + len as usize].fill(val);",
             "}",
         ]),
     }

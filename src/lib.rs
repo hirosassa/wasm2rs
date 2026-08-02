@@ -91,8 +91,8 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                 // Function imports occupy the low end of the function index
                 // space (dispatched through an injected host trait) and imported
                 // globals the low end of the global index space (host getters/
-                // setters). Imported memory is host-owned (lent through the
-                // trait); imported tables and tags are still rejected. Imports
+                // setters). Imported memory and tables are host-owned (lent
+                // through the trait); imported tags are still rejected. Imports
                 // may be grouped in the compact encodings, so each group is
                 // expanded.
                 for group in reader {
@@ -104,6 +104,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                                 &mut imports,
                                 &mut imported_globals,
                                 &mut memory,
+                                &mut table,
                             )?;
                         }
                         wasmparser::Imports::Compact1 { items, .. } => {
@@ -114,6 +115,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                                     &mut imports,
                                     &mut imported_globals,
                                     &mut memory,
+                                    &mut table,
                                 )?;
                             }
                         }
@@ -126,6 +128,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                                     &mut imports,
                                     &mut imported_globals,
                                     &mut memory,
+                                    &mut table,
                                 )?;
                             }
                         }
@@ -176,7 +179,10 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                     }
                     let min = u32::try_from(ty.initial)
                         .map_err(|_| TranspileError::Unsupported("table too large".into()))?;
-                    table = Some(codegen::TableInfo { min });
+                    table = Some(codegen::TableInfo {
+                        min,
+                        imported: false,
+                    });
                 }
             }
             Payload::ElementSection(reader) => {
@@ -319,6 +325,7 @@ fn classify_import(
     imports: &mut Vec<codegen::ImportInfo>,
     imported_globals: &mut Vec<codegen::ImportedGlobalInfo>,
     memory: &mut Option<codegen::MemInfo>,
+    table: &mut Option<codegen::TableInfo>,
 ) -> Result<(), TranspileError> {
     match ty {
         TypeRef::Func(type_index) | TypeRef::FuncExact(type_index) => {
@@ -353,7 +360,25 @@ fn classify_import(
             });
             Ok(())
         }
-        _ => Err(TranspileError::Unsupported("imported table or tag".into())),
+        TypeRef::Table(table_ty) => {
+            if !table_ty.element_type.is_func_ref() {
+                return Err(TranspileError::Unsupported("non-funcref table".into()));
+            }
+            if table_ty.table64 || table_ty.shared {
+                return Err(TranspileError::Unsupported("64-bit or shared table".into()));
+            }
+            if table.is_some() {
+                return Err(TranspileError::Unsupported("multiple tables".into()));
+            }
+            let min = u32::try_from(table_ty.initial)
+                .map_err(|_| TranspileError::Unsupported("table too large".into()))?;
+            *table = Some(codegen::TableInfo {
+                min,
+                imported: true,
+            });
+            Ok(())
+        }
+        _ => Err(TranspileError::Unsupported("imported tag".into())),
     }
 }
 
@@ -528,9 +553,9 @@ mod tests {
     }
 
     #[test]
-    fn imported_table_is_rejected() {
-        // An imported table would require host-routed call_indirect dispatch,
-        // which is not supported yet.
+    fn imported_table_lends_storage_through_the_host() {
+        // An imported table is host-owned: the trait declares `table`/`table_mut`
+        // accessors and the instance routes through them (no `table` field).
         let wasm = wat_to_wasm(
             r#"
             (module
@@ -539,8 +564,11 @@ mod tests {
             "#,
         );
 
-        let err = transpile(&wasm).expect_err("imported table must be rejected");
-        assert!(matches!(err, TranspileError::Unsupported(_)));
+        let rust = transpile(&wasm).expect("imported table should transpile");
+        assert!(
+            rust.contains("fn table(&self) -> &[u32];") && rust.contains("self.imports.table()"),
+            "{rust}"
+        );
     }
 
     #[test]
@@ -728,11 +756,12 @@ impl Instance {
         let rust = transpile(&wasm).expect("transpile ok");
 
         // The table is a `Vec<u32>` of function indices seeded from the element
-        // segment, and dispatch is a `match` that traps on a null/wrong entry.
+        // segment; dispatch reads the entry through the `table()` accessor into a
+        // local, then a `match` traps on a null/wrong entry.
         assert!(rust.contains("table: Vec<u32>,"), "{rust}");
         assert!(rust.contains("t[0] = 0u32;"), "{rust}");
         assert!(
-            rust.contains("match self.table[") && rust.contains("0u32 => self.func0("),
+            rust.contains("= self.table()[") && rust.contains("0u32 => self.func0("),
             "{rust}"
         );
         assert!(
