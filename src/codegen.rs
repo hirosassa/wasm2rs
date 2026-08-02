@@ -33,8 +33,11 @@ pub(crate) struct GlobalInfo {
 
 /// Metadata about the module's linear memory. The declared maximum is not
 /// tracked; `memory.grow` only enforces the wasm32 hard cap of 65536 pages.
+/// When `imported`, the host owns the buffer (lent through the `Imports` trait)
+/// and the instance carries no `memory` field of its own.
 pub(crate) struct MemInfo {
     pub min_pages: u64,
+    pub imported: bool,
 }
 
 /// Metadata about the module's function table (a single `funcref` table). The
@@ -210,7 +213,7 @@ struct ModuleCtx<'a> {
     imported_globals: Vec<(ValType, bool)>,
     /// Per-defined-global `(type, mutable)`, indexed after the imported globals.
     globals: Vec<(ValType, bool)>,
-    /// Whether the module declares linear memory (so `self.memory` exists).
+    /// Whether the module declares linear memory (so `self.mem()` exists).
     has_memory: bool,
     /// Whether the module declares a table (so `self.table` exists).
     has_table: bool,
@@ -297,8 +300,10 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
 
     let has_memory = memory.is_some();
     let has_table = table.is_some();
-    // The host is injected whenever anything is imported (functions or globals).
-    let has_imports = !imports.is_empty() || !imported_globals.is_empty();
+    // The host is injected whenever anything is imported (functions, globals, or
+    // memory).
+    let has_imports =
+        !imports.is_empty() || !imported_globals.is_empty() || memory.is_some_and(|m| m.imported);
     // Imports must be held by an instance, so a module that has them (or any
     // other mutable state) becomes a `struct Instance` with method functions.
     let stateful = has_memory || has_table || has_imports || !globals.is_empty();
@@ -1176,11 +1181,18 @@ impl<'a> FuncGen<'a> {
 
     fn memory_size(&mut self) -> Result<(), TranspileError> {
         self.require_memory()?;
+        // Materialise into a temp: `self.mem()` borrows the instance, so leaving
+        // it inline could clash with another `self.mem()`/method call in the same
+        // enclosing expression (e.g. imported memory, where `mem()` routes
+        // through the host).
+        let name = self.fresh_temp();
+        self.line(format!(
+            "let {name}: i32 = (self.mem().len() / 65536) as i32;"
+        ));
         self.push(Val {
-            code: "((self.memory.len() / 65536) as i32)".to_string(),
+            code: name,
             ty: ValType::I32,
-            // `memory.grow` can change the size.
-            stable: false,
+            stable: true,
         });
         Ok(())
     }
@@ -1356,14 +1368,16 @@ impl<'a> FuncGen<'a> {
     }
 
     /// Emit a bulk copy of `len` elements from a retained passive segment
-    /// (`src_seg`, e.g. `self.data0`) into `dst` (e.g. `self.memory`). A range
+    /// (`src_seg`, e.g. `self.data0`) into `dst` (e.g. `self.mem_mut()`). A range
     /// exceeding either side — including a dropped, now-empty segment — panics,
     /// reproducing the wasm trap; the destination is bounds-checked first, so no
-    /// partial write occurs.
+    /// partial write occurs. The segment slice is copied into a local first so
+    /// that `dst` (which may borrow the whole instance, e.g. `self.mem_mut()` for
+    /// imported memory) does not clash with the `&self` segment field borrow.
     fn emit_bulk_init(&mut self, dst: &str, src_seg: &str, dest: &Val, src: &Val, len: &Val) {
         self.line(format!(
-            "{{ let n = ({}) as usize; let s = ({}) as usize; let d = ({}) as usize; \
-             {dst}[d..d + n].copy_from_slice(&{src_seg}[s..s + n]); }}",
+            "{{ let seg = {src_seg}; let n = ({}) as usize; let s = ({}) as usize; \
+             let d = ({}) as usize; {dst}[d..d + n].copy_from_slice(&seg[s..s + n]); }}",
             len.code, src.code, dest.code
         ));
     }
@@ -1374,7 +1388,7 @@ impl<'a> FuncGen<'a> {
         self.require_passive(&self.ctx.data_passive, data_index, "data")?;
         let (dest, src, len) = self.pop_bulk_operands()?;
         self.emit_bulk_init(
-            "self.memory",
+            "self.mem_mut()",
             &format!("self.data{data_index}"),
             &dest,
             &src,
@@ -2239,9 +2253,10 @@ fn render_module(
 
     let mut lines: Vec<String> = Vec::new();
 
-    let has_imports = !imports.is_empty() || !imported_globals.is_empty();
+    let mem_imported = memory.is_some_and(|m| m.imported);
+    let has_imports = !imports.is_empty() || !imported_globals.is_empty() || mem_imported;
     if has_imports {
-        lines.extend(import_trait_lines(imports, imported_globals)?);
+        lines.extend(import_trait_lines(imports, imported_globals, mem_imported)?);
         lines.push(String::new());
     }
     // A generic parameter carries the host implementation only when needed:
@@ -2283,7 +2298,8 @@ fn render_module(
     if has_imports {
         lines.push("    imports: H,".to_string());
     }
-    if memory.is_some() {
+    // Imported memory lives in the host, so the instance owns no buffer.
+    if memory.is_some() && !mem_imported {
         lines.push("    memory: Vec<u8>,".to_string());
     }
     if table.is_some() {
@@ -2319,14 +2335,22 @@ fn render_module(
     if has_imports {
         inner.push("        imports,".to_string());
     }
-    if let Some(m) = memory {
+    // Only active segments are copied at instantiation; passive ones are
+    // retained (see the `data{d}` fields) for `memory.init`.
+    let active: Vec<&DataSegment> = data.iter().filter(|d| d.offset.is_some()).collect();
+    // Imported memory is host-owned; the instance carries no buffer to
+    // initialise. Active data would have to be written into the host buffer
+    // after construction, which is not supported yet.
+    if mem_imported && !active.is_empty() {
+        return Err(TranspileError::Unsupported(
+            "active data segment with imported memory".into(),
+        ));
+    }
+    if let Some(m) = memory.filter(|_| !mem_imported) {
         let bytes = m
             .min_pages
             .checked_mul(65536)
             .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
-        // Only active segments are copied at instantiation; passive ones are
-        // retained (see the `data{d}` fields) for `memory.init`.
-        let active: Vec<&DataSegment> = data.iter().filter(|d| d.offset.is_some()).collect();
         if active.is_empty() {
             inner.push(format!("        memory: vec![0u8; {bytes}],"));
         } else {
@@ -2386,6 +2410,22 @@ fn render_module(
     inner.push("    }".to_string());
     inner.push("}".to_string());
 
+    // Uniform memory accessors so the load/store/bulk helpers are identical for
+    // defined and imported memory: a defined buffer is a field, an imported one
+    // is lent by the host through the `Imports` trait.
+    if let Some(m) = memory {
+        let (borrow, borrow_mut) = if m.imported {
+            ("self.imports.memory()", "self.imports.memory_mut()")
+        } else {
+            ("&self.memory", "&mut self.memory")
+        };
+        inner.push(String::new());
+        inner.push(format!("fn mem(&self) -> &[u8] {{ {borrow} }}"));
+        inner.push(format!(
+            "fn mem_mut(&mut self) -> &mut Vec<u8> {{ {borrow_mut} }}"
+        ));
+    }
+
     for helper in HELPER_ORDER {
         if used.contains(&helper) {
             inner.push(String::new());
@@ -2415,8 +2455,14 @@ fn render_module(
 fn import_trait_lines(
     imports: &[ImportInfo],
     imported_globals: &[ImportedGlobalInfo],
+    mem_imported: bool,
 ) -> Result<Vec<String>, TranspileError> {
     let mut lines = vec!["pub trait Imports {".to_string()];
+    // Imported memory: the host lends its buffer for loads/stores/grow.
+    if mem_imported {
+        lines.push("    fn memory(&self) -> &[u8];".to_string());
+        lines.push("    fn memory_mut(&mut self) -> &mut Vec<u8>;".to_string());
+    }
     for (j, im) in imports.iter().enumerate() {
         let mut params = String::from("&mut self");
         for (k, ty) in im.params.iter().enumerate() {
@@ -2453,139 +2499,139 @@ fn helper_lines(helper: Helper) -> Vec<String> {
         Helper::LoadI32 => owned(&[
             "fn load_i32(&self, addr: u32, offset: u32) -> i32 {",
             "    let a = addr as usize + offset as usize;",
-            "    i32::from_le_bytes([self.memory[a], self.memory[a + 1], self.memory[a + 2], self.memory[a + 3]])",
+            "    i32::from_le_bytes([self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3]])",
             "}",
         ]),
         Helper::Load8U => owned(&[
             "fn load8_u(&self, addr: u32, offset: u32) -> i32 {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a] as i32",
+            "    self.mem()[a] as i32",
             "}",
         ]),
         Helper::Load8S => owned(&[
             "fn load8_s(&self, addr: u32, offset: u32) -> i32 {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a] as i8 as i32",
+            "    self.mem()[a] as i8 as i32",
             "}",
         ]),
         Helper::Load16U => owned(&[
             "fn load16_u(&self, addr: u32, offset: u32) -> i32 {",
             "    let a = addr as usize + offset as usize;",
-            "    u16::from_le_bytes([self.memory[a], self.memory[a + 1]]) as i32",
+            "    u16::from_le_bytes([self.mem()[a], self.mem()[a + 1]]) as i32",
             "}",
         ]),
         Helper::Load16S => owned(&[
             "fn load16_s(&self, addr: u32, offset: u32) -> i32 {",
             "    let a = addr as usize + offset as usize;",
-            "    i16::from_le_bytes([self.memory[a], self.memory[a + 1]]) as i32",
+            "    i16::from_le_bytes([self.mem()[a], self.mem()[a + 1]]) as i32",
             "}",
         ]),
         Helper::StoreI32 => owned(&[
             "fn store_i32(&mut self, addr: u32, offset: u32, value: i32) {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a..a + 4].copy_from_slice(&value.to_le_bytes());",
+            "    self.mem_mut()[a..a + 4].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::Store8 => owned(&[
             "fn store8(&mut self, addr: u32, offset: u32, value: i32) {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a] = value as u8;",
+            "    self.mem_mut()[a] = value as u8;",
             "}",
         ]),
         Helper::Store16 => owned(&[
             "fn store16(&mut self, addr: u32, offset: u32, value: i32) {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a..a + 2].copy_from_slice(&(value as u16).to_le_bytes());",
+            "    self.mem_mut()[a..a + 2].copy_from_slice(&(value as u16).to_le_bytes());",
             "}",
         ]),
         Helper::LoadI64 => owned(&[
             "fn load_i64(&self, addr: u32, offset: u32) -> i64 {",
             "    let a = addr as usize + offset as usize;",
-            "    i64::from_le_bytes([self.memory[a], self.memory[a + 1], self.memory[a + 2], self.memory[a + 3], self.memory[a + 4], self.memory[a + 5], self.memory[a + 6], self.memory[a + 7]])",
+            "    i64::from_le_bytes([self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3], self.mem()[a + 4], self.mem()[a + 5], self.mem()[a + 6], self.mem()[a + 7]])",
             "}",
         ]),
         Helper::LoadF32 => owned(&[
             "fn load_f32(&self, addr: u32, offset: u32) -> f32 {",
             "    let a = addr as usize + offset as usize;",
-            "    f32::from_le_bytes([self.memory[a], self.memory[a + 1], self.memory[a + 2], self.memory[a + 3]])",
+            "    f32::from_le_bytes([self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3]])",
             "}",
         ]),
         Helper::LoadF64 => owned(&[
             "fn load_f64(&self, addr: u32, offset: u32) -> f64 {",
             "    let a = addr as usize + offset as usize;",
-            "    f64::from_le_bytes([self.memory[a], self.memory[a + 1], self.memory[a + 2], self.memory[a + 3], self.memory[a + 4], self.memory[a + 5], self.memory[a + 6], self.memory[a + 7]])",
+            "    f64::from_le_bytes([self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3], self.mem()[a + 4], self.mem()[a + 5], self.mem()[a + 6], self.mem()[a + 7]])",
             "}",
         ]),
         Helper::Load8UI64 => owned(&[
             "fn load8_u_i64(&self, addr: u32, offset: u32) -> i64 {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a] as i64",
+            "    self.mem()[a] as i64",
             "}",
         ]),
         Helper::Load8SI64 => owned(&[
             "fn load8_s_i64(&self, addr: u32, offset: u32) -> i64 {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a] as i8 as i64",
+            "    self.mem()[a] as i8 as i64",
             "}",
         ]),
         Helper::Load16UI64 => owned(&[
             "fn load16_u_i64(&self, addr: u32, offset: u32) -> i64 {",
             "    let a = addr as usize + offset as usize;",
-            "    u16::from_le_bytes([self.memory[a], self.memory[a + 1]]) as i64",
+            "    u16::from_le_bytes([self.mem()[a], self.mem()[a + 1]]) as i64",
             "}",
         ]),
         Helper::Load16SI64 => owned(&[
             "fn load16_s_i64(&self, addr: u32, offset: u32) -> i64 {",
             "    let a = addr as usize + offset as usize;",
-            "    i16::from_le_bytes([self.memory[a], self.memory[a + 1]]) as i64",
+            "    i16::from_le_bytes([self.mem()[a], self.mem()[a + 1]]) as i64",
             "}",
         ]),
         Helper::Load32UI64 => owned(&[
             "fn load32_u_i64(&self, addr: u32, offset: u32) -> i64 {",
             "    let a = addr as usize + offset as usize;",
-            "    u32::from_le_bytes([self.memory[a], self.memory[a + 1], self.memory[a + 2], self.memory[a + 3]]) as i64",
+            "    u32::from_le_bytes([self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3]]) as i64",
             "}",
         ]),
         Helper::Load32SI64 => owned(&[
             "fn load32_s_i64(&self, addr: u32, offset: u32) -> i64 {",
             "    let a = addr as usize + offset as usize;",
-            "    i32::from_le_bytes([self.memory[a], self.memory[a + 1], self.memory[a + 2], self.memory[a + 3]]) as i64",
+            "    i32::from_le_bytes([self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3]]) as i64",
             "}",
         ]),
         Helper::StoreI64 => owned(&[
             "fn store_i64(&mut self, addr: u32, offset: u32, value: i64) {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a..a + 8].copy_from_slice(&value.to_le_bytes());",
+            "    self.mem_mut()[a..a + 8].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::StoreF32 => owned(&[
             "fn store_f32(&mut self, addr: u32, offset: u32, value: f32) {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a..a + 4].copy_from_slice(&value.to_le_bytes());",
+            "    self.mem_mut()[a..a + 4].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::StoreF64 => owned(&[
             "fn store_f64(&mut self, addr: u32, offset: u32, value: f64) {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a..a + 8].copy_from_slice(&value.to_le_bytes());",
+            "    self.mem_mut()[a..a + 8].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::Store8I64 => owned(&[
             "fn store8_i64(&mut self, addr: u32, offset: u32, value: i64) {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a] = value as u8;",
+            "    self.mem_mut()[a] = value as u8;",
             "}",
         ]),
         Helper::Store16I64 => owned(&[
             "fn store16_i64(&mut self, addr: u32, offset: u32, value: i64) {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a..a + 2].copy_from_slice(&(value as u16).to_le_bytes());",
+            "    self.mem_mut()[a..a + 2].copy_from_slice(&(value as u16).to_le_bytes());",
             "}",
         ]),
         Helper::Store32I64 => owned(&[
             "fn store32_i64(&mut self, addr: u32, offset: u32, value: i64) {",
             "    let a = addr as usize + offset as usize;",
-            "    self.memory[a..a + 4].copy_from_slice(&(value as u32).to_le_bytes());",
+            "    self.mem_mut()[a..a + 4].copy_from_slice(&(value as u32).to_le_bytes());",
             "}",
         ]),
         // `delta` is an unsigned page count. Growth past the wasm32 limit of
@@ -2593,12 +2639,12 @@ fn helper_lines(helper: Helper) -> Vec<String> {
         // the declared maximum is not tracked, so only that hard cap applies.
         Helper::Grow => owned(&[
             "fn memory_grow(&mut self, delta: i32) -> i32 {",
-            "    let old_pages = (self.memory.len() / 65536) as u64;",
+            "    let old_pages = (self.mem().len() / 65536) as u64;",
             "    let new_pages = old_pages + (delta as u32 as u64);",
             "    if new_pages > 65536 {",
             "        return -1;",
             "    }",
-            "    self.memory.resize((new_pages as usize) * 65536, 0);",
+            "    self.mem_mut().resize((new_pages as usize) * 65536, 0);",
             "    old_pages as i32",
             "}",
         ]),
@@ -2608,14 +2654,14 @@ fn helper_lines(helper: Helper) -> Vec<String> {
         Helper::MemoryFill => owned(&[
             "fn memory_fill(&mut self, dest: u32, val: i32, len: u32) {",
             "    let d = dest as usize;",
-            "    self.memory[d..d + len as usize].fill(val as u8);",
+            "    self.mem_mut()[d..d + len as usize].fill(val as u8);",
             "}",
         ]),
         Helper::MemoryCopy => owned(&[
             "fn memory_copy(&mut self, dest: u32, src: u32, len: u32) {",
             "    let s = src as usize;",
             "    let d = dest as usize;",
-            "    self.memory.copy_within(s..s + len as usize, d);",
+            "    self.mem_mut().copy_within(s..s + len as usize, d);",
             "}",
         ]),
         Helper::TableCopy => owned(&[

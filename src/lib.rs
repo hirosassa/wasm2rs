@@ -91,9 +91,10 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                 // Function imports occupy the low end of the function index
                 // space (dispatched through an injected host trait) and imported
                 // globals the low end of the global index space (host getters/
-                // setters). Imported memories/tables/tags are still rejected.
-                // Imports may be grouped in the compact encodings, so each group
-                // is expanded.
+                // setters). Imported memory is host-owned (lent through the
+                // trait); imported tables and tags are still rejected. Imports
+                // may be grouped in the compact encodings, so each group is
+                // expanded.
                 for group in reader {
                     match group? {
                         wasmparser::Imports::Single(_, import) => {
@@ -102,6 +103,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                                 &signatures,
                                 &mut imports,
                                 &mut imported_globals,
+                                &mut memory,
                             )?;
                         }
                         wasmparser::Imports::Compact1 { items, .. } => {
@@ -111,6 +113,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                                     &signatures,
                                     &mut imports,
                                     &mut imported_globals,
+                                    &mut memory,
                                 )?;
                             }
                         }
@@ -122,6 +125,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                                     &signatures,
                                     &mut imports,
                                     &mut imported_globals,
+                                    &mut memory,
                                 )?;
                             }
                         }
@@ -146,6 +150,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                     }
                     memory = Some(codegen::MemInfo {
                         min_pages: mem.initial,
+                        imported: false,
                     });
                 }
             }
@@ -305,14 +310,15 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
     })
 }
 
-/// Classify an import by its type, pushing a function import onto `imports` or a
-/// global import onto `imported_globals`. Imported memories, tables and tags are
-/// rejected as not supported yet.
+/// Classify an import by its type: a function import is pushed onto `imports`, a
+/// global onto `imported_globals`, and an imported memory recorded in `memory`.
+/// Imported tables and tags are rejected as not supported yet.
 fn classify_import(
     ty: TypeRef,
     signatures: &[Signature],
     imports: &mut Vec<codegen::ImportInfo>,
     imported_globals: &mut Vec<codegen::ImportedGlobalInfo>,
+    memory: &mut Option<codegen::MemInfo>,
 ) -> Result<(), TranspileError> {
     match ty {
         TypeRef::Func(type_index) | TypeRef::FuncExact(type_index) => {
@@ -332,9 +338,22 @@ fn classify_import(
             });
             Ok(())
         }
-        _ => Err(TranspileError::Unsupported(
-            "imported memory, table or tag".into(),
-        )),
+        TypeRef::Memory(mem_ty) => {
+            if mem_ty.memory64 || mem_ty.shared {
+                return Err(TranspileError::Unsupported(
+                    "64-bit or shared memory".into(),
+                ));
+            }
+            if memory.is_some() {
+                return Err(TranspileError::Unsupported("multiple memories".into()));
+            }
+            *memory = Some(codegen::MemInfo {
+                min_pages: mem_ty.initial,
+                imported: true,
+            });
+            Ok(())
+        }
+        _ => Err(TranspileError::Unsupported("imported table or tag".into())),
     }
 }
 
@@ -490,16 +509,37 @@ mod tests {
     }
 
     #[test]
-    fn imported_memory_is_rejected() {
+    fn imported_memory_is_supported() {
+        // Imported memory is host-owned; the module accesses it through the
+        // injected `Imports` trait (see tests/imported_memory.rs for behaviour).
         let wasm = wat_to_wasm(
             r#"
             (module
               (import "env" "mem" (memory 1))
+              (func (param i32) (result i32) (i32.load8_u (local.get 0))))
+            "#,
+        );
+
+        let rust = transpile(&wasm).expect("imported memory should transpile");
+        assert!(
+            rust.contains("fn memory(&self) -> &[u8];") && rust.contains("self.imports.memory()"),
+            "{rust}"
+        );
+    }
+
+    #[test]
+    fn imported_table_is_rejected() {
+        // An imported table would require host-routed call_indirect dispatch,
+        // which is not supported yet.
+        let wasm = wat_to_wasm(
+            r#"
+            (module
+              (import "env" "t" (table 1 funcref))
               (func (param i32) (result i32) local.get 0))
             "#,
         );
 
-        let err = transpile(&wasm).expect_err("imported memory must be rejected");
+        let err = transpile(&wasm).expect_err("imported table must be rejected");
         assert!(matches!(err, TranspileError::Unsupported(_)));
     }
 
