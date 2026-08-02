@@ -84,9 +84,24 @@ enum Helper {
     Load8S,
     Load16U,
     Load16S,
+    LoadI64,
+    LoadF32,
+    LoadF64,
+    Load8UI64,
+    Load8SI64,
+    Load16UI64,
+    Load16SI64,
+    Load32UI64,
+    Load32SI64,
     StoreI32,
     Store8,
     Store16,
+    StoreI64,
+    StoreF32,
+    StoreF64,
+    Store8I64,
+    Store16I64,
+    Store32I64,
     Grow,
 }
 
@@ -504,14 +519,37 @@ impl<'a> FuncGen<'a> {
             }
             Operator::GlobalGet { global_index } => self.global_get(global_index)?,
             Operator::GlobalSet { global_index } => self.global_set(global_index)?,
-            Operator::I32Load { memarg } => self.load(Helper::LoadI32, memarg)?,
-            Operator::I32Load8U { memarg } => self.load(Helper::Load8U, memarg)?,
-            Operator::I32Load8S { memarg } => self.load(Helper::Load8S, memarg)?,
-            Operator::I32Load16U { memarg } => self.load(Helper::Load16U, memarg)?,
-            Operator::I32Load16S { memarg } => self.load(Helper::Load16S, memarg)?,
+            Operator::I32Load { memarg } => self.load(Helper::LoadI32, ValType::I32, memarg)?,
+            Operator::I32Load8U { memarg } => self.load(Helper::Load8U, ValType::I32, memarg)?,
+            Operator::I32Load8S { memarg } => self.load(Helper::Load8S, ValType::I32, memarg)?,
+            Operator::I32Load16U { memarg } => self.load(Helper::Load16U, ValType::I32, memarg)?,
+            Operator::I32Load16S { memarg } => self.load(Helper::Load16S, ValType::I32, memarg)?,
+            Operator::I64Load { memarg } => self.load(Helper::LoadI64, ValType::I64, memarg)?,
+            Operator::F32Load { memarg } => self.load(Helper::LoadF32, ValType::F32, memarg)?,
+            Operator::F64Load { memarg } => self.load(Helper::LoadF64, ValType::F64, memarg)?,
+            Operator::I64Load8U { memarg } => self.load(Helper::Load8UI64, ValType::I64, memarg)?,
+            Operator::I64Load8S { memarg } => self.load(Helper::Load8SI64, ValType::I64, memarg)?,
+            Operator::I64Load16U { memarg } => {
+                self.load(Helper::Load16UI64, ValType::I64, memarg)?
+            }
+            Operator::I64Load16S { memarg } => {
+                self.load(Helper::Load16SI64, ValType::I64, memarg)?
+            }
+            Operator::I64Load32U { memarg } => {
+                self.load(Helper::Load32UI64, ValType::I64, memarg)?
+            }
+            Operator::I64Load32S { memarg } => {
+                self.load(Helper::Load32SI64, ValType::I64, memarg)?
+            }
             Operator::I32Store { memarg } => self.store(Helper::StoreI32, memarg)?,
             Operator::I32Store8 { memarg } => self.store(Helper::Store8, memarg)?,
             Operator::I32Store16 { memarg } => self.store(Helper::Store16, memarg)?,
+            Operator::I64Store { memarg } => self.store(Helper::StoreI64, memarg)?,
+            Operator::F32Store { memarg } => self.store(Helper::StoreF32, memarg)?,
+            Operator::F64Store { memarg } => self.store(Helper::StoreF64, memarg)?,
+            Operator::I64Store8 { memarg } => self.store(Helper::Store8I64, memarg)?,
+            Operator::I64Store16 { memarg } => self.store(Helper::Store16I64, memarg)?,
+            Operator::I64Store32 { memarg } => self.store(Helper::Store32I64, memarg)?,
             Operator::MemorySize { .. } => self.memory_size()?,
             Operator::MemoryGrow { .. } => self.memory_grow()?,
             Operator::Drop => {
@@ -900,7 +938,7 @@ impl<'a> FuncGen<'a> {
         }
     }
 
-    fn load(&mut self, helper: Helper, memarg: MemArg) -> Result<(), TranspileError> {
+    fn load(&mut self, helper: Helper, ty: ValType, memarg: MemArg) -> Result<(), TranspileError> {
         self.require_memory()?;
         let offset = memarg_offset(memarg)?;
         let addr = self.pop()?;
@@ -911,7 +949,7 @@ impl<'a> FuncGen<'a> {
                 helper_name(helper),
                 addr.code
             ),
-            ty: ValType::I32,
+            ty,
             // The result depends on memory contents, which a store can change.
             stable: false,
         });
@@ -1504,9 +1542,24 @@ fn helper_name(helper: Helper) -> &'static str {
         Helper::Load8S => "load8_s",
         Helper::Load16U => "load16_u",
         Helper::Load16S => "load16_s",
+        Helper::LoadI64 => "load_i64",
+        Helper::LoadF32 => "load_f32",
+        Helper::LoadF64 => "load_f64",
+        Helper::Load8UI64 => "load8_u_i64",
+        Helper::Load8SI64 => "load8_s_i64",
+        Helper::Load16UI64 => "load16_u_i64",
+        Helper::Load16SI64 => "load16_s_i64",
+        Helper::Load32UI64 => "load32_u_i64",
+        Helper::Load32SI64 => "load32_s_i64",
         Helper::StoreI32 => "store_i32",
         Helper::Store8 => "store8",
         Helper::Store16 => "store16",
+        Helper::StoreI64 => "store_i64",
+        Helper::StoreF32 => "store_f32",
+        Helper::StoreF64 => "store_f64",
+        Helper::Store8I64 => "store8_i64",
+        Helper::Store16I64 => "store16_i64",
+        Helper::Store32I64 => "store32_i64",
         Helper::Grow => "memory_grow",
     }
 }
@@ -1660,15 +1713,30 @@ pub(crate) fn const_expr_to_rust(expr: &ConstExpr<'_>) -> Result<String, Transpi
 }
 
 /// All memory helpers, in a deterministic emission order.
-const HELPER_ORDER: [Helper; 9] = [
+const HELPER_ORDER: [Helper; 24] = [
     Helper::LoadI32,
     Helper::Load8U,
     Helper::Load8S,
     Helper::Load16U,
     Helper::Load16S,
+    Helper::LoadI64,
+    Helper::LoadF32,
+    Helper::LoadF64,
+    Helper::Load8UI64,
+    Helper::Load8SI64,
+    Helper::Load16UI64,
+    Helper::Load16SI64,
+    Helper::Load32UI64,
+    Helper::Load32SI64,
     Helper::StoreI32,
     Helper::Store8,
     Helper::Store16,
+    Helper::StoreI64,
+    Helper::StoreF32,
+    Helper::StoreF64,
+    Helper::Store8I64,
+    Helper::Store16I64,
+    Helper::Store32I64,
     Helper::Grow,
 ];
 
@@ -1873,11 +1941,7 @@ fn helper_lines(helper: Helper) -> Vec<String> {
         Helper::StoreI32 => owned(&[
             "fn store_i32(&mut self, addr: u32, offset: u32, value: i32) {",
             "    let a = addr as usize + offset as usize;",
-            "    let b = value.to_le_bytes();",
-            "    self.memory[a] = b[0];",
-            "    self.memory[a + 1] = b[1];",
-            "    self.memory[a + 2] = b[2];",
-            "    self.memory[a + 3] = b[3];",
+            "    self.memory[a..a + 4].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::Store8 => owned(&[
@@ -1889,9 +1953,97 @@ fn helper_lines(helper: Helper) -> Vec<String> {
         Helper::Store16 => owned(&[
             "fn store16(&mut self, addr: u32, offset: u32, value: i32) {",
             "    let a = addr as usize + offset as usize;",
-            "    let b = (value as u16).to_le_bytes();",
-            "    self.memory[a] = b[0];",
-            "    self.memory[a + 1] = b[1];",
+            "    self.memory[a..a + 2].copy_from_slice(&(value as u16).to_le_bytes());",
+            "}",
+        ]),
+        Helper::LoadI64 => owned(&[
+            "fn load_i64(&self, addr: u32, offset: u32) -> i64 {",
+            "    let a = addr as usize + offset as usize;",
+            "    i64::from_le_bytes([self.memory[a], self.memory[a + 1], self.memory[a + 2], self.memory[a + 3], self.memory[a + 4], self.memory[a + 5], self.memory[a + 6], self.memory[a + 7]])",
+            "}",
+        ]),
+        Helper::LoadF32 => owned(&[
+            "fn load_f32(&self, addr: u32, offset: u32) -> f32 {",
+            "    let a = addr as usize + offset as usize;",
+            "    f32::from_le_bytes([self.memory[a], self.memory[a + 1], self.memory[a + 2], self.memory[a + 3]])",
+            "}",
+        ]),
+        Helper::LoadF64 => owned(&[
+            "fn load_f64(&self, addr: u32, offset: u32) -> f64 {",
+            "    let a = addr as usize + offset as usize;",
+            "    f64::from_le_bytes([self.memory[a], self.memory[a + 1], self.memory[a + 2], self.memory[a + 3], self.memory[a + 4], self.memory[a + 5], self.memory[a + 6], self.memory[a + 7]])",
+            "}",
+        ]),
+        Helper::Load8UI64 => owned(&[
+            "fn load8_u_i64(&self, addr: u32, offset: u32) -> i64 {",
+            "    let a = addr as usize + offset as usize;",
+            "    self.memory[a] as i64",
+            "}",
+        ]),
+        Helper::Load8SI64 => owned(&[
+            "fn load8_s_i64(&self, addr: u32, offset: u32) -> i64 {",
+            "    let a = addr as usize + offset as usize;",
+            "    self.memory[a] as i8 as i64",
+            "}",
+        ]),
+        Helper::Load16UI64 => owned(&[
+            "fn load16_u_i64(&self, addr: u32, offset: u32) -> i64 {",
+            "    let a = addr as usize + offset as usize;",
+            "    u16::from_le_bytes([self.memory[a], self.memory[a + 1]]) as i64",
+            "}",
+        ]),
+        Helper::Load16SI64 => owned(&[
+            "fn load16_s_i64(&self, addr: u32, offset: u32) -> i64 {",
+            "    let a = addr as usize + offset as usize;",
+            "    i16::from_le_bytes([self.memory[a], self.memory[a + 1]]) as i64",
+            "}",
+        ]),
+        Helper::Load32UI64 => owned(&[
+            "fn load32_u_i64(&self, addr: u32, offset: u32) -> i64 {",
+            "    let a = addr as usize + offset as usize;",
+            "    u32::from_le_bytes([self.memory[a], self.memory[a + 1], self.memory[a + 2], self.memory[a + 3]]) as i64",
+            "}",
+        ]),
+        Helper::Load32SI64 => owned(&[
+            "fn load32_s_i64(&self, addr: u32, offset: u32) -> i64 {",
+            "    let a = addr as usize + offset as usize;",
+            "    i32::from_le_bytes([self.memory[a], self.memory[a + 1], self.memory[a + 2], self.memory[a + 3]]) as i64",
+            "}",
+        ]),
+        Helper::StoreI64 => owned(&[
+            "fn store_i64(&mut self, addr: u32, offset: u32, value: i64) {",
+            "    let a = addr as usize + offset as usize;",
+            "    self.memory[a..a + 8].copy_from_slice(&value.to_le_bytes());",
+            "}",
+        ]),
+        Helper::StoreF32 => owned(&[
+            "fn store_f32(&mut self, addr: u32, offset: u32, value: f32) {",
+            "    let a = addr as usize + offset as usize;",
+            "    self.memory[a..a + 4].copy_from_slice(&value.to_le_bytes());",
+            "}",
+        ]),
+        Helper::StoreF64 => owned(&[
+            "fn store_f64(&mut self, addr: u32, offset: u32, value: f64) {",
+            "    let a = addr as usize + offset as usize;",
+            "    self.memory[a..a + 8].copy_from_slice(&value.to_le_bytes());",
+            "}",
+        ]),
+        Helper::Store8I64 => owned(&[
+            "fn store8_i64(&mut self, addr: u32, offset: u32, value: i64) {",
+            "    let a = addr as usize + offset as usize;",
+            "    self.memory[a] = value as u8;",
+            "}",
+        ]),
+        Helper::Store16I64 => owned(&[
+            "fn store16_i64(&mut self, addr: u32, offset: u32, value: i64) {",
+            "    let a = addr as usize + offset as usize;",
+            "    self.memory[a..a + 2].copy_from_slice(&(value as u16).to_le_bytes());",
+            "}",
+        ]),
+        Helper::Store32I64 => owned(&[
+            "fn store32_i64(&mut self, addr: u32, offset: u32, value: i64) {",
+            "    let a = addr as usize + offset as usize;",
+            "    self.memory[a..a + 4].copy_from_slice(&(value as u32).to_le_bytes());",
             "}",
         ]),
         // `delta` is an unsigned page count. Growth past the wasm32 limit of

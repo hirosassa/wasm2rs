@@ -101,6 +101,91 @@ fn narrow_stores_and_sign_extension() {
 }
 
 #[test]
+fn i64_store_load_roundtrip() {
+    transpile_compile_run(
+        "mem_i64",
+        r#"
+        (module
+          (memory 1)
+          (func (param i32 i64) (i64.store (local.get 0) (local.get 1)))
+          (func (param i32) (result i64) (i64.load (local.get 0))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         inst.func0(8, 0x0123456789ABCDEFu64 as i64);\n    \
+         assert_eq!(inst.func1(8), 0x0123456789ABCDEFu64 as i64);\n    \
+         assert_eq!(inst.func1(0), 0);",
+    );
+}
+
+#[test]
+fn i64_negative_roundtrip_at_offset() {
+    // A negative value exercises the sign bit through to_le_bytes/from_le_bytes,
+    // and a non-zero memarg offset is folded into the effective address.
+    transpile_compile_run(
+        "mem_i64_offset",
+        r#"
+        (module
+          (memory 1)
+          (func (param i32 i64) (i64.store offset=32 (local.get 0) (local.get 1)))
+          (func (param i32) (result i64) (i64.load offset=32 (local.get 0))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         inst.func0(8, -12345678901234i64);\n    \
+         assert_eq!(inst.func1(8), -12345678901234i64);",
+    );
+}
+
+#[test]
+fn float_store_load_roundtrip() {
+    transpile_compile_run(
+        "mem_float",
+        r#"
+        (module
+          (memory 1)
+          (func (param i32 f32) (f32.store (local.get 0) (local.get 1)))
+          (func (param i32) (result f32) (f32.load (local.get 0)))
+          (func (param i32 f64) (f64.store (local.get 0) (local.get 1)))
+          (func (param i32) (result f64) (f64.load (local.get 0))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         inst.func0(0, 1.5f32);\n    \
+         assert_eq!(inst.func1(0), 1.5f32);\n    \
+         inst.func2(8, 2.25f64);\n    \
+         assert_eq!(inst.func3(8), 2.25f64);",
+    );
+}
+
+#[test]
+fn i64_narrow_stores_and_sign_extension() {
+    transpile_compile_run(
+        "mem_i64_narrow",
+        r#"
+        (module
+          (memory 1)
+          (func (param i32 i64) (i64.store8 (local.get 0) (local.get 1)))
+          (func (param i32 i64) (i64.store16 (local.get 0) (local.get 1)))
+          (func (param i32 i64) (i64.store32 (local.get 0) (local.get 1)))
+          (func (param i32) (result i64) (i64.load8_s (local.get 0)))
+          (func (param i32) (result i64) (i64.load8_u (local.get 0)))
+          (func (param i32) (result i64) (i64.load16_s (local.get 0)))
+          (func (param i32) (result i64) (i64.load16_u (local.get 0)))
+          (func (param i32) (result i64) (i64.load32_s (local.get 0)))
+          (func (param i32) (result i64) (i64.load32_u (local.get 0))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         inst.func0(0, 0xFF);\n    \
+         assert_eq!(inst.func3(0), -1);\n    \
+         assert_eq!(inst.func4(0), 255);\n    \
+         inst.func1(2, 0xFFFF);\n    \
+         assert_eq!(inst.func5(2), -1);\n    \
+         assert_eq!(inst.func6(2), 65535);\n    \
+         inst.func2(4, 0xFFFFFFFFi64);\n    \
+         assert_eq!(inst.func7(4), -1);\n    \
+         assert_eq!(inst.func8(4), 4294967295);",
+    );
+}
+
+#[test]
 fn memory_size_and_grow() {
     transpile_compile_run(
         "mem_grow",
