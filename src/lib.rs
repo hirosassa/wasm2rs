@@ -67,6 +67,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
     let mut elements: Vec<codegen::ElemSegment> = Vec::new();
     let mut data: Vec<codegen::DataSegment> = Vec::new();
     let mut imports: Vec<codegen::ImportInfo> = Vec::new();
+    let mut imported_globals: Vec<codegen::ImportedGlobalInfo> = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
@@ -88,24 +89,40 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
             }
             Payload::ImportSection(reader) => {
                 // Function imports occupy the low end of the function index
-                // space and are dispatched through an injected host trait.
-                // Imported memories/globals/tables still need wiring that is
-                // deferred to a later phase, so reject those. Imports may be
-                // grouped in the compact encodings, so each group is expanded.
+                // space (dispatched through an injected host trait) and imported
+                // globals the low end of the global index space (host getters/
+                // setters). Imported memories/tables/tags are still rejected.
+                // Imports may be grouped in the compact encodings, so each group
+                // is expanded.
                 for group in reader {
                     match group? {
                         wasmparser::Imports::Single(_, import) => {
-                            imports.push(import_sig(import.ty, &signatures)?);
+                            classify_import(
+                                import.ty,
+                                &signatures,
+                                &mut imports,
+                                &mut imported_globals,
+                            )?;
                         }
                         wasmparser::Imports::Compact1 { items, .. } => {
                             for item in items {
-                                imports.push(import_sig(item?.ty, &signatures)?);
+                                classify_import(
+                                    item?.ty,
+                                    &signatures,
+                                    &mut imports,
+                                    &mut imported_globals,
+                                )?;
                             }
                         }
                         wasmparser::Imports::Compact2 { ty, names, .. } => {
                             for name in names {
                                 name?;
-                                imports.push(import_sig(ty, &signatures)?);
+                                classify_import(
+                                    ty,
+                                    &signatures,
+                                    &mut imports,
+                                    &mut imported_globals,
+                                )?;
                             }
                         }
                     }
@@ -267,6 +284,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
 
     codegen::generate_module(&codegen::ModuleParts {
         imports: &imports,
+        imported_globals: &imported_globals,
         funcs: &funcs,
         types: &types,
         globals: &globals,
@@ -277,24 +295,35 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
     })
 }
 
-/// Resolve an import's type to a function signature, rejecting non-function
-/// imports (memories, globals, tables, tags) which are not supported yet.
-fn import_sig(
+/// Classify an import by its type, pushing a function import onto `imports` or a
+/// global import onto `imported_globals`. Imported memories, tables and tags are
+/// rejected as not supported yet.
+fn classify_import(
     ty: TypeRef,
     signatures: &[Signature],
-) -> Result<codegen::ImportInfo, TranspileError> {
+    imports: &mut Vec<codegen::ImportInfo>,
+    imported_globals: &mut Vec<codegen::ImportedGlobalInfo>,
+) -> Result<(), TranspileError> {
     match ty {
         TypeRef::Func(type_index) | TypeRef::FuncExact(type_index) => {
             let sig = signatures.get(type_index as usize).ok_or_else(|| {
                 TranspileError::Unsupported("import type index out of range".into())
             })?;
-            Ok(codegen::ImportInfo {
+            imports.push(codegen::ImportInfo {
                 params: sig.params.clone(),
                 results: sig.results.clone(),
-            })
+            });
+            Ok(())
+        }
+        TypeRef::Global(global_ty) => {
+            imported_globals.push(codegen::ImportedGlobalInfo {
+                ty: global_ty.content_type,
+                mutable: global_ty.mutable,
+            });
+            Ok(())
         }
         _ => Err(TranspileError::Unsupported(
-            "imported memory, global, table or tag".into(),
+            "imported memory, table or tag".into(),
         )),
     }
 }

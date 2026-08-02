@@ -1,9 +1,9 @@
-//! Integration tests for Phase 5b: imported functions via trait injection. A
-//! module with function imports generates a `pub trait Imports` (one
-//! `import{j}` method per imported function) and a generic
-//! `Instance<H: Imports>` that stores the host implementation. Each test
-//! defines a host type, compiles the generated Rust with `rustc -D warnings`,
-//! and drives the instance.
+//! Integration tests for imported functions and globals via trait injection. A
+//! module with imports generates a `pub trait Imports` (an `import{j}` method
+//! per imported function, plus `get_global{k}`/`set_global{k}` per imported
+//! global) and a generic `Instance<H: Imports>` that stores the host
+//! implementation. Each test defines a host type, compiles the generated Rust
+//! with `rustc -D warnings`, and drives the instance.
 
 use std::process::Command;
 
@@ -83,6 +83,71 @@ fn void_import_and_multiple_imports() {
          }\n    \
          let mut inst = Instance::new(Host { logged: 0 });\n    \
          assert_eq!(inst.func2(5), 10);",
+    );
+}
+
+#[test]
+fn imported_immutable_global_is_read_from_host() {
+    transpile_compile_run(
+        "global_ro",
+        r#"
+        (module
+          (import "env" "base" (global i32))
+          (func (result i32) (global.get 0)))
+        "#,
+        "struct Host;\n    \
+         impl Imports for Host {\n        \
+             fn get_global0(&self) -> i32 { 42 }\n    \
+         }\n    \
+         let mut inst = Instance::new(Host);\n    \
+         assert_eq!(inst.func0(), 42);",
+    );
+}
+
+#[test]
+fn imported_mutable_global_get_set_with_defined_global() {
+    // Global 0 is the imported mutable global (host-backed); global 1 is a
+    // defined mutable global, so its field must be named `g1`, not `g0`.
+    transpile_compile_run(
+        "global_rw",
+        r#"
+        (module
+          (import "env" "counter" (global (mut i32)))
+          (global (mut i32) (i32.const 5))
+          (func (result i32)
+            (global.set 0 (i32.add (global.get 0) (i32.const 1)))
+            (global.set 1 (i32.add (global.get 1) (global.get 0)))
+            (global.get 1)))
+        "#,
+        "struct Host { c: i32 }\n    \
+         impl Imports for Host {\n        \
+             fn get_global0(&self) -> i32 { self.c }\n        \
+             fn set_global0(&mut self, v: i32) { self.c = v; }\n    \
+         }\n    \
+         let mut inst = Instance::new(Host { c: 10 });\n    \
+         assert_eq!(inst.func0(), 16);\n    \
+         assert_eq!(inst.func0(), 28);",
+    );
+}
+
+#[test]
+fn imported_function_and_global_share_no_index_space() {
+    // Function import 0 and global import 0 are indexed independently.
+    transpile_compile_run(
+        "func_and_global",
+        r#"
+        (module
+          (import "env" "f" (func (param i32) (result i32)))
+          (import "env" "g" (global i32))
+          (func (result i32) (call 0 (global.get 0))))
+        "#,
+        "struct Host;\n    \
+         impl Imports for Host {\n        \
+             fn import0(&mut self, a0: i32) -> i32 { a0 * 10 }\n        \
+             fn get_global0(&self) -> i32 { 7 }\n    \
+         }\n    \
+         let mut inst = Instance::new(Host);\n    \
+         assert_eq!(inst.func1(), 70);",
     );
 }
 

@@ -69,6 +69,14 @@ pub(crate) struct ImportInfo {
     pub results: Vec<ValType>,
 }
 
+/// An imported global: its type and mutability. Imported globals occupy the low
+/// end of the global index space and are read/written through the injected host
+/// (`get_global{k}`/`set_global{k}`), preserving host sharing.
+pub(crate) struct ImportedGlobalInfo {
+    pub ty: ValType,
+    pub mutable: bool,
+}
+
 /// One function to translate: its signature plus its body.
 pub(crate) struct FuncInput<'a> {
     pub params: &'a [ValType],
@@ -189,7 +197,9 @@ struct ModuleCtx<'a> {
     /// Every function type, so `call_indirect` can resolve its declared type
     /// index back to a signature.
     types: &'a [TypeSig],
-    /// Per-global `(type, mutable)`, indexed by global index.
+    /// Per-imported-global `(type, mutable)`, occupying the low global indices.
+    imported_globals: Vec<(ValType, bool)>,
+    /// Per-defined-global `(type, mutable)`, indexed after the imported globals.
     globals: Vec<(ValType, bool)>,
     /// Whether the module declares linear memory (so `self.memory` exists).
     has_memory: bool,
@@ -240,6 +250,7 @@ impl ModuleCtx<'_> {
 /// context ([`ModuleCtx`]) is computed from these.
 pub(crate) struct ModuleParts<'a> {
     pub(crate) imports: &'a [ImportInfo],
+    pub(crate) imported_globals: &'a [ImportedGlobalInfo],
     pub(crate) funcs: &'a [FuncInput<'a>],
     pub(crate) types: &'a [TypeSig],
     pub(crate) globals: &'a [GlobalInfo],
@@ -258,6 +269,7 @@ pub(crate) struct ModuleParts<'a> {
 pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, TranspileError> {
     let ModuleParts {
         imports,
+        imported_globals,
         funcs,
         types,
         globals,
@@ -268,7 +280,8 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
 
     let has_memory = memory.is_some();
     let has_table = table.is_some();
-    let has_imports = !imports.is_empty();
+    // The host is injected whenever anything is imported (functions or globals).
+    let has_imports = !imports.is_empty() || !imported_globals.is_empty();
     // Imports must be held by an instance, so a module that has them (or any
     // other mutable state) becomes a `struct Instance` with method functions.
     let stateful = has_memory || has_table || has_imports || !globals.is_empty();
@@ -277,6 +290,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         imports,
         funcs,
         types,
+        imported_globals: imported_globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,
         has_table,
@@ -1000,27 +1014,38 @@ impl<'a> FuncGen<'a> {
 
     // ----- globals ---------------------------------------------------------
 
-    fn global(&self, global_index: u32) -> Result<(ValType, bool), TranspileError> {
-        self.ctx
-            .globals
-            .get(global_index as usize)
-            .copied()
+    /// Resolve a global index to `(type, mutable, imported)`, spanning imported
+    /// globals (the low indices) then defined globals. `imported` is true when
+    /// the global is host-backed.
+    fn global(&self, global_index: u32) -> Result<(ValType, bool, bool), TranspileError> {
+        let n_imported = self.ctx.imported_globals.len();
+        let idx = global_index as usize;
+        let (entry, imported) = if idx < n_imported {
+            (self.ctx.imported_globals.get(idx), true)
+        } else {
+            (self.ctx.globals.get(idx - n_imported), false)
+        };
+        entry
+            .map(|&(ty, mutable)| (ty, mutable, imported))
             .ok_or_else(|| TranspileError::Unsupported("global index out of range".into()))
     }
 
     fn global_get(&mut self, global_index: u32) -> Result<(), TranspileError> {
-        let (ty, mutable) = self.global(global_index)?;
-        self.push(Val {
-            code: format!("self.g{global_index}"),
-            ty,
-            // A mutable global can be changed by a later `global.set`.
-            stable: !mutable,
-        });
+        let (ty, mutable, imported) = self.global(global_index)?;
+        // An imported global is fetched from the host and is always unstable (a
+        // host getter should not be re-evaluated, so it is materialised when it
+        // matters); a defined one is a field, unstable only when mutable.
+        let (code, stable) = if imported {
+            (format!("self.imports.get_global{global_index}()"), false)
+        } else {
+            (format!("self.g{global_index}"), !mutable)
+        };
+        self.push(Val { code, ty, stable });
         Ok(())
     }
 
     fn global_set(&mut self, global_index: u32) -> Result<(), TranspileError> {
-        let (_, mutable) = self.global(global_index)?;
+        let (_, mutable, imported) = self.global(global_index)?;
         if !mutable {
             return Err(TranspileError::Unsupported(
                 "set of immutable global".into(),
@@ -1028,7 +1053,14 @@ impl<'a> FuncGen<'a> {
         }
         self.spill_nonstable()?;
         let value = self.pop()?;
-        self.line(format!("self.g{global_index} = {};", value.code));
+        if imported {
+            self.line(format!(
+                "self.imports.set_global{global_index}({});",
+                value.code
+            ));
+        } else {
+            self.line(format!("self.g{global_index} = {};", value.code));
+        }
         Ok(())
     }
 
@@ -1934,6 +1966,7 @@ fn render_module(
 ) -> Result<String, TranspileError> {
     let ModuleParts {
         imports,
+        imported_globals,
         globals,
         memory,
         data,
@@ -1942,11 +1975,15 @@ fn render_module(
         ..
     } = *parts;
 
+    // Defined globals are named by their full index, i.e. after the imported
+    // globals in the shared global index space.
+    let global_base = imported_globals.len();
+
     let mut lines: Vec<String> = Vec::new();
 
-    let has_imports = !imports.is_empty();
+    let has_imports = !imports.is_empty() || !imported_globals.is_empty();
     if has_imports {
-        lines.extend(import_trait_lines(imports)?);
+        lines.extend(import_trait_lines(imports, imported_globals)?);
         lines.push(String::new());
     }
     // A generic parameter carries the host implementation only when needed:
@@ -1971,7 +2008,7 @@ fn render_module(
         lines.push("    table: Vec<u32>,".to_string());
     }
     for (i, g) in globals.iter().enumerate() {
-        lines.push(format!("    g{i}: {},", rust_type(g.ty)?));
+        lines.push(format!("    g{}: {},", global_base + i, rust_type(g.ty)?));
     }
     lines.push("}".to_string());
     lines.push(String::new());
@@ -2038,7 +2075,7 @@ fn render_module(
         }
     }
     for (i, g) in globals.iter().enumerate() {
-        inner.push(format!("        g{i}: {},", g.init));
+        inner.push(format!("        g{}: {},", global_base + i, g.init));
     }
     inner.push("    }".to_string());
     inner.push("}".to_string());
@@ -2069,7 +2106,10 @@ fn render_module(
 
 /// The `pub trait Imports` declaration: one `import{j}` method per imported
 /// function, taking `&mut self` since a host call may have side effects.
-fn import_trait_lines(imports: &[ImportInfo]) -> Result<Vec<String>, TranspileError> {
+fn import_trait_lines(
+    imports: &[ImportInfo],
+    imported_globals: &[ImportedGlobalInfo],
+) -> Result<Vec<String>, TranspileError> {
     let mut lines = vec!["pub trait Imports {".to_string()];
     for (j, im) in imports.iter().enumerate() {
         let mut params = String::from("&mut self");
@@ -2086,6 +2126,14 @@ fn import_trait_lines(imports: &[ImportInfo]) -> Result<Vec<String>, TranspileEr
             }
         };
         lines.push(format!("    fn import{j}({params}){ret};"));
+    }
+    // Each imported global gets a getter; a mutable one also gets a setter.
+    for (k, g) in imported_globals.iter().enumerate() {
+        let ty = rust_type(g.ty)?;
+        lines.push(format!("    fn get_global{k}(&self) -> {ty};"));
+        if g.mutable {
+            lines.push(format!("    fn set_global{k}(&mut self, v: {ty});"));
+        }
     }
     lines.push("}".to_string());
     Ok(lines)
