@@ -41,17 +41,19 @@ pub(crate) struct TableInfo {
     pub min: u32,
 }
 
-/// One active element segment: function indices written into the table
-/// starting at a constant `offset`.
+/// One element segment: function indices for the table. `offset` is `Some` for
+/// an active segment (written at that constant offset during instantiation) and
+/// `None` for a passive one (retained for `table.init`).
 pub(crate) struct ElemSegment {
-    pub offset: u32,
+    pub offset: Option<u32>,
     pub funcs: Vec<u32>,
 }
 
-/// One active data segment: raw bytes written into linear memory starting at a
-/// constant `offset`.
+/// One data segment: raw bytes for linear memory. `offset` is `Some` for an
+/// active segment (written at that constant offset during instantiation) and
+/// `None` for a passive one (retained for `memory.init`).
 pub(crate) struct DataSegment {
-    pub offset: u32,
+    pub offset: Option<u32>,
     pub bytes: Vec<u8>,
 }
 
@@ -205,6 +207,12 @@ struct ModuleCtx<'a> {
     has_memory: bool,
     /// Whether the module declares a table (so `self.table` exists).
     has_table: bool,
+    /// Per-data-segment: whether it is passive (so `memory.init`/`data.drop`
+    /// can reference it through a `data{d}` field), indexed by data index.
+    data_passive: Vec<bool>,
+    /// Per-element-segment: whether it is passive (so `table.init`/`elem.drop`
+    /// can reference it through an `elem{e}` field), indexed by element index.
+    elem_passive: Vec<bool>,
     /// Whether functions are emitted as `&mut self` methods (stateful module).
     is_method: bool,
 }
@@ -274,7 +282,9 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         types,
         globals,
         memory,
+        data,
         table,
+        elements,
         ..
     } = *parts;
 
@@ -294,6 +304,8 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,
         has_table,
+        data_passive: data.iter().map(|d| d.offset.is_none()).collect(),
+        elem_passive: elements.iter().map(|e| e.offset.is_none()).collect(),
         is_method: stateful,
     };
 
@@ -647,6 +659,13 @@ impl<'a> FuncGen<'a> {
                 dst_table,
                 src_table,
             } => self.table_copy(dst_table, src_table)?,
+            // Passive-segment init/drop (bulk-memory proposal). `memory.init`/
+            // `table.init` copy from a passive segment; `data.drop`/`elem.drop`
+            // release it so a later non-zero init traps.
+            Operator::MemoryInit { data_index, mem } => self.memory_init(data_index, mem)?,
+            Operator::DataDrop { data_index } => self.data_drop(data_index)?,
+            Operator::TableInit { elem_index, table } => self.table_init(elem_index, table)?,
+            Operator::ElemDrop { elem_index } => self.elem_drop(elem_index)?,
             Operator::Drop => {
                 self.pop()?;
             }
@@ -1208,6 +1227,79 @@ impl<'a> FuncGen<'a> {
             "self.table_copy(({}) as u32, ({}) as u32, ({}) as u32);",
             dest.code, src.code, len.code
         ));
+        Ok(())
+    }
+
+    /// Require that segment `index` (named by `kind`, e.g. "data") is passive;
+    /// the init/drop instructions only reference passive segments here (active
+    /// ones are auto-copied then implicitly dropped at instantiation).
+    fn require_passive(
+        &self,
+        passive: &[bool],
+        index: u32,
+        kind: &str,
+    ) -> Result<(), TranspileError> {
+        if passive.get(index as usize).copied().unwrap_or(false) {
+            Ok(())
+        } else {
+            Err(TranspileError::Unsupported(format!(
+                "{kind} segment {index} is not passive (init/drop needs a passive segment)"
+            )))
+        }
+    }
+
+    /// Emit a bulk copy of `len` elements from a retained passive segment
+    /// (`src_seg`, e.g. `self.data0`) into `dst` (e.g. `self.memory`). A range
+    /// exceeding either side — including a dropped, now-empty segment — panics,
+    /// reproducing the wasm trap; the destination is bounds-checked first, so no
+    /// partial write occurs.
+    fn emit_bulk_init(&mut self, dst: &str, src_seg: &str, dest: &Val, src: &Val, len: &Val) {
+        self.line(format!(
+            "{{ let n = ({}) as usize; let s = ({}) as usize; let d = ({}) as usize; \
+             {dst}[d..d + n].copy_from_slice(&{src_seg}[s..s + n]); }}",
+            len.code, src.code, dest.code
+        ));
+    }
+
+    fn memory_init(&mut self, data_index: u32, mem: u32) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        self.require_zero_index(mem, "memory.init")?;
+        self.require_passive(&self.ctx.data_passive, data_index, "data")?;
+        let (dest, src, len) = self.pop_bulk_operands()?;
+        self.emit_bulk_init(
+            "self.memory",
+            &format!("self.data{data_index}"),
+            &dest,
+            &src,
+            &len,
+        );
+        Ok(())
+    }
+
+    fn data_drop(&mut self, data_index: u32) -> Result<(), TranspileError> {
+        self.require_passive(&self.ctx.data_passive, data_index, "data")?;
+        self.line(format!("self.data{data_index} = &[];"));
+        Ok(())
+    }
+
+    fn table_init(&mut self, elem_index: u32, table: u32) -> Result<(), TranspileError> {
+        self.require_table()?;
+        self.require_zero_index(table, "table.init")?;
+        self.require_passive(&self.ctx.elem_passive, elem_index, "elem")?;
+        let (dest, src, len) = self.pop_bulk_operands()?;
+        self.emit_bulk_init(
+            "self.table",
+            &format!("self.elem{elem_index}"),
+            &dest,
+            &src,
+            &len,
+        );
+        Ok(())
+    }
+
+    fn elem_drop(&mut self, elem_index: u32) -> Result<(), TranspileError> {
+        self.require_passive(&self.ctx.elem_passive, elem_index, "elem")?;
+        self.line(format!("self.elem{elem_index} = &[];"));
         Ok(())
     }
 
@@ -1777,6 +1869,15 @@ fn helper_name(helper: Helper) -> &'static str {
     }
 }
 
+/// Render bytes as a comma-separated list of `u8` literals (a Rust array body).
+fn byte_array_literal(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b}u8"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Indent each non-empty line by four spaces.
 fn indent(lines: &[String]) -> Vec<String> {
     lines
@@ -1995,6 +2096,31 @@ fn render_module(
         ("", "")
     };
 
+    // Module-scope statics backing the retained passive segments.
+    for (d, seg) in data.iter().enumerate() {
+        if seg.offset.is_none() {
+            let bytes_lit = byte_array_literal(&seg.bytes);
+            lines.push(format!(
+                "static DATA{d}: [u8; {}] = [{bytes_lit}];",
+                seg.bytes.len()
+            ));
+        }
+    }
+    for (e, seg) in elements.iter().enumerate() {
+        if seg.offset.is_none() {
+            let funcs_lit = seg
+                .funcs
+                .iter()
+                .map(|f| format!("{f}u32"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!(
+                "static ELEM{e}: [u32; {}] = [{funcs_lit}];",
+                seg.funcs.len()
+            ));
+        }
+    }
+
     lines.push("#[allow(dead_code)]".to_string());
     lines.push(format!("pub struct Instance{decl_generics} {{"));
     if has_imports {
@@ -2009,6 +2135,18 @@ fn render_module(
     }
     for (i, g) in globals.iter().enumerate() {
         lines.push(format!("    g{}: {},", global_base + i, rust_type(g.ty)?));
+    }
+    // A retained passive segment is a `&'static` slice; `data.drop`/`elem.drop`
+    // reset it to an empty slice.
+    for (d, seg) in data.iter().enumerate() {
+        if seg.offset.is_none() {
+            lines.push(format!("    data{d}: &'static [u8],"));
+        }
+    }
+    for (e, seg) in elements.iter().enumerate() {
+        if seg.offset.is_none() {
+            lines.push(format!("    elem{e}: &'static [u32],"));
+        }
     }
     lines.push("}".to_string());
     lines.push(String::new());
@@ -2029,7 +2167,10 @@ fn render_module(
             .min_pages
             .checked_mul(65536)
             .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
-        if data.is_empty() {
+        // Only active segments are copied at instantiation; passive ones are
+        // retained (see the `data{d}` fields) for `memory.init`.
+        let active: Vec<&DataSegment> = data.iter().filter(|d| d.offset.is_some()).collect();
+        if active.is_empty() {
             inner.push(format!("        memory: vec![0u8; {bytes}],"));
         } else {
             // Zero the memory, then copy each active data segment into place.
@@ -2037,15 +2178,10 @@ fn render_module(
             inner.push(format!(
                 "            let mut m: Vec<u8> = vec![0u8; {bytes}];"
             ));
-            for seg in data {
-                let off = seg.offset as usize;
+            for seg in active {
+                let off = seg.offset.unwrap_or(0) as usize;
                 let end = off + seg.bytes.len();
-                let bytes_lit = seg
-                    .bytes
-                    .iter()
-                    .map(|b| format!("{b}u8"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let bytes_lit = byte_array_literal(&seg.bytes);
                 inner.push(format!(
                     "            m[{off}..{end}].copy_from_slice(&[{bytes_lit}]);"
                 ));
@@ -2055,7 +2191,8 @@ fn render_module(
         }
     }
     if let Some(t) = table {
-        if elements.is_empty() {
+        let active: Vec<&ElemSegment> = elements.iter().filter(|e| e.offset.is_some()).collect();
+        if active.is_empty() {
             inner.push(format!("        table: vec![u32::MAX; {}],", t.min));
         } else {
             // Start every slot null, then apply each active element segment.
@@ -2064,9 +2201,9 @@ fn render_module(
                 "            let mut t: Vec<u32> = vec![u32::MAX; {}];",
                 t.min
             ));
-            for seg in elements {
+            for seg in active {
                 for (k, f) in seg.funcs.iter().enumerate() {
-                    let idx = seg.offset as usize + k;
+                    let idx = seg.offset.unwrap_or(0) as usize + k;
                     inner.push(format!("            t[{idx}] = {f}u32;"));
                 }
             }
@@ -2076,6 +2213,18 @@ fn render_module(
     }
     for (i, g) in globals.iter().enumerate() {
         inner.push(format!("        g{}: {},", global_base + i, g.init));
+    }
+    // Passive segments are retained as `&'static` slices of the module-scope
+    // statics, so `memory.init`/`table.init` can copy from them on demand.
+    for (d, seg) in data.iter().enumerate() {
+        if seg.offset.is_none() {
+            inner.push(format!("        data{d}: &DATA{d},"));
+        }
+    }
+    for (e, seg) in elements.iter().enumerate() {
+        if seg.offset.is_none() {
+            inner.push(format!("        elem{e}: &ELEM{e},"));
+        }
     }
     inner.push("    }".to_string());
     inner.push("}".to_string());

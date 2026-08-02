@@ -187,11 +187,12 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                                     "element segment for a non-zero table".into(),
                                 ));
                             }
-                            codegen::const_expr_u32(offset_expr)?
+                            Some(codegen::const_expr_u32(offset_expr)?)
                         }
-                        _ => {
+                        ElementKind::Passive => None,
+                        ElementKind::Declared => {
                             return Err(TranspileError::Unsupported(
-                                "passive or declared element segment".into(),
+                                "declared element segment".into(),
                             ));
                         }
                     };
@@ -236,11 +237,9 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                                     "data segment for a non-zero memory".into(),
                                 ));
                             }
-                            codegen::const_expr_u32(offset_expr)?
+                            Some(codegen::const_expr_u32(offset_expr)?)
                         }
-                        DataKind::Passive => {
-                            return Err(TranspileError::Unsupported("passive data segment".into()));
-                        }
+                        DataKind::Passive => None,
                     };
                     data.push(codegen::DataSegment {
                         offset,
