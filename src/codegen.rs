@@ -192,6 +192,10 @@ struct Frame {
     /// so an `if`'s `else` arm can restore them after the `then` arm consumes
     /// them.
     entry_params: Vec<Val>,
+    /// For a `loop`: one `(variable, type)` per parameter. A `br` back to the
+    /// header reassigns these loop-carried variables before `continue`. Empty
+    /// for blocks and `if`s.
+    loop_params: Vec<(String, ValType)>,
     /// Operand-stack height of the enclosing scope (values below this frame).
     parent_height: usize,
     /// The output buffer of the enclosing scope, restored when the frame ends.
@@ -208,6 +212,14 @@ impl Frame {
     /// The result variable names, in source order.
     fn result_vars(&self) -> Vec<String> {
         self.results.iter().map(|(var, _)| var.clone()).collect()
+    }
+
+    /// The loop-carried parameter variable names, in source order.
+    fn loop_param_vars(&self) -> Vec<String> {
+        self.loop_params
+            .iter()
+            .map(|(var, _)| var.clone())
+            .collect()
     }
 }
 
@@ -1539,9 +1551,6 @@ impl<'a> FuncGen<'a> {
         cond: Option<String>,
     ) -> Result<(), TranspileError> {
         let (param_types, result_types) = self.block_signature(blockty)?;
-        if kind == FrameKind::Loop && !param_types.is_empty() {
-            return Err(TranspileError::Unsupported("loop with parameters".into()));
-        }
         self.spill_nonstable()?;
         // The parameters are the top operands; they stay on the stack as the
         // region's initial values, so the enclosing scope ends below them.
@@ -1551,6 +1560,14 @@ impl<'a> FuncGen<'a> {
             .checked_sub(param_types.len())
             .ok_or(TranspileError::StackUnderflow)?;
         let entry_params = self.stack[parent_height..].to_vec();
+        // A loop's parameters are loop-carried, so they become mutable variables
+        // that a `br` back to the header can reassign. A block's/`if`'s
+        // parameters are read-only and stay as their entry expressions.
+        let loop_params = if kind == FrameKind::Loop {
+            self.materialize_loop_params(parent_height, &param_types)?
+        } else {
+            Vec::new()
+        };
         // Result variables are declared in the enclosing buffer, before the
         // region, so a `br` out of it (or its fall-through) can assign them.
         let results = self.alloc_results(&result_types)?;
@@ -1563,6 +1580,7 @@ impl<'a> FuncGen<'a> {
             targeted: false,
             results,
             entry_params,
+            loop_params,
             parent_height,
             parent_buffer,
             then_buffer: None,
@@ -1570,6 +1588,30 @@ impl<'a> FuncGen<'a> {
             cond,
         });
         Ok(())
+    }
+
+    /// Turn a loop's entry parameters into `let mut` variables (initialised to
+    /// their entry expressions) and rewrite their stack slots to reference the
+    /// variables, so the loop body and any `br` back to it share the same
+    /// loop-carried storage.
+    fn materialize_loop_params(
+        &mut self,
+        parent_height: usize,
+        param_types: &[ValType],
+    ) -> Result<Vec<(String, ValType)>, TranspileError> {
+        let mut vars = Vec::with_capacity(param_types.len());
+        for (i, &ty) in param_types.iter().enumerate() {
+            let name = self.fresh_temp();
+            let entry = self.stack[parent_height + i].code.clone();
+            self.line(format!("let mut {name}: {} = {entry};", rust_type(ty)?));
+            self.stack[parent_height + i] = Val {
+                code: name.clone(),
+                ty,
+                stable: true,
+            };
+            vars.push((name, ty));
+        }
+        Ok(vars)
     }
 
     /// Assign the current frame's results from the top operands (in source
@@ -1726,10 +1768,10 @@ impl<'a> FuncGen<'a> {
             .ok_or_else(|| TranspileError::Unsupported("branch depth out of range".into()))?;
         let is_loop = self.frames[idx].kind == FrameKind::Loop;
         let label = self.frames[idx].label;
-        // Branching to a loop targets its (empty) parameters; branching to a
-        // block or if carries the region's result values.
+        // Branching to a loop targets its parameters (its loop-carried
+        // variables); branching to a block or if carries the region's results.
         let vars = if is_loop {
-            Vec::new()
+            self.frames[idx].loop_param_vars()
         } else {
             self.frames[idx].result_vars()
         };
@@ -1796,8 +1838,9 @@ impl<'a> FuncGen<'a> {
     }
 
     /// Resolve a branch-table target depth to a `(keyword, label)` pair and mark
-    /// the target frame as branched to. Result-carrying targets are rejected in
-    /// a `br_table` for now, since each arm would need its own assignment.
+    /// the target frame as branched to. Value-carrying targets are rejected in
+    /// a `br_table` for now, since each arm would need its own assignment: a
+    /// block/if with a result, or a loop with parameters.
     fn branch_arm(&mut self, depth: u32) -> Result<(&'static str, usize), TranspileError> {
         let idx = self
             .frames
@@ -1808,6 +1851,11 @@ impl<'a> FuncGen<'a> {
         if frame.kind != FrameKind::Loop && !frame.results.is_empty() {
             return Err(TranspileError::Unsupported(
                 "br_table targeting a block with a result".into(),
+            ));
+        }
+        if frame.kind == FrameKind::Loop && !frame.loop_params.is_empty() {
+            return Err(TranspileError::Unsupported(
+                "br_table targeting a loop with parameters".into(),
             ));
         }
         let keyword = if frame.kind == FrameKind::Loop {

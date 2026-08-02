@@ -544,6 +544,26 @@ mod tests {
     }
 
     #[test]
+    fn br_table_into_a_loop_with_parameters_is_rejected() {
+        // `br_table` cannot yet carry values, so a target loop that has
+        // parameters (loop-carried variables to reassign) is rejected, mirroring
+        // the existing rejection of result-carrying block targets.
+        let wasm = wat_to_wasm(
+            r#"
+            (module
+              (func (param i32) (result i32)
+                (i32.const 0)
+                (loop (param i32) (result i32)
+                  (loop (param i32)
+                    (br_table 0 1 (local.get 0))))))
+            "#,
+        );
+
+        let err = transpile(&wasm).expect_err("br_table into a param loop must be rejected");
+        assert!(matches!(err, TranspileError::Unsupported(_)));
+    }
+
+    #[test]
     fn result_declared_but_empty_stack_is_rejected() {
         // A function that declares a result but falls off its end with nothing
         // on the stack must be an error, rather than silently emitting an
