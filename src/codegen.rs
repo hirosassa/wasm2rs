@@ -131,6 +131,24 @@ struct Frame {
 /// it is emitted as a `pub struct Instance` with the functions as `&mut self`
 /// methods. A stateless module keeps its functions as free `pub fn`s, matching
 /// the earlier phases exactly.
+/// Module-wide context shared by every function's code generation.
+struct ModuleCtx<'a> {
+    /// Every function, indexed by function index, so a `call` can read its
+    /// callee's signature (arity and result).
+    funcs: &'a [FuncInput<'a>],
+    /// Every function type, so `call_indirect` can resolve its declared type
+    /// index back to a signature.
+    types: &'a [TypeSig],
+    /// Per-global `(type, mutable)`, indexed by global index.
+    globals: Vec<(ValType, bool)>,
+    /// Whether the module declares linear memory (so `self.memory` exists).
+    has_memory: bool,
+    /// Whether the module declares a table (so `self.table` exists).
+    has_table: bool,
+    /// Whether functions are emitted as `&mut self` methods (stateful module).
+    is_method: bool,
+}
+
 pub(crate) fn generate_module(
     funcs: &[FuncInput<'_>],
     types: &[TypeSig],
@@ -143,12 +161,19 @@ pub(crate) fn generate_module(
     let has_table = table.is_some();
     let stateful = has_memory || has_table || !globals.is_empty();
 
+    let ctx = ModuleCtx {
+        funcs,
+        types,
+        globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
+        has_memory,
+        has_table,
+        is_method: stateful,
+    };
+
     let mut sources = Vec::with_capacity(funcs.len());
     let mut used: HashSet<Helper> = HashSet::new();
     for (index, f) in funcs.iter().enumerate() {
-        let generated = generate_function(
-            index, f, funcs, types, globals, has_memory, has_table, stateful,
-        )?;
+        let generated = generate_function(index, f, &ctx)?;
         used.extend(generated.helpers);
         sources.push(generated.src);
     }
@@ -159,16 +184,10 @@ pub(crate) fn generate_module(
     render_module(&sources, globals, memory, table, elements, &used)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn generate_function<'a>(
+fn generate_function(
     index: usize,
     input: &FuncInput<'_>,
-    funcs: &'a [FuncInput<'a>],
-    types: &'a [TypeSig],
-    globals: &[GlobalInfo],
-    has_memory: bool,
-    has_table: bool,
-    is_method: bool,
+    ctx: &ModuleCtx<'_>,
 ) -> Result<GenFn, TranspileError> {
     let result = match input.results {
         [] => None,
@@ -176,17 +195,7 @@ fn generate_function<'a>(
         _ => return Err(TranspileError::Unsupported("multi-value results".into())),
     };
 
-    let mut func = FuncGen::new(
-        input.params,
-        result,
-        input.body,
-        funcs,
-        types,
-        globals,
-        has_memory,
-        has_table,
-        is_method,
-    )?;
+    let mut func = FuncGen::new(input.params, result, input.body, ctx)?;
     func.run(input.body)?;
     func.finish(index, input.params, result)
 }
@@ -195,20 +204,8 @@ fn generate_function<'a>(
 struct FuncGen<'a> {
     local_types: Vec<ValType>,
     mutable_locals: HashSet<u32>,
-    /// Every function in the module, indexed by function index, so a `call`
-    /// can read its callee's signature (arity and result).
-    funcs: &'a [FuncInput<'a>],
-    /// Every function type in the module, so `call_indirect` can resolve its
-    /// declared type index back to a signature.
-    types: &'a [TypeSig],
-    /// Per-global `(type, mutable)`, indexed by global index.
-    globals: Vec<(ValType, bool)>,
-    /// Whether the module declares linear memory (so `self.memory` exists).
-    has_memory: bool,
-    /// Whether the module declares a table (so `self.table` exists).
-    has_table: bool,
-    /// Whether this function is emitted as a `&mut self` method.
-    is_method: bool,
+    /// Module-wide context (functions, types, globals, stateful flags).
+    ctx: &'a ModuleCtx<'a>,
     result: Option<ValType>,
     stack: Vec<Val>,
     frames: Vec<Frame>,
@@ -227,17 +224,11 @@ struct FuncGen<'a> {
 }
 
 impl<'a> FuncGen<'a> {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         params: &[ValType],
         result: Option<ValType>,
         body: &FunctionBody<'_>,
-        funcs: &'a [FuncInput<'a>],
-        types: &'a [TypeSig],
-        globals: &[GlobalInfo],
-        has_memory: bool,
-        has_table: bool,
-        is_method: bool,
+        ctx: &'a ModuleCtx<'a>,
     ) -> Result<Self, TranspileError> {
         let mut local_types = params.to_vec();
         for local in body.get_locals_reader()? {
@@ -267,12 +258,7 @@ impl<'a> FuncGen<'a> {
         Ok(Self {
             local_types,
             mutable_locals,
-            funcs,
-            types,
-            globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
-            has_memory,
-            has_table,
-            is_method,
+            ctx,
             result,
             stack: Vec::new(),
             frames: Vec::new(),
@@ -539,7 +525,8 @@ impl<'a> FuncGen<'a> {
     // ----- globals ---------------------------------------------------------
 
     fn global(&self, global_index: u32) -> Result<(ValType, bool), TranspileError> {
-        self.globals
+        self.ctx
+            .globals
             .get(global_index as usize)
             .copied()
             .ok_or_else(|| TranspileError::Unsupported("global index out of range".into()))
@@ -572,7 +559,7 @@ impl<'a> FuncGen<'a> {
     // ----- linear memory ---------------------------------------------------
 
     fn require_memory(&self) -> Result<(), TranspileError> {
-        if self.has_memory {
+        if self.ctx.has_memory {
             Ok(())
         } else {
             Err(TranspileError::Unsupported(
@@ -935,6 +922,7 @@ impl<'a> FuncGen<'a> {
 
     fn call(&mut self, function_index: u32) -> Result<(), TranspileError> {
         let callee = self
+            .ctx
             .funcs
             .get(function_index as usize)
             .ok_or_else(|| TranspileError::Unsupported("call to unknown function".into()))?;
@@ -965,7 +953,7 @@ impl<'a> FuncGen<'a> {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let receiver = if self.is_method { "self." } else { "" };
+        let receiver = if self.ctx.is_method { "self." } else { "" };
         let call_expr = format!("{receiver}func{function_index}({arg_list})");
         match result {
             // A call is not re-evaluatable, so bind it to a temporary at exactly
@@ -985,7 +973,7 @@ impl<'a> FuncGen<'a> {
     }
 
     fn call_indirect(&mut self, type_index: u32, table_index: u32) -> Result<(), TranspileError> {
-        if !self.has_table {
+        if !self.ctx.has_table {
             return Err(TranspileError::Unsupported(
                 "call_indirect without a table".into(),
             ));
@@ -996,6 +984,7 @@ impl<'a> FuncGen<'a> {
             ));
         }
         let sig = self
+            .ctx
             .types
             .get(type_index as usize)
             .ok_or_else(|| TranspileError::Unsupported("call_indirect: unknown type".into()))?;
@@ -1012,6 +1001,7 @@ impl<'a> FuncGen<'a> {
         // signature equals the declared type (no subtyping, so a structural
         // match is a type match).
         let targets: Vec<usize> = self
+            .ctx
             .funcs
             .iter()
             .enumerate()
@@ -1122,11 +1112,11 @@ impl<'a> FuncGen<'a> {
     ) -> Result<GenFn, TranspileError> {
         let mut params_src = String::new();
         // Stateful modules pass their memory/globals through `&mut self`.
-        if self.is_method {
+        if self.ctx.is_method {
             params_src.push_str("&mut self");
         }
         for (i, ty) in params.iter().enumerate() {
-            if self.is_method || i > 0 {
+            if self.ctx.is_method || i > 0 {
                 params_src.push_str(", ");
             }
             let keyword = if self.mutable_locals.contains(&index_u32(i)?) {
@@ -1150,7 +1140,7 @@ impl<'a> FuncGen<'a> {
         // For a method the lint-suppression attribute is applied once on the
         // enclosing `impl`; free functions carry it individually.
         let mut out = String::new();
-        if !self.is_method {
+        if !self.ctx.is_method {
             out.push_str(ALLOW);
             out.push('\n');
         }
