@@ -454,6 +454,52 @@ impl<'a> FuncGen<'a> {
             Operator::F32Nearest | Operator::F64Nearest => self.unop_method("round_ties_even")?,
             Operator::F32Sqrt | Operator::F64Sqrt => self.unop_method("sqrt")?,
             Operator::F32Copysign | Operator::F64Copysign => self.binop_method("copysign")?,
+            // Numeric conversions. Integer wrap/extend and int<->float casts map
+            // to Rust `as` (which truncates integers and, for float->int, is
+            // saturating — matching wasm's `trunc_sat`). `cast_as` is a single
+            // `as R`; `cast_through` first reinterprets `as M` (an unsigned type
+            // for unsigned variants, a narrower signed type for sign-extension).
+            // `reinterpret` moves the bits unchanged.
+            Operator::I32WrapI64 => self.cast_as(ValType::I32, "i32")?,
+            Operator::I64ExtendI32S => self.cast_as(ValType::I64, "i64")?,
+            Operator::I64ExtendI32U => self.cast_through(ValType::I64, "u32", "i64")?,
+            Operator::I32Extend8S => self.cast_through(ValType::I32, "i8", "i32")?,
+            Operator::I32Extend16S => self.cast_through(ValType::I32, "i16", "i32")?,
+            Operator::I64Extend8S => self.cast_through(ValType::I64, "i8", "i64")?,
+            Operator::I64Extend16S => self.cast_through(ValType::I64, "i16", "i64")?,
+            Operator::I64Extend32S => self.cast_through(ValType::I64, "i32", "i64")?,
+            Operator::F32ConvertI32S | Operator::F32ConvertI64S => {
+                self.cast_as(ValType::F32, "f32")?
+            }
+            Operator::F64ConvertI32S | Operator::F64ConvertI64S => {
+                self.cast_as(ValType::F64, "f64")?
+            }
+            Operator::F32ConvertI32U => self.cast_through(ValType::F32, "u32", "f32")?,
+            Operator::F32ConvertI64U => self.cast_through(ValType::F32, "u64", "f32")?,
+            Operator::F64ConvertI32U => self.cast_through(ValType::F64, "u32", "f64")?,
+            Operator::F64ConvertI64U => self.cast_through(ValType::F64, "u64", "f64")?,
+            Operator::F32DemoteF64 => self.cast_as(ValType::F32, "f32")?,
+            Operator::F64PromoteF32 => self.cast_as(ValType::F64, "f64")?,
+            Operator::I32ReinterpretF32 => self.reinterpret(ValType::I32, "i32")?,
+            Operator::I64ReinterpretF64 => self.reinterpret(ValType::I64, "i64")?,
+            Operator::F32ReinterpretI32 => {
+                self.convert(ValType::F32, |x| format!("f32::from_bits({x} as u32)"))?
+            }
+            Operator::F64ReinterpretI64 => {
+                self.convert(ValType::F64, |x| format!("f64::from_bits({x} as u64)"))?
+            }
+            Operator::I32TruncSatF32S | Operator::I32TruncSatF64S => {
+                self.cast_as(ValType::I32, "i32")?
+            }
+            Operator::I64TruncSatF32S | Operator::I64TruncSatF64S => {
+                self.cast_as(ValType::I64, "i64")?
+            }
+            Operator::I32TruncSatF32U | Operator::I32TruncSatF64U => {
+                self.cast_through(ValType::I32, "u32", "i32")?
+            }
+            Operator::I64TruncSatF32U | Operator::I64TruncSatF64U => {
+                self.cast_through(ValType::I64, "u64", "i64")?
+            }
             Operator::GlobalGet { global_index } => self.global_get(global_index)?,
             Operator::GlobalSet { global_index } => self.global_set(global_index)?,
             Operator::I32Load { memarg } => self.load(Helper::LoadI32, memarg)?,
@@ -721,6 +767,48 @@ impl<'a> FuncGen<'a> {
             stable: a.stable,
         });
         Ok(())
+    }
+
+    /// A unary numeric conversion: pop one operand, build the converted
+    /// expression from its code via `make`, and push it with `result_ty`. Used
+    /// for wrap/extend, int<->float conversions, demote/promote, reinterpret
+    /// and the saturating truncations — all pure and non-trapping.
+    fn convert(
+        &mut self,
+        result_ty: ValType,
+        make: impl FnOnce(&str) -> String,
+    ) -> Result<(), TranspileError> {
+        let a = self.pop()?;
+        self.push(Val {
+            code: make(&a.code),
+            ty: result_ty,
+            stable: a.stable,
+        });
+        Ok(())
+    }
+
+    /// A single `operand as target` cast (`target` is the Rust primitive name),
+    /// pushing the result as `result_ty`.
+    fn cast_as(&mut self, result_ty: ValType, target: &str) -> Result<(), TranspileError> {
+        self.convert(result_ty, |x| format!("({x} as {target})"))
+    }
+
+    /// A cast that first reinterprets `operand as via` and then casts the result
+    /// `as target`. Used for unsigned int<->float conversions and byte/half-word
+    /// sign extension.
+    fn cast_through(
+        &mut self,
+        result_ty: ValType,
+        via: &str,
+        target: &str,
+    ) -> Result<(), TranspileError> {
+        self.convert(result_ty, |x| format!("(({x} as {via}) as {target})"))
+    }
+
+    /// A float->int reinterpret: read the operand's raw bits and cast them to the
+    /// signed integer `target` of the same width.
+    fn reinterpret(&mut self, result_ty: ValType, target: &str) -> Result<(), TranspileError> {
+        self.convert(result_ty, |x| format!("({x}.to_bits() as {target})"))
     }
 
     fn select(&mut self) -> Result<(), TranspileError> {
