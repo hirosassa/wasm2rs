@@ -98,6 +98,9 @@ pub(crate) enum WasiFn {
     ProcExit,
     FdWrite,
     FdRead,
+    FdClose,
+    FdSeek,
+    FdFdstatGet,
     ArgsSizesGet,
     ArgsGet,
     EnvironSizesGet,
@@ -123,6 +126,9 @@ impl WasiFn {
             "proc_exit" => WasiFn::ProcExit,
             "fd_write" => WasiFn::FdWrite,
             "fd_read" => WasiFn::FdRead,
+            "fd_close" => WasiFn::FdClose,
+            "fd_seek" => WasiFn::FdSeek,
+            "fd_fdstat_get" => WasiFn::FdFdstatGet,
             "args_sizes_get" => WasiFn::ArgsSizesGet,
             "args_get" => WasiFn::ArgsGet,
             "environ_sizes_get" => WasiFn::EnvironSizesGet,
@@ -137,9 +143,11 @@ impl WasiFn {
     fn params(self) -> &'static [ValType] {
         use ValType::{I32, I64};
         match self {
-            WasiFn::ProcExit => &[I32],
+            WasiFn::ProcExit | WasiFn::FdClose => &[I32],
             WasiFn::FdWrite | WasiFn::FdRead => &[I32, I32, I32, I32],
-            WasiFn::ArgsSizesGet
+            WasiFn::FdSeek => &[I32, I64, I32, I32],
+            WasiFn::FdFdstatGet
+            | WasiFn::ArgsSizesGet
             | WasiFn::ArgsGet
             | WasiFn::EnvironSizesGet
             | WasiFn::EnvironGet
@@ -153,6 +161,9 @@ impl WasiFn {
             WasiFn::ProcExit => &[],
             WasiFn::FdWrite
             | WasiFn::FdRead
+            | WasiFn::FdClose
+            | WasiFn::FdSeek
+            | WasiFn::FdFdstatGet
             | WasiFn::ArgsSizesGet
             | WasiFn::ArgsGet
             | WasiFn::EnvironSizesGet
@@ -168,6 +179,9 @@ impl WasiFn {
             WasiFn::ProcExit => "wasi_proc_exit",
             WasiFn::FdWrite => "wasi_fd_write",
             WasiFn::FdRead => "wasi_fd_read",
+            WasiFn::FdClose => "wasi_fd_close",
+            WasiFn::FdSeek => "wasi_fd_seek",
+            WasiFn::FdFdstatGet => "wasi_fd_fdstat_get",
             WasiFn::ArgsSizesGet => "wasi_args_sizes_get",
             WasiFn::ArgsGet => "wasi_args_get",
             WasiFn::EnvironSizesGet => "wasi_environ_sizes_get",
@@ -178,10 +192,11 @@ impl WasiFn {
     }
 
     /// Whether the native body accesses linear memory (`self.mem()`), so a
-    /// module using it must declare or import a memory.
+    /// module using it must declare or import a memory. The exceptions are the
+    /// functions whose bodies never touch memory: `proc_exit`, and the `fd_`
+    /// stubs that only return an errno (`fd_close`, `fd_seek`).
     fn needs_memory(self) -> bool {
-        // `proc_exit` is the only recognised function that never touches memory.
-        !matches!(self, WasiFn::ProcExit)
+        !matches!(self, WasiFn::ProcExit | WasiFn::FdClose | WasiFn::FdSeek)
     }
 
     /// The source lines of the native implementation, emitted into the `impl`.
@@ -254,6 +269,38 @@ impl WasiFn {
                 "    }",
                 "    let w = a3 as u32 as usize;",
                 "    self.mem_mut()[w..w + 4].copy_from_slice(&(n as u32).to_le_bytes());",
+                "    0",
+                "}",
+            ]),
+            // `fd_close(fd)` is a stub: this runtime owns no openable files
+            // (there is no `path_open`), so closing always reports success.
+            WasiFn::FdClose => owned(&[
+                "fn wasi_fd_close(&mut self, a0: i32) -> i32 {",
+                "    0",
+                "}",
+            ]),
+            // `fd_seek(fd, offset, whence, newoffset)` — the only supported fds
+            // are the stdio streams, which are not seekable, so it always
+            // returns ESPIPE (70) without writing `newoffset`.
+            WasiFn::FdSeek => owned(&[
+                "fn wasi_fd_seek(&mut self, a0: i32, a1: i64, a2: i32, a3: i32) -> i32 {",
+                "    70",
+                "}",
+            ]),
+            // `fd_fdstat_get(fd, buf)` writes a 24-byte `fdstat`. A stdio fd (0-2)
+            // is reported as a character device (filetype 2) with all rights
+            // granted; any other fd returns EBADF (8).
+            WasiFn::FdFdstatGet => owned(&[
+                "fn wasi_fd_fdstat_get(&mut self, a0: i32, a1: i32) -> i32 {",
+                "    if !(0..=2).contains(&a0) {",
+                "        return 8;",
+                "    }",
+                "    let b = a1 as u32 as usize;",
+                "    let mut stat = [0u8; 24];",
+                "    stat[0] = 2;",
+                "    stat[8..16].copy_from_slice(&u64::MAX.to_le_bytes());",
+                "    stat[16..24].copy_from_slice(&u64::MAX.to_le_bytes());",
+                "    self.mem_mut()[b..b + 24].copy_from_slice(&stat);",
                 "    0",
                 "}",
             ]),

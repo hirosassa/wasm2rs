@@ -336,6 +336,98 @@ fn main() {
     assert!(status.success(), "random_get assertions failed");
 }
 
+// fd_fdstat_get: describe a file descriptor. `run` queries fd 1 into offset 0
+// and returns the errno. A stdio fd is reported as a character device (2) with
+// all rights granted.
+const FDSTAT: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "fd_fdstat_get"
+        (func $fdstat (param i32 i32) (result i32)))
+      (memory 1)
+      (func (export "run") (result i32)
+        (call $fdstat (i32.const 1) (i32.const 0))))
+    "#;
+
+#[test]
+fn fd_fdstat_get_reports_stdio_as_a_character_device() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 0);
+    assert_eq!(i.mem()[0], 2, \"stdio should be a character device\");
+    let rights = u64::from_le_bytes([
+        i.mem()[8], i.mem()[9], i.mem()[10], i.mem()[11],
+        i.mem()[12], i.mem()[13], i.mem()[14], i.mem()[15],
+    ]);
+    assert_eq!(rights, u64::MAX, \"all base rights should be granted\");
+}
+";
+    let bin = compile("fdstat", FDSTAT, extra);
+    let status = Command::new(&bin).status().expect("run generated binary");
+    assert!(status.success(), "fd_fdstat_get assertions failed");
+}
+
+// fd_fdstat_get on an unknown fd returns EBADF (8).
+#[test]
+fn fd_fdstat_get_rejects_unknown_fd() {
+    let wat = r#"
+        (module
+          (import "wasi_snapshot_preview1" "fd_fdstat_get"
+            (func $fdstat (param i32 i32) (result i32)))
+          (memory 1)
+          (func (export "run") (result i32)
+            (call $fdstat (i32.const 7) (i32.const 0))))
+        "#;
+    let bin = compile(
+        "fdstat_badf",
+        wat,
+        "fn main() {\n    let mut i = Instance::new();\n    assert_eq!(i.func1(), 8);\n}\n",
+    );
+    let status = Command::new(&bin).status().expect("run generated binary");
+    assert!(status.success(), "expected EBADF for unknown fd");
+}
+
+// fd_close is a stub that reports success; the module needs no memory.
+#[test]
+fn fd_close_returns_success() {
+    let wat = r#"
+        (module
+          (import "wasi_snapshot_preview1" "fd_close" (func $close (param i32) (result i32)))
+          (func (export "run") (result i32) (call $close (i32.const 1))))
+        "#;
+    let generated = wasm2rs::transpile(&wat::parse_str(wat).expect("valid wat")).expect("ok");
+    assert!(
+        !generated.contains("trait Imports"),
+        "should be standalone:\n{generated}"
+    );
+    let bin = compile(
+        "close",
+        wat,
+        "fn main() {\n    let mut i = Instance::new();\n    assert_eq!(i.func1(), 0);\n}\n",
+    );
+    let status = Command::new(&bin).status().expect("run generated binary");
+    assert!(status.success(), "fd_close should succeed");
+}
+
+// fd_seek on a stdio fd is not seekable, so it returns ESPIPE (70).
+#[test]
+fn fd_seek_on_stdio_returns_espipe() {
+    let wat = r#"
+        (module
+          (import "wasi_snapshot_preview1" "fd_seek"
+            (func $seek (param i32 i64 i32 i32) (result i32)))
+          (func (export "run") (result i32)
+            (call $seek (i32.const 1) (i64.const 0) (i32.const 0) (i32.const 0))))
+        "#;
+    let bin = compile(
+        "seek",
+        wat,
+        "fn main() {\n    let mut i = Instance::new();\n    assert_eq!(i.func1(), 70);\n}\n",
+    );
+    let status = Command::new(&bin).status().expect("run generated binary");
+    assert!(status.success(), "fd_seek should return ESPIPE");
+}
+
 // `fd_write` reads iovecs from linear memory, so a module importing it without
 // declaring a memory cannot be honoured natively; transpile must reject it
 // rather than emit code that references a non-existent `self.mem()`.
