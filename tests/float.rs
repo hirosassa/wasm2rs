@@ -141,3 +141,86 @@ fn float_const_is_emitted_from_bits() {
         "assert_eq!(func0(), 1.5);\n    assert_eq!(func1(), 2.5);",
     );
 }
+
+#[test]
+fn f32_multiply_sqrt_rounding_and_ordering() {
+    transpile_compile_run(
+        "f32more",
+        r#"
+        (module
+          (func (param f32 f32) (result f32) (f32.mul (local.get 0) (local.get 1)))
+          (func (param f32) (result f32) (f32.sqrt (local.get 0)))
+          (func (param f32) (result f32) (f32.ceil (local.get 0)))
+          (func (param f32) (result f32) (f32.floor (local.get 0)))
+          (func (param f32) (result f32) (f32.trunc (local.get 0)))
+          (func (param f32 f32) (result i32) (f32.gt (local.get 0) (local.get 1)))
+          (func (param f32 f32) (result i32) (f32.le (local.get 0) (local.get 1)))
+          (func (param f32 f32) (result i32) (f32.ge (local.get 0) (local.get 1))))
+        "#,
+        "assert_eq!(func0(3.0, 4.0), 12.0);\n    \
+         assert_eq!(func1(9.0), 3.0);\n    \
+         assert_eq!(func2(1.2), 2.0);\n    \
+         assert_eq!(func3(1.8), 1.0);\n    \
+         assert_eq!(func4(-1.8), -1.0);\n    \
+         assert_eq!(func5(2.0, 1.0), 1);\n    \
+         assert_eq!(func5(1.0, 1.0), 0);\n    \
+         assert_eq!(func6(1.0, 1.0), 1);\n    \
+         assert_eq!(func7(1.0, 2.0), 0);",
+    );
+}
+
+#[test]
+fn f64_arithmetic_rounding_ordering_and_copysign() {
+    transpile_compile_run(
+        "f64more",
+        r#"
+        (module
+          (func (param f64 f64) (result f64) (f64.add (local.get 0) (local.get 1)))
+          (func (param f64 f64) (result f64) (f64.sub (local.get 0) (local.get 1)))
+          (func (param f64 f64) (result f64) (f64.div (local.get 0) (local.get 1)))
+          (func (param f64) (result f64) (f64.abs (local.get 0)))
+          (func (param f64) (result f64) (f64.neg (local.get 0)))
+          (func (param f64) (result f64) (f64.ceil (local.get 0)))
+          (func (param f64) (result f64) (f64.trunc (local.get 0)))
+          (func (param f64 f64) (result i32) (f64.eq (local.get 0) (local.get 1)))
+          (func (param f64 f64) (result i32) (f64.lt (local.get 0) (local.get 1)))
+          (func (param f64 f64) (result i32) (f64.gt (local.get 0) (local.get 1)))
+          (func (param f64 f64) (result i32) (f64.le (local.get 0) (local.get 1)))
+          (func (param f64 f64) (result f64) (f64.copysign (local.get 0) (local.get 1))))
+        "#,
+        "assert_eq!(func0(1.5, 2.25), 3.75);\n    \
+         assert_eq!(func1(5.0, 1.5), 3.5);\n    \
+         assert_eq!(func2(9.0, 2.0), 4.5);\n    \
+         assert_eq!(func3(-3.0), 3.0);\n    \
+         assert_eq!(func4(3.0), -3.0);\n    \
+         assert_eq!(func5(1.2), 2.0);\n    \
+         assert_eq!(func6(-1.8), -1.0);\n    \
+         assert_eq!(func7(1.0, 1.0), 1);\n    \
+         assert_eq!(func8(1.0, 2.0), 1);\n    \
+         assert_eq!(func9(2.0, 1.0), 1);\n    \
+         assert_eq!(func10(1.0, 1.0), 1);\n    \
+         assert_eq!(func11(3.0, -1.0), -3.0);",
+    );
+}
+
+#[test]
+fn nearest_rounds_ties_to_even() {
+    // `nearest` is round-half-to-even, not away-from-zero: 2.5 and -2.5 round to
+    // the even 2/-2, while 3.5 rounds up to the even 4.
+    transpile_compile_run(
+        "nearest",
+        r#"
+        (module
+          (func (param f32) (result f32) (f32.nearest (local.get 0)))
+          (func (param f64) (result f64) (f64.nearest (local.get 0))))
+        "#,
+        "assert_eq!(func0(2.5), 2.0);\n    \
+         assert_eq!(func0(3.5), 4.0);\n    \
+         assert_eq!(func0(-2.5), -2.0);\n    \
+         assert_eq!(func0(0.5), 0.0);\n    \
+         assert_eq!(func1(2.5), 2.0);\n    \
+         assert_eq!(func1(3.5), 4.0);\n    \
+         assert_eq!(func1(-2.5), -2.0);\n    \
+         assert_eq!(func1(0.5), 0.0);",
+    );
+}

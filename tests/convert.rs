@@ -222,3 +222,45 @@ fn saturating_truncation() {
          assert_eq!(func2(-2.9f64), -2i64);",
     );
 }
+
+#[test]
+fn sixty_four_bit_and_signed_int_to_float_conversions() {
+    // The 64-bit int->float conversions and the signed/unsigned variants: an
+    // unsigned convert reads -1 as its wide positive bit pattern, a signed one
+    // as -1.
+    transpile_compile_run(
+        "int_to_float",
+        r#"
+        (module
+          (func (param i32) (result f32) (f32.convert_i32_s (local.get 0)))
+          (func (param i32) (result f64) (f64.convert_i32_u (local.get 0)))
+          (func (param i64) (result f32) (f32.convert_i64_s (local.get 0)))
+          (func (param i64) (result f64) (f64.convert_i64_s (local.get 0)))
+          (func (param i64) (result f64) (f64.convert_i64_u (local.get 0)))
+          (func (param f32) (result i64) (i64.trunc_f32_s (local.get 0))))
+        "#,
+        "assert_eq!(func0(-5), -5.0f32);\n    \
+         assert_eq!(func1(-1), 4294967295.0f64);\n    \
+         assert_eq!(func2(-3), -3.0f32);\n    \
+         assert_eq!(func3(-5), -5.0f64);\n    \
+         assert_eq!(func4(-1), 18446744073709551616.0f64);\n    \
+         assert_eq!(func5(3.7f32), 3i64);",
+    );
+}
+
+#[test]
+fn reinterpret_64bit_round_trips() {
+    // reinterpret is a pure bit-cast: 1.0f64 has the bit pattern
+    // 0x3FF0000000000000, and casting there and back is the identity.
+    transpile_compile_run(
+        "reinterpret64",
+        r#"
+        (module
+          (func (param f64) (result i64) (i64.reinterpret_f64 (local.get 0)))
+          (func (param i64) (result f64) (f64.reinterpret_i64 (local.get 0))))
+        "#,
+        "assert_eq!(func0(1.0f64), 0x3FF0_0000_0000_0000i64);\n    \
+         assert_eq!(func1(0x3FF0_0000_0000_0000i64), 1.0f64);\n    \
+         assert_eq!(func1(func0(3.14f64)), 3.14f64);",
+    );
+}
