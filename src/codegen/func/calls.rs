@@ -186,6 +186,14 @@ impl<'a> super::FuncGen<'a> {
     }
 
     pub(super) fn emit_return(&mut self) -> Result<(), TranspileError> {
+        // A `return` from inside a `try` body would leave its `catch_unwind`
+        // closure, which Rust cannot express. A handler runs in the landing pad,
+        // so a `return` there is fine unless it sits in an outer try's body.
+        if self.try_barriers.iter().any(|&(_, in_catch)| !in_catch) {
+            return Err(TranspileError::Unsupported(
+                "return from within a try body".into(),
+            ));
+        }
         match self.pop_results(self.results.len())? {
             Some(code) => self.term(format!("return {code};")),
             None => self.term("return;".to_string()),
@@ -288,6 +296,7 @@ impl<'a> super::FuncGen<'a> {
             helpers: self.used_helpers,
             rt: self.used_rt,
             dispatch_sigs: self.dispatch_sigs,
+            uses_eh: self.uses_eh,
         })
     }
 }

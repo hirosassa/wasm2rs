@@ -44,6 +44,16 @@ pub(super) struct FuncGen<'a> {
     /// `call_indirect` type indices this function dispatches through; each needs
     /// a `call_ref_t{ti}` method on the instance.
     dispatch_sigs: HashSet<u32>,
+    /// Whether this function uses legacy exception handling (`try`/`throw`), so
+    /// the module needs the exception type emitted.
+    uses_eh: bool,
+    /// The enclosing `try` regions, innermost last, as `(frame index, in a catch
+    /// handler)`. A `try` lowers to a `catch_unwind` closure (the body) plus a
+    /// landing-pad `match` (the handlers); a branch or `return` leaving either
+    /// has no Rust lowering. In the body (`false`) only a branch strictly out of
+    /// the try escapes; in a handler (`true`) even a branch to the try itself
+    /// does, since the landing pad is not a breakable region.
+    try_barriers: Vec<(usize, bool)>,
 }
 
 impl<'a> FuncGen<'a> {
@@ -95,6 +105,8 @@ impl<'a> FuncGen<'a> {
             used_helpers: HashSet::new(),
             used_rt: HashSet::new(),
             dispatch_sigs: HashSet::new(),
+            uses_eh: false,
+            try_barriers: Vec::new(),
         })
     }
 
@@ -380,6 +392,14 @@ impl<'a> FuncGen<'a> {
                 table_index,
             } => self.call_indirect(type_index, table_index)?,
             Operator::Return => self.emit_return()?,
+            // Legacy exception handling: a `try` region protects its body and
+            // dispatches thrown exceptions to matching `catch`/`catch_all`
+            // handlers; `throw` raises one and `rethrow` re-raises a caught one.
+            Operator::Try { blockty } => self.open_try(blockty)?,
+            Operator::Catch { tag_index } => self.handle_catch(Some(tag_index))?,
+            Operator::CatchAll => self.handle_catch(None)?,
+            Operator::Throw { tag_index } => self.emit_throw(tag_index)?,
+            Operator::Rethrow { relative_depth } => self.emit_rethrow(relative_depth)?,
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
             }
@@ -391,7 +411,10 @@ impl<'a> FuncGen<'a> {
     /// nesting so the matching `end`/`else` of the live frame is still handled.
     fn skip_dead(&mut self, op: &Operator<'_>) -> Result<(), TranspileError> {
         match op {
-            Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. } => {
+            Operator::Block { .. }
+            | Operator::Loop { .. }
+            | Operator::If { .. }
+            | Operator::Try { .. } => {
                 self.dead_nesting += 1;
             }
             Operator::End => {
@@ -403,6 +426,14 @@ impl<'a> FuncGen<'a> {
             }
             Operator::Else if self.dead_nesting == 0 => {
                 self.handle_else()?;
+            }
+            // A `catch`/`catch_all` on the live `try` frame starts a fresh,
+            // reachable handler even though the preceding arm ended dead.
+            Operator::Catch { tag_index } if self.dead_nesting == 0 => {
+                self.handle_catch(Some(*tag_index))?;
+            }
+            Operator::CatchAll if self.dead_nesting == 0 => {
+                self.handle_catch(None)?;
             }
             _ => {}
         }

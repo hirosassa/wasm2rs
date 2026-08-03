@@ -42,7 +42,7 @@ use self::runtime::{render_rt_helpers, rt_name};
 pub(crate) use self::const_expr::{const_expr_to_rust, const_expr_u32};
 pub(crate) use self::info::{
     DataSegment, ElemSegment, FuncInput, GlobalInfo, ImportInfo, ImportedGlobalInfo, MemInfo,
-    TableInfo, TypeSig,
+    TableInfo, TagInfo, TypeSig,
 };
 pub(crate) use self::wasi::WasiFn;
 
@@ -112,6 +112,9 @@ struct GenMeta {
     rt: HashSet<Rt>,
     /// `call_indirect` type indices needing a `call_ref_t{ti}` dispatch method.
     dispatch_sigs: HashSet<u32>,
+    /// Whether the function uses legacy exception handling, so the module needs
+    /// the [`EXC_TYPE`] definition.
+    uses_eh: bool,
 }
 
 /// The lint-suppression attribute prefixed to generated functions/impls.
@@ -163,6 +166,48 @@ struct Frame {
     then_reachable: bool,
     /// For `if`: the Rust condition expression.
     cond: Option<String>,
+    /// For a legacy-exception `try`: the accumulating handler state. A try frame
+    /// reuses [`FrameKind::Block`] (a branch to it behaves like a block exit) but
+    /// carries this so `end` renders it as a `catch_unwind` region instead.
+    try_state: Option<TryState>,
+}
+
+/// The kind of one arm of a `try` region.
+#[derive(Clone, PartialEq, Eq)]
+enum CatchKind {
+    /// The protected body.
+    Body,
+    /// A `catch $tag` handler.
+    Tag(u32),
+    /// A `catch_all` handler.
+    All,
+}
+
+/// One finished arm of a `try` region: the body or a catch handler.
+struct CatchArm {
+    kind: CatchKind,
+    /// Prebuilt `let` statements that extract the exception payload into the
+    /// handler's operand variables, run before the handler body. Empty for the
+    /// body and `catch_all`.
+    binds: Vec<String>,
+    body: Vec<Node>,
+    /// Whether control can fall through this arm's end (so it needs a trailing
+    /// `break 'lN;` when the try is targeted).
+    reachable_at_end: bool,
+}
+
+/// The state accumulated while translating a `try` region, between its opening
+/// and its `end`.
+struct TryState {
+    /// The variable the caught exception box is bound to in the `Err` arm.
+    exc_var: String,
+    /// Finished arms, in order: the body first, then each catch handler.
+    arms: Vec<CatchArm>,
+    /// The kind of the arm currently being emitted into `self.cur`.
+    cur_kind: CatchKind,
+    /// The exception-payload extraction statements of the currently-open catch
+    /// handler.
+    cur_binds: Vec<String>,
 }
 
 impl Frame {
@@ -207,6 +252,25 @@ enum Node {
     BrTable { selector: String, arms: Vec<BrArm> },
     /// A nested control-flow region (block/loop/if).
     Region(RegionNode),
+    /// A legacy-exception `try` region, rendered as a `catch_unwind` over the
+    /// protected body with a landing pad dispatching on the caught tag.
+    Try(TryRegionNode),
+}
+
+/// A finished `try` region: the protected body plus its catch handlers.
+struct TryRegionNode {
+    /// Numeric label; the body is wrapped in `'lN: loop { … }` when `targeted`
+    /// so a `br` to the try becomes a `break` out of the protected body.
+    label: usize,
+    targeted: bool,
+    /// The variable the caught exception box binds to in the landing pad.
+    exc_var: String,
+    /// The protected body.
+    body: Vec<Node>,
+    /// Whether the body can fall through its end (needs a trailing `break`).
+    body_reachable_at_end: bool,
+    /// The catch handlers, in source order.
+    catches: Vec<CatchArm>,
 }
 
 /// One arm of a [`Node::BrTable`]: a match pattern that assigns its target's
@@ -271,6 +335,7 @@ fn render_nodes_into(nodes: Vec<Node>, depth: usize, line_prefix: &str, out: &mu
                 render_br_table_nested(&selector, &arms, depth, line_prefix, out)
             }
             Node::Region(region) => render_region_into(region, depth, line_prefix, out),
+            Node::Try(try_node) => render_try_into(try_node, depth, line_prefix, out),
         }
     }
 }
@@ -403,6 +468,177 @@ fn render_region_into(region: RegionNode, depth: usize, line_prefix: &str, out: 
     }
 }
 
+/// The module-scope type name carrying a thrown wasm exception's tag and its
+/// (bit-encoded) payload values.
+const EXC_TYPE: &str = "Wasm2RsException";
+
+/// The module-scope definition of [`EXC_TYPE`], emitted once when any function
+/// uses exception handling. A thrown exception is `panic_any`-ed as this type;
+/// each payload value is bit-encoded into a `u64` so one field carries any mix
+/// of numeric types.
+const EXC_DEF: &str = "\
+#[allow(dead_code)]
+struct Wasm2RsException {
+    tag: u32,
+    values: Vec<u64>,
+}";
+
+/// The Rust expression bit-encoding a payload operand of type `ty` (given as the
+/// expression `expr`) into the `u64` stored in an exception's `values`.
+fn encode_exc_value(ty: ValType, expr: &str) -> Result<String, TranspileError> {
+    Ok(match ty {
+        ValType::I32 => format!("({expr}) as u32 as u64"),
+        ValType::I64 => format!("({expr}) as u64"),
+        ValType::F32 => format!("({expr}).to_bits() as u64"),
+        ValType::F64 => format!("({expr}).to_bits()"),
+        ValType::Ref(_) => {
+            return Err(TranspileError::Unsupported(
+                "exception payload with a reference type".into(),
+            ));
+        }
+        ValType::V128 => {
+            return Err(TranspileError::Unsupported(
+                "exception payload with a v128 value".into(),
+            ));
+        }
+    })
+}
+
+/// The Rust expression decoding a `u64` (given as `expr`) from an exception's
+/// `values` back into an operand of type `ty`, inverting [`encode_exc_value`].
+fn decode_exc_value(ty: ValType, expr: &str) -> Result<String, TranspileError> {
+    Ok(match ty {
+        ValType::I32 => format!("{expr} as u32 as i32"),
+        ValType::I64 => format!("{expr} as i64"),
+        ValType::F32 => format!("f32::from_bits({expr} as u32)"),
+        ValType::F64 => format!("f64::from_bits({expr})"),
+        ValType::Ref(_) => {
+            return Err(TranspileError::Unsupported(
+                "exception payload with a reference type".into(),
+            ));
+        }
+        ValType::V128 => {
+            return Err(TranspileError::Unsupported(
+                "exception payload with a v128 value".into(),
+            ));
+        }
+    })
+}
+
+/// Render a `try` region as a `catch_unwind` over the protected body followed by
+/// a landing pad that dispatches on the caught exception's tag. A thrown wasm
+/// exception is a `panic_any` of [`EXC_TYPE`]; any other payload (a trap, or a
+/// foreign panic) is re-raised so only wasm exceptions are caught.
+fn render_try_into(node: TryRegionNode, depth: usize, line_prefix: &str, out: &mut String) {
+    let TryRegionNode {
+        label,
+        targeted,
+        exc_var,
+        body,
+        body_reachable_at_end,
+        catches,
+    } = node;
+
+    push_body_line(
+        out,
+        "match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {",
+        depth,
+        line_prefix,
+    );
+    // The protected body. A targeted try wraps it in a labelled loop so a `br`
+    // to the try is a `break` that leaves the body (returning `()` normally).
+    if targeted {
+        push_body_line(out, &format!("'l{label}: loop {{"), depth + 1, line_prefix);
+        render_nodes_into(body, depth + 2, line_prefix, out);
+        if body_reachable_at_end {
+            push_body_line(out, &format!("break 'l{label};"), depth + 2, line_prefix);
+        }
+        push_body_line(out, "}", depth + 1, line_prefix);
+    } else {
+        render_nodes_into(body, depth + 1, line_prefix, out);
+    }
+    push_body_line(out, "})) {", depth, line_prefix);
+    push_body_line(out, "Ok(()) => {}", depth + 1, line_prefix);
+    push_body_line(
+        out,
+        &format!("Err({exc_var}) => {{"),
+        depth + 1,
+        line_prefix,
+    );
+    render_landing_pad(catches, &exc_var, depth + 2, line_prefix, out);
+    push_body_line(out, "}", depth + 1, line_prefix);
+    push_body_line(out, "}", depth, line_prefix);
+}
+
+/// Render the `Err` arm of a try's `catch_unwind`: resolve the caught tag and
+/// dispatch to the matching handler, re-raising anything unmatched. Consumes the
+/// handler nodes (like [`render_nodes_into`]) so a huge body is never held twice.
+fn render_landing_pad(
+    catches: Vec<CatchArm>,
+    exc_var: &str,
+    depth: usize,
+    line_prefix: &str,
+    out: &mut String,
+) {
+    if catches.is_empty() {
+        // Nothing this try catches, so always re-raise.
+        push_body_line(
+            out,
+            &format!("::std::panic::resume_unwind({exc_var});"),
+            depth,
+            line_prefix,
+        );
+        return;
+    }
+    // A `catch_all` present makes the wildcard arm run its handler; otherwise an
+    // unmatched wasm exception is re-raised.
+    let has_all = catches.iter().any(|c| c.kind == CatchKind::All);
+    push_body_line(
+        out,
+        &format!("let __tag = match {exc_var}.downcast_ref::<{EXC_TYPE}>() {{"),
+        depth,
+        line_prefix,
+    );
+    push_body_line(out, "Some(__e) => __e.tag,", depth + 1, line_prefix);
+    push_body_line(
+        out,
+        &format!("None => ::std::panic::resume_unwind({exc_var}),"),
+        depth + 1,
+        line_prefix,
+    );
+    push_body_line(out, "};", depth, line_prefix);
+    push_body_line(out, "match __tag {", depth, line_prefix);
+    for arm in catches {
+        let CatchArm {
+            kind, binds, body, ..
+        } = arm;
+        match kind {
+            CatchKind::Tag(tag) => {
+                push_body_line(out, &format!("{tag}u32 => {{"), depth + 1, line_prefix);
+            }
+            CatchKind::All => {
+                push_body_line(out, "_ => {", depth + 1, line_prefix);
+            }
+            // The body arm is never part of `catches`.
+            CatchKind::Body => continue,
+        }
+        for bind in binds {
+            push_body_line(out, &bind, depth + 2, line_prefix);
+        }
+        render_nodes_into(body, depth + 2, line_prefix, out);
+        push_body_line(out, "}", depth + 1, line_prefix);
+    }
+    if !has_all {
+        push_body_line(
+            out,
+            &format!("_ => ::std::panic::resume_unwind({exc_var}),"),
+            depth + 1,
+            line_prefix,
+        );
+    }
+    push_body_line(out, "}", depth, line_prefix);
+}
+
 /// The estimated byte length of a rendered body, used to pre-reserve the output
 /// buffer so appending a huge function never triggers repeated `String`
 /// doublings. Indentation is ignored; the statement text dominates.
@@ -440,6 +676,19 @@ fn estimate_body_len(nodes: &[Node]) -> usize {
                     + region.els.as_deref().map_or(0, estimate_body_len)
                     + 32
             }
+            Node::Try(t) => {
+                estimate_body_len(&t.body)
+                    + t.catches
+                        .iter()
+                        .map(|c| {
+                            estimate_body_len(&c.body)
+                                + c.binds.iter().map(|b| b.len() + 5).sum::<usize>()
+                                + 32
+                        })
+                        .sum::<usize>()
+                    // The `catch_unwind`/landing-pad scaffolding.
+                    + 160
+            }
         })
         .sum()
 }
@@ -462,6 +711,12 @@ fn can_flatten(nodes: &[Node]) -> bool {
     let mut stack: Vec<&[Node]> = vec![nodes];
     while let Some(nodes) = stack.pop() {
         for node in nodes {
+            // A `try` region relies on Rust's `catch_unwind` scaffolding, which
+            // has no flat-dispatch lowering, so a body containing one stays
+            // nested.
+            if matches!(node, Node::Try(_)) {
+                return false;
+            }
             let Node::Region(region) = node else { continue };
             // A `br_if`-only `if` (no condition) has no flat lowering.
             if region.kind == FrameKind::If && region.cond.is_none() {
@@ -620,6 +875,15 @@ impl Flattener {
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         worklist.push((region.body, inner, cont));
                         state = cont;
+                    }
+                    Node::Try(t) => {
+                        // A `try` keeps [`can_flatten`] from choosing this path,
+                        // so this is unreachable in practice; render it to text
+                        // and keep it as one opaque statement so a stray one is
+                        // still emitted correctly rather than dropped.
+                        let mut buf = String::new();
+                        render_try_into(t, 0, "", &mut buf);
+                        stmts.push(buf.trim_end().to_string());
                     }
                     Node::BrTable { selector, arms } => {
                         // Each arm assigns its target's carried variables then
@@ -800,6 +1064,9 @@ struct ModuleCtx<'a> {
     elem_passive: Vec<bool>,
     /// Whether functions are emitted as `&mut self` methods (stateful module).
     is_method: bool,
+    /// Per-tag exception payload types, indexed by tag index (imported tags
+    /// first, then defined). `throw`/`catch` resolve their tag index here.
+    tags: Vec<Vec<ValType>>,
 }
 
 impl ModuleCtx<'_> {
@@ -858,6 +1125,7 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) data: &'a [DataSegment],
     pub(crate) table: Option<&'a TableInfo>,
     pub(crate) elements: &'a [ElemSegment],
+    pub(crate) tags: &'a [TagInfo],
 }
 
 /// Derive the translation context from a module's raw parts.
@@ -921,6 +1189,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
             .map(|e| e.offset.is_none() && !e.declared)
             .collect(),
         is_method: stateful,
+        tags: parts.tags.iter().map(|t| t.params.clone()).collect(),
     };
     Ok((ctx, stateful))
 }
@@ -938,6 +1207,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     let mut used: HashSet<Helper> = HashSet::new();
     let mut used_rt: HashSet<Rt> = HashSet::new();
     let mut dispatch_sigs: HashSet<u32> = HashSet::new();
+    let mut uses_eh = false;
     for (index, f) in parts.funcs.iter().enumerate() {
         // Defined functions are named by their full function index, i.e. after
         // the imported functions in the shared index space. The single-file
@@ -948,6 +1218,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         used.extend(meta.helpers);
         used_rt.extend(meta.rt);
         dispatch_sigs.extend(meta.dispatch_sigs);
+        uses_eh |= meta.uses_eh;
         sources.push(src);
     }
 
@@ -961,10 +1232,17 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         render_module(parts, &ctx, &sources, &used, &dispatch_sigs)?
     };
 
-    Ok(if rt_helpers.is_empty() {
+    // The exception type, then the runtime helpers, precede the module body.
+    let mut prelude = String::new();
+    if uses_eh {
+        prelude.push_str(EXC_DEF);
+        prelude.push('\n');
+    }
+    prelude.push_str(&rt_helpers);
+    Ok(if prelude.is_empty() {
         body
     } else {
-        format!("{rt_helpers}\n{body}")
+        format!("{prelude}\n{body}")
     })
 }
 
@@ -1019,6 +1297,7 @@ pub(crate) fn generate_module_split(
     let mut used: HashSet<Helper> = HashSet::new();
     let mut used_rt: HashSet<Rt> = HashSet::new();
     let mut dispatch_sigs: HashSet<u32> = HashSet::new();
+    let mut uses_eh = false;
 
     // A stateful chunk wraps its functions in an `impl Instance` block, so every
     // emitted line is indented one level; a stateless chunk emits free `pub fn`s
@@ -1043,6 +1322,7 @@ pub(crate) fn generate_module_split(
         used.extend(meta.helpers);
         used_rt.extend(meta.rt);
         dispatch_sigs.extend(meta.dispatch_sigs);
+        uses_eh |= meta.uses_eh;
         funcs_in_chunk += 1;
 
         // Flush at the function count cap or once the chunk's own bytes reach
@@ -1081,6 +1361,13 @@ pub(crate) fn generate_module_split(
         &dispatch_sigs,
         n_chunks,
     )?;
+    // The exception type lives at the crate root so every chunk's `use super::*`
+    // sees it, ahead of everything else in `lib.rs`.
+    let root = if uses_eh {
+        format!("{EXC_DEF}\n{root}")
+    } else {
+        root
+    };
     emit("lib.rs".to_string(), root)
 }
 

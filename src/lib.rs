@@ -132,6 +132,9 @@ where
     let mut data: Vec<codegen::DataSegment> = Vec::new();
     let mut imports: Vec<codegen::ImportInfo> = Vec::new();
     let mut imported_globals: Vec<codegen::ImportedGlobalInfo> = Vec::new();
+    // Exception tags, imported ones first (classified alongside other imports)
+    // then locally-defined ones, matching the wasm tag index space.
+    let mut tags: Vec<codegen::TagInfo> = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
@@ -156,9 +159,16 @@ where
                 // space (dispatched through an injected host trait) and imported
                 // globals the low end of the global index space (host getters/
                 // setters). Imported memory and tables are host-owned (lent
-                // through the trait); imported tags are still rejected. Imports
-                // may be grouped in the compact encodings, so each group is
-                // expanded.
+                // through the trait); imported tags occupy the low tag indices.
+                // Imports may be grouped in the compact encodings, so each group
+                // is expanded.
+                let mut sink = ImportSink {
+                    imports: &mut imports,
+                    imported_globals: &mut imported_globals,
+                    memory: &mut memory,
+                    table: &mut table,
+                    tags: &mut tags,
+                };
                 for group in reader {
                     match group? {
                         wasmparser::Imports::Single(_, import) => {
@@ -166,10 +176,7 @@ where
                                 (import.module, import.name),
                                 import.ty,
                                 &signatures,
-                                &mut imports,
-                                &mut imported_globals,
-                                &mut memory,
-                                &mut table,
+                                &mut sink,
                             )?;
                         }
                         wasmparser::Imports::Compact1 { module, items } => {
@@ -179,24 +186,13 @@ where
                                     (module, item.name),
                                     item.ty,
                                     &signatures,
-                                    &mut imports,
-                                    &mut imported_globals,
-                                    &mut memory,
-                                    &mut table,
+                                    &mut sink,
                                 )?;
                             }
                         }
                         wasmparser::Imports::Compact2 { module, ty, names } => {
                             for name in names {
-                                classify_import(
-                                    (module, name?),
-                                    ty,
-                                    &signatures,
-                                    &mut imports,
-                                    &mut imported_globals,
-                                    &mut memory,
-                                    &mut table,
-                                )?;
+                                classify_import((module, name?), ty, &signatures, &mut sink)?;
                             }
                         }
                     }
@@ -205,6 +201,13 @@ where
             Payload::FunctionSection(reader) => {
                 for type_index in reader {
                     func_type_indices.push(type_index?);
+                }
+            }
+            Payload::TagSection(reader) => {
+                // A tag references a function type whose parameters are the
+                // exception's payload; exceptions carry no results.
+                for tag in reader {
+                    tags.push(tag_info(tag?.func_type_idx, &signatures)?);
                 }
             }
             Payload::MemorySection(reader) => {
@@ -383,6 +386,7 @@ where
         data: &data,
         table: table.as_ref(),
         elements: &elements,
+        tags: &tags,
     };
     codegen::generate_module_split(
         &parts,
@@ -392,17 +396,37 @@ where
     )
 }
 
+/// Resolve a tag's referenced function type into its exception payload types.
+fn tag_info(
+    func_type_idx: u32,
+    signatures: &[Signature],
+) -> Result<codegen::TagInfo, TranspileError> {
+    let sig = signatures
+        .get(func_type_idx as usize)
+        .ok_or_else(|| TranspileError::Unsupported("tag type index out of range".into()))?;
+    Ok(codegen::TagInfo {
+        params: sig.params.clone(),
+    })
+}
+
+/// The module-level accumulators an import is classified into, bundled so the
+/// classifier takes one sink rather than many out-parameters.
+struct ImportSink<'a> {
+    imports: &'a mut Vec<codegen::ImportInfo>,
+    imported_globals: &'a mut Vec<codegen::ImportedGlobalInfo>,
+    memory: &'a mut Option<codegen::MemInfo>,
+    table: &'a mut Option<codegen::TableInfo>,
+    tags: &'a mut Vec<codegen::TagInfo>,
+}
+
 /// Classify an import by its type: a function import is pushed onto `imports`, a
-/// global onto `imported_globals`, and an imported memory recorded in `memory`.
-/// Imported tables and tags are rejected as not supported yet.
+/// global onto `imported_globals`, an imported memory recorded in `memory`, an
+/// imported table in `table`, and an imported exception tag onto `tags`.
 fn classify_import(
     id: (&str, &str),
     ty: TypeRef,
     signatures: &[Signature],
-    imports: &mut Vec<codegen::ImportInfo>,
-    imported_globals: &mut Vec<codegen::ImportedGlobalInfo>,
-    memory: &mut Option<codegen::MemInfo>,
-    table: &mut Option<codegen::TableInfo>,
+    sink: &mut ImportSink<'_>,
 ) -> Result<(), TranspileError> {
     match ty {
         TypeRef::Func(type_index) | TypeRef::FuncExact(type_index) => {
@@ -413,7 +437,7 @@ fn classify_import(
             // is dispatched through the injected host trait.
             let (module, name) = id;
             let wasi = codegen::WasiFn::recognise(module, name, &sig.params, &sig.results);
-            imports.push(codegen::ImportInfo {
+            sink.imports.push(codegen::ImportInfo {
                 params: sig.params.clone(),
                 results: sig.results.clone(),
                 wasi,
@@ -421,7 +445,7 @@ fn classify_import(
             Ok(())
         }
         TypeRef::Global(global_ty) => {
-            imported_globals.push(codegen::ImportedGlobalInfo {
+            sink.imported_globals.push(codegen::ImportedGlobalInfo {
                 ty: global_ty.content_type,
                 mutable: global_ty.mutable,
             });
@@ -433,10 +457,10 @@ fn classify_import(
                     "64-bit or shared memory".into(),
                 ));
             }
-            if memory.is_some() {
+            if sink.memory.is_some() {
                 return Err(TranspileError::Unsupported("multiple memories".into()));
             }
-            *memory = Some(codegen::MemInfo {
+            *sink.memory = Some(codegen::MemInfo {
                 min_pages: mem_ty.initial,
                 imported: true,
             });
@@ -451,19 +475,22 @@ fn classify_import(
             if table_ty.table64 || table_ty.shared {
                 return Err(TranspileError::Unsupported("64-bit or shared table".into()));
             }
-            if table.is_some() {
+            if sink.table.is_some() {
                 return Err(TranspileError::Unsupported("multiple tables".into()));
             }
             let min = u32::try_from(table_ty.initial)
                 .map_err(|_| TranspileError::Unsupported("table too large".into()))?;
-            *table = Some(codegen::TableInfo {
+            *sink.table = Some(codegen::TableInfo {
                 min,
                 imported: true,
                 element: ValType::Ref(table_ty.element_type),
             });
             Ok(())
         }
-        _ => Err(TranspileError::Unsupported("imported tag".into())),
+        TypeRef::Tag(tag_ty) => {
+            sink.tags.push(tag_info(tag_ty.func_type_idx, signatures)?);
+            Ok(())
+        }
     }
 }
 

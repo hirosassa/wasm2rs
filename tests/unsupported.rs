@@ -73,9 +73,53 @@ fn element_segment_with_expression_items_is_rejected() {
 }
 
 #[test]
-fn imported_tag_is_rejected() {
-    // Tags (exception handling) are not supported as imports.
-    assert_unsupported(r#"(module (import "e" "t" (tag)))"#, "imported tag");
+fn try_table_is_rejected() {
+    // Only the legacy exception-handling proposal is lowered; the newer
+    // `try_table` form has no translation yet.
+    assert_unsupported(
+        r#"(module
+            (tag $e)
+            (func (result i32)
+              (block $b
+                try_table (result i32) (catch_all $b)
+                  i32.const 1
+                end)))"#,
+        "operator",
+    );
+}
+
+#[test]
+fn branch_out_of_try_body_is_rejected() {
+    // A `br` leaving a `try` body would cross its `catch_unwind` closure, which
+    // Rust cannot express.
+    assert_unsupported(
+        r#"(module
+            (tag $e)
+            (func
+              (block $out
+                try
+                  br $out
+                catch_all
+                end)))"#,
+        "branch out of a try region",
+    );
+}
+
+#[test]
+fn branch_to_try_from_handler_is_rejected() {
+    // A `br` to the try's own label from a catch handler would break out of the
+    // landing-pad `match`, which is not a loop.
+    assert_unsupported(
+        r#"(module
+            (tag $e)
+            (func
+              try
+                throw $e
+              catch_all
+                br 0
+              end))"#,
+        "branch out of a try region",
+    );
 }
 
 #[test]

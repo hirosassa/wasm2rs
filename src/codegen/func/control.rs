@@ -3,7 +3,8 @@ use std::mem;
 use wasmparser::{BlockType, ValType};
 
 use super::super::{
-    BrArm, Frame, FrameKind, Node, RegionNode, Val, default_value, index_u32, reachable_after,
+    BrArm, CatchArm, CatchKind, EXC_TYPE, Frame, FrameKind, Node, RegionNode, TryRegionNode,
+    TryState, Val, decode_exc_value, default_value, encode_exc_value, index_u32, reachable_after,
     rust_type,
 };
 use crate::TranspileError;
@@ -109,6 +110,7 @@ impl<'a> super::FuncGen<'a> {
             then_buffer: None,
             then_reachable: false,
             cond,
+            try_state: None,
         });
         self.max_depth = self.max_depth.max(self.frames.len());
         Ok(())
@@ -185,6 +187,11 @@ impl<'a> super::FuncGen<'a> {
     }
 
     pub(super) fn handle_end(&mut self) -> Result<(), TranspileError> {
+        // A `try` region ends into a `catch_unwind` node, not the generic
+        // block/loop/if lowering.
+        if self.frames.last().is_some_and(|f| f.try_state.is_some()) {
+            return self.handle_try_end();
+        }
         let Some(frame) = self.frames.pop() else {
             return self.end_function();
         };
@@ -369,6 +376,14 @@ impl<'a> super::FuncGen<'a> {
             .len()
             .checked_sub(1 + depth as usize)
             .ok_or_else(|| TranspileError::Unsupported("branch depth out of range".into()))?;
+        // A branch leaving an enclosing `try` has no Rust lowering: out of the
+        // body it would cross the `catch_unwind` closure; out of a handler it
+        // would break out of the landing-pad `match` (which is not a loop).
+        if self.branch_escapes_try(idx) {
+            return Err(TranspileError::Unsupported(
+                "branch out of a try region".into(),
+            ));
+        }
         let frame = &self.frames[idx];
         let is_loop = frame.kind == FrameKind::Loop;
         let vars = if is_loop {
@@ -379,5 +394,252 @@ impl<'a> super::FuncGen<'a> {
         let label = frame.label;
         self.frames[idx].targeted = true;
         Ok((is_loop, label, vars))
+    }
+
+    // ----- legacy exception handling ---------------------------------------
+
+    /// Whether a branch to frame `target_idx` would leave an enclosing `try`.
+    /// Only the innermost barrier matters: a target at or inside it is also
+    /// inside every outer (lower-index) barrier. In a `try` body a branch to the
+    /// try itself is a `break` out of its labelled body loop and allowed; in a
+    /// handler even that has no lowering (the landing pad is not a loop).
+    fn branch_escapes_try(&self, target_idx: usize) -> bool {
+        match self.try_barriers.last() {
+            Some(&(idx, in_catch)) => {
+                if in_catch {
+                    target_idx <= idx
+                } else {
+                    target_idx < idx
+                }
+            }
+            None => false,
+        }
+    }
+
+    /// Open a `try` region. It reuses a block frame (a `br` to it exits like a
+    /// block) but carries [`TryState`] so `end` lowers it to a `catch_unwind`,
+    /// and registers a barrier so branches leaving it are rejected.
+    pub(super) fn open_try(
+        &mut self,
+        blockty: wasmparser::BlockType,
+    ) -> Result<(), TranspileError> {
+        self.uses_eh = true;
+        self.push_frame(FrameKind::Block, blockty, None)?;
+        let idx = self
+            .frames
+            .len()
+            .checked_sub(1)
+            .ok_or(TranspileError::StackUnderflow)?;
+        let label = self.frames[idx].label;
+        self.frames[idx].try_state = Some(TryState {
+            exc_var: format!("__exc{label}"),
+            arms: Vec::new(),
+            cur_kind: CatchKind::Body,
+            cur_binds: Vec::new(),
+        });
+        // The barrier starts in the body phase; the first catch flips it so a
+        // branch out of a handler is rejected too.
+        self.try_barriers.push((idx, false));
+        Ok(())
+    }
+
+    /// Handle a `catch $tag` (`tag` is `Some`) or `catch_all` (`None`): close the
+    /// current arm, reset the operand stack, bind the exception payload (for a
+    /// tagged catch) and start the handler.
+    pub(super) fn handle_catch(&mut self, tag: Option<u32>) -> Result<(), TranspileError> {
+        // The falling-through arm produces the try's results before it ends.
+        if self.reachable {
+            self.assign_fallthrough_result()?;
+        }
+        let body = mem::take(&mut self.cur);
+        let reachable_at_end = self.reachable;
+
+        let idx = self
+            .frames
+            .len()
+            .checked_sub(1)
+            .ok_or(TranspileError::StackUnderflow)?;
+        let frame = self.frames.get(idx).ok_or(TranspileError::StackUnderflow)?;
+        let ts = frame
+            .try_state
+            .as_ref()
+            .ok_or_else(|| TranspileError::Unsupported("catch without try".into()))?;
+        let exc_var = ts.exc_var.clone();
+        let parent_height = frame.parent_height;
+        let label = frame.label;
+
+        // Build the new handler's payload bindings and the operands it pushes.
+        let (new_kind, binds, pushed) = match tag {
+            Some(t) => {
+                let params =
+                    self.ctx.tags.get(t as usize).cloned().ok_or_else(|| {
+                        TranspileError::Unsupported("catch of an unknown tag".into())
+                    })?;
+                let mut binds = Vec::with_capacity(params.len());
+                let mut pushed = Vec::with_capacity(params.len());
+                for (i, ty) in params.iter().enumerate() {
+                    let var = format!("__hv{label}_{i}");
+                    let source =
+                        format!("{exc_var}.downcast_ref::<{EXC_TYPE}>().unwrap().values[{i}]");
+                    binds.push(format!(
+                        "let {var}: {} = {};",
+                        rust_type(*ty)?,
+                        decode_exc_value(*ty, &source)?
+                    ));
+                    pushed.push(Val {
+                        code: var,
+                        ty: *ty,
+                        stable: true,
+                    });
+                }
+                (CatchKind::Tag(t), binds, pushed)
+            }
+            None => (CatchKind::All, Vec::new(), Vec::new()),
+        };
+
+        // Close the previous arm and start the new one.
+        if let Some(ts) = self.frames[idx].try_state.as_mut() {
+            let kind = mem::replace(&mut ts.cur_kind, new_kind);
+            let prev_binds = mem::replace(&mut ts.cur_binds, binds);
+            ts.arms.push(CatchArm {
+                kind,
+                binds: prev_binds,
+                body,
+                reachable_at_end,
+            });
+        }
+        // Handler code runs in the landing pad, outside the body's labelled
+        // loop, so flip this try's barrier to the catch phase. Every nested try
+        // opened in the body has already ended, so this try's barrier is on top.
+        if let Some(barrier) = self.try_barriers.last_mut() {
+            barrier.1 = true;
+        }
+
+        self.stack.truncate(parent_height);
+        for val in pushed {
+            self.push(val);
+        }
+        self.reachable = true;
+        Ok(())
+    }
+
+    /// Finish a `try` region, assembling its body and handlers into a
+    /// [`Node::Try`] emitted into the enclosing buffer.
+    pub(super) fn handle_try_end(&mut self) -> Result<(), TranspileError> {
+        if self.reachable {
+            self.assign_fallthrough_result()?;
+        }
+        let body = mem::take(&mut self.cur);
+        let reachable_at_end = self.reachable;
+
+        let mut frame = self.frames.pop().ok_or(TranspileError::StackUnderflow)?;
+        let ts = frame
+            .try_state
+            .take()
+            .ok_or_else(|| TranspileError::Unsupported("try end without try".into()))?;
+        let TryState {
+            exc_var,
+            mut arms,
+            cur_kind,
+            cur_binds,
+        } = ts;
+        arms.push(CatchArm {
+            kind: cur_kind,
+            binds: cur_binds,
+            body,
+            reachable_at_end,
+        });
+        // This try's barrier (pushed on open, flipped at its first catch) is on
+        // top since every nested try has already ended.
+        self.try_barriers.pop();
+
+        // The try continues if any arm falls through, or a `br` targets it.
+        let next_reachable = frame.targeted || arms.iter().any(|a| a.reachable_at_end);
+
+        // The first arm is always the protected body; the rest are handlers.
+        let mut arms = arms.into_iter();
+        let body_arm = arms
+            .next()
+            .ok_or_else(|| TranspileError::Unsupported("try without a body".into()))?;
+        let catches: Vec<CatchArm> = arms.collect();
+
+        let node = Node::Try(TryRegionNode {
+            label: frame.label,
+            targeted: frame.targeted,
+            exc_var,
+            body: body_arm.body,
+            body_reachable_at_end: body_arm.reachable_at_end,
+            catches,
+        });
+
+        self.cur = mem::take(&mut frame.parent_buffer);
+        self.node(node);
+        // The try lowers to a `()`-typed `match`. When it never falls through
+        // (its body and every handler diverge), the following wasm code is dead
+        // and not emitted, so a diverging guard stands in for it — otherwise the
+        // `match` would be a `()` tail where a value is expected. It is never
+        // reached, since every path through the `match` diverges.
+        if !next_reachable {
+            self.term("unreachable!();".to_string());
+        }
+
+        self.stack.truncate(frame.parent_height);
+        for (var, ty) in frame.results {
+            self.push(Val {
+                code: var,
+                ty,
+                stable: true,
+            });
+        }
+        self.reachable = next_reachable;
+        if !self.reachable {
+            self.dead_nesting = 0;
+        }
+        Ok(())
+    }
+
+    /// Emit a `throw $tag`: pop the payload operands, bit-encode them, and raise
+    /// the exception as a `panic_any` so an enclosing `try` can catch it.
+    pub(super) fn emit_throw(&mut self, tag_index: u32) -> Result<(), TranspileError> {
+        self.uses_eh = true;
+        let params = self
+            .ctx
+            .tags
+            .get(tag_index as usize)
+            .cloned()
+            .ok_or_else(|| TranspileError::Unsupported("throw of an unknown tag".into()))?;
+        // Operands are popped top-first, so fill the payload back to front.
+        let mut encoded = vec![String::new(); params.len()];
+        for i in (0..params.len()).rev() {
+            let value = self.pop()?;
+            encoded[i] = encode_exc_value(params[i], &value.code)?;
+        }
+        self.term(format!(
+            "::std::panic::panic_any({EXC_TYPE} {{ tag: {tag_index}u32, values: vec![{}] }});",
+            encoded.join(", ")
+        ));
+        self.reachable = false;
+        self.dead_nesting = 0;
+        Ok(())
+    }
+
+    /// Emit a `rethrow`: re-raise the exception caught by the targeted enclosing
+    /// `try`'s handler.
+    pub(super) fn emit_rethrow(&mut self, relative_depth: u32) -> Result<(), TranspileError> {
+        let idx = self
+            .frames
+            .len()
+            .checked_sub(1 + relative_depth as usize)
+            .ok_or_else(|| TranspileError::Unsupported("rethrow depth out of range".into()))?;
+        let exc_var = self
+            .frames
+            .get(idx)
+            .and_then(|f| f.try_state.as_ref())
+            .map(|ts| ts.exc_var.clone())
+            .ok_or_else(|| TranspileError::Unsupported("rethrow target is not a try".into()))?;
+        self.term(format!("::std::panic::resume_unwind({exc_var});"));
+        self.reachable = false;
+        self.dead_nesting = 0;
+        Ok(())
     }
 }

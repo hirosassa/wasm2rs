@@ -79,6 +79,13 @@ pub(crate) struct ImportedGlobalInfo {
     pub mutable: bool,
 }
 
+/// An exception tag: the parameter types of the exception it declares. Tags
+/// occupy their own index space (imported tags first, then defined ones), which
+/// `throw`/`catch` reference. Exceptions carry parameters but no results.
+pub(crate) struct TagInfo {
+    pub params: Vec<ValType>,
+}
+
 /// One function to translate: its signature plus its body.
 pub(crate) struct FuncInput<'a> {
     pub params: &'a [ValType],
