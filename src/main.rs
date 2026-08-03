@@ -27,8 +27,22 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const USAGE: &str = "usage: wasm2rs <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]";
 
+/// Worker-thread stack size. Flattening a deeply nested function recurses on the
+/// module's control-flow nesting, which a pathological module can drive into the
+/// thousands — past the default main-thread stack. Like `rustc`, run the work on
+/// a thread with a generous stack.
+const WORKER_STACK: usize = 512 * 1024 * 1024;
+
 fn main() -> ExitCode {
-    match run() {
+    let worker = std::thread::Builder::new()
+        .stack_size(WORKER_STACK)
+        .spawn(run)
+        .expect("spawn worker thread");
+    let result = match worker.join() {
+        Ok(result) => result,
+        Err(_) => Err("transpiler thread panicked".to_string()),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("wasm2rs: {msg}");

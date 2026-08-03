@@ -1,6 +1,9 @@
 use wasmparser::ValType;
 
-use super::super::{ALLOW, GenMeta, Val, index_u32, rust_type, rust_types};
+use super::super::{
+    ALLOW, FLATTEN_DEPTH_THRESHOLD, GenMeta, Val, can_flatten, estimate_body_len, flatten_body,
+    index_u32, push_body_line, render_body_into, rust_type, rust_types,
+};
 use crate::TranspileError;
 
 impl<'a> super::FuncGen<'a> {
@@ -91,7 +94,7 @@ impl<'a> super::FuncGen<'a> {
         // host resolves, so fall through to the shared dispatch method (which
         // has only the null/external/catch-all arms).
         if targets.is_empty() && !self.ctx.has_imports {
-            self.line("panic!(\"indirect call type mismatch\");".to_string());
+            self.term("panic!(\"indirect call type mismatch\");".to_string());
             self.reachable = false;
             self.dead_nesting = 0;
             return Ok(());
@@ -184,8 +187,8 @@ impl<'a> super::FuncGen<'a> {
 
     pub(super) fn emit_return(&mut self) -> Result<(), TranspileError> {
         match self.pop_results(self.results.len())? {
-            Some(code) => self.line(format!("return {code};")),
-            None => self.line("return;".to_string()),
+            Some(code) => self.term(format!("return {code};")),
+            None => self.term("return;".to_string()),
         }
         self.reachable = false;
         self.dead_nesting = 0;
@@ -242,13 +245,24 @@ impl<'a> super::FuncGen<'a> {
             many => format!(" -> ({})", rust_types(many)?.join(", ")),
         };
 
+        // A deeply nested function is flattened to a `loop { match pc { … } }`
+        // dispatch so its rendered nesting cannot overflow rustc's parser; an
+        // ordinary function keeps its readable nested form and its tail
+        // expression. When flattening, the tail is returned from the dispatch's
+        // exit state instead.
+        let flatten = self.max_depth > FLATTEN_DEPTH_THRESHOLD && can_flatten(&self.cur);
+        let (body, trailing) = if flatten {
+            (
+                flatten_body(self.cur, self.trailing, !results.is_empty()),
+                None,
+            )
+        } else {
+            (self.cur, self.trailing)
+        };
+
         // Reserve the function's whole size in one go so appending it never
         // triggers repeated doublings of a multi-megabyte buffer.
-        let body_bytes: usize = self
-            .cur
-            .iter()
-            .map(|l| line_prefix.len() + l.len() + 5)
-            .sum();
+        let body_bytes = estimate_body_len(&body);
         out.reserve(body_bytes + params_src.len() + ret.len() + ALLOW.len() + 32);
 
         // For a method the lint-suppression attribute is applied once on the
@@ -261,22 +275,11 @@ impl<'a> super::FuncGen<'a> {
         out.push_str(line_prefix);
         out.push_str(&format!("pub fn func{index}({params_src}){ret} {{\n"));
 
-        // Emit one body line: a non-empty statement gets `line_prefix` plus the
-        // four-space function-body indent; a blank line stays bare (matching the
-        // single-file renderer's `indent`, which leaves empty lines empty).
-        let push_body_line = |out: &mut String, line: &str| {
-            if !line.is_empty() {
-                out.push_str(line_prefix);
-                out.push_str("    ");
-                out.push_str(line);
-            }
-            out.push('\n');
-        };
-        for line in self.cur {
-            push_body_line(out, &line);
-        }
-        if let Some(trailing) = self.trailing {
-            push_body_line(out, &trailing);
+        // Render the deferred body (consuming it line by line so a huge function
+        // is never held twice), then the tail expression at the body's level.
+        render_body_into(body, line_prefix, out);
+        if let Some(trailing) = trailing {
+            push_body_line(out, &trailing, 0, line_prefix);
         }
 
         out.push_str(line_prefix);

@@ -3,7 +3,8 @@ use std::mem;
 use wasmparser::{BlockType, ValType};
 
 use super::super::{
-    Frame, FrameKind, Val, default_value, indent, index_u32, reachable_after, rust_type,
+    BrArm, Frame, FrameKind, Node, RegionNode, Val, default_value, index_u32, reachable_after,
+    rust_type,
 };
 use crate::TranspileError;
 
@@ -109,6 +110,7 @@ impl<'a> super::FuncGen<'a> {
             then_reachable: false,
             cond,
         });
+        self.max_depth = self.max_depth.max(self.frames.len());
         Ok(())
     }
 
@@ -194,14 +196,56 @@ impl<'a> super::FuncGen<'a> {
 
         let body = mem::take(&mut self.cur);
         let reachable_at_end = self.reachable;
-        let rendered = self.render_frame(&frame, body, reachable_at_end)?;
         let next_reachable = reachable_after(&frame, reachable_at_end);
 
-        self.cur = frame.parent_buffer;
-        self.cur.extend(rendered);
+        let Frame {
+            kind,
+            label,
+            targeted,
+            results,
+            entry_params,
+            parent_height,
+            parent_buffer,
+            then_buffer,
+            cond,
+            ..
+        } = frame;
 
-        self.stack.truncate(frame.parent_height);
-        for (var, ty) in frame.results {
+        // Split an `if` into its then/else arms. When the region yields results
+        // but has no explicit `else`, synthesise an implicit else that forwards
+        // the parameters to the results (validation guarantees matching arity
+        // and types). Blocks and loops keep their whole body as-is.
+        let (body, els) = match kind {
+            FrameKind::Block | FrameKind::Loop => (body, None),
+            FrameKind::If => match then_buffer {
+                Some(then_nodes) => (then_nodes, Some(body)),
+                None if !results.is_empty() => {
+                    let forward = results
+                        .iter()
+                        .zip(&entry_params)
+                        .map(|((var, _), param)| Node::Line(format!("{var} = {};", param.code)))
+                        .collect();
+                    (body, Some(forward))
+                }
+                None => (body, None),
+            },
+        };
+
+        let region = RegionNode {
+            kind,
+            label,
+            targeted,
+            reachable_at_end,
+            cond,
+            body,
+            els,
+        };
+
+        self.cur = parent_buffer;
+        self.cur.push(Node::Region(region));
+
+        self.stack.truncate(parent_height);
+        for (var, ty) in results {
             self.push(Val {
                 code: var,
                 ty,
@@ -216,104 +260,37 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
-    /// Render a finished frame into the enclosing buffer's lines.
-    pub(super) fn render_frame(
-        &self,
-        frame: &Frame,
-        body: Vec<String>,
-        reachable_at_end: bool,
-    ) -> Result<Vec<String>, TranspileError> {
-        match frame.kind {
-            FrameKind::Block | FrameKind::Loop => {
-                if !frame.targeted {
-                    // Never branched to: a plain sequence (a loop that is never
-                    // continued to runs exactly once).
-                    return Ok(body);
-                }
-                let mut out = vec![format!("'l{}: loop {{", frame.label)];
-                out.extend(indent(&body));
-                if reachable_at_end {
-                    out.push(format!("    break 'l{};", frame.label));
-                }
-                out.push("}".to_string());
-                Ok(out)
-            }
-            FrameKind::If => {
-                let cond = frame
-                    .cond
-                    .clone()
-                    .ok_or_else(|| TranspileError::Unsupported("if without condition".into()))?;
-                let (then_lines, else_lines) = match &frame.then_buffer {
-                    Some(then_lines) => (then_lines.clone(), Some(body)),
-                    // No explicit `else`, but the region yields results: the
-                    // implicit else forwards the parameters as the results
-                    // (validation guarantees matching arity and types).
-                    None if !frame.results.is_empty() => {
-                        let forward = frame
-                            .results
-                            .iter()
-                            .zip(&frame.entry_params)
-                            .map(|((var, _), param)| format!("{var} = {};", param.code))
-                            .collect();
-                        (body, Some(forward))
-                    }
-                    None => (body, None),
-                };
-
-                let mut inner = vec![format!("if {cond} {{")];
-                inner.extend(indent(&then_lines));
-                if let Some(else_lines) = else_lines {
-                    inner.push("} else {".to_string());
-                    inner.extend(indent(&else_lines));
-                }
-                inner.push("}".to_string());
-
-                if !frame.targeted {
-                    return Ok(inner);
-                }
-                let mut out = vec![format!("'l{}: loop {{", frame.label)];
-                out.extend(indent(&inner));
-                if reachable_at_end {
-                    out.push(format!("    break 'l{};", frame.label));
-                }
-                out.push("}".to_string());
-                Ok(out)
-            }
-        }
-    }
-
     pub(super) fn branch(&mut self, depth: u32, cond: Option<Val>) -> Result<(), TranspileError> {
-        // Resolve the target frame's branch keyword and value-carrying variables
-        // (the same resolution `br_table` uses per arm).
-        let (keyword, label, vars) = self.branch_arm(depth)?;
+        // Resolve the target frame's kind and value-carrying variables (the same
+        // resolution `br_table` uses per arm).
+        let (is_loop, label, vars) = self.branch_arm(depth)?;
 
         match cond {
             None => {
                 self.assign_results(&vars)?;
-                self.line(format!("{keyword} 'l{label};"));
+                self.node(Node::Br { label, is_loop });
                 self.reachable = false;
                 self.dead_nesting = 0;
             }
             Some(cond) if vars.is_empty() => {
-                self.line(format!("if {} != 0 {{ {keyword} 'l{label}; }}", cond.code));
+                self.node(Node::BrIf {
+                    cond: cond.code,
+                    label,
+                    is_loop,
+                    assigns: Vec::new(),
+                });
             }
             Some(cond) => {
                 // The result values stay on the stack for the fall-through
                 // path, so materialise them and reference the temporaries.
                 self.spill_nonstable()?;
-                let base = self
-                    .stack
-                    .len()
-                    .checked_sub(vars.len())
-                    .ok_or(TranspileError::StackUnderflow)?;
-                let values: Vec<String> =
-                    self.stack[base..].iter().map(|v| v.code.clone()).collect();
-                self.line(format!("if {} != 0 {{", cond.code));
-                for (var, value) in vars.iter().zip(&values) {
-                    self.line(format!("    {var} = {value};"));
-                }
-                self.line(format!("    {keyword} 'l{label};"));
-                self.line("}".to_string());
+                let assigns = self.carried_assigns(&vars)?;
+                self.node(Node::BrIf {
+                    cond: cond.code,
+                    label,
+                    is_loop,
+                    assigns,
+                });
             }
         }
         Ok(())
@@ -327,58 +304,66 @@ impl<'a> super::FuncGen<'a> {
         self.spill_nonstable()?;
 
         let default = targets.default();
-        let mut arms: Vec<(Option<u32>, u32)> = Vec::new();
+        let mut cases: Vec<(Option<u32>, u32)> = Vec::new();
         for (i, target) in targets.targets().enumerate() {
-            arms.push((Some(index_u32(i)?), target?));
+            cases.push((Some(index_u32(i)?), target?));
         }
-        arms.push((None, default));
+        cases.push((None, default));
 
         // Every `br_table` target has the same arity, so the carried operands
         // are the same top-of-stack values for every arm; each arm just assigns
         // them to its own target's variables. After spilling they are stable, so
         // they can be referenced repeatedly across the arms.
-        // The `br_table` selector is interpreted as an unsigned index.
-        self.line(format!("match ({}) as u32 {{", selector.code));
-        for (case, depth) in arms {
-            let (keyword, label, vars) = self.branch_arm(depth)?;
+        let mut arms = Vec::with_capacity(cases.len());
+        for (case, depth) in cases {
+            let (is_loop, label, vars) = self.branch_arm(depth)?;
             let pattern = match case {
                 Some(n) => format!("{n}u32"),
                 None => "_".to_string(),
             };
-            if vars.is_empty() {
-                self.line(format!("    {pattern} => {keyword} 'l{label},"));
-            } else {
-                let base = self
-                    .stack
-                    .len()
-                    .checked_sub(vars.len())
-                    .ok_or(TranspileError::StackUnderflow)?;
-                let assigns: String = vars
-                    .iter()
-                    .zip(&self.stack[base..])
-                    .map(|(var, value)| format!("{var} = {}; ", value.code))
-                    .collect();
-                self.line(format!(
-                    "    {pattern} => {{ {assigns}{keyword} 'l{label}; }},"
-                ));
-            }
+            let assigns = self.carried_assigns(&vars)?;
+            arms.push(BrArm {
+                pattern,
+                label,
+                is_loop,
+                assigns,
+            });
         }
-        self.line("}".to_string());
+        self.node(Node::BrTable {
+            selector: selector.code,
+            arms,
+        });
         self.reachable = false;
         self.dead_nesting = 0;
         Ok(())
     }
 
-    /// Resolve a branch target depth to a `(keyword, label, vars)` triple and
-    /// mark the target frame as branched to (shared by `br`/`br_if`/`br_table`).
-    /// `vars` are the target's value-carrying variables (a block/if's results,
-    /// or a loop's parameters), which the caller assigns before the
-    /// `break`/`continue`. Branching to a loop targets its parameters (its
-    /// loop-carried variables); branching to a block or if carries its results.
+    /// Pair each carried variable with the operand-stack value it receives (the
+    /// top `vars.len()` operands, which `spill_nonstable` has already made
+    /// stable so they can be referenced across arms).
+    fn carried_assigns(&self, vars: &[String]) -> Result<Vec<(String, String)>, TranspileError> {
+        let base = self
+            .stack
+            .len()
+            .checked_sub(vars.len())
+            .ok_or(TranspileError::StackUnderflow)?;
+        Ok(vars
+            .iter()
+            .zip(&self.stack[base..])
+            .map(|(var, value)| (var.clone(), value.code.clone()))
+            .collect())
+    }
+
+    /// Resolve a branch target depth to `(is_loop, label, vars)` and mark the
+    /// target frame as branched to (shared by `br`/`br_if`/`br_table`). `vars`
+    /// are the target's value-carrying variables (a block/if's results, or a
+    /// loop's parameters), which the caller assigns before the branch. Branching
+    /// to a loop targets its parameters (its loop-carried variables); branching
+    /// to a block or if carries its results.
     pub(super) fn branch_arm(
         &mut self,
         depth: u32,
-    ) -> Result<(&'static str, usize, Vec<String>), TranspileError> {
+    ) -> Result<(bool, usize, Vec<String>), TranspileError> {
         let idx = self
             .frames
             .len()
@@ -391,9 +376,8 @@ impl<'a> super::FuncGen<'a> {
         } else {
             frame.result_vars()
         };
-        let keyword = if is_loop { "continue" } else { "break" };
         let label = frame.label;
         self.frames[idx].targeted = true;
-        Ok((keyword, label, vars))
+        Ok((is_loop, label, vars))
     }
 }

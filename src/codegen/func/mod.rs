@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use wasmparser::{FunctionBody, Operator, ValType};
 
 use super::{
-    Frame, FrameKind, Helper, ModuleCtx, Rt, Val, collect_mutated_locals, default_value,
+    Frame, FrameKind, Helper, ModuleCtx, Node, Rt, Val, collect_mutated_locals, default_value,
     i32_literal, i64_literal, index_u32, rust_type,
 };
 use crate::TranspileError;
@@ -24,10 +24,13 @@ pub(super) struct FuncGen<'a> {
     results: Vec<ValType>,
     stack: Vec<Val>,
     frames: Vec<Frame>,
-    /// The output buffer of the innermost scope currently being emitted into.
-    cur: Vec<String>,
+    /// The deferred output of the innermost scope currently being emitted into.
+    cur: Vec<Node>,
     temp_counter: usize,
     label_counter: usize,
+    /// The deepest control-flow nesting reached (peak `frames.len()`), used to
+    /// decide whether to flatten this function to bound its rendered nesting.
+    max_depth: usize,
     /// Whether the current program point is reachable.
     reachable: bool,
     /// Nesting depth of regions opened while unreachable (skipped wholesale).
@@ -68,11 +71,11 @@ impl<'a> FuncGen<'a> {
             } else {
                 "let"
             };
-            cur.push(format!(
+            cur.push(Node::Line(format!(
                 "{keyword} l{i}: {} = {};",
                 rust_type(*ty)?,
                 default_value(*ty)
-            ));
+            )));
         }
 
         Ok(Self {
@@ -85,6 +88,7 @@ impl<'a> FuncGen<'a> {
             cur,
             temp_counter: 0,
             label_counter: 0,
+            max_depth: 0,
             reachable: true,
             dead_nesting: 0,
             trailing: None,
@@ -111,7 +115,7 @@ impl<'a> FuncGen<'a> {
             // `unreachable` always traps; code after it is dead, so stop
             // emitting until the enclosing region ends (as for `return`/`br`).
             Operator::Unreachable => {
-                self.line("panic!(\"unreachable\");".to_string());
+                self.term("panic!(\"unreachable\");".to_string());
                 self.reachable = false;
                 self.dead_nesting = 0;
             }
@@ -440,7 +444,17 @@ impl<'a> FuncGen<'a> {
     }
 
     fn line(&mut self, text: impl Into<String>) {
-        self.cur.push(text.into());
+        self.cur.push(Node::Line(text.into()));
+    }
+
+    /// Push a terminating statement (control does not fall through afterwards).
+    fn term(&mut self, text: impl Into<String>) {
+        self.cur.push(Node::Term(text.into()));
+    }
+
+    /// Push a structured control-flow node.
+    fn node(&mut self, node: Node) {
+        self.cur.push(node);
     }
 
     fn fresh_temp(&mut self) -> String {

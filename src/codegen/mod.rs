@@ -7,6 +7,12 @@
 //! becomes a labelled `loop { ... }` (with `break`/`continue` for `br`), while
 //! one that is never targeted is emitted inline to avoid unused-label warnings.
 //!
+//! A function whose control nesting exceeds [`FLATTEN_DEPTH_THRESHOLD`] is
+//! instead emitted as a flat `loop { match pc { … } }` dispatch (see
+//! [`flatten_body`]), so its rendered nesting is a small constant and cannot
+//! overflow rustc's recursive-descent parser. Ordinary functions keep the
+//! readable nested form above, byte for byte.
+//!
 //! Values are tracked on a simulated operand stack of expression strings. A
 //! value is "stable" when re-evaluating its expression always yields the same
 //! result (a constant, an immutable local, a materialised temporary, or a
@@ -14,7 +20,7 @@
 //! bindings at control-flow boundaries and before local mutations, which keeps
 //! straight-line code compiling to clean inline expressions.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use wasmparser::{FunctionBody, MemArg, Operator, ValType};
 
@@ -150,9 +156,9 @@ struct Frame {
     /// Operand-stack height of the enclosing scope (values below this frame).
     parent_height: usize,
     /// The output buffer of the enclosing scope, restored when the frame ends.
-    parent_buffer: Vec<String>,
-    /// For `if`: the `then` branch lines, captured when `else` is reached.
-    then_buffer: Option<Vec<String>>,
+    parent_buffer: Vec<Node>,
+    /// For `if`: the `then` branch nodes, captured when `else` is reached.
+    then_buffer: Option<Vec<Node>>,
     /// For `if`: whether the `then` branch could fall through to `else`.
     then_reachable: bool,
     /// For `if`: the Rust condition expression.
@@ -172,6 +178,577 @@ impl Frame {
             .map(|(var, _)| var.clone())
             .collect()
     }
+}
+
+/// One element of a function body, captured structurally so a whole function can
+/// be rendered lazily at `finish` time as either nested Rust (the default) or a
+/// flat dispatch loop. Rendering is deferred because the choice depends on the
+/// function's peak control-flow nesting, which is only known once the whole body
+/// has been generated.
+enum Node {
+    /// An opaque straight-line statement, already formatted at its region's own
+    /// base indentation (region nesting is applied when rendered).
+    Line(String),
+    /// A statement after which control does not fall through (`return`, a
+    /// trapping `panic!`).
+    Term(String),
+    /// An unconditional branch: `break`/`continue` to region `label`. Any
+    /// value-carrying assignments precede it as `Line`s.
+    Br { label: usize, is_loop: bool },
+    /// A conditional branch (`br_if`): when `cond` is non-zero, run `assigns`
+    /// then `break`/`continue` to `label`; otherwise fall through.
+    BrIf {
+        cond: String,
+        label: usize,
+        is_loop: bool,
+        assigns: Vec<(String, String)>,
+    },
+    /// A `br_table`: dispatch on `selector` to one of several branch arms.
+    BrTable { selector: String, arms: Vec<BrArm> },
+    /// A nested control-flow region (block/loop/if).
+    Region(RegionNode),
+}
+
+/// One arm of a [`Node::BrTable`]: a match pattern that assigns its target's
+/// value-carrying variables then `break`/`continue`s to `label`.
+struct BrArm {
+    pattern: String,
+    label: usize,
+    is_loop: bool,
+    assigns: Vec<(String, String)>,
+}
+
+impl BrArm {
+    fn keyword(&self) -> &'static str {
+        if self.is_loop { "continue" } else { "break" }
+    }
+}
+
+/// A finished control-flow region, retained structurally (rather than eagerly
+/// flattened to indented text) so it can be rendered nested or flattened.
+struct RegionNode {
+    kind: FrameKind,
+    /// Numeric label; only rendered as `'lN` when `targeted`.
+    label: usize,
+    /// Whether some `br`/`br_if`/`br_table` targets this region.
+    targeted: bool,
+    /// Whether control could fall through the region's end (so a targeted
+    /// block/loop needs a trailing `break 'lN;`).
+    reachable_at_end: bool,
+    /// For an `if`: its Rust condition expression; `None` for block/loop.
+    cond: Option<String>,
+    /// For block/loop: the whole body. For `if`: the `then` arm.
+    body: Vec<Node>,
+    /// For an `if` with an explicit or implicit `else`: the `else` arm.
+    els: Option<Vec<Node>>,
+}
+
+/// Render a function body (its deferred [`Node`] list) into `out`, consuming it.
+/// Each non-empty line is written as `line_prefix` + the four-space function-body
+/// indent + four spaces per control-nesting level + the statement; blank lines
+/// stay bare. This reproduces, byte for byte, the previously eager
+/// `indent`-based rendering, while consuming and dropping each node as it is
+/// copied so a huge body is never held twice.
+fn render_body_into(nodes: Vec<Node>, line_prefix: &str, out: &mut String) {
+    render_nodes_into(nodes, 0, line_prefix, out);
+}
+
+fn render_nodes_into(nodes: Vec<Node>, depth: usize, line_prefix: &str, out: &mut String) {
+    for node in nodes {
+        match node {
+            Node::Line(text) | Node::Term(text) => push_body_line(out, &text, depth, line_prefix),
+            Node::Br { label, is_loop } => {
+                let keyword = if is_loop { "continue" } else { "break" };
+                push_body_line(out, &format!("{keyword} 'l{label};"), depth, line_prefix);
+            }
+            Node::BrIf {
+                cond,
+                label,
+                is_loop,
+                assigns,
+            } => render_br_if_nested(&cond, label, is_loop, &assigns, depth, line_prefix, out),
+            Node::BrTable { selector, arms } => {
+                render_br_table_nested(&selector, &arms, depth, line_prefix, out)
+            }
+            Node::Region(region) => render_region_into(region, depth, line_prefix, out),
+        }
+    }
+}
+
+/// Render a `br_if` node as nested Rust, matching the byte layout the eager
+/// renderer produced: a one-line `if` when it carries no values, or a
+/// multi-line `if` whose body assigns the carried values (with the historic
+/// four-space inner indent baked into the statement) before branching.
+fn render_br_if_nested(
+    cond: &str,
+    label: usize,
+    is_loop: bool,
+    assigns: &[(String, String)],
+    depth: usize,
+    line_prefix: &str,
+    out: &mut String,
+) {
+    let keyword = if is_loop { "continue" } else { "break" };
+    if assigns.is_empty() {
+        push_body_line(
+            out,
+            &format!("if {cond} != 0 {{ {keyword} 'l{label}; }}"),
+            depth,
+            line_prefix,
+        );
+    } else {
+        push_body_line(out, &format!("if {cond} != 0 {{"), depth, line_prefix);
+        for (var, value) in assigns {
+            push_body_line(out, &format!("    {var} = {value};"), depth, line_prefix);
+        }
+        push_body_line(
+            out,
+            &format!("    {keyword} 'l{label};"),
+            depth,
+            line_prefix,
+        );
+        push_body_line(out, "}", depth, line_prefix);
+    }
+}
+
+/// Render a `br_table` node as nested Rust (`match (sel) as u32 { … }`),
+/// matching the byte layout the eager renderer produced.
+fn render_br_table_nested(
+    selector: &str,
+    arms: &[BrArm],
+    depth: usize,
+    line_prefix: &str,
+    out: &mut String,
+) {
+    push_body_line(
+        out,
+        &format!("match ({selector}) as u32 {{"),
+        depth,
+        line_prefix,
+    );
+    for arm in arms {
+        let keyword = arm.keyword();
+        let label = arm.label;
+        let line = if arm.assigns.is_empty() {
+            format!("    {} => {keyword} 'l{label},", arm.pattern)
+        } else {
+            let assigns: String = arm
+                .assigns
+                .iter()
+                .map(|(var, value)| format!("{var} = {value}; "))
+                .collect();
+            format!(
+                "    {} => {{ {assigns}{keyword} 'l{label}; }},",
+                arm.pattern
+            )
+        };
+        push_body_line(out, &line, depth, line_prefix);
+    }
+    push_body_line(out, "}", depth, line_prefix);
+}
+
+/// Write one body line at control-nesting `depth`. Empty lines stay bare
+/// (matching the single-file renderer's `indent`, which leaves them empty).
+fn push_body_line(out: &mut String, text: &str, depth: usize, line_prefix: &str) {
+    if !text.is_empty() {
+        out.push_str(line_prefix);
+        // Base function-body indent, then one level per enclosing region.
+        for _ in 0..=depth {
+            out.push_str("    ");
+        }
+        out.push_str(text);
+    }
+    out.push('\n');
+}
+
+fn render_region_into(region: RegionNode, depth: usize, line_prefix: &str, out: &mut String) {
+    let RegionNode {
+        kind,
+        label,
+        targeted,
+        reachable_at_end,
+        cond,
+        body,
+        els,
+    } = region;
+
+    // The inner content (block/loop body, or the `if { … } else { … }`),
+    // rendered at `inner_depth`; a targeted region wraps it in a labelled loop.
+    let inner_depth = if targeted { depth + 1 } else { depth };
+    let render_inner = |out: &mut String, body: Vec<Node>, els: Option<Vec<Node>>| match kind {
+        FrameKind::Block | FrameKind::Loop => {
+            render_nodes_into(body, inner_depth, line_prefix, out)
+        }
+        FrameKind::If => {
+            let cond = cond.clone().unwrap_or_default();
+            push_body_line(out, &format!("if {cond} {{"), inner_depth, line_prefix);
+            render_nodes_into(body, inner_depth + 1, line_prefix, out);
+            if let Some(els) = els {
+                push_body_line(out, "} else {", inner_depth, line_prefix);
+                render_nodes_into(els, inner_depth + 1, line_prefix, out);
+            }
+            push_body_line(out, "}", inner_depth, line_prefix);
+        }
+    };
+
+    if targeted {
+        push_body_line(out, &format!("'l{label}: loop {{"), depth, line_prefix);
+        render_inner(out, body, els);
+        if reachable_at_end {
+            push_body_line(out, &format!("break 'l{label};"), inner_depth, line_prefix);
+        }
+        push_body_line(out, "}", depth, line_prefix);
+    } else {
+        render_inner(out, body, els);
+    }
+}
+
+/// The estimated byte length of a rendered body, used to pre-reserve the output
+/// buffer so appending a huge function never triggers repeated `String`
+/// doublings. Indentation is ignored; the statement text dominates.
+fn estimate_body_len(nodes: &[Node]) -> usize {
+    nodes
+        .iter()
+        .map(|node| match node {
+            Node::Line(text) | Node::Term(text) => text.len() + 5,
+            Node::Br { .. } => 24,
+            Node::BrIf { cond, assigns, .. } => {
+                cond.len()
+                    + assigns
+                        .iter()
+                        .map(|(v, e)| v.len() + e.len() + 8)
+                        .sum::<usize>()
+                    + 32
+            }
+            Node::BrTable { selector, arms } => {
+                selector.len()
+                    + arms
+                        .iter()
+                        .map(|a| {
+                            a.pattern.len()
+                                + a.assigns
+                                    .iter()
+                                    .map(|(v, e)| v.len() + e.len() + 6)
+                                    .sum::<usize>()
+                                + 24
+                        })
+                        .sum::<usize>()
+                    + 32
+            }
+            Node::Region(region) => {
+                estimate_body_len(&region.body)
+                    + region.els.as_deref().map_or(0, estimate_body_len)
+                    + 32
+            }
+        })
+        .sum()
+}
+
+/// Peak control-flow nesting above which a function is emitted as a flat
+/// dispatch loop instead of nested Rust, so its rendered nesting cannot overflow
+/// rustc's recursive-descent parser. Chosen well above any hand-written nesting
+/// (so ordinary functions keep their readable nested form) yet far below the
+/// parser's stack limit.
+const FLATTEN_DEPTH_THRESHOLD: usize = 40;
+
+/// Whether a body can be lowered to a flat dispatch loop with the currently
+/// supported constructs (block/loop/`br`/`br_if`/terminators). `if` regions and
+/// `br_table` are not yet flattenable, so a body containing them stays nested.
+fn can_flatten(nodes: &[Node]) -> bool {
+    nodes.iter().all(|node| match node {
+        Node::Line(_)
+        | Node::Term(_)
+        | Node::Br { .. }
+        | Node::BrIf { .. }
+        | Node::BrTable { .. } => true,
+        Node::Region(region) => match region.kind {
+            FrameKind::Block | FrameKind::Loop => can_flatten(&region.body),
+            FrameKind::If => {
+                region.cond.is_some()
+                    && can_flatten(&region.body)
+                    && region.els.as_deref().is_none_or(can_flatten)
+            }
+        },
+    })
+}
+
+/// Lower a structured body to a flat state machine: `let mut pc = …; 'sm: loop {
+/// match pc { … } }`. Each control region becomes one or more flat `match` arms
+/// linked by `pc` assignments, so the rendered nesting is a small constant
+/// regardless of the wasm nesting depth. The caller must have checked
+/// [`can_flatten`] first.
+///
+/// `trailing` is the function's tail expression (the value produced by falling
+/// through the whole body), returned from the exit state. Every arm either loops
+/// (setting `pc`) or `return`s, so the dispatch loop diverges (`!`) and is a
+/// valid tail for any return type. `returns_value` says whether the function has
+/// a result: a value-returning function with no `trailing` never falls through,
+/// so its exit state is unreachable. Returns the flat body as already-indented
+/// [`Node::Line`]s.
+fn flatten_body(nodes: Vec<Node>, trailing: Option<String>, returns_value: bool) -> Vec<Node> {
+    let mut f = Flattener {
+        arms: Vec::new(),
+        next_state: 0,
+        labels: HashMap::new(),
+        uses_continue: false,
+    };
+    let start = f.alloc();
+    let exit = f.alloc();
+    let exit_stmt = match trailing {
+        Some(expr) => format!("return {expr};"),
+        // A value-returning function reaches its exit only by falling through
+        // with a value (a `Some` trailing); reaching it otherwise is impossible.
+        None if returns_value => "unreachable!();".to_string(),
+        None => "return;".to_string(),
+    };
+    f.arms.push((exit, vec![exit_stmt]));
+    f.lower(nodes, start, exit);
+    f.assemble(start)
+}
+
+/// Builds the flat `match pc { … }` arms while linearising a structured body.
+struct Flattener {
+    /// Completed dispatch arms: `(state id, its statements)`.
+    arms: Vec<(usize, Vec<String>)>,
+    /// Next unused state id.
+    next_state: usize,
+    /// wasm region label → the state a branch to it jumps to (a loop's header,
+    /// a block's continuation).
+    labels: HashMap<usize, usize>,
+    /// Whether any arm uses `continue 'sm` (emitted for `br_if`), so the
+    /// dispatch loop needs its `'sm` label. Without it the label is unused.
+    uses_continue: bool,
+}
+
+impl Flattener {
+    fn alloc(&mut self) -> usize {
+        let id = self.next_state;
+        self.next_state += 1;
+        id
+    }
+
+    /// Linearise `nodes` so execution enters at state `entry` and, on
+    /// fall-through, transfers to state `after`.
+    fn lower(&mut self, nodes: Vec<Node>, entry: usize, after: usize) {
+        let mut state = entry;
+        let mut stmts: Vec<String> = Vec::new();
+        let mut reachable = true;
+        for node in nodes {
+            if !reachable {
+                // The generator does not emit past a terminator within a region,
+                // but skip defensively so a stray node cannot start a dead arm.
+                continue;
+            }
+            match node {
+                Node::Line(text) => stmts.push(text),
+                Node::Term(text) => {
+                    stmts.push(text);
+                    self.arms.push((state, std::mem::take(&mut stmts)));
+                    reachable = false;
+                }
+                Node::Br { label, .. } => {
+                    let target = self.labels[&label];
+                    stmts.push(format!("pc = {target};"));
+                    self.arms.push((state, std::mem::take(&mut stmts)));
+                    reachable = false;
+                }
+                Node::BrIf {
+                    cond,
+                    label,
+                    assigns,
+                    ..
+                } => {
+                    let target = self.labels[&label];
+                    let mut line = format!("if {cond} != 0 {{ ");
+                    for (var, value) in assigns {
+                        line.push_str(&format!("{var} = {value}; "));
+                    }
+                    line.push_str(&format!("pc = {target}; continue 'sm; }}"));
+                    self.uses_continue = true;
+                    stmts.push(line);
+                }
+                Node::Region(region) if region.kind == FrameKind::If => {
+                    // Dispatch to the `then`/`else` entry, then rejoin at `cont`.
+                    // A branch to the `if` exits to `cont`.
+                    let cont = self.alloc();
+                    let then_e = self.alloc();
+                    self.labels.insert(region.label, cont);
+                    let cond = region.cond.clone().unwrap_or_default();
+                    let RegionNode { body, els, .. } = region;
+                    let else_e = match &els {
+                        Some(_) => self.alloc(),
+                        None => cont,
+                    };
+                    stmts.push(format!(
+                        "if {cond} {{ pc = {then_e}; }} else {{ pc = {else_e}; }}"
+                    ));
+                    self.arms.push((state, std::mem::take(&mut stmts)));
+                    self.lower(body, then_e, cont);
+                    if let Some(els) = els {
+                        self.lower(els, else_e, cont);
+                    }
+                    state = cont;
+                }
+                Node::Region(region) => {
+                    let inner = self.alloc();
+                    let cont = self.alloc();
+                    // A branch to a loop resumes its header; to a block it exits
+                    // to the continuation.
+                    let branch_target = match region.kind {
+                        FrameKind::Loop => inner,
+                        _ => cont,
+                    };
+                    self.labels.insert(region.label, branch_target);
+                    stmts.push(format!("pc = {inner};"));
+                    self.arms.push((state, std::mem::take(&mut stmts)));
+                    self.lower(region.body, inner, cont);
+                    state = cont;
+                }
+                Node::BrTable { selector, arms } => {
+                    // Each arm assigns its target's carried variables then sets
+                    // `pc`; the whole `match` ends the current arm.
+                    let mut line = format!("match ({selector}) as u32 {{ ");
+                    for arm in arms {
+                        let target = self.labels[&arm.label];
+                        line.push_str(&format!("{} => {{ ", arm.pattern));
+                        for (var, value) in arm.assigns {
+                            line.push_str(&format!("{var} = {value}; "));
+                        }
+                        line.push_str(&format!("pc = {target}; }} "));
+                    }
+                    line.push('}');
+                    stmts.push(line);
+                    self.arms.push((state, std::mem::take(&mut stmts)));
+                    reachable = false;
+                }
+            }
+        }
+        if reachable {
+            stmts.push(format!("pc = {after};"));
+            self.arms.push((state, stmts));
+        }
+    }
+
+    /// Assemble the dispatch loop from the collected arms, indenting each line to
+    /// its final position (relative to the function body's first level).
+    ///
+    /// Each `match` arm is its own lexical scope, so a `let` binding declared in
+    /// one arm would be invisible to the others. Every typed `let` is therefore
+    /// hoisted to a declaration above the loop (kept in scope for all arms) while
+    /// its initialising assignment — which may carry side effects and must run at
+    /// its original program point — stays in the arm.
+    fn assemble(mut self, start: usize) -> Vec<Node> {
+        self.arms.sort_by_key(|(state, _)| *state);
+
+        let mut decls: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut rewritten: Vec<(usize, Vec<String>)> = Vec::with_capacity(self.arms.len());
+        for (state, stmts) in self.arms {
+            let mut arm = Vec::with_capacity(stmts.len());
+            for stmt in stmts {
+                match hoist_decl(&stmt) {
+                    Some((decl, assign)) => {
+                        if seen.insert(decl.clone()) {
+                            decls.push(decl);
+                        }
+                        arm.push(assign);
+                    }
+                    None => arm.push(stmt),
+                }
+            }
+            rewritten.push((state, arm));
+        }
+
+        let mut out = Vec::new();
+        let mut push = |depth: usize, text: String| {
+            out.push(Node::Line(format!("{}{text}", "    ".repeat(depth))));
+        };
+        push(0, format!("let mut pc: usize = {start};"));
+        for decl in decls {
+            push(0, decl);
+        }
+        // The `'sm` label is only needed when an arm uses `continue 'sm`.
+        let loop_head = if self.uses_continue {
+            "'sm: loop {"
+        } else {
+            "loop {"
+        };
+        push(0, loop_head.to_string());
+        push(1, "match pc {".to_string());
+        for (state, stmts) in rewritten {
+            push(2, format!("{state} => {{"));
+            for stmt in stmts {
+                push(3, stmt);
+            }
+            push(2, "}".to_string());
+        }
+        push(2, "_ => unreachable!(),".to_string());
+        push(1, "}".to_string());
+        push(0, "}".to_string());
+        out
+    }
+}
+
+/// If `line` is a typed `let` binding, return `(hoisted declaration, in-arm
+/// assignment)`: the declaration is placed above the dispatch loop so it stays
+/// in scope for every arm, while the assignment (carrying any side effects)
+/// stays at the original program point. A typeless `let` — whose binding never
+/// crosses an arm boundary — returns `None` and is left in place.
+fn hoist_decl(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("let ")?;
+    let rest = rest.strip_prefix("mut ").unwrap_or(rest);
+    // `BINDING: TYPE = INIT;` — split at the first top-level ` = `, then split
+    // the left side at the first top-level `:`.
+    let eq = top_level_find(rest, " = ")?;
+    let (lhs, init) = (&rest[..eq], &rest[eq + 3..]);
+    let colon = top_level_find(lhs, ":")?;
+    let binding = lhs[..colon].trim_end();
+    let ty = lhs[colon + 1..].trim();
+    let default = type_default(ty);
+    let decl = if let Some(names) = binding.strip_prefix('(').and_then(|b| b.strip_suffix(')')) {
+        // A tuple binding needs `mut` on each name: `let (mut a, mut b): …`.
+        let muts: Vec<String> = names
+            .split(',')
+            .map(|n| format!("mut {}", n.trim()))
+            .collect();
+        format!("let ({}): {ty} = {default};", muts.join(", "))
+    } else {
+        format!("let mut {binding}: {ty} = {default};")
+    };
+    let assign = format!("{binding} = {init}");
+    Some((decl, assign))
+}
+
+/// A placeholder default value for `ty`, valid to bind before the real
+/// initialising assignment overwrites it. Any value of the type works, since the
+/// assignment dominates every read.
+fn type_default(ty: &str) -> String {
+    if let Some(inner) = ty.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
+        let parts: Vec<String> = inner.split(',').map(|p| type_default(p.trim())).collect();
+        format!("({})", parts.join(", "))
+    } else if ty == "f32" || ty == "f64" {
+        "0.0".to_string()
+    } else {
+        "0".to_string()
+    }
+}
+
+/// The byte index of the first occurrence of `pat` in `s` at bracket-nesting
+/// depth zero (ignoring matches inside `()`/`[]`/`{}`), if any.
+fn top_level_find(s: &str, pat: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    for i in 0..bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && s[i..].starts_with(pat) {
+            return Some(i);
+        }
+    }
+    None
 }
 
 /// Module-wide context shared by every function's code generation.
