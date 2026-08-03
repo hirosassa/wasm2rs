@@ -1,6 +1,6 @@
 use wasmparser::ValType;
 
-use super::super::{ALLOW, GenFn, Val, indent, index_u32, rust_type, rust_types};
+use super::super::{ALLOW, GenMeta, Val, index_u32, rust_type, rust_types};
 use crate::TranspileError;
 
 impl<'a> super::FuncGen<'a> {
@@ -201,12 +201,24 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    /// Append this function's Rust source to `out`, streaming the body straight
+    /// in rather than materialising it as a second `String`, and return the
+    /// helper dependencies it discovered.
+    ///
+    /// Each non-empty line is prefixed by `line_prefix` (empty for a free `pub
+    /// fn`, four spaces when the function is a method inside a chunk's `impl`
+    /// block); body statements additionally carry the usual four-space
+    /// function-body indent. Because the whole body (`self.cur`, potentially
+    /// hundreds of megabytes for a pathologically large function) is consumed
+    /// line by line and dropped as it is copied, it is never held twice.
     pub(in crate::codegen) fn finish(
         self,
         index: usize,
         params: &[ValType],
         results: &[ValType],
-    ) -> Result<GenFn, TranspileError> {
+        line_prefix: &str,
+        out: &mut String,
+    ) -> Result<GenMeta, TranspileError> {
         let mut params_src = String::new();
         // Stateful modules pass their memory/globals through `&mut self`.
         if self.ctx.is_method {
@@ -230,26 +242,46 @@ impl<'a> super::FuncGen<'a> {
             many => format!(" -> ({})", rust_types(many)?.join(", ")),
         };
 
-        let mut body = self.cur;
-        if let Some(trailing) = self.trailing {
-            body.push(trailing);
-        }
+        // Reserve the function's whole size in one go so appending it never
+        // triggers repeated doublings of a multi-megabyte buffer.
+        let body_bytes: usize = self
+            .cur
+            .iter()
+            .map(|l| line_prefix.len() + l.len() + 5)
+            .sum();
+        out.reserve(body_bytes + params_src.len() + ret.len() + ALLOW.len() + 32);
 
         // For a method the lint-suppression attribute is applied once on the
         // enclosing `impl`; free functions carry it individually.
-        let mut out = String::new();
         if !self.ctx.is_method {
+            out.push_str(line_prefix);
             out.push_str(ALLOW);
             out.push('\n');
         }
+        out.push_str(line_prefix);
         out.push_str(&format!("pub fn func{index}({params_src}){ret} {{\n"));
-        for line in indent(&body) {
-            out.push_str(&line);
+
+        // Emit one body line: a non-empty statement gets `line_prefix` plus the
+        // four-space function-body indent; a blank line stays bare (matching the
+        // single-file renderer's `indent`, which leaves empty lines empty).
+        let push_body_line = |out: &mut String, line: &str| {
+            if !line.is_empty() {
+                out.push_str(line_prefix);
+                out.push_str("    ");
+                out.push_str(line);
+            }
             out.push('\n');
+        };
+        for line in self.cur {
+            push_body_line(out, &line);
         }
+        if let Some(trailing) = self.trailing {
+            push_body_line(out, &trailing);
+        }
+
+        out.push_str(line_prefix);
         out.push_str("}\n");
-        Ok(GenFn {
-            src: out,
+        Ok(GenMeta {
             helpers: self.used_helpers,
             rt: self.used_rt,
             dispatch_sigs: self.dispatch_sigs,

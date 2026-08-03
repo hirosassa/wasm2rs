@@ -354,52 +354,31 @@ fn host_generics(parts: &ModuleParts<'_>) -> (&'static str, &'static str) {
     }
 }
 
-/// Render one chunk file of a multi-file module: the defined functions in
-/// `sources` plus a `use super::*;` that pulls the root's items (the `Instance`
-/// type, the `Imports` trait, the runtime helpers and the other chunks'
-/// re-exported functions) into scope.
+/// Render the *prelude* of one chunk file of a multi-file module: the
+/// `use super::*;` that pulls the root's items (the `Instance` type, the
+/// `Imports` trait, the runtime helpers and the other chunks' re-exported
+/// functions) into scope, and — for a stateful module — the opening of the
+/// `impl Instance` block the chunk's methods live in.
 ///
-/// A stateless module's functions are free `pub fn`s emitted directly; a
-/// stateful module's are `&mut self` methods, so they are wrapped in an
-/// `impl Instance` block (Rust allows a type's inherent impl to be split across
-/// files in the same crate). The private helper methods the bodies call live on
-/// the root's impl and are visible here because a chunk module is a descendant
-/// of the crate root that defines them.
-pub(super) fn render_chunk_file(
-    parts: &ModuleParts<'_>,
-    stateful: bool,
-    sources: &[String],
-) -> String {
+/// The functions themselves are streamed in after this prelude by
+/// [`generate_function_into`](super::generate_function_into): a stateless
+/// module's are free `pub fn`s emitted directly, while a stateful module's are
+/// `&mut self` methods indented one level inside the `impl` (Rust allows a
+/// type's inherent impl to be split across files in the same crate), whose
+/// closing `}` the caller appends. The private helper methods the bodies call
+/// live on the root's impl and are visible here because a chunk module is a
+/// descendant of the crate root that defines them.
+pub(super) fn chunk_prelude(parts: &ModuleParts<'_>, stateful: bool) -> String {
     // A chunk that happens to call nothing from the root leaves the glob unused,
     // which `-D warnings` rejects, so the import is unconditionally allowed.
     let mut out = String::from("#[allow(unused_imports)]\nuse super::*;\n");
-    if !stateful {
-        for src in sources {
-            out.push('\n');
-            out.push_str(src);
-        }
-        return out;
-    }
-
-    let (decl_generics, type_generics) = host_generics(parts);
-    out.push('\n');
-    out.push_str(ALLOW);
-    out.push('\n');
-    out.push_str(&format!("impl{decl_generics} Instance{type_generics} {{\n"));
-    // Indent each method body inline rather than buffering every line into a
-    // `Vec` and copying it again through `indent`: a chunk holding one very large
-    // function would otherwise transiently need several times its own size.
-    for src in sources {
+    if stateful {
+        let (decl_generics, type_generics) = host_generics(parts);
         out.push('\n');
-        for line in src.lines() {
-            if !line.is_empty() {
-                out.push_str("    ");
-                out.push_str(line);
-            }
-            out.push('\n');
-        }
+        out.push_str(ALLOW);
+        out.push('\n');
+        out.push_str(&format!("impl{decl_generics} Instance{type_generics} {{\n"));
     }
-    out.push_str("}\n");
     out
 }
 

@@ -30,7 +30,7 @@ mod wasi;
 
 use self::func::FuncGen;
 use self::helpers::helper_name;
-use self::render::{render_chunk_file, render_lib_root, render_module};
+use self::render::{chunk_prelude, render_lib_root, render_module};
 use self::runtime::{render_rt_helpers, rt_name};
 
 pub(crate) use self::const_expr::{const_expr_to_rust, const_expr_u32};
@@ -93,9 +93,13 @@ enum Rt {
     I64TruncF64U,
 }
 
-/// The rendered source of one function plus the helpers it relies on.
-struct GenFn {
-    src: String,
+/// The helper dependencies discovered while generating one function.
+///
+/// The function's own Rust source is written straight into the caller's output
+/// buffer (see [`generate_function_into`]) rather than returned, so the whole
+/// body is never held twice; only these aggregated sets — needed to render the
+/// module/root once every function has been seen — are returned.
+struct GenMeta {
     /// Instance-method memory helpers.
     helpers: HashSet<Helper>,
     /// Module-scope free-function runtime helpers.
@@ -341,12 +345,15 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     let mut dispatch_sigs: HashSet<u32> = HashSet::new();
     for (index, f) in parts.funcs.iter().enumerate() {
         // Defined functions are named by their full function index, i.e. after
-        // the imported functions in the shared index space.
-        let generated = generate_function(parts.imports.len() + index, f, &ctx)?;
-        used.extend(generated.helpers);
-        used_rt.extend(generated.rt);
-        dispatch_sigs.extend(generated.dispatch_sigs);
-        sources.push(generated.src);
+        // the imported functions in the shared index space. The single-file
+        // path is not memory-critical, so each function is rendered into its own
+        // `String` and the pieces are joined/wrapped exactly as before.
+        let mut src = String::new();
+        let meta = generate_function_into(parts.imports.len() + index, f, &ctx, "", &mut src)?;
+        used.extend(meta.helpers);
+        used_rt.extend(meta.rt);
+        dispatch_sigs.extend(meta.dispatch_sigs);
+        sources.push(src);
     }
 
     // Free-function runtime helpers live at module scope, above the functions
@@ -418,27 +425,53 @@ pub(crate) fn generate_module_split(
     let mut used_rt: HashSet<Rt> = HashSet::new();
     let mut dispatch_sigs: HashSet<u32> = HashSet::new();
 
-    let mut chunk: Vec<String> = Vec::new();
-    let mut chunk_bytes = 0usize;
+    // A stateful chunk wraps its functions in an `impl Instance` block, so every
+    // emitted line is indented one level; a stateless chunk emits free `pub fn`s
+    // at column zero.
+    let line_prefix = if stateful { "    " } else { "" };
+    // The current chunk is built in place: its prelude is written when the first
+    // function joins it, each function's source is streamed straight in (never
+    // buffered as a separate `String`), and the whole buffer is handed to `emit`
+    // and reset at a flush. Peak memory is therefore about one chunk, not the
+    // whole program.
+    let mut chunk = String::new();
+    let mut funcs_in_chunk = 0usize;
     let mut chunk_index = 0usize;
     for (index, f) in parts.funcs.iter().enumerate() {
-        let generated = generate_function(base + index, f, &ctx)?;
-        used.extend(generated.helpers);
-        used_rt.extend(generated.rt);
-        dispatch_sigs.extend(generated.dispatch_sigs);
-        chunk_bytes += generated.src.len();
-        chunk.push(generated.src);
-        if chunk.len() >= per || chunk_bytes >= byte_cap {
-            let code = render_chunk_file(parts, stateful, &chunk);
-            emit(format!("funcs_{chunk_index}.rs"), code)?;
-            chunk.clear();
-            chunk_bytes = 0;
+        if funcs_in_chunk == 0 {
+            chunk.push_str(&chunk_prelude(parts, stateful));
+        }
+        // A blank line separates each function from the prelude or its
+        // predecessor, matching the single-file rendering.
+        chunk.push('\n');
+        let meta = generate_function_into(base + index, f, &ctx, line_prefix, &mut chunk)?;
+        used.extend(meta.helpers);
+        used_rt.extend(meta.rt);
+        dispatch_sigs.extend(meta.dispatch_sigs);
+        funcs_in_chunk += 1;
+
+        // Flush at the function count cap or once the chunk's own bytes reach
+        // the byte cap (both act only here, at a function boundary).
+        if funcs_in_chunk >= per || chunk.len() >= byte_cap {
+            if stateful {
+                chunk.push_str("}\n");
+            }
+            emit(
+                format!("funcs_{chunk_index}.rs"),
+                std::mem::take(&mut chunk),
+            )?;
             chunk_index += 1;
+            funcs_in_chunk = 0;
         }
     }
-    if !chunk.is_empty() {
-        let code = render_chunk_file(parts, stateful, &chunk);
-        emit(format!("funcs_{chunk_index}.rs"), code)?;
+    if funcs_in_chunk > 0 {
+        if stateful {
+            chunk.push_str("}\n");
+        }
+        emit(
+            format!("funcs_{chunk_index}.rs"),
+            std::mem::take(&mut chunk),
+        )?;
         chunk_index += 1;
     }
     let n_chunks = chunk_index;
@@ -456,14 +489,19 @@ pub(crate) fn generate_module_split(
     emit("lib.rs".to_string(), root)
 }
 
-fn generate_function(
+/// Generate the Rust source of one function, appending it to `out` (each
+/// non-empty line prefixed by `line_prefix`, used to indent a method inside a
+/// chunk's `impl` block), and return the helper dependencies it discovered.
+fn generate_function_into(
     index: usize,
     input: &FuncInput<'_>,
     ctx: &ModuleCtx<'_>,
-) -> Result<GenFn, TranspileError> {
+    line_prefix: &str,
+    out: &mut String,
+) -> Result<GenMeta, TranspileError> {
     let mut func = FuncGen::new(input.params, input.results, input.body, ctx)?;
     func.run(input.body)?;
-    func.finish(index, input.params, input.results)
+    func.finish(index, input.params, input.results, line_prefix, out)
 }
 
 /// The offset field of a memory access, as a `u32` (32-bit memory only).
