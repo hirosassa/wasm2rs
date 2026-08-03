@@ -3,11 +3,28 @@ use std::mem;
 use wasmparser::{BlockType, ValType};
 
 use super::super::{
-    BrArm, CatchArm, CatchKind, EXC_TYPE, Frame, FrameKind, Node, RegionNode, TryRegionNode,
-    TryState, Val, decode_exc_value, default_value, encode_exc_value, index_u32, reachable_after,
-    rust_type,
+    BrArm, BranchEscape, CatchArm, CatchKind, EXC_TYPE, Frame, FrameKind, Node, RegionNode,
+    TryRegionNode, TryState, Val, decode_exc_value, default_value, encode_exc_value, index_u32,
+    reachable_after, rust_type,
 };
 use crate::TranspileError;
+
+/// A resolved branch target: either a plain `break`/`continue` to an enclosing
+/// region, or one that leaves an enclosing `try` body and must be re-issued from
+/// outside the `catch_unwind` closure.
+enum BranchTarget {
+    Direct {
+        is_loop: bool,
+        label: usize,
+        vars: Vec<String>,
+    },
+    Escape {
+        target_idx: usize,
+        is_loop: bool,
+        label: usize,
+        vars: Vec<String>,
+    },
+}
 
 impl<'a> super::FuncGen<'a> {
     // ----- control flow ----------------------------------------------------
@@ -268,13 +285,34 @@ impl<'a> super::FuncGen<'a> {
     }
 
     pub(super) fn branch(&mut self, depth: u32, cond: Option<Val>) -> Result<(), TranspileError> {
-        // Resolve the target frame's kind and value-carrying variables (the same
-        // resolution `br_table` uses per arm).
-        let (is_loop, label, vars) = self.branch_arm(depth)?;
+        match self.resolve_target(depth)? {
+            BranchTarget::Direct {
+                is_loop,
+                label,
+                vars,
+            } => self.emit_direct_branch(is_loop, label, &vars, cond),
+            BranchTarget::Escape {
+                target_idx,
+                is_loop,
+                label,
+                vars,
+            } => self.emit_escaping_branch(target_idx, is_loop, label, &vars, cond),
+        }
+    }
 
+    /// Emit a branch that stays within the current `catch_unwind` closure (if
+    /// any): a plain `break`/`continue`, optionally guarded by `br_if`'s
+    /// condition.
+    fn emit_direct_branch(
+        &mut self,
+        is_loop: bool,
+        label: usize,
+        vars: &[String],
+        cond: Option<Val>,
+    ) -> Result<(), TranspileError> {
         match cond {
             None => {
-                self.assign_results(&vars)?;
+                self.assign_results(vars)?;
                 self.node(Node::Br { label, is_loop });
                 self.reachable = false;
                 self.dead_nesting = 0;
@@ -291,13 +329,52 @@ impl<'a> super::FuncGen<'a> {
                 // The result values stay on the stack for the fall-through
                 // path, so materialise them and reference the temporaries.
                 self.spill_nonstable()?;
-                let assigns = self.carried_assigns(&vars)?;
+                let assigns = self.carried_assigns(vars)?;
                 self.node(Node::BrIf {
                     cond: cond.code,
                     label,
                     is_loop,
                     assigns,
                 });
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit a branch that leaves an enclosing `try` body: carry its values into
+    /// the (outer) target's variables, then set the try's outcome variable and
+    /// `return` from the closure. The try's post-`match` dispatch turns the
+    /// outcome back into the real branch.
+    fn emit_escaping_branch(
+        &mut self,
+        target_idx: usize,
+        is_loop: bool,
+        label: usize,
+        vars: &[String],
+        cond: Option<Val>,
+    ) -> Result<(), TranspileError> {
+        match cond {
+            None => {
+                self.assign_results(vars)?;
+                let (code, out_var) = self.record_branch_escape(target_idx, is_loop, label)?;
+                self.line(format!("{out_var} = {code}u32;"));
+                self.term("return;");
+                self.reachable = false;
+                self.dead_nesting = 0;
+            }
+            Some(cond) => {
+                // Only the taken path escapes; the values are carried inside the
+                // guard so the fall-through leaves them on the stack untouched.
+                self.spill_nonstable()?;
+                let assigns = self.carried_assigns(vars)?;
+                let (code, out_var) = self.record_branch_escape(target_idx, is_loop, label)?;
+                self.line(format!("if {} != 0 {{", cond.code));
+                for (var, value) in assigns {
+                    self.line(format!("{var} = {value};"));
+                }
+                self.line(format!("{out_var} = {code}u32;"));
+                self.line("return;");
+                self.line("}");
             }
         }
         Ok(())
@@ -323,7 +400,20 @@ impl<'a> super::FuncGen<'a> {
         // they can be referenced repeatedly across the arms.
         let mut arms = Vec::with_capacity(cases.len());
         for (case, depth) in cases {
-            let (is_loop, label, vars) = self.branch_arm(depth)?;
+            // A `br_table` whose arms leave a `try` body (mixing escaping and
+            // non-escaping targets) is not lowered; only plain targets are.
+            let (is_loop, label, vars) = match self.resolve_target(depth)? {
+                BranchTarget::Direct {
+                    is_loop,
+                    label,
+                    vars,
+                } => (is_loop, label, vars),
+                BranchTarget::Escape { .. } => {
+                    return Err(TranspileError::Unsupported(
+                        "br_table out of a try region".into(),
+                    ));
+                }
+            };
             let pattern = match case {
                 Some(n) => format!("{n}u32"),
                 None => "_".to_string(),
@@ -361,29 +451,19 @@ impl<'a> super::FuncGen<'a> {
             .collect())
     }
 
-    /// Resolve a branch target depth to `(is_loop, label, vars)` and mark the
-    /// target frame as branched to (shared by `br`/`br_if`/`br_table`). `vars`
-    /// are the target's value-carrying variables (a block/if's results, or a
-    /// loop's parameters), which the caller assigns before the branch. Branching
-    /// to a loop targets its parameters (its loop-carried variables); branching
-    /// to a block or if carries its results.
-    pub(super) fn branch_arm(
-        &mut self,
-        depth: u32,
-    ) -> Result<(bool, usize, Vec<String>), TranspileError> {
+    /// Resolve a branch target depth to a [`BranchTarget`] and mark the target
+    /// frame as branched to (shared by `br`/`br_if`/`br_table`). The `vars` are
+    /// the target's value-carrying variables (a block/if's results, or a loop's
+    /// parameters), which the caller assigns before the branch. A branch that
+    /// leaves an enclosing `try` *body* resolves to [`BranchTarget::Escape`]; one
+    /// leaving a `try` *handler* has no lowering (the landing pad is not a
+    /// breakable region) and is rejected.
+    fn resolve_target(&mut self, depth: u32) -> Result<BranchTarget, TranspileError> {
         let idx = self
             .frames
             .len()
             .checked_sub(1 + depth as usize)
             .ok_or_else(|| TranspileError::Unsupported("branch depth out of range".into()))?;
-        // A branch leaving an enclosing `try` has no Rust lowering: out of the
-        // body it would cross the `catch_unwind` closure; out of a handler it
-        // would break out of the landing-pad `match` (which is not a loop).
-        if self.branch_escapes_try(idx) {
-            return Err(TranspileError::Unsupported(
-                "branch out of a try region".into(),
-            ));
-        }
         let frame = &self.frames[idx];
         let is_loop = frame.kind == FrameKind::Loop;
         let vars = if is_loop {
@@ -393,32 +473,198 @@ impl<'a> super::FuncGen<'a> {
         };
         let label = frame.label;
         self.frames[idx].targeted = true;
-        Ok((is_loop, label, vars))
+
+        // A branch to the try whose *handler* we are directly in has no lowering:
+        // that try's body loop lives inside its `catch_unwind` closure, which the
+        // landing pad (where the handler runs) sits outside of. A branch to any
+        // other target from a handler is an ordinary break/continue.
+        if let Some(&(try_idx, true)) = self.try_barriers.last()
+            && idx == try_idx
+        {
+            return Err(TranspileError::Unsupported(
+                "branch out of a try handler".into(),
+            ));
+        }
+        // A branch leaving the innermost enclosing try *body* crosses that
+        // closure and must be re-issued from outside it via the outcome signal.
+        if self.branch_escapes_try(idx) {
+            return Ok(BranchTarget::Escape {
+                target_idx: idx,
+                is_loop,
+                label,
+                vars,
+            });
+        }
+        Ok(BranchTarget::Direct {
+            is_loop,
+            label,
+            vars,
+        })
+    }
+
+    /// Record a branch that escapes the innermost enclosing `try` body, returning
+    /// the `(outcome code, outcome variable)` to signal from the closure. Escapes
+    /// to the same target share a code so one dispatch arm re-issues them all.
+    fn record_branch_escape(
+        &mut self,
+        target_idx: usize,
+        is_loop: bool,
+        label: usize,
+    ) -> Result<(u32, String), TranspileError> {
+        let try_idx = self.enclosing_try_body().ok_or_else(|| {
+            TranspileError::Unsupported("branch escape outside a try body".into())
+        })?;
+        let try_label = self.frames[try_idx].label;
+        let ts = self.frames[try_idx]
+            .try_state
+            .as_mut()
+            .ok_or_else(|| TranspileError::Unsupported("branch escape outside a try".into()))?;
+        let code = match ts.escapes.iter().position(|e| e.target_idx == target_idx) {
+            Some(pos) => pos + 1,
+            None => {
+                ts.escapes.push(BranchEscape {
+                    target_idx,
+                    is_loop,
+                    label,
+                });
+                ts.escapes.len()
+            }
+        };
+        Ok((index_u32(code)?, format!("__out{try_label}")))
+    }
+
+    /// Emit a `try`'s post-`match` dispatch: turn each recorded outcome back into
+    /// the real control transfer, outside the `catch_unwind` closure. A target
+    /// still inside an enclosing try body becomes another closure-outcome signal
+    /// (propagating the escape outward); otherwise it is a plain `break`/
+    /// `continue`. A return escape is re-issued the same way.
+    fn emit_try_dispatch(
+        &mut self,
+        out_var: &str,
+        escapes: Vec<BranchEscape>,
+        has_ret_escape: bool,
+    ) -> Result<(), TranspileError> {
+        // At most one signal is set per closure exit, so the checks are
+        // independent and their order does not matter.
+        if has_ret_escape {
+            self.emit_return_dispatch()?;
+        }
+        for (i, esc) in escapes.into_iter().enumerate() {
+            let code = index_u32(i + 1)?;
+            self.line(format!("if {out_var} == {code}u32 {{"));
+            if self.branch_escapes_try(esc.target_idx) {
+                // Still inside an enclosing try body: re-signal that closure. The
+                // carried values already sit in the target's variables.
+                let (code2, out2) =
+                    self.record_branch_escape(esc.target_idx, esc.is_loop, esc.label)?;
+                self.line(format!("{out2} = {code2}u32;"));
+                self.line("return;");
+            } else {
+                let keyword = if esc.is_loop { "continue" } else { "break" };
+                self.line(format!("{keyword} 'l{};", esc.label));
+            }
+            self.line("}");
+        }
+        Ok(())
+    }
+
+    /// Emit the return-escape arm of a `try`'s dispatch: if the dispatch itself
+    /// sits in an enclosing try body, leave that closure too (marking it so it
+    /// re-dispatches); otherwise perform the real function `return`.
+    fn emit_return_dispatch(&mut self) -> Result<(), TranspileError> {
+        let enclosing = self.enclosing_try_body();
+        self.line("if __returning {");
+        match enclosing {
+            Some(_) => {
+                self.mark_enclosing_ret_escape();
+                self.line("return;");
+            }
+            None => {
+                let expr = self.return_holder_expr();
+                if expr.is_empty() {
+                    self.line("return;");
+                } else {
+                    self.line(format!("return {expr};"));
+                }
+            }
+        }
+        self.line("}");
+        Ok(())
+    }
+
+    /// The expression yielding the function's result(s) from the return holders
+    /// (`__rv{i}`): empty for no results, a bare holder for one, a tuple for more.
+    fn return_holder_expr(&self) -> String {
+        let n = self.results.len();
+        if n == 0 {
+            return String::new();
+        }
+        let parts: Vec<String> = (0..n).map(|i| format!("__rv{i}")).collect();
+        if n == 1 {
+            parts.join(", ")
+        } else {
+            format!("({})", parts.join(", "))
+        }
+    }
+
+    /// Flag the innermost enclosing `try` body so its dispatch re-issues the
+    /// function return — used when a return escape leaves that closure too.
+    fn mark_enclosing_ret_escape(&mut self) {
+        if let Some(idx) = self.enclosing_try_body()
+            && let Some(ts) = self.frames[idx].try_state.as_mut()
+        {
+            ts.has_ret_escape = true;
+        }
+    }
+
+    /// Emit a `return` that escapes an enclosing `try` body: stash the results in
+    /// the function-wide holders, raise the return signal, and leave the closure.
+    /// Each enclosing try's dispatch re-issues it until the real function return.
+    pub(super) fn emit_return_escape(&mut self) -> Result<(), TranspileError> {
+        self.uses_ret_escape = true;
+        // Pop the results highest-index first (as `assign_results` does) so holder
+        // `__rv{i}` receives the i-th source-order operand.
+        for i in (0..self.results.len()).rev() {
+            let val = self.pop()?;
+            self.line(format!("__rv{i} = {};", val.code));
+        }
+        self.line("__returning = true;");
+        self.term("return;");
+        // The innermost enclosing try body owns the closure this return leaves;
+        // its dispatch must re-issue the function return.
+        self.mark_enclosing_ret_escape();
+        self.reachable = false;
+        self.dead_nesting = 0;
+        Ok(())
     }
 
     // ----- legacy exception handling ---------------------------------------
 
-    /// Whether a branch to frame `target_idx` would leave an enclosing `try`.
-    /// Only the innermost barrier matters: a target at or inside it is also
-    /// inside every outer (lower-index) barrier. In a `try` body a branch to the
-    /// try itself is a `break` out of its labelled body loop and allowed; in a
-    /// handler even that has no lowering (the landing pad is not a loop).
+    /// The frame index of the innermost enclosing `try` *body* around the current
+    /// point, i.e. the innermost `catch_unwind` closure a branch would sit inside.
+    /// A catch handler runs in the landing pad, *outside* its own try's closure,
+    /// so a barrier in the catch phase does not count as an enclosing body.
+    fn enclosing_try_body(&self) -> Option<usize> {
+        self.try_barriers
+            .iter()
+            .rev()
+            .find(|&&(_, in_catch)| !in_catch)
+            .map(|&(idx, _)| idx)
+    }
+
+    /// Whether a branch to `target_idx` would leave the innermost enclosing `try`
+    /// body — crossing its `catch_unwind` closure, which a `break`/`continue`
+    /// cannot do, so it must be re-issued via the closure-outcome signal. A
+    /// target at or inside that body stays within the closure (a plain branch).
     fn branch_escapes_try(&self, target_idx: usize) -> bool {
-        match self.try_barriers.last() {
-            Some(&(idx, in_catch)) => {
-                if in_catch {
-                    target_idx <= idx
-                } else {
-                    target_idx < idx
-                }
-            }
-            None => false,
-        }
+        self.enclosing_try_body()
+            .is_some_and(|body_idx| target_idx < body_idx)
     }
 
     /// Open a `try` region. It reuses a block frame (a `br` to it exits like a
     /// block) but carries [`TryState`] so `end` lowers it to a `catch_unwind`,
-    /// and registers a barrier so branches leaving it are rejected.
+    /// and registers a barrier so branches leaving its body are re-issued from
+    /// outside the closure.
     pub(super) fn open_try(
         &mut self,
         blockty: wasmparser::BlockType,
@@ -436,9 +682,12 @@ impl<'a> super::FuncGen<'a> {
             arms: Vec::new(),
             cur_kind: CatchKind::Body,
             cur_binds: Vec::new(),
+            escapes: Vec::new(),
+            has_ret_escape: false,
         });
-        // The barrier starts in the body phase; the first catch flips it so a
-        // branch out of a handler is rejected too.
+        // The barrier starts in the body phase; the first catch flips it so the
+        // handler no longer counts as inside this try's closure (only a branch to
+        // the try itself from its handler is then rejected).
         self.try_barriers.push((idx, false));
         Ok(())
     }
@@ -542,6 +791,8 @@ impl<'a> super::FuncGen<'a> {
             mut arms,
             cur_kind,
             cur_binds,
+            escapes,
+            has_ret_escape,
         } = ts;
         arms.push(CatchArm {
             kind: cur_kind,
@@ -572,8 +823,19 @@ impl<'a> super::FuncGen<'a> {
             catches,
         });
 
+        let out_var = format!("__out{}", frame.label);
         self.cur = mem::take(&mut frame.parent_buffer);
+        // Branches escaping the body signal an outcome; declare its variable
+        // before the `match` (so a try inside a loop re-initialises it each
+        // iteration), then dispatch the recorded outcomes after it.
+        let has_escapes = !escapes.is_empty();
+        if has_escapes {
+            self.line(format!("let mut {out_var}: u32 = 0;"));
+        }
         self.node(node);
+        if has_escapes || has_ret_escape {
+            self.emit_try_dispatch(&out_var, escapes, has_ret_escape)?;
+        }
         // The try lowers to a `()`-typed `match`. When it never falls through
         // (its body and every handler diverge), the following wasm code is dead
         // and not emitted, so a diverging guard stands in for it — otherwise the

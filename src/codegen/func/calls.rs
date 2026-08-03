@@ -1,8 +1,9 @@
 use wasmparser::ValType;
 
 use super::super::{
-    ALLOW, FLATTEN_DEPTH_THRESHOLD, GenMeta, Val, can_flatten, estimate_body_len, flatten_body,
-    index_u32, push_body_line, render_body_into, rust_type, rust_types,
+    ALLOW, FLATTEN_DEPTH_THRESHOLD, GenMeta, Node, Val, can_flatten, default_value,
+    estimate_body_len, flatten_body, index_u32, push_body_line, render_body_into, rust_type,
+    rust_types,
 };
 use crate::TranspileError;
 
@@ -186,13 +187,13 @@ impl<'a> super::FuncGen<'a> {
     }
 
     pub(super) fn emit_return(&mut self) -> Result<(), TranspileError> {
-        // A `return` from inside a `try` body would leave its `catch_unwind`
-        // closure, which Rust cannot express. A handler runs in the landing pad,
-        // so a `return` there is fine unless it sits in an outer try's body.
+        // A `return` from inside a `try` body cannot leave its `catch_unwind`
+        // closure directly; route it through the function-wide return signal that
+        // each enclosing try's dispatch re-issues. A handler runs in the landing
+        // pad, so a `return` there is a plain return unless it sits in an outer
+        // try's body.
         if self.try_barriers.iter().any(|&(_, in_catch)| !in_catch) {
-            return Err(TranspileError::Unsupported(
-                "return from within a try body".into(),
-            ));
+            return self.emit_return_escape();
         }
         match self.pop_results(self.results.len())? {
             Some(code) => self.term(format!("return {code};")),
@@ -223,13 +224,29 @@ impl<'a> super::FuncGen<'a> {
     /// hundreds of megabytes for a pathologically large function) is consumed
     /// line by line and dropped as it is copied, it is never held twice.
     pub(in crate::codegen) fn finish(
-        self,
+        mut self,
         index: usize,
         params: &[ValType],
         results: &[ValType],
         line_prefix: &str,
         out: &mut String,
     ) -> Result<GenMeta, TranspileError> {
+        // A `return` escaping a try body stashes its results in these holders and
+        // raises a shared flag; both are declared once at the function top so
+        // every try's dispatch can re-issue the return.
+        if self.uses_ret_escape {
+            let mut decls = Vec::with_capacity(results.len() + 1);
+            decls.push(Node::Line("let mut __returning: bool = false;".to_string()));
+            for (i, ty) in results.iter().enumerate() {
+                decls.push(Node::Line(format!(
+                    "let mut __rv{i}: {} = {};",
+                    rust_type(*ty)?,
+                    default_value(*ty)
+                )));
+            }
+            decls.append(&mut self.cur);
+            self.cur = decls;
+        }
         let mut params_src = String::new();
         // Stateful modules pass their memory/globals through `&mut self`.
         if self.ctx.is_method {

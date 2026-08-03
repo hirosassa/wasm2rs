@@ -208,6 +208,24 @@ struct TryState {
     /// The exception-payload extraction statements of the currently-open catch
     /// handler.
     cur_binds: Vec<String>,
+    /// Distinct branch targets that escape this try's body, in discovery order.
+    /// The try's outcome variable holds `index + 1` for the branch that fired,
+    /// so the post-`match` dispatch can re-issue it outside the closure.
+    escapes: Vec<BranchEscape>,
+    /// Whether a `return` escapes this try's body (routed through the
+    /// function-wide return signal rather than the outcome variable).
+    has_ret_escape: bool,
+}
+
+/// A branch that leaves a `try` body, recorded so the try's post-`match`
+/// dispatch can re-issue it outside the `catch_unwind` closure (as a direct
+/// `break`/`continue`, or — when it also escapes an enclosing try — as another
+/// closure-outcome signal).
+struct BranchEscape {
+    /// The frame the branch targets (below the try that it escapes).
+    target_idx: usize,
+    is_loop: bool,
+    label: usize,
 }
 
 impl Frame {

@@ -89,19 +89,21 @@ fn try_table_is_rejected() {
 }
 
 #[test]
-fn branch_out_of_try_body_is_rejected() {
-    // A `br` leaving a `try` body would cross its `catch_unwind` closure, which
-    // Rust cannot express.
+fn br_table_out_of_try_body_is_rejected() {
+    // A `br` and `br_if` escaping a `try` body are lowered via a closure-outcome
+    // signal, but a `br_table` whose arms leave the body (mixing escaping and
+    // non-escaping targets) is not lowered yet.
     assert_unsupported(
         r#"(module
             (tag $e)
-            (func
+            (func (param i32)
               (block $out
                 try
-                  br $out
+                  local.get 0
+                  br_table $out $out
                 catch_all
                 end)))"#,
-        "branch out of a try region",
+        "br_table out of a try region",
     );
 }
 
@@ -118,7 +120,7 @@ fn branch_to_try_from_handler_is_rejected() {
               catch_all
                 br 0
               end))"#,
-        "branch out of a try region",
+        "branch out of a try handler",
     );
 }
 

@@ -201,6 +201,139 @@ fn non_falling_through_try_is_a_valid_tail() {
 }
 
 #[test]
+fn br_escaping_try_body_to_outer_block() {
+    // An unconditional `br` from inside the `try` body targets an *enclosing*
+    // block, carrying the block's result value out of the `catch_unwind` closure.
+    compile_run(
+        "eh_br_escape_block",
+        r#"(module
+            (tag $e)
+            (func (export "f") (result i32)
+              (block (result i32)
+                try
+                  i32.const 5
+                  br 1
+                catch_all end
+                i32.const 99)))"#,
+        "assert_eq!(func0(), 5);",
+    );
+}
+
+#[test]
+fn br_if_escaping_try_body_is_conditional() {
+    // A `br_if` from the `try` body escapes only when its condition holds; the
+    // fall-through path stays inside the body and yields the block's own result.
+    compile_run(
+        "eh_br_if_escape",
+        r#"(module
+            (tag $e)
+            (func (export "f") (param i32) (result i32)
+              (block (result i32)
+                try
+                  i32.const 7
+                  local.get 0
+                  br_if 1
+                  drop
+                catch_all end
+                i32.const 99)))"#,
+        "assert_eq!(func0(1), 7); assert_eq!(func0(0), 99);",
+    );
+}
+
+#[test]
+fn return_escaping_try_body() {
+    // A `return` inside the `try` body leaves both the closure and the function,
+    // carrying the function's result value out.
+    compile_run(
+        "eh_return_escape",
+        r#"(module
+            (tag $e)
+            (func (export "f") (param i32) (result i32)
+              try
+                local.get 0
+                return
+              catch_all end
+              i32.const 42))"#,
+        "assert_eq!(func0(3), 3); assert_eq!(func0(-1), -1);",
+    );
+}
+
+#[test]
+fn br_escaping_two_nested_try_bodies() {
+    // A `br` from the innermost `try` body targets a block outside *both* trys,
+    // so the escape signal must propagate out through each `catch_unwind` closure.
+    compile_run(
+        "eh_br_escape_nested",
+        r#"(module
+            (tag $e)
+            (func (export "f") (result i32)
+              (block (result i32)
+                try
+                  try
+                    i32.const 8
+                    br 2
+                  catch_all end
+                catch_all end
+                i32.const 99)))"#,
+        "assert_eq!(func0(), 8);",
+    );
+}
+
+#[test]
+fn br_escaping_try_body_to_outer_loop() {
+    // A `br` to an enclosing loop from within a `try` body continues the loop
+    // (its header), so a counter reaches its bound across repeated re-entries of
+    // the try (and its per-iteration outcome variable).
+    compile_run(
+        "eh_br_escape_loop",
+        r#"(module
+            (tag $e)
+            (func (export "f") (result i32)
+              (local $i i32)
+              (loop $l (result i32)
+                try (result i32)
+                  local.get $i
+                  i32.const 3
+                  i32.ge_s
+                  if (result i32)
+                    local.get $i          ;; done: yield the counter as the result
+                  else
+                    local.get $i
+                    i32.const 1
+                    i32.add
+                    local.set $i
+                    br 2                  ;; continue the loop $l
+                  end
+                catch_all
+                  i32.const -1
+                end)))"#,
+        "assert_eq!(func0(), 3);",
+    );
+}
+
+#[test]
+fn br_from_catch_handler_to_outer_block() {
+    // The shape LLVM's SjLj lowering relies on: a `br` from a *catch handler* to
+    // an enclosing block. The handler runs in the landing pad, which sits inside
+    // the outer block's labelled loop, so it lowers to a plain `break`.
+    compile_run(
+        "eh_br_from_handler",
+        r#"(module
+            (tag $e)
+            (func (export "f") (result i32)
+              (block (result i32)
+                try (result i32)
+                  throw $e
+                catch_all
+                  i32.const 7
+                  br 1
+                end
+                i32.const 99)))"#,
+        "assert_eq!(func0(), 7);",
+    );
+}
+
+#[test]
 fn uncaught_throw_traps() {
     // An exception with no enclosing handler aborts the program.
     expect_trap(

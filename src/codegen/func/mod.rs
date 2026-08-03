@@ -54,6 +54,10 @@ pub(super) struct FuncGen<'a> {
     /// the try escapes; in a handler (`true`) even a branch to the try itself
     /// does, since the landing pad is not a breakable region.
     try_barriers: Vec<(usize, bool)>,
+    /// Whether a `return` escapes some `try` body, so the function declares the
+    /// shared return-signal flag (`__returning`) and result holders (`__rv{i}`)
+    /// that each enclosing try's dispatch re-issues the function return from.
+    uses_ret_escape: bool,
 }
 
 impl<'a> FuncGen<'a> {
@@ -107,6 +111,7 @@ impl<'a> FuncGen<'a> {
             dispatch_sigs: HashSet::new(),
             uses_eh: false,
             try_barriers: Vec::new(),
+            uses_ret_escape: false,
         })
     }
 
