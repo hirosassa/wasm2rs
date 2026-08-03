@@ -1,0 +1,274 @@
+//! Integration tests for the WASI filesystem subset: `path_open`,
+//! `fd_prestat_get`, `fd_prestat_dir_name`, and the file-backed variants of
+//! `fd_read`/`fd_write`/`fd_seek`/`fd_close`.
+//!
+//! A module that imports any of the preopen/`path_open` functions gains a real
+//! file-descriptor table on its `Instance` and routes descriptors >= 4 to
+//! `std::fs::File`s opened *within a single preopened directory* (fd 3, name
+//! ".", the process's current directory). Paths that are absolute or escape the
+//! preopen via ".." are rejected (ENOTCAPABLE). The generated Rust is compiled
+//! with `rustc -D warnings` and run as a real child process against real files
+//! in a temp directory (no mocking).
+
+use std::process::Command;
+
+/// Compile the transpiled module plus a trailing `extra` (`fn main`) block,
+/// returning both the binary path and the temp directory it lives in (used as
+/// the child's working directory so `path_open` resolves against real files).
+fn compile(test: &str, wat: &str, extra: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
+
+    let dir = std::env::temp_dir().join(format!("wasm2rs_wasifs_{test}"));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let src = dir.join("gen.rs");
+    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
+
+    let program = format!("{generated}\n{extra}\n");
+    std::fs::write(&src, &program).expect("write generated source");
+
+    let out = Command::new("rustc")
+        .current_dir(&dir)
+        .arg(&src)
+        .arg("--edition")
+        .arg("2021")
+        .arg("-D")
+        .arg("warnings")
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("run rustc");
+    assert!(
+        out.status.success(),
+        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    (bin, dir)
+}
+
+// fd_prestat_get/fd_prestat_dir_name advertise exactly one preopened directory
+// (fd 3, name "."). `run` writes fd 3's prestat at 0 and its name at 16, then
+// returns the errno of probing fd 4 (which must be EBADF so libc stops).
+const PRESTAT: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "fd_prestat_get"
+        (func $pg (param i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_prestat_dir_name"
+        (func $pn (param i32 i32 i32) (result i32)))
+      (memory 1)
+      (func (export "run") (result i32)
+        (drop (call $pg (i32.const 3) (i32.const 0)))
+        (drop (call $pn (i32.const 3) (i32.const 16) (i32.const 8)))
+        (call $pg (i32.const 4) (i32.const 32))))
+    "#;
+
+#[test]
+fn fd_prestat_advertises_one_preopen_dir() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    // Probing fd 4 must report EBADF so wasi-libc stops scanning preopens.
+    assert_eq!(i.func2(), 8);
+    assert_eq!(i.mem()[0], 0, \"fd 3 should be a preopen directory (tag 0)\");
+    let name_len = u32::from_le_bytes([i.mem()[4], i.mem()[5], i.mem()[6], i.mem()[7]]);
+    assert_eq!(name_len, 1, \"the preopen name \\\".\\\" is one byte\");
+    assert_eq!(i.mem()[16], b'.', \"the preopen dir name is \\\".\\\"\");
+}
+";
+    let (bin, dir) = compile("prestat", PRESTAT, extra);
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "prestat assertions failed");
+}
+
+// path_open opens a real file in the preopen dir and fd_read reads it. The path
+// "input.txt" lives at offset 100; an iovec at 0 points at offset 200 (cap 64);
+// the opened fd is stored at 300. `open_and_read` returns the read errno and
+// stores the byte count at offset 8.
+const OPEN_READ: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_open"
+        (func $po (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_read"
+        (func $rd (param i32 i32 i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "input.txt")
+      (data (i32.const 0) "\c8\00\00\00\40\00\00\00")
+      (func (export "open_and_read") (result i32)
+        (drop (call $po (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 9)
+                        (i32.const 0) (i64.const 2) (i64.const 0) (i32.const 0) (i32.const 300)))
+        (call $rd (i32.load (i32.const 300)) (i32.const 0) (i32.const 1) (i32.const 8))))
+    "#;
+
+#[test]
+fn path_open_then_fd_read_reads_a_real_file() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    let errno = i.func2();
+    assert_eq!(errno, 0, \"read should succeed\");
+    // The freshly opened file gets the first free descriptor, 4.
+    let fd = u32::from_le_bytes([i.mem()[300], i.mem()[301], i.mem()[302], i.mem()[303]]);
+    assert_eq!(fd, 4, \"first opened file descriptor should be 4\");
+    let n = u32::from_le_bytes([i.mem()[8], i.mem()[9], i.mem()[10], i.mem()[11]]) as usize;
+    assert_eq!(&i.mem()[200..200 + n], b\"file-contents-123\\n\");
+}
+";
+    let (bin, dir) = compile("open_read", OPEN_READ, extra);
+    std::fs::write(dir.join("input.txt"), b"file-contents-123\n").expect("write input file");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "path_open+fd_read assertions failed");
+}
+
+// path_open with O_CREAT|O_TRUNC creates a file, fd_write persists bytes, and
+// fd_close releases it. "out.txt" at 100; iovec at 0 -> offset 200 (len 9);
+// the 9 bytes "persisted" at 200. `run` returns the fd_close errno.
+const CREATE_WRITE: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_open"
+        (func $po (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_write"
+        (func $wr (param i32 i32 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_close"
+        (func $cl (param i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "out.txt")
+      (data (i32.const 0) "\c8\00\00\00\09\00\00\00")
+      (data (i32.const 200) "persisted")
+      (func (export "run") (result i32)
+        (drop (call $po (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 7)
+                        (i32.const 9) (i64.const 64) (i64.const 0) (i32.const 0) (i32.const 300)))
+        (drop (call $wr (i32.load (i32.const 300)) (i32.const 0) (i32.const 1) (i32.const 308)))
+        (call $cl (i32.load (i32.const 300)))))
+    "#;
+
+#[test]
+fn path_open_create_then_fd_write_persists_to_disk() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func3(), 0, \"close should succeed\");
+}
+";
+    let (bin, dir) = compile("create_write", CREATE_WRITE, extra);
+    let out_path = dir.join("out.txt");
+    let _ = std::fs::remove_file(&out_path);
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "create/write/close failed");
+    let written = std::fs::read(&out_path).expect("output file should exist");
+    assert_eq!(written, b"persisted");
+}
+
+// fd_filestat_get reports an opened file's size and type. Opens "input.txt"
+// then writes its 64-byte filestat at offset 400; `run` returns the errno.
+const FILESTAT: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_open"
+        (func $po (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_filestat_get"
+        (func $fs (param i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "input.txt")
+      (func (export "run") (result i32)
+        (drop (call $po (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 9)
+                        (i32.const 0) (i64.const 2) (i64.const 0) (i32.const 0) (i32.const 300)))
+        (call $fs (i32.load (i32.const 300)) (i32.const 400))))
+    "#;
+
+#[test]
+fn fd_filestat_get_reports_file_size_and_type() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func2(), 0, \"filestat should succeed\");
+    assert_eq!(i.mem()[416], 4, \"a regular file has filetype 4\");
+    let size = u64::from_le_bytes([
+        i.mem()[432], i.mem()[433], i.mem()[434], i.mem()[435],
+        i.mem()[436], i.mem()[437], i.mem()[438], i.mem()[439],
+    ]);
+    assert_eq!(size, 10, \"file size in bytes\");
+}
+";
+    let (bin, dir) = compile("filestat", FILESTAT, extra);
+    std::fs::write(dir.join("input.txt"), b"0123456789").expect("write input file");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "fd_filestat_get assertions failed");
+}
+
+// With a file table, fd_fdstat_get must describe opened files and the preopen
+// directory (not just stdio) — Rust's `File::open` calls it right after
+// `path_open`, so returning EBADF there would break every real file open.
+// Opens "input.txt" (fd 4) and writes fd 4's fdstat at 400 and fd 3's at 424.
+const FDSTAT_FILE: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_open"
+        (func $po (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_fdstat_get"
+        (func $fd (param i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "input.txt")
+      (func (export "run") (result i32)
+        (drop (call $po (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 9)
+                        (i32.const 0) (i64.const 2) (i64.const 0) (i32.const 0) (i32.const 300)))
+        (drop (call $fd (i32.const 3) (i32.const 424)))
+        (call $fd (i32.load (i32.const 300)) (i32.const 400))))
+    "#;
+
+#[test]
+fn fd_fdstat_get_describes_open_files_and_the_preopen_dir() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func2(), 0, \"fdstat on an open file should succeed\");
+    assert_eq!(i.mem()[400], 4, \"an opened file has filetype 4 (regular file)\");
+    assert_eq!(i.mem()[424], 3, \"the preopen fd 3 has filetype 3 (directory)\");
+}
+";
+    let (bin, dir) = compile("fdstat_file", FDSTAT_FILE, extra);
+    std::fs::write(dir.join("input.txt"), b"hi").expect("write input file");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "fd_fdstat_get file assertions failed");
+}
+
+// path_open must refuse to escape the preopen directory. "../escape" resolves
+// above the preopen root, so it returns ENOTCAPABLE (76) without opening.
+const ESCAPE: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_open"
+        (func $po (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "../escape")
+      (func (export "run") (result i32)
+        (call $po (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 9)
+                  (i32.const 0) (i64.const 2) (i64.const 0) (i32.const 0) (i32.const 300))))
+    "#;
+
+#[test]
+fn path_open_rejects_parent_directory_escape() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 76, \"escaping the preopen must return ENOTCAPABLE\");
+}
+";
+    let (bin, dir) = compile("escape", ESCAPE, extra);
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "escape rejection assertions failed");
+}
