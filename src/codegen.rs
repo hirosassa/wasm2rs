@@ -806,6 +806,9 @@ struct ModuleCtx<'a> {
     has_memory: bool,
     /// Whether the module declares a table (so `self.table()` exists).
     has_table: bool,
+    /// Whether the module has an injected host (`self.imports`), so an external
+    /// funcref handle in a table can be resolved through the host.
+    has_imports: bool,
     /// The table's element type (`funcref` or `externref`), if a table exists;
     /// `table.get` pushes an operand of this type.
     table_element: Option<ValType>,
@@ -929,6 +932,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,
         has_table,
+        has_imports,
         table_element: table.map(|t| t.element),
         data_passive: data.iter().map(|d| d.offset.is_none()).collect(),
         elem_passive: elements
@@ -2566,9 +2570,12 @@ impl<'a> FuncGen<'a> {
             .collect::<Vec<_>>()
             .join(", ");
 
-        // No function has the requested type, so every entry mismatches: the
-        // call always traps and control cannot continue past it.
-        if targets.is_empty() {
+        // No local function has the requested type. Without a host, every entry
+        // mismatches, so the call always traps and control cannot continue past
+        // it. With a host, a table entry may still be an external handle the
+        // host resolves, so fall through to the shared dispatch method (which
+        // has only the null/external/catch-all arms).
+        if targets.is_empty() && !self.ctx.has_imports {
             self.line("panic!(\"indirect call type mismatch\");".to_string());
             self.reachable = false;
             self.dead_nesting = 0;
@@ -3300,6 +3307,12 @@ fn render_module(
     }
     lines.push("}".to_string());
 
+    // Module-scope external-funcref registries (the Linker helper), one per
+    // `call_indirect` signature, for modules that can receive external handles.
+    if has_imports && !dispatch_sigs.is_empty() {
+        lines.extend(extern_registry_lines(ctx, dispatch_sigs)?);
+    }
+
     let mut out = lines.join("\n");
     out.push('\n');
     Ok(out)
@@ -3362,6 +3375,67 @@ fn dispatch_method_lines(
     lines.push("        _ => panic!(\"indirect call type mismatch\"),".to_string());
     lines.push("    }".to_string());
     lines.push("}".to_string());
+    Ok(lines)
+}
+
+/// A module-scope `ExternFuncs{ti}` registry per `call_indirect` signature: a
+/// small helper the host uses to link external funcrefs without hand-managing
+/// slot numbers or the handle tag bit. `register` stores a boxed closure and
+/// returns a tagged funcref handle to place in a table; `call` resolves a
+/// stripped slot (as delivered to `Imports::call_ref_t{ti}`) back to its
+/// closure. Emitted only for modules that can receive external handles, and
+/// `#[allow(dead_code)]` since a host may ignore it.
+fn extern_registry_lines(
+    ctx: &ModuleCtx<'_>,
+    dispatch_sigs: &HashSet<u32>,
+) -> Result<Vec<String>, TranspileError> {
+    let mut ordered: Vec<u32> = dispatch_sigs.iter().copied().collect();
+    ordered.sort_unstable();
+
+    let mut lines = Vec::new();
+    for ti in ordered {
+        let sig = ctx
+            .types
+            .get(ti as usize)
+            .ok_or_else(|| TranspileError::Unsupported("call_indirect: unknown type".into()))?;
+        let param_tys = rust_types(&sig.params)?.join(", ");
+        let ret = match sig.results.as_slice() {
+            [] => String::new(),
+            [ty] => format!(" -> {}", rust_type(*ty)?),
+            many => format!(" -> ({})", rust_types(many)?.join(", ")),
+        };
+        let boxed = format!("Box<dyn FnMut({param_tys}){ret}>");
+        let mut call_params = String::from("&mut self, slot: u32");
+        for (k, ty) in sig.params.iter().enumerate() {
+            call_params.push_str(&format!(", a{k}: {}", rust_type(*ty)?));
+        }
+        let arg_list = (0..sig.params.len())
+            .map(|k| format!("a{k}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        lines.push(String::new());
+        lines.push("#[allow(dead_code)]".to_string());
+        lines.push(format!("pub struct ExternFuncs{ti} {{"));
+        lines.push(format!("    fns: Vec<{boxed}>,"));
+        lines.push("}".to_string());
+        lines.push("#[allow(dead_code)]".to_string());
+        lines.push(format!("impl ExternFuncs{ti} {{"));
+        lines.push("    pub fn new() -> Self {".to_string());
+        lines.push("        Self { fns: Vec::new() }".to_string());
+        lines.push("    }".to_string());
+        lines.push(format!(
+            "    pub fn register(&mut self, f: {boxed}) -> u32 {{"
+        ));
+        lines.push("        let slot = self.fns.len() as u32;".to_string());
+        lines.push("        self.fns.push(f);".to_string());
+        lines.push("        0x8000_0000u32 | slot".to_string());
+        lines.push("    }".to_string());
+        lines.push(format!("    pub fn call({call_params}){ret} {{"));
+        lines.push(format!("        (self.fns[slot as usize])({arg_list})"));
+        lines.push("    }".to_string());
+        lines.push("}".to_string());
+    }
     Ok(lines)
 }
 
