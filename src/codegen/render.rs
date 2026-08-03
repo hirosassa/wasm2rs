@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use super::helpers::{HELPER_ORDER, helper_lines};
+use super::runtime::render_rt_helpers;
 use super::{
     ALLOW, DataSegment, ElemSegment, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
     ModuleParts, WasiFn, byte_array_literal, indent, rust_type, rust_types,
@@ -36,12 +37,7 @@ pub(super) fn render_module(
 
     let mem_imported = memory.is_some_and(|m| m.imported);
     let table_imported = table.is_some_and(|t| t.imported);
-    // Recognised WASI imports are native inherent methods, so they need no host
-    // trait; a module whose imports are all WASI is fully standalone.
-    let has_imports = imports.iter().any(|im| im.wasi.is_none())
-        || !imported_globals.is_empty()
-        || mem_imported
-        || table_imported;
+    let has_imports = needs_host_trait(parts);
     // A module that imports any preopen/`path_open` function gains a real
     // file-descriptor table (`wasi_fds`) and the file-backed fd_* variants.
     let wasi_files = imports.iter().any(|im| {
@@ -66,14 +62,7 @@ pub(super) fn render_module(
         )?);
         lines.push(String::new());
     }
-    // A generic parameter carries the host implementation only when needed:
-    // `<H: Imports>` where the parameter is bound (struct/impl header) and
-    // `<H>` where the type is merely named (`Instance<H>`).
-    let (decl_generics, type_generics) = if has_imports {
-        ("<H: Imports>", "<H>")
-    } else {
-        ("", "")
-    };
+    let (decl_generics, type_generics) = host_generics(parts);
 
     // Module-scope statics backing the retained passive segments.
     for (d, seg) in data.iter().enumerate() {
@@ -340,6 +329,122 @@ pub(super) fn render_module(
 
     let mut out = lines.join("\n");
     out.push('\n');
+    Ok(out)
+}
+
+/// Whether the module needs the injected `Imports` host trait — i.e. it has a
+/// non-WASI function import, an imported global, or host-owned memory/table.
+/// Recognised WASI imports are native inherent methods and need no host, so a
+/// module whose imports are all WASI is fully standalone.
+fn needs_host_trait(parts: &ModuleParts<'_>) -> bool {
+    parts.imports.iter().any(|im| im.wasi.is_none())
+        || !parts.imported_globals.is_empty()
+        || parts.memory.is_some_and(|m| m.imported)
+        || parts.table.is_some_and(|t| t.imported)
+}
+
+/// The generic-parameter fragments for the `Instance` type: `<H: Imports>` where
+/// the parameter is bound (struct/impl headers) and `<H>` where the type is
+/// merely named (`Instance<H>`), or empty strings when no host is needed.
+fn host_generics(parts: &ModuleParts<'_>) -> (&'static str, &'static str) {
+    if needs_host_trait(parts) {
+        ("<H: Imports>", "<H>")
+    } else {
+        ("", "")
+    }
+}
+
+/// Render one chunk file of a multi-file module: the defined functions in
+/// `sources` plus a `use super::*;` that pulls the root's items (the `Instance`
+/// type, the `Imports` trait, the runtime helpers and the other chunks'
+/// re-exported functions) into scope.
+///
+/// A stateless module's functions are free `pub fn`s emitted directly; a
+/// stateful module's are `&mut self` methods, so they are wrapped in an
+/// `impl Instance` block (Rust allows a type's inherent impl to be split across
+/// files in the same crate). The private helper methods the bodies call live on
+/// the root's impl and are visible here because a chunk module is a descendant
+/// of the crate root that defines them.
+pub(super) fn render_chunk_file(
+    parts: &ModuleParts<'_>,
+    stateful: bool,
+    sources: &[String],
+) -> String {
+    // A chunk that happens to call nothing from the root leaves the glob unused,
+    // which `-D warnings` rejects, so the import is unconditionally allowed.
+    let mut out = String::from("#[allow(unused_imports)]\nuse super::*;\n");
+    if !stateful {
+        for src in sources {
+            out.push('\n');
+            out.push_str(src);
+        }
+        return out;
+    }
+
+    let (decl_generics, type_generics) = host_generics(parts);
+    out.push('\n');
+    out.push_str(ALLOW);
+    out.push('\n');
+    out.push_str(&format!("impl{decl_generics} Instance{type_generics} {{\n"));
+    // Indent each method body inline rather than buffering every line into a
+    // `Vec` and copying it again through `indent`: a chunk holding one very large
+    // function would otherwise transiently need several times its own size.
+    for src in sources {
+        out.push('\n');
+        for line in src.lines() {
+            if !line.is_empty() {
+                out.push_str("    ");
+                out.push_str(line);
+            }
+            out.push('\n');
+        }
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// Render the `lib.rs` root of a multi-file module: the module-scope runtime
+/// helpers followed by `mod`/`pub use` declarations for each chunk.
+///
+/// A stateless root re-exports every chunk's free functions so callers (and the
+/// other chunks' `use super::*`) see them at the crate root, matching the
+/// single-file layout. A stateful root additionally emits the `Instance` struct,
+/// its `new`, the shared helper/dispatch methods and the `Imports` trait — every
+/// part of [`render_module`] except the per-function bodies, which live in the
+/// chunk files.
+pub(super) fn render_lib_root(
+    parts: &ModuleParts<'_>,
+    ctx: &ModuleCtx<'_>,
+    stateful: bool,
+    used: &HashSet<Helper>,
+    used_rt: &HashSet<super::Rt>,
+    dispatch_sigs: &HashSet<u32>,
+    n_chunks: usize,
+) -> Result<String, TranspileError> {
+    let mut out = String::new();
+    let rt_helpers = render_rt_helpers(used_rt);
+    if !rt_helpers.is_empty() {
+        out.push_str(&rt_helpers);
+        out.push('\n');
+    }
+
+    if stateful {
+        // The header impl carries no function bodies; those are added by the
+        // chunk files' own `impl Instance` blocks.
+        out.push_str(&render_module(parts, ctx, &[], used, dispatch_sigs)?);
+        out.push('\n');
+    }
+
+    for i in 0..n_chunks {
+        out.push_str(&format!("mod funcs_{i};\n"));
+    }
+    // A stateless module exposes free functions at the crate root, so the chunks
+    // must be re-exported to preserve that public shape.
+    if !stateful {
+        for i in 0..n_chunks {
+            out.push_str(&format!("pub use funcs_{i}::*;\n"));
+        }
+    }
     Ok(out)
 }
 

@@ -30,7 +30,7 @@ mod wasi;
 
 use self::func::FuncGen;
 use self::helpers::helper_name;
-use self::render::render_module;
+use self::render::{render_chunk_file, render_lib_root, render_module};
 use self::runtime::{render_rt_helpers, rt_name};
 
 pub(crate) use self::const_expr::{const_expr_to_rust, const_expr_u32};
@@ -261,13 +261,14 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) elements: &'a [ElemSegment],
 }
 
-/// Translate a whole module into Rust source.
+/// Derive the translation context from a module's raw parts.
 ///
-/// A module that declares linear memory, a table or globals carries mutable
-/// state, so it is emitted as a `pub struct Instance` with the functions as
-/// `&mut self` methods. A stateless module keeps its functions as free
-/// `pub fn`s, matching the earlier phases exactly.
-pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, TranspileError> {
+/// Returns the [`ModuleCtx`] plus whether the module is *stateful* — i.e.
+/// carries mutable state (memory, a table, globals or imports) and is therefore
+/// emitted as a `struct Instance` with `&mut self` methods rather than free
+/// functions. Also performs the module-level validation that cannot be checked
+/// during parsing (a native WASI function that reads memory needs one).
+fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), TranspileError> {
     let ModuleParts {
         imports,
         imported_globals,
@@ -322,15 +323,26 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
             .collect(),
         is_method: stateful,
     };
+    Ok((ctx, stateful))
+}
 
-    let mut sources = Vec::with_capacity(funcs.len());
+/// Translate a whole module into a single Rust source string.
+///
+/// A module that declares linear memory, a table or globals carries mutable
+/// state, so it is emitted as a `pub struct Instance` with the functions as
+/// `&mut self` methods. A stateless module keeps its functions as free
+/// `pub fn`s, matching the earlier phases exactly.
+pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, TranspileError> {
+    let (ctx, stateful) = build_ctx(parts)?;
+
+    let mut sources = Vec::with_capacity(parts.funcs.len());
     let mut used: HashSet<Helper> = HashSet::new();
     let mut used_rt: HashSet<Rt> = HashSet::new();
     let mut dispatch_sigs: HashSet<u32> = HashSet::new();
-    for (index, f) in funcs.iter().enumerate() {
+    for (index, f) in parts.funcs.iter().enumerate() {
         // Defined functions are named by their full function index, i.e. after
         // the imported functions in the shared index space.
-        let generated = generate_function(imports.len() + index, f, &ctx)?;
+        let generated = generate_function(parts.imports.len() + index, f, &ctx)?;
         used.extend(generated.helpers);
         used_rt.extend(generated.rt);
         dispatch_sigs.extend(generated.dispatch_sigs);
@@ -352,6 +364,96 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     } else {
         format!("{rt_helpers}\n{body}")
     })
+}
+
+/// Translate a module, emitting its Rust source across one or more files.
+///
+/// Each finished file is handed to `emit(name, code)` and then dropped, so the
+/// peak memory stays around one chunk's worth rather than the whole program.
+/// When nothing forces a split — the module fits in `funcs_per_file` functions
+/// and no `max_bytes_per_file` cap is set — the output is byte-identical to
+/// [`generate_module`], emitted as a single `lib.rs`.
+///
+/// Otherwise the defined functions are chunked into `funcs_{n}.rs` files and a
+/// `lib.rs` root ties them together: for a stateless module the chunks hold free
+/// `pub fn`s re-exported from the root; for a stateful one each chunk adds an
+/// `impl Instance` block while the root owns the struct, `new`, the shared
+/// helper methods and the module-scope runtime helpers.
+///
+/// A chunk is flushed once it reaches `funcs_per_file` functions *or* its
+/// accumulated source reaches `max_bytes_per_file` bytes (whichever comes
+/// first). The byte cap is what actually bounds peak memory when a module holds
+/// a few very large functions, since a fixed function count can still add up to
+/// a huge chunk. Both caps take effect only at a function boundary, so a single
+/// oversized function is still emitted whole.
+pub(crate) fn generate_module_split(
+    parts: &ModuleParts<'_>,
+    funcs_per_file: usize,
+    max_bytes_per_file: usize,
+    emit: &mut dyn FnMut(String, String) -> Result<(), TranspileError>,
+) -> Result<(), TranspileError> {
+    let per = if funcs_per_file == 0 {
+        usize::MAX
+    } else {
+        funcs_per_file
+    };
+    let byte_cap = if max_bytes_per_file == 0 {
+        usize::MAX
+    } else {
+        max_bytes_per_file
+    };
+    // With nothing forcing a split, keep the exact single-file rendering.
+    if parts.funcs.len() <= per && byte_cap == usize::MAX {
+        let code = generate_module(parts)?;
+        return emit("lib.rs".to_string(), code);
+    }
+
+    let (ctx, stateful) = build_ctx(parts)?;
+    let base = parts.imports.len();
+
+    // Aggregated across every function: needed only to render the `lib.rs` root
+    // (helper methods, dispatch methods and runtime helpers). Each chunk file is
+    // otherwise self-contained, so it can be emitted and dropped immediately.
+    let mut used: HashSet<Helper> = HashSet::new();
+    let mut used_rt: HashSet<Rt> = HashSet::new();
+    let mut dispatch_sigs: HashSet<u32> = HashSet::new();
+
+    let mut chunk: Vec<String> = Vec::new();
+    let mut chunk_bytes = 0usize;
+    let mut chunk_index = 0usize;
+    for (index, f) in parts.funcs.iter().enumerate() {
+        let generated = generate_function(base + index, f, &ctx)?;
+        used.extend(generated.helpers);
+        used_rt.extend(generated.rt);
+        dispatch_sigs.extend(generated.dispatch_sigs);
+        chunk_bytes += generated.src.len();
+        chunk.push(generated.src);
+        if chunk.len() >= per || chunk_bytes >= byte_cap {
+            let code = render_chunk_file(parts, stateful, &chunk);
+            emit(format!("funcs_{chunk_index}.rs"), code)?;
+            chunk.clear();
+            chunk_bytes = 0;
+            chunk_index += 1;
+        }
+    }
+    if !chunk.is_empty() {
+        let code = render_chunk_file(parts, stateful, &chunk);
+        emit(format!("funcs_{chunk_index}.rs"), code)?;
+        chunk_index += 1;
+    }
+    let n_chunks = chunk_index;
+
+    // The root is emitted last, once the used-helper/dispatch sets are complete.
+    let root = render_lib_root(
+        parts,
+        &ctx,
+        stateful,
+        &used,
+        &used_rt,
+        &dispatch_sigs,
+        n_chunks,
+    )?;
+    emit("lib.rs".to_string(), root)
 }
 
 fn generate_function(

@@ -56,8 +56,72 @@ struct Signature {
     results: Vec<ValType>,
 }
 
-/// Transpile a wasm binary into Rust source code.
+/// One emitted Rust source file of a transpiled module.
+///
+/// `name` is a file name relative to the output directory (`lib.rs` is the
+/// crate root; the chunk files are `funcs_0.rs`, `funcs_1.rs`, ...).
+pub struct SourceFile {
+    pub name: String,
+    pub code: String,
+}
+
+/// How to split a module's generated source across files.
+///
+/// A chunk file is closed once it reaches `funcs_per_file` functions *or*
+/// `max_bytes_per_file` bytes, whichever comes first (`0` disables that cap).
+/// The byte cap is what bounds peak memory when a module has a few very large
+/// functions, where a fixed function count can still produce a huge file.
+pub struct SplitOptions {
+    /// The maximum number of defined functions per chunk file (`0` = no limit).
+    pub funcs_per_file: usize,
+    /// The approximate maximum source size per chunk file, in bytes (`0` = no
+    /// limit). Enforced at function boundaries, so a single larger function is
+    /// still emitted whole.
+    pub max_bytes_per_file: usize,
+}
+
+impl SplitOptions {
+    /// Emit the whole module as a single `lib.rs`, byte-identical to
+    /// [`transpile`].
+    pub fn single_file() -> Self {
+        Self {
+            funcs_per_file: 0,
+            max_bytes_per_file: 0,
+        }
+    }
+}
+
+/// Transpile a wasm binary into a single Rust source string.
+///
+/// Convenience wrapper over [`transpile_split`] with [`SplitOptions::single_file`];
+/// use `transpile_split` when a module is large enough that one file is
+/// impractical to compile.
 pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
+    let mut code = None;
+    transpile_split(wasm, &SplitOptions::single_file(), |file| {
+        code = Some(file.code);
+        Ok(())
+    })?;
+    // The single-file path always emits exactly one file.
+    code.ok_or_else(|| TranspileError::Unsupported("no source emitted".into()))
+}
+
+/// Transpile a wasm binary, handing each generated [`SourceFile`] to `sink` as
+/// soon as it is complete and then dropping it, so the peak memory stays around
+/// one file's worth rather than the whole program.
+///
+/// With [`SplitOptions::single_file`] (or a `funcs_per_file` at least the
+/// function count) exactly one `lib.rs` is emitted, identical to [`transpile`].
+/// Otherwise the module is split into a `lib.rs` root plus `funcs_{n}.rs` chunk
+/// files that together form one Rust crate.
+pub fn transpile_split<F>(
+    wasm: &[u8],
+    opts: &SplitOptions,
+    mut sink: F,
+) -> Result<(), TranspileError>
+where
+    F: FnMut(SourceFile) -> Result<(), TranspileError>,
+{
     let mut signatures: Vec<Signature> = Vec::new();
     let mut func_type_indices: Vec<u32> = Vec::new();
     let mut bodies: Vec<wasmparser::FunctionBody> = Vec::new();
@@ -309,7 +373,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
         })
         .collect();
 
-    codegen::generate_module(&codegen::ModuleParts {
+    let parts = codegen::ModuleParts {
         imports: &imports,
         imported_globals: &imported_globals,
         funcs: &funcs,
@@ -319,7 +383,13 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
         data: &data,
         table: table.as_ref(),
         elements: &elements,
-    })
+    };
+    codegen::generate_module_split(
+        &parts,
+        opts.funcs_per_file,
+        opts.max_bytes_per_file,
+        &mut |name, code| sink(SourceFile { name, code }),
+    )
 }
 
 /// Classify an import by its type: a function import is pushed onto `imports`, a

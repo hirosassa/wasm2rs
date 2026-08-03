@@ -12,6 +12,86 @@
 
 use std::process::Command;
 
+use wasm2rs::{SourceFile, SplitOptions, transpile_split};
+
+/// Transpile `wat` into a multi-file crate with the given `funcs_per_file`,
+/// returning every emitted [`SourceFile`] in emission order.
+pub fn transpile_files(wat: &str, funcs_per_file: usize) -> Vec<SourceFile> {
+    transpile_files_capped(wat, funcs_per_file, 0)
+}
+
+/// Like [`transpile_files`] but also enforces a `max_bytes_per_file` chunk cap.
+pub fn transpile_files_capped(
+    wat: &str,
+    funcs_per_file: usize,
+    max_bytes_per_file: usize,
+) -> Vec<SourceFile> {
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    let opts = SplitOptions {
+        funcs_per_file,
+        max_bytes_per_file,
+    };
+    let mut files = Vec::new();
+    transpile_split(&wasm, &opts, |f| {
+        files.push(f);
+        Ok(())
+    })
+    .expect("transpile ok");
+    files
+}
+
+/// Transpile `wat` into a multi-file crate (splitting at `funcs_per_file`), write
+/// the files to a temp dir, append `fn main {{ main_body }}` to the crate root
+/// (`lib.rs`), compile the whole crate with `rustc -D warnings`, run it, and
+/// assert it exits 0. Returns the emitted file names in order so a test can also
+/// assert the split shape.
+pub fn compile_run_split(
+    name: &str,
+    wat: &str,
+    funcs_per_file: usize,
+    main_body: &str,
+) -> Vec<String> {
+    let files = transpile_files(wat, funcs_per_file);
+    let names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+
+    let dir = std::env::temp_dir().join(format!("wasm2rs_{name}"));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for f in &files {
+        let mut code = f.code.clone();
+        // The crate root is turned into a runnable binary by appending `main`.
+        if f.name == "lib.rs" {
+            code.push_str(&format!("\nfn main() {{\n{main_body}\n}}\n"));
+        }
+        std::fs::write(dir.join(&f.name), code).expect("write generated file");
+    }
+
+    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
+    let out = Command::new("rustc")
+        .current_dir(&dir)
+        .arg("lib.rs")
+        .arg("--edition")
+        .arg("2021")
+        .arg("-D")
+        .arg("warnings")
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("run rustc");
+    assert!(
+        out.status.success(),
+        "multi-file crate failed to compile ({name}):\n--- files ---\n{}\n--- stderr ---\n{}",
+        names.join(", "),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(
+        run.success(),
+        "generated program assertions failed:\n{name}"
+    );
+    names
+}
+
 /// Compile `program` (a complete Rust source file) with `rustc -D warnings`
 /// into a temp-dir binary and return its path. Panics with the compiler's
 /// stderr if the generated code does not build.
