@@ -29,12 +29,11 @@ impl<'a> super::FuncGen<'a> {
         self.require_zero_index(table, "table.get")?;
         let index = self.pop()?;
         let element = self.ctx.table_element.unwrap_or(ValType::FUNCREF);
-        self.push(Val {
-            code: format!("self.table()[({}) as u32 as usize]", index.code),
-            ty: element,
-            stable: false,
-        });
-        Ok(())
+        self.push_combined(
+            format!("self.table()[({}) as u32 as usize]", index.code),
+            element,
+            false,
+        )
     }
 
     /// `table.set`: write a funcref at the given index. Out-of-bounds panics (a
@@ -227,11 +226,10 @@ impl<'a> super::FuncGen<'a> {
     /// `ref.is_null`: pop a funcref and push 1 if it is null, else 0.
     pub(super) fn ref_is_null(&mut self) -> Result<(), TranspileError> {
         let r = self.pop()?;
-        self.push(Val {
-            code: format!("i32::from({} == u32::MAX)", r.code),
-            ty: ValType::I32,
-            stable: r.stable,
-        });
-        Ok(())
+        self.push_combined(
+            format!("i32::from({} == u32::MAX)", r.code),
+            ValType::I32,
+            r.stable,
+        )
     }
 }

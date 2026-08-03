@@ -9,44 +9,40 @@ impl<'a> super::FuncGen<'a> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
         // Arithmetic/bitwise results keep the operand type (i32 or i64).
-        self.push(Val {
-            code: format!("{}.{method}({})", lhs.code, rhs.code),
-            ty: lhs.ty,
-            stable: lhs.stable && rhs.stable,
-        });
-        Ok(())
+        self.push_combined(
+            format!("{}.{method}({})", lhs.code, rhs.code),
+            lhs.ty,
+            lhs.stable && rhs.stable,
+        )
     }
 
     pub(super) fn binop_infix(&mut self, op: &str) -> Result<(), TranspileError> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
-        self.push(Val {
-            code: format!("({} {op} {})", lhs.code, rhs.code),
-            ty: lhs.ty,
-            stable: lhs.stable && rhs.stable,
-        });
-        Ok(())
+        self.push_combined(
+            format!("({} {op} {})", lhs.code, rhs.code),
+            lhs.ty,
+            lhs.stable && rhs.stable,
+        )
     }
 
     pub(super) fn compare_zero(&mut self) -> Result<(), TranspileError> {
         let a = self.pop()?;
-        self.push(Val {
-            code: format!("i32::from({} == 0)", a.code),
-            ty: ValType::I32,
-            stable: a.stable,
-        });
-        Ok(())
+        self.push_combined(
+            format!("i32::from({} == 0)", a.code),
+            ValType::I32,
+            a.stable,
+        )
     }
 
     pub(super) fn compare_signed(&mut self, op: &str) -> Result<(), TranspileError> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
-        self.push(Val {
-            code: format!("i32::from({} {op} {})", lhs.code, rhs.code),
-            ty: ValType::I32,
-            stable: lhs.stable && rhs.stable,
-        });
-        Ok(())
+        self.push_combined(
+            format!("i32::from({} {op} {})", lhs.code, rhs.code),
+            ValType::I32,
+            lhs.stable && rhs.stable,
+        )
     }
 
     pub(super) fn compare_unsigned(&mut self, op: &str) -> Result<(), TranspileError> {
@@ -54,15 +50,14 @@ impl<'a> super::FuncGen<'a> {
         let lhs = self.pop()?;
         // The operands are reinterpreted as the unsigned integer of their width.
         let unsigned = unsigned_type(lhs.ty)?;
-        self.push(Val {
-            code: format!(
+        self.push_combined(
+            format!(
                 "i32::from(({} as {unsigned}) {op} ({} as {unsigned}))",
                 lhs.code, rhs.code
             ),
-            ty: ValType::I32,
-            stable: lhs.stable && rhs.stable,
-        });
-        Ok(())
+            ValType::I32,
+            lhs.stable && rhs.stable,
+        )
     }
 
     /// A shift or rotate: `lhs.method(rhs as u32)`. `wrapping_shl`/`wrapping_shr`
@@ -71,12 +66,11 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn shift_op(&mut self, method: &str) -> Result<(), TranspileError> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
-        self.push(Val {
-            code: format!("{}.{method}({} as u32)", lhs.code, rhs.code),
-            ty: lhs.ty,
-            stable: lhs.stable && rhs.stable,
-        });
-        Ok(())
+        self.push_combined(
+            format!("{}.{method}({} as u32)", lhs.code, rhs.code),
+            lhs.ty,
+            lhs.stable && rhs.stable,
+        )
     }
 
     /// Bind a possibly-trapping expression (integer div/rem) to a temporary at
@@ -136,15 +130,14 @@ impl<'a> super::FuncGen<'a> {
         let lhs = self.pop()?;
         let unsigned = unsigned_type(lhs.ty)?;
         let signed = rust_type(lhs.ty)?;
-        self.push(Val {
-            code: format!(
+        self.push_combined(
+            format!(
                 "(({} as {unsigned}).{method}({} as u32) as {signed})",
                 lhs.code, rhs.code
             ),
-            ty: lhs.ty,
-            stable: lhs.stable && rhs.stable,
-        });
-        Ok(())
+            lhs.ty,
+            lhs.stable && rhs.stable,
+        )
     }
 
     /// A binary call to a free-function runtime helper `name(lhs, rhs)` (used
@@ -154,12 +147,11 @@ impl<'a> super::FuncGen<'a> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
         self.used_rt.insert(rt);
-        self.push(Val {
-            code: format!("{}({}, {})", rt_name(rt), lhs.code, rhs.code),
-            ty: lhs.ty,
-            stable: lhs.stable && rhs.stable,
-        });
-        Ok(())
+        self.push_combined(
+            format!("{}({}, {})", rt_name(rt), lhs.code, rhs.code),
+            lhs.ty,
+            lhs.stable && rhs.stable,
+        )
     }
 
     /// A unary call to a possibly-trapping runtime helper (the non-saturating
@@ -179,12 +171,7 @@ impl<'a> super::FuncGen<'a> {
     /// A unary method call `operand.method()` (float math like `abs`, `sqrt`).
     pub(super) fn unop_method(&mut self, method: &str) -> Result<(), TranspileError> {
         let a = self.pop()?;
-        self.push(Val {
-            code: format!("{}.{method}()", a.code),
-            ty: a.ty,
-            stable: a.stable,
-        });
-        Ok(())
+        self.push_combined(format!("{}.{method}()", a.code), a.ty, a.stable)
     }
 
     /// wasm's bit-counting unary ops (`clz`/`ctz`/`popcnt`). Rust's
@@ -199,12 +186,7 @@ impl<'a> super::FuncGen<'a> {
     /// Floating-point negation, parenthesised so it composes as a subexpression.
     pub(super) fn unop_neg(&mut self) -> Result<(), TranspileError> {
         let a = self.pop()?;
-        self.push(Val {
-            code: format!("(-{})", a.code),
-            ty: a.ty,
-            stable: a.stable,
-        });
-        Ok(())
+        self.push_combined(format!("(-{})", a.code), a.ty, a.stable)
     }
 
     /// A unary numeric conversion: pop one operand, build the converted
@@ -217,12 +199,7 @@ impl<'a> super::FuncGen<'a> {
         make: impl FnOnce(&str) -> String,
     ) -> Result<(), TranspileError> {
         let a = self.pop()?;
-        self.push(Val {
-            code: make(&a.code),
-            ty: result_ty,
-            stable: a.stable,
-        });
-        Ok(())
+        self.push_combined(make(&a.code), result_ty, a.stable)
     }
 
     /// A single `operand as target` cast (`target` is the Rust primitive name),
@@ -263,14 +240,13 @@ impl<'a> super::FuncGen<'a> {
         let a = self.pop()?;
         // Parenthesised so the `if` expression composes safely when this value
         // is later embedded in a larger expression (e.g. as an operator arm).
-        self.push(Val {
-            code: format!(
+        self.push_combined(
+            format!(
                 "(if {} != 0 {{ {} }} else {{ {} }})",
                 cond.code, a.code, b.code
             ),
-            ty: a.ty,
-            stable: cond.stable && a.stable && b.stable,
-        });
-        Ok(())
+            a.ty,
+            cond.stable && a.stable && b.stable,
+        )
     }
 }

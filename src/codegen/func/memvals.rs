@@ -130,17 +130,17 @@ impl<'a> super::FuncGen<'a> {
         let offset = memarg_offset(memarg)?;
         let addr = self.pop()?;
         self.used_helpers.insert(helper);
-        self.push(Val {
-            code: format!(
+        // The result depends on memory contents, which a store can change, so
+        // it is never stable.
+        self.push_combined(
+            format!(
                 "self.{}(({}) as u32, {offset}u32)",
                 helper_name(helper),
                 addr.code
             ),
             ty,
-            // The result depends on memory contents, which a store can change.
-            stable: false,
-        });
-        Ok(())
+            false,
+        )
     }
 
     pub(super) fn store(&mut self, helper: Helper, memarg: MemArg) -> Result<(), TranspileError> {

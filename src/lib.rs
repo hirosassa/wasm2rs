@@ -748,10 +748,10 @@ impl Instance {
             rust.contains("let mut m: Vec<u8> = vec![0u8; 65536];"),
             "{rust}"
         );
-        assert!(
-            rust.contains("m[4..6].copy_from_slice(&[1u8, 2u8]);"),
-            "{rust}"
-        );
+        // The byte literal is wrapped across lines (see `byte_array_literal`),
+        // so check the destination slice and the byte sequence separately.
+        assert!(rust.contains("m[4..6].copy_from_slice(&["), "{rust}");
+        assert!(rust.contains("1u8, 2u8,"), "{rust}");
     }
 
     #[test]

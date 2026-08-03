@@ -407,8 +407,32 @@ impl<'a> FuncGen<'a> {
 
     // ----- operand stack helpers -------------------------------------------
 
+    /// Upper bound on the textual length of a single generated expression.
+    /// A "stable" value is never spilled, so a long straight-line chain of
+    /// operations folds into one Rust expression on one line; without a cap a
+    /// large function collapses into a multi-megabyte line that overflows
+    /// rustc's parser. `push_combined` spills any expression exceeding this.
+    const MAX_EXPR_LEN: usize = 4096;
+
     fn push(&mut self, val: Val) {
         self.stack.push(val);
+    }
+
+    /// Push an expression built from other operands, first spilling it into a
+    /// `let` binding when it grows past `MAX_EXPR_LEN`. This bounds the size of
+    /// any single generated line while preserving the computed value (the temp
+    /// is itself stable, so it inlines cheaply into the next operation).
+    fn push_combined(
+        &mut self,
+        code: String,
+        ty: ValType,
+        stable: bool,
+    ) -> Result<(), TranspileError> {
+        if code.len() > Self::MAX_EXPR_LEN {
+            return self.materialize(code, ty);
+        }
+        self.push(Val { code, ty, stable });
+        Ok(())
     }
 
     fn pop(&mut self) -> Result<Val, TranspileError> {

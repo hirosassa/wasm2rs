@@ -371,12 +371,20 @@ fn memarg_offset(memarg: MemArg) -> Result<u32, TranspileError> {
 }
 
 /// Render bytes as a comma-separated list of `u8` literals (a Rust array body).
+///
+/// The list is broken onto a new line every `PER_LINE` bytes: a large data
+/// segment would otherwise render as one multi-megabyte line that overflows
+/// rustc's parser. The embedded newlines sit inside the `[ ... ]` wrapper at the
+/// call site, producing an ordinary multi-line array literal.
 fn byte_array_literal(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{b}u8"))
-        .collect::<Vec<_>>()
-        .join(", ")
+    use std::fmt::Write as _;
+    const PER_LINE: usize = 32;
+    let mut out = String::new();
+    for (i, b) in bytes.iter().enumerate() {
+        out.push_str(if i % PER_LINE == 0 { "\n" } else { " " });
+        let _ = write!(out, "{b}u8,");
+    }
+    out
 }
 
 /// Indent each non-empty line by four spaces.
