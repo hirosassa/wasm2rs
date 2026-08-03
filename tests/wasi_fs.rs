@@ -272,3 +272,146 @@ fn main() {
         .expect("run generated binary");
     assert!(status.success(), "escape rejection assertions failed");
 }
+
+// fd_pread reads at an explicit offset without moving the file position. Opens
+// "input.txt", then preads at offset 5 into an iovec (offset 0 -> buffer 200,
+// cap 64); `run` returns the errno and stores the byte count at offset 8.
+const PREAD: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_open"
+        (func $po (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_pread"
+        (func $pr (param i32 i32 i32 i64 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "input.txt")
+      (data (i32.const 0) "\c8\00\00\00\40\00\00\00")
+      (func (export "run") (result i32)
+        (drop (call $po (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 9)
+                        (i32.const 0) (i64.const 2) (i64.const 0) (i32.const 0) (i32.const 300)))
+        (call $pr (i32.load (i32.const 300)) (i32.const 0) (i32.const 1) (i64.const 5) (i32.const 8))))
+    "#;
+
+#[test]
+fn fd_pread_reads_at_an_offset() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func2(), 0, \"pread should succeed\");
+    let n = u32::from_le_bytes([i.mem()[8], i.mem()[9], i.mem()[10], i.mem()[11]]) as usize;
+    assert_eq!(&i.mem()[200..200 + n], b\"contents-123\\n\", \"pread reads from offset 5\");
+}
+";
+    let (bin, dir) = compile("pread", PREAD, extra);
+    std::fs::write(dir.join("input.txt"), b"file-contents-123\n").expect("write input file");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "fd_pread assertions failed");
+}
+
+// fd_pwrite writes at an explicit offset without moving the file position
+// (`write_at`). Opens an existing writable "pout.txt", pwrites "XYZ" (iovec at
+// 0 -> buffer 200, len 3) at offset 4, and stores the byte count at 308.
+const PWRITE: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_open"
+        (func $po (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_pwrite"
+        (func $pw (param i32 i32 i32 i64 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "pout.txt")
+      (data (i32.const 0) "\c8\00\00\00\03\00\00\00")
+      (data (i32.const 200) "XYZ")
+      (func (export "run") (result i32)
+        (drop (call $po (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 8)
+                        (i32.const 0) (i64.const 64) (i64.const 0) (i32.const 0) (i32.const 300)))
+        (call $pw (i32.load (i32.const 300)) (i32.const 0) (i32.const 1) (i64.const 4) (i32.const 308))))
+    "#;
+
+#[test]
+fn fd_pwrite_writes_at_an_offset() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func2(), 0, \"pwrite should succeed\");
+    let n = u32::from_le_bytes([i.mem()[308], i.mem()[309], i.mem()[310], i.mem()[311]]);
+    assert_eq!(n, 3, \"three bytes written\");
+}
+";
+    let (bin, dir) = compile("pwrite", PWRITE, extra);
+    let out_path = dir.join("pout.txt");
+    std::fs::write(&out_path, b"AAAAAAAAAA").expect("seed output file");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "fd_pwrite assertions failed");
+    let written = std::fs::read(&out_path).expect("output file should exist");
+    assert_eq!(written, b"AAAAXYZAAA", "pwrite overwrites bytes 4..7");
+}
+
+// path_filestat_get stats a path within the preopen without opening it, so it
+// needs no file-descriptor table. It writes a 64-byte filestat at offset 400
+// for "input.txt"; `run` returns the errno.
+const PATH_FILESTAT: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_filestat_get"
+        (func $pf (param i32 i32 i32 i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "input.txt")
+      (func (export "run") (result i32)
+        (call $pf (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 9) (i32.const 400))))
+    "#;
+
+#[test]
+fn path_filestat_get_reports_size_and_type_without_opening() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 0, \"path_filestat_get should succeed\");
+    assert_eq!(i.mem()[416], 4, \"a regular file has filetype 4\");
+    let size = u64::from_le_bytes([
+        i.mem()[432], i.mem()[433], i.mem()[434], i.mem()[435],
+        i.mem()[436], i.mem()[437], i.mem()[438], i.mem()[439],
+    ]);
+    assert_eq!(size, 10, \"file size in bytes\");
+}
+";
+    let (bin, dir) = compile("path_filestat", PATH_FILESTAT, extra);
+    std::fs::write(dir.join("input.txt"), b"0123456789").expect("write input file");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "path_filestat_get assertions failed");
+}
+
+#[test]
+fn path_filestat_get_rejects_parent_directory_escape() {
+    // Like path_open, a path escaping the preopen via ".." is ENOTCAPABLE (76).
+    let wat = r#"
+        (module
+          (import "wasi_snapshot_preview1" "path_filestat_get"
+            (func $pf (param i32 i32 i32 i32 i32) (result i32)))
+          (memory 1)
+          (data (i32.const 100) "../escape")
+          (func (export "run") (result i32)
+            (call $pf (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 9) (i32.const 400))))
+        "#;
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 76, \"escaping the preopen must return ENOTCAPABLE\");
+}
+";
+    let (bin, dir) = compile("path_filestat_escape", wat, extra);
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(
+        status.success(),
+        "path_filestat_get escape rejection failed"
+    );
+}

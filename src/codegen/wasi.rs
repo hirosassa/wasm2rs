@@ -22,6 +22,11 @@ pub(crate) enum WasiFn {
     FdPrestatGet,
     FdPrestatDirName,
     FdFilestatGet,
+    SchedYield,
+    ClockResGet,
+    FdPread,
+    FdPwrite,
+    PathFilestatGet,
 }
 
 impl WasiFn {
@@ -54,6 +59,11 @@ impl WasiFn {
             "fd_prestat_get" => WasiFn::FdPrestatGet,
             "fd_prestat_dir_name" => WasiFn::FdPrestatDirName,
             "fd_filestat_get" => WasiFn::FdFilestatGet,
+            "sched_yield" => WasiFn::SchedYield,
+            "clock_res_get" => WasiFn::ClockResGet,
+            "fd_pread" => WasiFn::FdPread,
+            "fd_pwrite" => WasiFn::FdPwrite,
+            "path_filestat_get" => WasiFn::PathFilestatGet,
             _ => return None,
         };
         (params == candidate.params() && results == candidate.results()).then_some(candidate)
@@ -62,6 +72,7 @@ impl WasiFn {
     fn params(self) -> &'static [ValType] {
         use ValType::{I32, I64};
         match self {
+            WasiFn::SchedYield => &[],
             WasiFn::ProcExit | WasiFn::FdClose => &[I32],
             WasiFn::FdWrite | WasiFn::FdRead => &[I32, I32, I32, I32],
             WasiFn::FdSeek => &[I32, I64, I32, I32],
@@ -72,9 +83,14 @@ impl WasiFn {
             | WasiFn::EnvironGet
             | WasiFn::RandomGet
             | WasiFn::FdPrestatGet
-            | WasiFn::FdFilestatGet => &[I32, I32],
+            | WasiFn::FdFilestatGet
+            | WasiFn::ClockResGet => &[I32, I32],
             WasiFn::ClockTimeGet => &[I32, I64, I32],
             WasiFn::FdPrestatDirName => &[I32, I32, I32],
+            // fd, iovs, iovs_len, offset, nread/nwritten.
+            WasiFn::FdPread | WasiFn::FdPwrite => &[I32, I32, I32, I64, I32],
+            // fd, lookupflags, path, path_len, filestat_buf.
+            WasiFn::PathFilestatGet => &[I32, I32, I32, I32, I32],
             // dirfd, dirflags, path, path_len, oflags, rights_base,
             // rights_inheriting, fdflags, opened_fd.
             WasiFn::PathOpen => &[I32, I32, I32, I32, I32, I64, I64, I32, I32],
@@ -98,7 +114,12 @@ impl WasiFn {
             | WasiFn::PathOpen
             | WasiFn::FdPrestatGet
             | WasiFn::FdPrestatDirName
-            | WasiFn::FdFilestatGet => &[ValType::I32],
+            | WasiFn::FdFilestatGet
+            | WasiFn::SchedYield
+            | WasiFn::ClockResGet
+            | WasiFn::FdPread
+            | WasiFn::FdPwrite
+            | WasiFn::PathFilestatGet => &[ValType::I32],
         }
     }
 
@@ -121,6 +142,11 @@ impl WasiFn {
             WasiFn::FdPrestatGet => "wasi_fd_prestat_get",
             WasiFn::FdPrestatDirName => "wasi_fd_prestat_dir_name",
             WasiFn::FdFilestatGet => "wasi_fd_filestat_get",
+            WasiFn::SchedYield => "wasi_sched_yield",
+            WasiFn::ClockResGet => "wasi_clock_res_get",
+            WasiFn::FdPread => "wasi_fd_pread",
+            WasiFn::FdPwrite => "wasi_fd_pwrite",
+            WasiFn::PathFilestatGet => "wasi_path_filestat_get",
         }
     }
 
@@ -129,7 +155,10 @@ impl WasiFn {
     /// functions whose bodies never touch memory: `proc_exit`, and the `fd_`
     /// stubs that only return an errno (`fd_close`, `fd_seek`).
     pub(super) fn needs_memory(self) -> bool {
-        !matches!(self, WasiFn::ProcExit | WasiFn::FdClose | WasiFn::FdSeek)
+        !matches!(
+            self,
+            WasiFn::ProcExit | WasiFn::FdClose | WasiFn::FdSeek | WasiFn::SchedYield
+        )
     }
 
     /// The Rust source for this WASI method's inherent-method definition. When
@@ -493,6 +522,155 @@ impl WasiFn {
                 "    st[24..32].copy_from_slice(&1u64.to_le_bytes());",
                 "    st[32..40].copy_from_slice(&size.to_le_bytes());",
                 "    let b = a1 as u32 as usize;",
+                "    self.mem_mut()[b..b + 64].copy_from_slice(&st);",
+                "    0",
+                "}",
+            ]),
+            // `sched_yield()` hints the scheduler to yield the CPU; the single
+            // owning thread simply yields and reports success.
+            WasiFn::SchedYield => owned(&[
+                "fn wasi_sched_yield(&mut self) -> i32 {",
+                "    std::thread::yield_now();",
+                "    0",
+                "}",
+            ]),
+            // `clock_res_get(clock_id, resolution)` writes the clock's resolution
+            // (a u64 nanosecond count) at the pointer. The clock id is ignored and
+            // the finest representable resolution, 1 ns, is reported.
+            WasiFn::ClockResGet => owned(&[
+                "fn wasi_clock_res_get(&mut self, a0: i32, a1: i32) -> i32 {",
+                "    let r = a1 as u32 as usize;",
+                "    self.mem_mut()[r..r + 8].copy_from_slice(&1u64.to_le_bytes());",
+                "    0",
+                "}",
+            ]),
+            // `fd_pread(fd, iovs, iovs_len, offset, nread)` reads at an explicit
+            // offset without moving the file position (`read_at`), scatters the
+            // bytes across the iovecs, and stores the count at `nread`. Stdio is
+            // not seekable (ESPIPE, 70).
+            WasiFn::FdPread if files => owned(&[
+                "fn wasi_fd_pread(&mut self, a0: i32, a1: i32, a2: i32, a3: i64, a4: i32) -> i32 {",
+                "    use std::os::unix::fs::FileExt;",
+                "    let mut iovs: Vec<(usize, usize)> = Vec::new();",
+                "    let mut cap = 0usize;",
+                "    for i in 0..a2 as usize {",
+                "        let e = a1 as u32 as usize + i * 8;",
+                "        let ptr = u32::from_le_bytes([self.mem()[e], self.mem()[e + 1], self.mem()[e + 2], self.mem()[e + 3]]) as usize;",
+                "        let len = u32::from_le_bytes([self.mem()[e + 4], self.mem()[e + 5], self.mem()[e + 6], self.mem()[e + 7]]) as usize;",
+                "        iovs.push((ptr, len));",
+                "        cap += len;",
+                "    }",
+                "    let mut tmp = vec![0u8; cap];",
+                "    let n = match a0 {",
+                "        0 | 1 | 2 => return 70,",
+                "        _ => {",
+                "            let idx = a0 as u32 as usize;",
+                "            match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()) {",
+                "                Some(f) => match f.read_at(&mut tmp, a3 as u64) { Ok(n) => n, Err(_) => return 29 },",
+                "                None => return 8,",
+                "            }",
+                "        }",
+                "    };",
+                "    let mut off = 0usize;",
+                "    for (ptr, len) in iovs {",
+                "        if off >= n {",
+                "            break;",
+                "        }",
+                "        let take = len.min(n - off);",
+                "        self.mem_mut()[ptr..ptr + take].copy_from_slice(&tmp[off..off + take]);",
+                "        off += take;",
+                "    }",
+                "    let w = a4 as u32 as usize;",
+                "    self.mem_mut()[w..w + 4].copy_from_slice(&(n as u32).to_le_bytes());",
+                "    0",
+                "}",
+            ]),
+            // Without a file table only the non-seekable stdio fds exist, so a
+            // positioned read is ESPIPE (70) for stdio and EBADF (8) otherwise.
+            WasiFn::FdPread => owned(&[
+                "fn wasi_fd_pread(&mut self, a0: i32, a1: i32, a2: i32, a3: i64, a4: i32) -> i32 {",
+                "    match a0 {",
+                "        0 | 1 | 2 => 70,",
+                "        _ => 8,",
+                "    }",
+                "}",
+            ]),
+            // `fd_pwrite(fd, iovs, iovs_len, offset, nwritten)` gathers the iovec
+            // buffers and writes them at an explicit offset without moving the
+            // file position (`write_at`), storing the count at `nwritten`. Stdio
+            // is not seekable (ESPIPE, 70).
+            WasiFn::FdPwrite if files => owned(&[
+                "fn wasi_fd_pwrite(&mut self, a0: i32, a1: i32, a2: i32, a3: i64, a4: i32) -> i32 {",
+                "    use std::os::unix::fs::FileExt;",
+                "    let mut buf: Vec<u8> = Vec::new();",
+                "    for i in 0..a2 as usize {",
+                "        let e = a1 as u32 as usize + i * 8;",
+                "        let ptr = u32::from_le_bytes([self.mem()[e], self.mem()[e + 1], self.mem()[e + 2], self.mem()[e + 3]]) as usize;",
+                "        let len = u32::from_le_bytes([self.mem()[e + 4], self.mem()[e + 5], self.mem()[e + 6], self.mem()[e + 7]]) as usize;",
+                "        buf.extend_from_slice(&self.mem()[ptr..ptr + len]);",
+                "    }",
+                "    let n = match a0 {",
+                "        0 | 1 | 2 => return 70,",
+                "        _ => {",
+                "            let idx = a0 as u32 as usize;",
+                "            match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()) {",
+                "                Some(f) => match f.write_at(&buf, a3 as u64) { Ok(n) => n, Err(_) => return 29 },",
+                "                None => return 8,",
+                "            }",
+                "        }",
+                "    };",
+                "    let w = a4 as u32 as usize;",
+                "    self.mem_mut()[w..w + 4].copy_from_slice(&(n as u32).to_le_bytes());",
+                "    0",
+                "}",
+            ]),
+            // Without a file table only the non-seekable stdio fds exist, so a
+            // positioned write is ESPIPE (70) for stdio and EBADF (8) otherwise.
+            WasiFn::FdPwrite => owned(&[
+                "fn wasi_fd_pwrite(&mut self, a0: i32, a1: i32, a2: i32, a3: i64, a4: i32) -> i32 {",
+                "    match a0 {",
+                "        0 | 1 | 2 => 70,",
+                "        _ => 8,",
+                "    }",
+                "}",
+            ]),
+            // `path_filestat_get(dirfd, flags, path, path_len, buf)` stats a path
+            // within the preopen (fd 3) *without opening it*, writing a 64-byte
+            // `filestat` (filetype @16, nlink=1 @24, size @32). Path containment
+            // is lexical, as in `path_open`: absolute paths and ".." escapes are
+            // refused with ENOTCAPABLE (76). `flags` (symlink follow) is ignored;
+            // `std::fs::metadata` follows symlinks.
+            WasiFn::PathFilestatGet => owned(&[
+                "fn wasi_path_filestat_get(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32) -> i32 {",
+                "    if a0 != 3 {",
+                "        return 8;",
+                "    }",
+                "    let p = a2 as u32 as usize;",
+                "    let len = a3 as u32 as usize;",
+                "    let raw = self.mem()[p..p + len].to_vec();",
+                "    let path = match std::str::from_utf8(&raw) { Ok(s) => s, Err(_) => return 28 };",
+                "    let mut rel = std::path::PathBuf::new();",
+                "    for comp in std::path::Path::new(path).components() {",
+                "        match comp {",
+                "            std::path::Component::Normal(c) => rel.push(c),",
+                "            std::path::Component::CurDir => {}",
+                "            _ => return 76,",
+                "        }",
+                "    }",
+                "    let meta = match std::fs::metadata(&rel) {",
+                "        Ok(m) => m,",
+                "        Err(e) => return match e.kind() {",
+                "            std::io::ErrorKind::NotFound => 44,",
+                "            std::io::ErrorKind::PermissionDenied => 2,",
+                "            _ => 29,",
+                "        },",
+                "    };",
+                "    let filetype = if meta.is_dir() { 3u8 } else if meta.is_file() { 4u8 } else { 0u8 };",
+                "    let mut st = [0u8; 64];",
+                "    st[16] = filetype;",
+                "    st[24..32].copy_from_slice(&1u64.to_le_bytes());",
+                "    st[32..40].copy_from_slice(&meta.len().to_le_bytes());",
+                "    let b = a4 as u32 as usize;",
                 "    self.mem_mut()[b..b + 64].copy_from_slice(&st);",
                 "    0",
                 "}",

@@ -463,3 +463,60 @@ fn proc_exit_terminates_with_code() {
     let status = Command::new(&bin).status().expect("run generated binary");
     assert_eq!(status.code(), Some(42), "process should exit with code 42");
 }
+
+// `sched_yield()` takes no arguments, touches no memory, and just returns
+// success. A module importing only it transpiles to a standalone, memory-free
+// `Instance`.
+const YIELD: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "sched_yield" (func $y (result i32)))
+      (func (export "run") (result i32)
+        call $y))
+    "#;
+
+#[test]
+fn sched_yield_returns_success() {
+    let generated =
+        wasm2rs::transpile(&wat::parse_str(YIELD).expect("valid wat")).expect("transpile ok");
+    assert!(
+        generated.contains("fn wasi_sched_yield("),
+        "sched_yield should be a native method:\n{generated}"
+    );
+    let bin = compile(
+        "yield",
+        YIELD,
+        "fn main() {\n    let mut i = Instance::new();\n    assert_eq!(i.func1(), 0);\n}\n",
+    );
+    let status = Command::new(&bin).status().expect("run generated binary");
+    assert!(status.success(), "sched_yield should return 0");
+}
+
+// `clock_res_get(clock_id, resolution_ptr)` writes the clock resolution (a u64
+// nanosecond count) at the pointer and returns success. The value reported is
+// 1 ns (the finest representable), regardless of clock id.
+const CLOCK_RES: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "clock_res_get"
+        (func $res (param i32 i32) (result i32)))
+      (memory 1)
+      (func (export "run") (result i32)
+        (call $res (i32.const 0) (i32.const 0))))
+    "#;
+
+#[test]
+fn clock_res_get_writes_the_resolution() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 0);
+    let res = u64::from_le_bytes([
+        i.mem()[0], i.mem()[1], i.mem()[2], i.mem()[3],
+        i.mem()[4], i.mem()[5], i.mem()[6], i.mem()[7],
+    ]);
+    assert_eq!(res, 1);
+}
+";
+    let bin = compile("clock_res", CLOCK_RES, extra);
+    let status = Command::new(&bin).status().expect("run generated binary");
+    assert!(status.success(), "clock_res_get assertions failed");
+}
