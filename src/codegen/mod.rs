@@ -454,22 +454,26 @@ const FLATTEN_DEPTH_THRESHOLD: usize = 40;
 /// Whether a body can be lowered to a flat dispatch loop with the currently
 /// supported constructs (block/loop/`br`/`br_if`/terminators). `if` regions and
 /// `br_table` are not yet flattenable, so a body containing them stays nested.
+///
+/// Walked with an explicit stack rather than by recursion, so a deeply nested
+/// module (the very case that triggers flattening) cannot overflow the thread's
+/// stack while deciding whether to flatten.
 fn can_flatten(nodes: &[Node]) -> bool {
-    nodes.iter().all(|node| match node {
-        Node::Line(_)
-        | Node::Term(_)
-        | Node::Br { .. }
-        | Node::BrIf { .. }
-        | Node::BrTable { .. } => true,
-        Node::Region(region) => match region.kind {
-            FrameKind::Block | FrameKind::Loop => can_flatten(&region.body),
-            FrameKind::If => {
-                region.cond.is_some()
-                    && can_flatten(&region.body)
-                    && region.els.as_deref().is_none_or(can_flatten)
+    let mut stack: Vec<&[Node]> = vec![nodes];
+    while let Some(nodes) = stack.pop() {
+        for node in nodes {
+            let Node::Region(region) = node else { continue };
+            // A `br_if`-only `if` (no condition) has no flat lowering.
+            if region.kind == FrameKind::If && region.cond.is_none() {
+                return false;
             }
-        },
-    })
+            stack.push(&region.body);
+            if let Some(els) = region.els.as_deref() {
+                stack.push(els);
+            }
+        }
+    }
+    true
 }
 
 /// Lower a structured body to a flat state machine: `let mut pc = …; 'sm: loop {
@@ -529,103 +533,117 @@ impl Flattener {
 
     /// Linearise `nodes` so execution enters at state `entry` and, on
     /// fall-through, transfers to state `after`.
+    ///
+    /// A nested region does not recurse: its body is pushed onto a worklist as a
+    /// `(nodes, entry, after)` task and lowered in a later iteration, so the
+    /// nesting depth becomes worklist length rather than call-stack depth and a
+    /// deeply nested module cannot overflow the stack. Order across tasks is
+    /// irrelevant because arms are collected into `self.arms` and sorted by state
+    /// id in [`Self::assemble`]; a region's label is inserted into `self.labels`
+    /// before its body task is pushed, and a branch only ever targets an
+    /// enclosing region (never a sibling or descendant), so every label a task
+    /// reads is already present.
     fn lower(&mut self, nodes: Vec<Node>, entry: usize, after: usize) {
-        let mut state = entry;
-        let mut stmts: Vec<String> = Vec::new();
-        let mut reachable = true;
-        for node in nodes {
-            if !reachable {
-                // The generator does not emit past a terminator within a region,
-                // but skip defensively so a stray node cannot start a dead arm.
-                continue;
-            }
-            match node {
-                Node::Line(text) => stmts.push(text),
-                Node::Term(text) => {
-                    stmts.push(text);
-                    self.arms.push((state, std::mem::take(&mut stmts)));
-                    reachable = false;
+        let mut worklist: Vec<(Vec<Node>, usize, usize)> = vec![(nodes, entry, after)];
+        while let Some((nodes, entry, after)) = worklist.pop() {
+            let mut state = entry;
+            let mut stmts: Vec<String> = Vec::new();
+            let mut reachable = true;
+            for node in nodes {
+                if !reachable {
+                    // The generator does not emit past a terminator within a
+                    // region, but skip defensively so a stray node cannot start a
+                    // dead arm.
+                    continue;
                 }
-                Node::Br { label, .. } => {
-                    let target = self.labels[&label];
-                    stmts.push(format!("pc = {target};"));
-                    self.arms.push((state, std::mem::take(&mut stmts)));
-                    reachable = false;
-                }
-                Node::BrIf {
-                    cond,
-                    label,
-                    assigns,
-                    ..
-                } => {
-                    let target = self.labels[&label];
-                    let mut line = format!("if {cond} != 0 {{ ");
-                    for (var, value) in assigns {
-                        line.push_str(&format!("{var} = {value}; "));
+                match node {
+                    Node::Line(text) => stmts.push(text),
+                    Node::Term(text) => {
+                        stmts.push(text);
+                        self.arms.push((state, std::mem::take(&mut stmts)));
+                        reachable = false;
                     }
-                    line.push_str(&format!("pc = {target}; continue 'sm; }}"));
-                    self.uses_continue = true;
-                    stmts.push(line);
-                }
-                Node::Region(region) if region.kind == FrameKind::If => {
-                    // Dispatch to the `then`/`else` entry, then rejoin at `cont`.
-                    // A branch to the `if` exits to `cont`.
-                    let cont = self.alloc();
-                    let then_e = self.alloc();
-                    self.labels.insert(region.label, cont);
-                    let cond = region.cond.clone().unwrap_or_default();
-                    let RegionNode { body, els, .. } = region;
-                    let else_e = match &els {
-                        Some(_) => self.alloc(),
-                        None => cont,
-                    };
-                    stmts.push(format!(
-                        "if {cond} {{ pc = {then_e}; }} else {{ pc = {else_e}; }}"
-                    ));
-                    self.arms.push((state, std::mem::take(&mut stmts)));
-                    self.lower(body, then_e, cont);
-                    if let Some(els) = els {
-                        self.lower(els, else_e, cont);
+                    Node::Br { label, .. } => {
+                        let target = self.labels[&label];
+                        stmts.push(format!("pc = {target};"));
+                        self.arms.push((state, std::mem::take(&mut stmts)));
+                        reachable = false;
                     }
-                    state = cont;
-                }
-                Node::Region(region) => {
-                    let inner = self.alloc();
-                    let cont = self.alloc();
-                    // A branch to a loop resumes its header; to a block it exits
-                    // to the continuation.
-                    let branch_target = match region.kind {
-                        FrameKind::Loop => inner,
-                        _ => cont,
-                    };
-                    self.labels.insert(region.label, branch_target);
-                    stmts.push(format!("pc = {inner};"));
-                    self.arms.push((state, std::mem::take(&mut stmts)));
-                    self.lower(region.body, inner, cont);
-                    state = cont;
-                }
-                Node::BrTable { selector, arms } => {
-                    // Each arm assigns its target's carried variables then sets
-                    // `pc`; the whole `match` ends the current arm.
-                    let mut line = format!("match ({selector}) as u32 {{ ");
-                    for arm in arms {
-                        let target = self.labels[&arm.label];
-                        line.push_str(&format!("{} => {{ ", arm.pattern));
-                        for (var, value) in arm.assigns {
+                    Node::BrIf {
+                        cond,
+                        label,
+                        assigns,
+                        ..
+                    } => {
+                        let target = self.labels[&label];
+                        let mut line = format!("if {cond} != 0 {{ ");
+                        for (var, value) in assigns {
                             line.push_str(&format!("{var} = {value}; "));
                         }
-                        line.push_str(&format!("pc = {target}; }} "));
+                        line.push_str(&format!("pc = {target}; continue 'sm; }}"));
+                        self.uses_continue = true;
+                        stmts.push(line);
                     }
-                    line.push('}');
-                    stmts.push(line);
-                    self.arms.push((state, std::mem::take(&mut stmts)));
-                    reachable = false;
+                    Node::Region(region) if region.kind == FrameKind::If => {
+                        // Dispatch to the `then`/`else` entry, then rejoin at
+                        // `cont`. A branch to the `if` exits to `cont`.
+                        let cont = self.alloc();
+                        let then_e = self.alloc();
+                        self.labels.insert(region.label, cont);
+                        let cond = region.cond.clone().unwrap_or_default();
+                        let RegionNode { body, els, .. } = region;
+                        let else_e = match &els {
+                            Some(_) => self.alloc(),
+                            None => cont,
+                        };
+                        stmts.push(format!(
+                            "if {cond} {{ pc = {then_e}; }} else {{ pc = {else_e}; }}"
+                        ));
+                        self.arms.push((state, std::mem::take(&mut stmts)));
+                        worklist.push((body, then_e, cont));
+                        if let Some(els) = els {
+                            worklist.push((els, else_e, cont));
+                        }
+                        state = cont;
+                    }
+                    Node::Region(region) => {
+                        let inner = self.alloc();
+                        let cont = self.alloc();
+                        // A branch to a loop resumes its header; to a block it
+                        // exits to the continuation.
+                        let branch_target = match region.kind {
+                            FrameKind::Loop => inner,
+                            _ => cont,
+                        };
+                        self.labels.insert(region.label, branch_target);
+                        stmts.push(format!("pc = {inner};"));
+                        self.arms.push((state, std::mem::take(&mut stmts)));
+                        worklist.push((region.body, inner, cont));
+                        state = cont;
+                    }
+                    Node::BrTable { selector, arms } => {
+                        // Each arm assigns its target's carried variables then
+                        // sets `pc`; the whole `match` ends the current arm.
+                        let mut line = format!("match ({selector}) as u32 {{ ");
+                        for arm in arms {
+                            let target = self.labels[&arm.label];
+                            line.push_str(&format!("{} => {{ ", arm.pattern));
+                            for (var, value) in arm.assigns {
+                                line.push_str(&format!("{var} = {value}; "));
+                            }
+                            line.push_str(&format!("pc = {target}; }} "));
+                        }
+                        line.push('}');
+                        stmts.push(line);
+                        self.arms.push((state, std::mem::take(&mut stmts)));
+                        reachable = false;
+                    }
                 }
             }
-        }
-        if reachable {
-            stmts.push(format!("pc = {after};"));
-            self.arms.push((state, stmts));
+            if reachable {
+                stmts.push(format!("pc = {after};"));
+                self.arms.push((state, stmts));
+            }
         }
     }
 

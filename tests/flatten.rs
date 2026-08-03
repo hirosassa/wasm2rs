@@ -199,6 +199,40 @@ fn very_deep_function_compiles_with_default_stack() {
 }
 
 #[test]
+fn deep_transpile_is_stack_safe_on_a_small_stack() {
+    // A library embedder calls `wasm2rs::transpile` directly on whatever thread
+    // it runs on — it does not get the CLI's large-stack worker. The flattening
+    // pipeline (`can_flatten`, the `Flattener` lowering) walks the control-nesting
+    // tree, so it must not recurse proportionally to the input depth or a deeply
+    // nested module would overflow an ordinary stack. This pins that a depth far
+    // past any recursive stack budget transpiles on a small (1MB) stack.
+    //
+    // The `wat` text parser itself recurses on nesting, so the deep source is
+    // parsed to wasm bytes on a large-stack thread first (a real `.wasm` reaches
+    // the transpiler through the iterative `wasmparser`, not the text parser);
+    // only `transpile` — the code under test — runs on the small stack.
+    let depth = 6000;
+    let wat = nested_increment_blocks(depth);
+    let build = std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || wat::parse_str(&wat).expect("valid wat"))
+        .expect("spawn build thread");
+    let wasm: Vec<u8> = build.join().expect("wat parses");
+
+    let transpile = std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(move || {
+            let source = wasm2rs::transpile(&wasm).expect("transpile ok");
+            assert!(source.contains("match pc {"), "the deep function flattens");
+            assert!(max_indent(&source) < 40, "flat output stays bounded");
+        })
+        .expect("spawn small-stack thread");
+    transpile
+        .join()
+        .expect("deep transpile does not overflow a small stack");
+}
+
+#[test]
 fn shallow_function_stays_nested() {
     // A modestly nested function keeps its readable nested form.
     let wat = nested_increment_blocks(3);
