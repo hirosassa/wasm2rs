@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 wasmparser = "0.255.0"
+mimalloc = "0.1"
 
 [dev-dependencies]
 wat = "1.255.0"
