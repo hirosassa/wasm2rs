@@ -1,2 +1,5 @@
 /target
 *.wasm
+
+# Coverage artifacts (cargo llvm-cov)
+/lcov.info
