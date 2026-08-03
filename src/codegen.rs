@@ -3025,10 +3025,12 @@ fn render_module(
     });
     if has_imports {
         lines.extend(import_trait_lines(
+            ctx,
             imports,
             imported_globals,
             mem_imported,
             table_imported,
+            dispatch_sigs,
         )?);
         lines.push(String::new());
     }
@@ -3283,7 +3285,7 @@ fn render_module(
     dispatch_ordered.sort_unstable();
     for ti in dispatch_ordered {
         inner.push(String::new());
-        inner.extend(dispatch_method_lines(ctx, ti)?);
+        inner.extend(dispatch_method_lines(ctx, ti, has_imports)?);
     }
 
     for src in sources {
@@ -3312,6 +3314,7 @@ fn render_module(
 fn dispatch_method_lines(
     ctx: &ModuleCtx<'_>,
     type_index: u32,
+    has_imports: bool,
 ) -> Result<Vec<String>, TranspileError> {
     let sig = ctx
         .types
@@ -3334,6 +3337,7 @@ fn dispatch_method_lines(
         .map(|k| format!("a{k}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let sep = if arg_list.is_empty() { "" } else { ", " };
 
     let mut lines = vec![
         format!("pub fn call_ref_t{type_index}({params}){ret} {{"),
@@ -3342,6 +3346,18 @@ fn dispatch_method_lines(
     for fidx in targets {
         let expr = ctx.call_expr(fidx, &arg_list);
         lines.push(format!("        {fidx}u32 => {expr},"));
+    }
+    // The high bit tags an external handle the host resolves (see the trait's
+    // defaulted `call_ref_t{ti}`); the tag is stripped before the host sees the
+    // slot. `u32::MAX` (null) has the high bit set too, so it is matched first
+    // and traps rather than being forwarded. Only a module with a host (an
+    // `Imports` trait) can receive external handles.
+    if has_imports {
+        lines.push("        u32::MAX => panic!(\"indirect call type mismatch\"),".to_string());
+        lines.push(format!(
+            "        h if (h & 0x8000_0000u32) != 0 => \
+             self.imports.call_ref_t{type_index}(h & 0x7fff_ffffu32{sep}{arg_list}),"
+        ));
     }
     lines.push("        _ => panic!(\"indirect call type mismatch\"),".to_string());
     lines.push("    }".to_string());
@@ -3352,10 +3368,12 @@ fn dispatch_method_lines(
 /// The `pub trait Imports` declaration: one `import{j}` method per imported
 /// function, taking `&mut self` since a host call may have side effects.
 fn import_trait_lines(
+    ctx: &ModuleCtx<'_>,
     imports: &[ImportInfo],
     imported_globals: &[ImportedGlobalInfo],
     mem_imported: bool,
     table_imported: bool,
+    dispatch_sigs: &HashSet<u32>,
 ) -> Result<Vec<String>, TranspileError> {
     let mut lines = vec!["pub trait Imports {".to_string()];
     // Imported memory: the host lends its buffer for loads/stores/grow.
@@ -3398,6 +3416,34 @@ fn import_trait_lines(
         if g.mutable {
             lines.push(format!("    fn set_global{k}(&mut self, v: {ty});"));
         }
+    }
+    // One `call_ref_t{ti}` per `call_indirect` signature, resolving an external
+    // funcref handle (a high-bit-tagged table entry) to another instance's
+    // function. It defaults to a trap so hosts that never place an external
+    // handle need not implement it; a host wanting cross-instance dispatch
+    // overrides it. The `slot` is the handle with its tag bit already stripped.
+    let mut dispatch_ordered: Vec<u32> = dispatch_sigs.iter().copied().collect();
+    dispatch_ordered.sort_unstable();
+    for ti in dispatch_ordered {
+        let sig = ctx
+            .types
+            .get(ti as usize)
+            .ok_or_else(|| TranspileError::Unsupported("call_indirect: unknown type".into()))?;
+        let ret = match sig.results.as_slice() {
+            [] => String::new(),
+            [ty] => format!(" -> {}", rust_type(*ty)?),
+            many => format!(" -> ({})", rust_types(many)?.join(", ")),
+        };
+        // Underscore the parameters: the default body ignores them, and an
+        // override is free to rename them.
+        let mut params = String::from("&mut self, _slot: u32");
+        for (k, ty) in sig.params.iter().enumerate() {
+            params.push_str(&format!(", _a{k}: {}", rust_type(*ty)?));
+        }
+        lines.push(format!(
+            "    fn call_ref_t{ti}({params}){ret} \
+             {{ panic!(\"unresolved external funcref\") }}"
+        ));
     }
     lines.push("}".to_string());
     Ok(lines)
