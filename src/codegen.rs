@@ -97,11 +97,13 @@ pub(crate) struct ImportInfo {
 pub(crate) enum WasiFn {
     ProcExit,
     FdWrite,
+    FdRead,
     ArgsSizesGet,
     ArgsGet,
     EnvironSizesGet,
     EnvironGet,
     ClockTimeGet,
+    RandomGet,
 }
 
 impl WasiFn {
@@ -120,11 +122,13 @@ impl WasiFn {
         let candidate = match name {
             "proc_exit" => WasiFn::ProcExit,
             "fd_write" => WasiFn::FdWrite,
+            "fd_read" => WasiFn::FdRead,
             "args_sizes_get" => WasiFn::ArgsSizesGet,
             "args_get" => WasiFn::ArgsGet,
             "environ_sizes_get" => WasiFn::EnvironSizesGet,
             "environ_get" => WasiFn::EnvironGet,
             "clock_time_get" => WasiFn::ClockTimeGet,
+            "random_get" => WasiFn::RandomGet,
             _ => return None,
         };
         (params == candidate.params() && results == candidate.results()).then_some(candidate)
@@ -134,11 +138,12 @@ impl WasiFn {
         use ValType::{I32, I64};
         match self {
             WasiFn::ProcExit => &[I32],
-            WasiFn::FdWrite => &[I32, I32, I32, I32],
+            WasiFn::FdWrite | WasiFn::FdRead => &[I32, I32, I32, I32],
             WasiFn::ArgsSizesGet
             | WasiFn::ArgsGet
             | WasiFn::EnvironSizesGet
-            | WasiFn::EnvironGet => &[I32, I32],
+            | WasiFn::EnvironGet
+            | WasiFn::RandomGet => &[I32, I32],
             WasiFn::ClockTimeGet => &[I32, I64, I32],
         }
     }
@@ -147,11 +152,13 @@ impl WasiFn {
         match self {
             WasiFn::ProcExit => &[],
             WasiFn::FdWrite
+            | WasiFn::FdRead
             | WasiFn::ArgsSizesGet
             | WasiFn::ArgsGet
             | WasiFn::EnvironSizesGet
             | WasiFn::EnvironGet
-            | WasiFn::ClockTimeGet => &[ValType::I32],
+            | WasiFn::ClockTimeGet
+            | WasiFn::RandomGet => &[ValType::I32],
         }
     }
 
@@ -160,11 +167,13 @@ impl WasiFn {
         match self {
             WasiFn::ProcExit => "wasi_proc_exit",
             WasiFn::FdWrite => "wasi_fd_write",
+            WasiFn::FdRead => "wasi_fd_read",
             WasiFn::ArgsSizesGet => "wasi_args_sizes_get",
             WasiFn::ArgsGet => "wasi_args_get",
             WasiFn::EnvironSizesGet => "wasi_environ_sizes_get",
             WasiFn::EnvironGet => "wasi_environ_get",
             WasiFn::ClockTimeGet => "wasi_clock_time_get",
+            WasiFn::RandomGet => "wasi_random_get",
         }
     }
 
@@ -213,6 +222,41 @@ impl WasiFn {
                 "    0",
                 "}",
             ]),
+            // `fd_read(fd, iovs, iovs_len, nread)` performs one read from stdin
+            // (fd 0) into the total iovec capacity, scatters the bytes across the
+            // iovec buffers, stores the byte count at `nread`, and returns 0 on
+            // success (an errno otherwise). Out-of-range pointers panic (a trap).
+            WasiFn::FdRead => owned(&[
+                "fn wasi_fd_read(&mut self, a0: i32, a1: i32, a2: i32, a3: i32) -> i32 {",
+                "    use std::io::Read;",
+                "    let mut iovs: Vec<(usize, usize)> = Vec::new();",
+                "    let mut cap = 0usize;",
+                "    for i in 0..a2 as usize {",
+                "        let e = a1 as u32 as usize + i * 8;",
+                "        let ptr = u32::from_le_bytes([self.mem()[e], self.mem()[e + 1], self.mem()[e + 2], self.mem()[e + 3]]) as usize;",
+                "        let len = u32::from_le_bytes([self.mem()[e + 4], self.mem()[e + 5], self.mem()[e + 6], self.mem()[e + 7]]) as usize;",
+                "        iovs.push((ptr, len));",
+                "        cap += len;",
+                "    }",
+                "    let mut tmp = vec![0u8; cap];",
+                "    let n = match a0 {",
+                "        0 => match std::io::stdin().read(&mut tmp) { Ok(n) => n, Err(_) => return 29 },",
+                "        _ => return 8,",
+                "    };",
+                "    let mut off = 0usize;",
+                "    for (ptr, len) in iovs {",
+                "        if off >= n {",
+                "            break;",
+                "        }",
+                "        let take = len.min(n - off);",
+                "        self.mem_mut()[ptr..ptr + take].copy_from_slice(&tmp[off..off + take]);",
+                "        off += take;",
+                "    }",
+                "    let w = a3 as u32 as usize;",
+                "    self.mem_mut()[w..w + 4].copy_from_slice(&(n as u32).to_le_bytes());",
+                "    0",
+                "}",
+            ]),
             // `args_sizes_get(argc, argv_buf_size)` reports the argument count
             // and the total byte size of the argument strings (each NUL-
             // terminated), taken from the process's real argv.
@@ -240,6 +284,22 @@ impl WasiFn {
                 "        .unwrap_or(0);",
                 "    let t = a2 as u32 as usize;",
                 "    self.mem_mut()[t..t + 8].copy_from_slice(&now.to_le_bytes());",
+                "    0",
+                "}",
+            ]),
+            // `random_get(buf, buf_len)` fills the buffer with OS entropy read
+            // from `/dev/urandom`. Returns 0 on success or an errno on failure.
+            WasiFn::RandomGet => owned(&[
+                "fn wasi_random_get(&mut self, a0: i32, a1: i32) -> i32 {",
+                "    use std::io::Read;",
+                "    let buf = a0 as u32 as usize;",
+                "    let len = a1 as u32 as usize;",
+                "    let mut tmp = vec![0u8; len];",
+                "    let read = std::fs::File::open(\"/dev/urandom\").and_then(|mut f| f.read_exact(&mut tmp));",
+                "    if read.is_err() {",
+                "        return 29;",
+                "    }",
+                "    self.mem_mut()[buf..buf + len].copy_from_slice(&tmp);",
                 "    0",
                 "}",
             ]),

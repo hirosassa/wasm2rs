@@ -7,7 +7,8 @@
 //! `rustc -D warnings` and run; stdout and process exit codes are checked (no
 //! mocking — a real `rustc` and a real child process).
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 /// Compile the transpiled module plus a trailing `extra` block (`fn main`).
 fn compile(test: &str, wat: &str, extra: &str) -> std::path::PathBuf {
@@ -269,6 +270,70 @@ fn main() {
     let bin = compile("clock", CLOCK, extra);
     let status = Command::new(&bin).status().expect("run generated binary");
     assert!(status.success(), "clock assertions failed");
+}
+
+// fd_read: read stdin into an iovec buffer. The iovec at offset 0 points at
+// offset 16 with capacity 32; `run` reads fd 0 and returns the errno, with the
+// byte count stored at offset 8.
+const READ: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "fd_read"
+        (func $read (param i32 i32 i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 0) "\10\00\00\00\20\00\00\00")
+      (func (export "run") (result i32)
+        (call $read (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 8))))
+    "#;
+
+#[test]
+fn fd_read_from_stdin_fills_iovec() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    let errno = i.func1();
+    assert_eq!(errno, 0);
+    let nread = u32::from_le_bytes([i.mem()[8], i.mem()[9], i.mem()[10], i.mem()[11]]) as usize;
+    assert_eq!(&i.mem()[16..16 + nread], b\"hello wasi read\\n\");
+}
+";
+    let bin = compile("read", READ, extra);
+    let mut child = Command::new(&bin)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn generated binary");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(b"hello wasi read\n")
+        .expect("write stdin");
+    let status = child.wait().expect("wait for child");
+    assert!(status.success(), "fd_read assertions failed");
+}
+
+// random_get fills the buffer with random bytes from the OS.
+const RANDOM: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "random_get"
+        (func $rand (param i32 i32) (result i32)))
+      (memory 1)
+      (func (export "run") (result i32)
+        (call $rand (i32.const 0) (i32.const 16))))
+    "#;
+
+#[test]
+fn random_get_fills_buffer_with_nonzero_entropy() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 0);
+    // 16 zero bytes from a working RNG has probability ~2^-128.
+    assert!(i.mem()[0..16].iter().any(|&b| b != 0), \"random bytes were all zero\");
+}
+";
+    let bin = compile("random", RANDOM, extra);
+    let status = Command::new(&bin).status().expect("run generated binary");
+    assert!(status.success(), "random_get assertions failed");
 }
 
 // `fd_write` reads iovecs from linear memory, so a module importing it without
