@@ -213,10 +213,11 @@ where
             Payload::MemorySection(reader) => {
                 for mem in reader {
                     let mem = mem?;
-                    if mem.memory64 || mem.shared {
-                        return Err(TranspileError::Unsupported(
-                            "64-bit or shared memory".into(),
-                        ));
+                    // `shared` memory (threads proposal) is accepted: one instance
+                    // owns it exclusively, so its atomics are trivially safe (see
+                    // codegen atomic ops). 64-bit memory is still unsupported.
+                    if mem.memory64 {
+                        return Err(TranspileError::Unsupported("64-bit memory".into()));
                     }
                     if memory.is_some() {
                         return Err(TranspileError::Unsupported("multiple memories".into()));
@@ -452,10 +453,9 @@ fn classify_import(
             Ok(())
         }
         TypeRef::Memory(mem_ty) => {
-            if mem_ty.memory64 || mem_ty.shared {
-                return Err(TranspileError::Unsupported(
-                    "64-bit or shared memory".into(),
-                ));
+            // See the defined-memory case: `shared` is accepted, 64-bit is not.
+            if mem_ty.memory64 {
+                return Err(TranspileError::Unsupported("64-bit memory".into()));
             }
             if sink.memory.is_some() {
                 return Err(TranspileError::Unsupported("multiple memories".into()));

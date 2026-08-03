@@ -160,6 +160,137 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    /// Lower an atomic read-modify-write. The instance owns its memory, so this
+    /// is a plain load of the old value, a `combine` with the operand, and a
+    /// store of the result; the (zero-extended) old value is pushed. `load` reads
+    /// the access width (zero-extending for narrow widths) and `store` truncates.
+    pub(super) fn atomic_rmw(
+        &mut self,
+        width: super::AtomicWidth,
+        op: super::RmwOp,
+        memarg: MemArg,
+    ) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        let (load, store, ty, _mask) = width.parts();
+        let offset = memarg_offset(memarg)?;
+        // Memory is about to change; fix any operand that reads from it.
+        self.spill_nonstable()?;
+        let value = self.pop()?;
+        let addr = self.pop()?;
+        self.used_helpers.insert(load);
+        self.used_helpers.insert(store);
+        // `addr` feeds both the load and the store, so bind it once.
+        let addr_tmp = self.fresh_temp();
+        self.line(format!("let {addr_tmp}: u32 = ({}) as u32;", addr.code));
+        let old = self.fresh_temp();
+        self.line(format!(
+            "let {old} = self.{}({addr_tmp}, {offset}u32);",
+            helper_name(load)
+        ));
+        let new = op.combine(&old, &value.code);
+        self.line(format!(
+            "self.{}({addr_tmp}, {offset}u32, {new});",
+            helper_name(store)
+        ));
+        // `old` is a snapshot, so it never changes once bound.
+        self.push(Val {
+            code: old,
+            ty,
+            stable: true,
+        });
+        Ok(())
+    }
+
+    /// Lower an atomic compare-exchange. Pops (addr, expected, replacement),
+    /// stores `replacement` only when the loaded value equals `expected`, and
+    /// pushes the (zero-extended) old value. For a narrow width, `mask` is the
+    /// width's low-bit mask so the comparison ignores the operand's high bits
+    /// (the spec compares at the access width); `None` compares the full width.
+    pub(super) fn atomic_cmpxchg(
+        &mut self,
+        width: super::AtomicWidth,
+        memarg: MemArg,
+    ) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        let (load, store, ty, mask) = width.parts();
+        let offset = memarg_offset(memarg)?;
+        // Memory may change; fix any operand that reads from it.
+        self.spill_nonstable()?;
+        let replacement = self.pop()?;
+        let expected = self.pop()?;
+        let addr = self.pop()?;
+        self.used_helpers.insert(load);
+        self.used_helpers.insert(store);
+        let addr_tmp = self.fresh_temp();
+        self.line(format!("let {addr_tmp}: u32 = ({}) as u32;", addr.code));
+        let old = self.fresh_temp();
+        self.line(format!(
+            "let {old} = self.{}({addr_tmp}, {offset}u32);",
+            helper_name(load)
+        ));
+        let cmp = match mask {
+            Some(mask) => format!("{old} == (({}) & {mask})", expected.code),
+            None => format!("{old} == ({})", expected.code),
+        };
+        self.line(format!(
+            "if {cmp} {{ self.{}({addr_tmp}, {offset}u32, {}); }}",
+            helper_name(store),
+            replacement.code
+        ));
+        // `old` is a snapshot, so it never changes once bound.
+        self.push(Val {
+            code: old,
+            ty,
+            stable: true,
+        });
+        Ok(())
+    }
+
+    /// Lower `memory.atomic.notify`. It pops (addr, count) and pushes the number
+    /// of woken waiters — always 0 on a single instance, which has no waiters.
+    pub(super) fn atomic_notify(&mut self) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        self.pop()?; // count
+        self.pop()?; // addr
+        self.push(Val {
+            code: "0i32".to_string(),
+            ty: ValType::I32,
+            stable: true,
+        });
+        Ok(())
+    }
+
+    /// Lower `memory.atomic.wait{32,64}`. It pops (addr, expected, timeout) and
+    /// pushes an i32 result. On a single instance nobody can ever notify, so a
+    /// matching wait would block forever and instead traps; a non-matching wait
+    /// returns 1 ("not equal") immediately, as the spec requires.
+    pub(super) fn atomic_wait(
+        &mut self,
+        load: Helper,
+        memarg: MemArg,
+    ) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        let offset = memarg_offset(memarg)?;
+        self.pop()?; // timeout
+        let expected = self.pop()?;
+        let addr = self.pop()?;
+        self.used_helpers.insert(load);
+        let name = self.fresh_temp();
+        self.line(format!(
+            "let {name}: i32 = if self.{}(({}) as u32, {offset}u32) != ({}) {{ 1 }} \
+             else {{ panic!(\"atomic.wait on a single-threaded instance would block forever\") }};",
+            helper_name(load),
+            addr.code,
+            expected.code
+        ));
+        self.push(Val {
+            code: name,
+            ty: ValType::I32,
+            stable: true,
+        });
+        Ok(())
+    }
+
     pub(super) fn memory_size(&mut self) -> Result<(), TranspileError> {
         self.require_memory()?;
         // Materialise into a temp: `self.mem()` borrows the instance, so leaving

@@ -31,17 +31,18 @@ fn multiple_defined_memories_are_rejected() {
 }
 
 #[test]
-fn shared_defined_memory_is_rejected() {
-    // A shared memory (threads proposal) parses but is not supported.
-    assert_unsupported(r#"(module (memory 1 1 shared))"#, "64-bit or shared memory");
+fn memory64_defined_memory_is_rejected() {
+    // 64-bit memory (memory64 proposal) parses but is not supported. Shared
+    // memory, by contrast, is now accepted (see tests/atomics.rs).
+    assert_unsupported(r#"(module (memory i64 1))"#, "64-bit memory");
 }
 
 #[test]
-fn shared_imported_memory_is_rejected() {
+fn memory64_imported_memory_is_rejected() {
     // Same rule on the import path (classify_import), a distinct branch.
     assert_unsupported(
-        r#"(module (import "e" "m" (memory 1 1 shared)))"#,
-        "64-bit or shared memory",
+        r#"(module (import "e" "m" (memory i64 1)))"#,
+        "64-bit memory",
     );
 }
 

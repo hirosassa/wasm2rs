@@ -14,6 +14,86 @@ mod memvals;
 mod numeric;
 mod table;
 
+/// The binary operation of an atomic read-modify-write. Since the instance owns
+/// its memory exclusively, an RMW lowers to a plain load / combine / store; each
+/// variant supplies the "combine" expression over the old value and the operand
+/// (`Xchg` just writes the operand). Narrow accesses combine at the full operand
+/// width and rely on the store helper to truncate, matching wasm's wrap-on-store.
+#[derive(Clone, Copy)]
+pub(super) enum RmwOp {
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+    Xchg,
+}
+
+impl RmwOp {
+    pub(super) fn combine(self, old: &str, value: &str) -> String {
+        match self {
+            RmwOp::Add => format!("{old}.wrapping_add({value})"),
+            RmwOp::Sub => format!("{old}.wrapping_sub({value})"),
+            RmwOp::And => format!("({old} & {value})"),
+            RmwOp::Or => format!("({old} | {value})"),
+            RmwOp::Xor => format!("({old} ^ {value})"),
+            RmwOp::Xchg => value.to_string(),
+        }
+    }
+}
+
+/// The value type and access width of an atomic RMW/cmpxchg, the single choice
+/// that fixes its load helper, store helper, result type, and (for a narrow
+/// access) the low-bit mask used to compare at the access width. `I32As8` means
+/// an i32-typed op over an 8-bit cell, etc.
+#[derive(Clone, Copy)]
+pub(super) enum AtomicWidth {
+    I32,
+    I32As8,
+    I32As16,
+    I64,
+    I64As8,
+    I64As16,
+    I64As32,
+}
+
+impl AtomicWidth {
+    /// `(load helper, store helper, result type, narrow mask)`. The mask is
+    /// `None` for a full-width access (compare directly) and the width's low-bit
+    /// mask for a narrow one.
+    pub(super) fn parts(self) -> (Helper, Helper, ValType, Option<&'static str>) {
+        match self {
+            AtomicWidth::I32 => (Helper::LoadI32, Helper::StoreI32, ValType::I32, None),
+            AtomicWidth::I32As8 => (Helper::Load8U, Helper::Store8, ValType::I32, Some("0xFF")),
+            AtomicWidth::I32As16 => (
+                Helper::Load16U,
+                Helper::Store16,
+                ValType::I32,
+                Some("0xFFFF"),
+            ),
+            AtomicWidth::I64 => (Helper::LoadI64, Helper::StoreI64, ValType::I64, None),
+            AtomicWidth::I64As8 => (
+                Helper::Load8UI64,
+                Helper::Store8I64,
+                ValType::I64,
+                Some("0xFF"),
+            ),
+            AtomicWidth::I64As16 => (
+                Helper::Load16UI64,
+                Helper::Store16I64,
+                ValType::I64,
+                Some("0xFFFF"),
+            ),
+            AtomicWidth::I64As32 => (
+                Helper::Load32UI64,
+                Helper::Store32I64,
+                ValType::I64,
+                Some("0xFFFF_FFFF"),
+            ),
+        }
+    }
+}
+
 /// State threaded through the translation of a single function body.
 pub(super) struct FuncGen<'a> {
     local_types: Vec<ValType>,
@@ -345,6 +425,197 @@ impl<'a> FuncGen<'a> {
             Operator::I64Store8 { memarg } => self.store(Helper::Store8I64, memarg)?,
             Operator::I64Store16 { memarg } => self.store(Helper::Store16I64, memarg)?,
             Operator::I64Store32 { memarg } => self.store(Helper::Store32I64, memarg)?,
+            // Threads/atomics proposal. The instance owns its memory exclusively
+            // (`&mut self`), so an atomic access lowers to the same code as the
+            // plain one — atomic loads/stores reuse the ordinary load/store
+            // helpers (narrow atomic loads are always zero-extending).
+            Operator::I32AtomicLoad { memarg } => {
+                self.load(Helper::LoadI32, ValType::I32, memarg)?
+            }
+            Operator::I32AtomicLoad8U { memarg } => {
+                self.load(Helper::Load8U, ValType::I32, memarg)?
+            }
+            Operator::I32AtomicLoad16U { memarg } => {
+                self.load(Helper::Load16U, ValType::I32, memarg)?
+            }
+            Operator::I64AtomicLoad { memarg } => {
+                self.load(Helper::LoadI64, ValType::I64, memarg)?
+            }
+            Operator::I64AtomicLoad8U { memarg } => {
+                self.load(Helper::Load8UI64, ValType::I64, memarg)?
+            }
+            Operator::I64AtomicLoad16U { memarg } => {
+                self.load(Helper::Load16UI64, ValType::I64, memarg)?
+            }
+            Operator::I64AtomicLoad32U { memarg } => {
+                self.load(Helper::Load32UI64, ValType::I64, memarg)?
+            }
+            Operator::I32AtomicStore { memarg } => self.store(Helper::StoreI32, memarg)?,
+            Operator::I32AtomicStore8 { memarg } => self.store(Helper::Store8, memarg)?,
+            Operator::I32AtomicStore16 { memarg } => self.store(Helper::Store16, memarg)?,
+            Operator::I64AtomicStore { memarg } => self.store(Helper::StoreI64, memarg)?,
+            Operator::I64AtomicStore8 { memarg } => self.store(Helper::Store8I64, memarg)?,
+            Operator::I64AtomicStore16 { memarg } => self.store(Helper::Store16I64, memarg)?,
+            Operator::I64AtomicStore32 { memarg } => self.store(Helper::Store32I64, memarg)?,
+            // Atomic read-modify-write. Each pops (addr, operand), combines the
+            // old value with the operand, stores the result, and pushes the old
+            // value. The `AtomicWidth` fixes the (load, store, type) triple;
+            // narrow variants zero-extend on load and truncate on store.
+            Operator::I32AtomicRmwAdd { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32, RmwOp::Add, memarg)?
+            }
+            Operator::I32AtomicRmwSub { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32, RmwOp::Sub, memarg)?
+            }
+            Operator::I32AtomicRmwAnd { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32, RmwOp::And, memarg)?
+            }
+            Operator::I32AtomicRmwOr { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32, RmwOp::Or, memarg)?
+            }
+            Operator::I32AtomicRmwXor { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32, RmwOp::Xor, memarg)?
+            }
+            Operator::I32AtomicRmwXchg { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32, RmwOp::Xchg, memarg)?
+            }
+            Operator::I32AtomicRmw8AddU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32As8, RmwOp::Add, memarg)?
+            }
+            Operator::I32AtomicRmw8SubU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32As8, RmwOp::Sub, memarg)?
+            }
+            Operator::I32AtomicRmw8AndU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32As8, RmwOp::And, memarg)?
+            }
+            Operator::I32AtomicRmw8OrU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32As8, RmwOp::Or, memarg)?
+            }
+            Operator::I32AtomicRmw8XorU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32As8, RmwOp::Xor, memarg)?
+            }
+            Operator::I32AtomicRmw8XchgU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32As8, RmwOp::Xchg, memarg)?
+            }
+            Operator::I32AtomicRmw16AddU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32As16, RmwOp::Add, memarg)?
+            }
+            Operator::I32AtomicRmw16SubU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32As16, RmwOp::Sub, memarg)?
+            }
+            Operator::I32AtomicRmw16AndU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32As16, RmwOp::And, memarg)?
+            }
+            Operator::I32AtomicRmw16OrU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32As16, RmwOp::Or, memarg)?
+            }
+            Operator::I32AtomicRmw16XorU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32As16, RmwOp::Xor, memarg)?
+            }
+            Operator::I32AtomicRmw16XchgU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I32As16, RmwOp::Xchg, memarg)?
+            }
+            Operator::I64AtomicRmwAdd { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64, RmwOp::Add, memarg)?
+            }
+            Operator::I64AtomicRmwSub { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64, RmwOp::Sub, memarg)?
+            }
+            Operator::I64AtomicRmwAnd { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64, RmwOp::And, memarg)?
+            }
+            Operator::I64AtomicRmwOr { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64, RmwOp::Or, memarg)?
+            }
+            Operator::I64AtomicRmwXor { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64, RmwOp::Xor, memarg)?
+            }
+            Operator::I64AtomicRmwXchg { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64, RmwOp::Xchg, memarg)?
+            }
+            Operator::I64AtomicRmw8AddU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As8, RmwOp::Add, memarg)?
+            }
+            Operator::I64AtomicRmw8SubU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As8, RmwOp::Sub, memarg)?
+            }
+            Operator::I64AtomicRmw8AndU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As8, RmwOp::And, memarg)?
+            }
+            Operator::I64AtomicRmw8OrU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As8, RmwOp::Or, memarg)?
+            }
+            Operator::I64AtomicRmw8XorU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As8, RmwOp::Xor, memarg)?
+            }
+            Operator::I64AtomicRmw8XchgU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As8, RmwOp::Xchg, memarg)?
+            }
+            Operator::I64AtomicRmw16AddU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As16, RmwOp::Add, memarg)?
+            }
+            Operator::I64AtomicRmw16SubU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As16, RmwOp::Sub, memarg)?
+            }
+            Operator::I64AtomicRmw16AndU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As16, RmwOp::And, memarg)?
+            }
+            Operator::I64AtomicRmw16OrU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As16, RmwOp::Or, memarg)?
+            }
+            Operator::I64AtomicRmw16XorU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As16, RmwOp::Xor, memarg)?
+            }
+            Operator::I64AtomicRmw16XchgU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As16, RmwOp::Xchg, memarg)?
+            }
+            Operator::I64AtomicRmw32AddU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As32, RmwOp::Add, memarg)?
+            }
+            Operator::I64AtomicRmw32SubU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As32, RmwOp::Sub, memarg)?
+            }
+            Operator::I64AtomicRmw32AndU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As32, RmwOp::And, memarg)?
+            }
+            Operator::I64AtomicRmw32OrU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As32, RmwOp::Or, memarg)?
+            }
+            Operator::I64AtomicRmw32XorU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As32, RmwOp::Xor, memarg)?
+            }
+            Operator::I64AtomicRmw32XchgU { memarg } => {
+                self.atomic_rmw(AtomicWidth::I64As32, RmwOp::Xchg, memarg)?
+            }
+            // Atomic compare-exchange. The `AtomicWidth` also carries the narrow
+            // mask, so a narrow variant compares the operand at the access width.
+            Operator::I32AtomicRmwCmpxchg { memarg } => {
+                self.atomic_cmpxchg(AtomicWidth::I32, memarg)?
+            }
+            Operator::I32AtomicRmw8CmpxchgU { memarg } => {
+                self.atomic_cmpxchg(AtomicWidth::I32As8, memarg)?
+            }
+            Operator::I32AtomicRmw16CmpxchgU { memarg } => {
+                self.atomic_cmpxchg(AtomicWidth::I32As16, memarg)?
+            }
+            Operator::I64AtomicRmwCmpxchg { memarg } => {
+                self.atomic_cmpxchg(AtomicWidth::I64, memarg)?
+            }
+            Operator::I64AtomicRmw8CmpxchgU { memarg } => {
+                self.atomic_cmpxchg(AtomicWidth::I64As8, memarg)?
+            }
+            Operator::I64AtomicRmw16CmpxchgU { memarg } => {
+                self.atomic_cmpxchg(AtomicWidth::I64As16, memarg)?
+            }
+            Operator::I64AtomicRmw32CmpxchgU { memarg } => {
+                self.atomic_cmpxchg(AtomicWidth::I64As32, memarg)?
+            }
+            // Fence and wait/notify. A fence is a no-op on a single instance;
+            // `notify` wakes nobody; `wait` traps (would block) or returns 1.
+            Operator::AtomicFence => {}
+            Operator::MemoryAtomicNotify { .. } => self.atomic_notify()?,
+            Operator::MemoryAtomicWait32 { memarg } => self.atomic_wait(Helper::LoadI32, memarg)?,
+            Operator::MemoryAtomicWait64 { memarg } => self.atomic_wait(Helper::LoadI64, memarg)?,
             Operator::MemorySize { .. } => self.memory_size()?,
             Operator::MemoryGrow { .. } => self.memory_grow()?,
             // Bulk-memory ops consume three i32s (dest, src/value, len) and
