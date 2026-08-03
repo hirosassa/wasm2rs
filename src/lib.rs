@@ -99,6 +99,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                     match group? {
                         wasmparser::Imports::Single(_, import) => {
                             classify_import(
+                                (import.module, import.name),
                                 import.ty,
                                 &signatures,
                                 &mut imports,
@@ -107,10 +108,12 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                                 &mut table,
                             )?;
                         }
-                        wasmparser::Imports::Compact1 { items, .. } => {
+                        wasmparser::Imports::Compact1 { module, items } => {
                             for item in items {
+                                let item = item?;
                                 classify_import(
-                                    item?.ty,
+                                    (module, item.name),
+                                    item.ty,
                                     &signatures,
                                     &mut imports,
                                     &mut imported_globals,
@@ -119,10 +122,10 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                                 )?;
                             }
                         }
-                        wasmparser::Imports::Compact2 { ty, names, .. } => {
+                        wasmparser::Imports::Compact2 { module, ty, names } => {
                             for name in names {
-                                name?;
                                 classify_import(
+                                    (module, name?),
                                     ty,
                                     &signatures,
                                     &mut imports,
@@ -320,6 +323,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
 /// global onto `imported_globals`, and an imported memory recorded in `memory`.
 /// Imported tables and tags are rejected as not supported yet.
 fn classify_import(
+    id: (&str, &str),
     ty: TypeRef,
     signatures: &[Signature],
     imports: &mut Vec<codegen::ImportInfo>,
@@ -332,9 +336,14 @@ fn classify_import(
             let sig = signatures.get(type_index as usize).ok_or_else(|| {
                 TranspileError::Unsupported("import type index out of range".into())
             })?;
+            // A recognised WASI function is generated natively; any other import
+            // is dispatched through the injected host trait.
+            let (module, name) = id;
+            let wasi = codegen::WasiFn::recognise(module, name, &sig.params, &sig.results);
             imports.push(codegen::ImportInfo {
                 params: sig.params.clone(),
                 results: sig.results.clone(),
+                wasi,
             });
             Ok(())
         }

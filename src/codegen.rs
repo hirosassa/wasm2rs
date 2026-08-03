@@ -78,10 +78,119 @@ pub(crate) struct TypeSig {
 }
 
 /// An imported function: its signature. Imported functions occupy the low end
-/// of the function index space and are dispatched through the injected host.
+/// of the function index space and are dispatched through the injected host,
+/// unless `wasi` recognises it as a natively-implemented WASI function.
 pub(crate) struct ImportInfo {
     pub params: Vec<ValType>,
     pub results: Vec<ValType>,
+    /// Set when this import is a recognised `wasi_snapshot_preview1` function
+    /// that is emitted as an inherent `Instance` method (`self.mem()`-backed)
+    /// instead of being dispatched through the host trait.
+    pub wasi: Option<WasiFn>,
+}
+
+/// A recognised WASI (`wasi_snapshot_preview1`) function that is generated as a
+/// native inherent `Instance` method rather than dispatched through the host
+/// trait. Only this small subset is native so far; every other WASI import
+/// still falls back to the injected host trait.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WasiFn {
+    ProcExit,
+    FdWrite,
+}
+
+impl WasiFn {
+    /// Match a `(module, name)` import against the native WASI subset. The
+    /// signature must match too, so a mis-typed import is left to the host
+    /// trait rather than bound to a wrong native body.
+    pub(crate) fn recognise(
+        module: &str,
+        name: &str,
+        params: &[ValType],
+        results: &[ValType],
+    ) -> Option<Self> {
+        if module != "wasi_snapshot_preview1" {
+            return None;
+        }
+        let candidate = match name {
+            "proc_exit" => WasiFn::ProcExit,
+            "fd_write" => WasiFn::FdWrite,
+            _ => return None,
+        };
+        (params == candidate.params() && results == candidate.results()).then_some(candidate)
+    }
+
+    fn params(self) -> &'static [ValType] {
+        match self {
+            WasiFn::ProcExit => &[ValType::I32],
+            WasiFn::FdWrite => &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        }
+    }
+
+    fn results(self) -> &'static [ValType] {
+        match self {
+            WasiFn::ProcExit => &[],
+            WasiFn::FdWrite => &[ValType::I32],
+        }
+    }
+
+    /// The inherent method name emitted for this function (see `call_expr`).
+    fn method(self) -> &'static str {
+        match self {
+            WasiFn::ProcExit => "wasi_proc_exit",
+            WasiFn::FdWrite => "wasi_fd_write",
+        }
+    }
+
+    /// Whether the native body accesses linear memory (`self.mem()`), so a
+    /// module using it must declare or import a memory.
+    fn needs_memory(self) -> bool {
+        match self {
+            WasiFn::ProcExit => false,
+            WasiFn::FdWrite => true,
+        }
+    }
+
+    /// The source lines of the native implementation, emitted into the `impl`.
+    fn lines(self) -> Vec<String> {
+        let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        match self {
+            // `proc_exit(code)` ends the process; it never returns.
+            WasiFn::ProcExit => owned(&[
+                "fn wasi_proc_exit(&mut self, a0: i32) {",
+                "    std::process::exit(a0);",
+                "}",
+            ]),
+            // `fd_write(fd, iovs, iovs_len, nwritten)` gathers the iovec buffers
+            // from linear memory, writes them to stdout (fd 1) or stderr (fd 2),
+            // stores the byte count at `nwritten`, and returns 0 on success (an
+            // errno otherwise). Out-of-range pointers panic (a wasm trap).
+            WasiFn::FdWrite => owned(&[
+                "fn wasi_fd_write(&mut self, a0: i32, a1: i32, a2: i32, a3: i32) -> i32 {",
+                "    use std::io::Write;",
+                "    let mut buf: Vec<u8> = Vec::new();",
+                "    for i in 0..a2 as usize {",
+                "        let e = a1 as u32 as usize + i * 8;",
+                "        let ptr = u32::from_le_bytes([self.mem()[e], self.mem()[e + 1], self.mem()[e + 2], self.mem()[e + 3]]) as usize;",
+                "        let len = u32::from_le_bytes([self.mem()[e + 4], self.mem()[e + 5], self.mem()[e + 6], self.mem()[e + 7]]) as usize;",
+                "        buf.extend_from_slice(&self.mem()[ptr..ptr + len]);",
+                "    }",
+                "    let ok = match a0 {",
+                "        1 => std::io::stdout().write_all(&buf).is_ok(),",
+                "        2 => std::io::stderr().write_all(&buf).is_ok(),",
+                "        _ => return 8,",
+                "    };",
+                "    if !ok {",
+                "        return 29;",
+                "    }",
+                "    let n = (buf.len() as u32).to_le_bytes();",
+                "    let w = a3 as u32 as usize;",
+                "    self.mem_mut()[w..w + 4].copy_from_slice(&n);",
+                "    0",
+                "}",
+            ]),
+        }
+    }
 }
 
 /// An imported global: its type and mutability. Imported globals occupy the low
@@ -275,12 +384,19 @@ impl ModuleCtx<'_> {
     }
 
     /// The Rust call expression for invoking the function at full index `fidx`
-    /// with the given comma-separated argument list. Imported functions are
-    /// dispatched through the injected host; defined ones are (method) calls.
+    /// with the given comma-separated argument list. A recognised WASI import is
+    /// a native inherent method; any other imported function is dispatched
+    /// through the injected host; defined ones are (method) calls.
     fn call_expr(&self, fidx: usize, arg_list: &str) -> String {
-        if fidx < self.imports.len() {
-            format!("self.imports.import{fidx}({arg_list})")
-        } else if self.is_method {
+        if let Some(im) = self.imports.get(fidx) {
+            // A recognised WASI import is a native inherent method; any other
+            // import is dispatched through the injected host trait.
+            return match im.wasi {
+                Some(w) => format!("self.{}({arg_list})", w.method()),
+                None => format!("self.imports.import{fidx}({arg_list})"),
+            };
+        }
+        if self.is_method {
             format!("self.func{fidx}({arg_list})")
         } else {
             format!("func{fidx}({arg_list})")
@@ -327,8 +443,20 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
 
     let has_memory = memory.is_some();
     let has_table = table.is_some();
-    // The host is injected whenever anything is imported (functions, globals,
-    // memory, or table).
+    // A native WASI function that reads/writes linear memory (e.g. `fd_write`)
+    // is emitted with `self.mem()`, which only exists when the module has a
+    // memory; reject a module that imports one but declares none.
+    if !has_memory
+        && imports
+            .iter()
+            .any(|im| im.wasi.is_some_and(WasiFn::needs_memory))
+    {
+        return Err(TranspileError::Unsupported(
+            "native WASI memory access without a linear memory".into(),
+        ));
+    }
+    // The host is injected whenever anything is imported (globals, non-WASI
+    // functions, or host-owned memory/table).
     let has_imports = !imports.is_empty()
         || !imported_globals.is_empty()
         || memory.is_some_and(|m| m.imported)
@@ -2386,8 +2514,12 @@ fn render_module(
 
     let mem_imported = memory.is_some_and(|m| m.imported);
     let table_imported = table.is_some_and(|t| t.imported);
-    let has_imports =
-        !imports.is_empty() || !imported_globals.is_empty() || mem_imported || table_imported;
+    // Recognised WASI imports are native inherent methods, so they need no host
+    // trait; a module whose imports are all WASI is fully standalone.
+    let has_imports = imports.iter().any(|im| im.wasi.is_none())
+        || !imported_globals.is_empty()
+        || mem_imported
+        || table_imported;
     if has_imports {
         lines.extend(import_trait_lines(
             imports,
@@ -2613,6 +2745,19 @@ fn render_module(
         ));
     }
 
+    // Native WASI functions are inherent methods backed by `self.mem()`; emit
+    // each recognised kind once, in first-import order.
+    let mut wasi_emitted: Vec<WasiFn> = Vec::new();
+    for im in imports {
+        if let Some(w) = im.wasi
+            && !wasi_emitted.contains(&w)
+        {
+            wasi_emitted.push(w);
+            inner.push(String::new());
+            inner.extend(w.lines());
+        }
+    }
+
     for helper in HELPER_ORDER {
         if used.contains(&helper) {
             inner.push(String::new());
@@ -2658,6 +2803,12 @@ fn import_trait_lines(
         lines.push("    fn table_mut(&mut self) -> &mut Vec<u32>;".to_string());
     }
     for (j, im) in imports.iter().enumerate() {
+        // A recognised WASI import is a native inherent method, not a host
+        // trait method; skip it while keeping `import{j}` aligned to the
+        // absolute import index used by `call_expr`.
+        if im.wasi.is_some() {
+            continue;
+        }
         let mut params = String::from("&mut self");
         for (k, ty) in im.params.iter().enumerate() {
             params.push_str(&format!(", a{k}: {}", rust_type(*ty)?));
