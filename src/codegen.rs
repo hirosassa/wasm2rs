@@ -862,6 +862,9 @@ impl<'a> FuncGen<'a> {
             Operator::I32ShrU => self.unsigned_shift("wrapping_shr")?,
             Operator::I32Rotl => self.shift_op("rotate_left")?,
             Operator::I32Rotr => self.shift_op("rotate_right")?,
+            Operator::I32Clz => self.bit_count(ValType::I32, "leading_zeros")?,
+            Operator::I32Ctz => self.bit_count(ValType::I32, "trailing_zeros")?,
+            Operator::I32Popcnt => self.bit_count(ValType::I32, "count_ones")?,
             Operator::I32Eqz => self.compare_zero()?,
             Operator::I32Eq => self.compare_signed("==")?,
             Operator::I32Ne => self.compare_signed("!=")?,
@@ -893,6 +896,9 @@ impl<'a> FuncGen<'a> {
             Operator::I64ShrU => self.unsigned_shift("wrapping_shr")?,
             Operator::I64Rotl => self.shift_op("rotate_left")?,
             Operator::I64Rotr => self.shift_op("rotate_right")?,
+            Operator::I64Clz => self.bit_count(ValType::I64, "leading_zeros")?,
+            Operator::I64Ctz => self.bit_count(ValType::I64, "trailing_zeros")?,
+            Operator::I64Popcnt => self.bit_count(ValType::I64, "count_ones")?,
             Operator::I64Eqz => self.compare_zero()?,
             Operator::I64Eq => self.compare_signed("==")?,
             Operator::I64Ne => self.compare_signed("!=")?,
@@ -1331,6 +1337,15 @@ impl<'a> FuncGen<'a> {
             stable: a.stable,
         });
         Ok(())
+    }
+
+    /// wasm's bit-counting unary ops (`clz`/`ctz`/`popcnt`). Rust's
+    /// `leading_zeros`/`trailing_zeros`/`count_ones` match wasm's semantics
+    /// exactly — including `clz(0)` and `ctz(0)` returning the full width — but
+    /// return `u32`, so the count is cast back to the operand's integer type.
+    fn bit_count(&mut self, ty: ValType, method: &str) -> Result<(), TranspileError> {
+        let target = rust_type(ty)?;
+        self.convert(ty, |x| format!("({x}.{method}() as {target})"))
     }
 
     /// Floating-point negation, parenthesised so it composes as a subexpression.
