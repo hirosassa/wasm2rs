@@ -719,6 +719,8 @@ struct GenFn {
     helpers: HashSet<Helper>,
     /// Module-scope free-function runtime helpers.
     rt: HashSet<Rt>,
+    /// `call_indirect` type indices needing a `call_ref_t{ti}` dispatch method.
+    dispatch_sigs: HashSet<u32>,
 }
 
 /// The lint-suppression attribute prefixed to generated functions/impls.
@@ -939,12 +941,14 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     let mut sources = Vec::with_capacity(funcs.len());
     let mut used: HashSet<Helper> = HashSet::new();
     let mut used_rt: HashSet<Rt> = HashSet::new();
+    let mut dispatch_sigs: HashSet<u32> = HashSet::new();
     for (index, f) in funcs.iter().enumerate() {
         // Defined functions are named by their full function index, i.e. after
         // the imported functions in the shared index space.
         let generated = generate_function(imports.len() + index, f, &ctx)?;
         used.extend(generated.helpers);
         used_rt.extend(generated.rt);
+        dispatch_sigs.extend(generated.dispatch_sigs);
         sources.push(generated.src);
     }
 
@@ -955,7 +959,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     let body = if !stateful {
         sources.join("\n")
     } else {
-        render_module(parts, &sources, &used)?
+        render_module(parts, &ctx, &sources, &used, &dispatch_sigs)?
     };
 
     Ok(if rt_helpers.is_empty() {
@@ -999,6 +1003,9 @@ struct FuncGen<'a> {
     used_helpers: HashSet<Helper>,
     /// Free-function runtime helpers this function relies on.
     used_rt: HashSet<Rt>,
+    /// `call_indirect` type indices this function dispatches through; each needs
+    /// a `call_ref_t{ti}` method on the instance.
+    dispatch_sigs: HashSet<u32>,
 }
 
 impl<'a> FuncGen<'a> {
@@ -1048,6 +1055,7 @@ impl<'a> FuncGen<'a> {
             trailing: None,
             used_helpers: HashSet::new(),
             used_rt: HashSet::new(),
+            dispatch_sigs: HashSet::new(),
         })
     }
 
@@ -2568,28 +2576,26 @@ impl<'a> FuncGen<'a> {
         }
 
         // Read the entry into a local first: for an imported table `table()`
-        // borrows the whole instance (the host), and a match scrutinee's borrow
-        // would live across the arms, clashing with each `&mut self` dispatch.
-        // Copying out the `u32` releases that borrow. An out-of-bounds index
-        // panics on this slice access (a trap).
+        // borrows the whole instance (the host), and passing the entry straight
+        // into the dispatch call would keep that borrow live across the `&mut
+        // self` method call. Copying out the `u32` releases it. An out-of-bounds
+        // index panics on this slice access (a trap).
         let entry = self.fresh_temp();
         self.line(format!(
             "let {entry} = self.table()[({}) as u32 as usize];",
             index.code
         ));
 
-        // A `match` on the table entry, emitted line by line so `indent` aligns
-        // it. The opening line binds the result temporary/tuple (or stands alone
-        // as a statement for a result-less call). A null or wrong-type entry
-        // falls through to the catch-all panic (also a trap).
+        // Dispatch through the shared `call_ref_t{ti}` method (see
+        // `dispatch_method_lines`): it holds the `match` on the funcref and is
+        // also the public entry point the host uses to invoke a funcref the
+        // module handed out. A null or wrong-type entry traps inside it.
+        self.dispatch_sigs.insert(type_index);
         let (prefix, temps) = self.result_binding(&results)?;
-        self.line(format!("{prefix}match {entry} {{"));
-        for &fidx in &targets {
-            let expr = self.ctx.call_expr(fidx, &arg_list);
-            self.line(format!("    {fidx}u32 => {expr},"));
-        }
-        self.line("    _ => panic!(\"indirect call type mismatch\"),".to_string());
-        self.line("};".to_string());
+        let sep = if arg_list.is_empty() { "" } else { ", " };
+        self.line(format!(
+            "{prefix}self.call_ref_t{type_index}({entry}{sep}{arg_list});"
+        ));
         self.push_temps(temps);
         Ok(())
     }
@@ -2724,6 +2730,7 @@ impl<'a> FuncGen<'a> {
             src: out,
             helpers: self.used_helpers,
             rt: self.used_rt,
+            dispatch_sigs: self.dispatch_sigs,
         })
     }
 }
@@ -2973,8 +2980,10 @@ const HELPER_ORDER: [Helper; 28] = [
 /// becomes generic over a host `H: Imports` that it stores and dispatches to.
 fn render_module(
     parts: &ModuleParts<'_>,
+    ctx: &ModuleCtx<'_>,
     sources: &[String],
     used: &HashSet<Helper>,
+    dispatch_sigs: &HashSet<u32>,
 ) -> Result<String, TranspileError> {
     let ModuleParts {
         imports,
@@ -3267,6 +3276,16 @@ fn render_module(
         }
     }
 
+    // One public `call_ref_t{ti}` dispatch method per `call_indirect` signature.
+    // It is both the target of the module's own `call_indirect` and the entry
+    // point through which the host invokes a funcref the module handed out.
+    let mut dispatch_ordered: Vec<u32> = dispatch_sigs.iter().copied().collect();
+    dispatch_ordered.sort_unstable();
+    for ti in dispatch_ordered {
+        inner.push(String::new());
+        inner.extend(dispatch_method_lines(ctx, ti)?);
+    }
+
     for src in sources {
         inner.push(String::new());
         for line in src.lines() {
@@ -3282,6 +3301,52 @@ fn render_module(
     let mut out = lines.join("\n");
     out.push('\n');
     Ok(out)
+}
+
+/// The `pub fn call_ref_t{ti}(&mut self, f: u32, args..) -> res` dispatch method
+/// for `call_indirect` type index `ti`: a `match` on the funcref that routes
+/// each function whose signature matches (spanning imports then defined
+/// functions) to `call_expr`, with a catch-all trap for null or a wrong type.
+/// Made `pub` so the host can invoke a funcref the module exported (the outbound
+/// half of cross-instance dispatch).
+fn dispatch_method_lines(
+    ctx: &ModuleCtx<'_>,
+    type_index: u32,
+) -> Result<Vec<String>, TranspileError> {
+    let sig = ctx
+        .types
+        .get(type_index as usize)
+        .ok_or_else(|| TranspileError::Unsupported("call_indirect: unknown type".into()))?;
+    // Structural type equality (no subtyping), matching `call_indirect`.
+    let want = Some((sig.params.as_slice(), sig.results.as_slice()));
+    let targets = (0..ctx.func_count()).filter(|&fidx| ctx.full_sig(fidx) == want);
+
+    let mut params = String::from("&mut self, f: u32");
+    for (k, ty) in sig.params.iter().enumerate() {
+        params.push_str(&format!(", a{k}: {}", rust_type(*ty)?));
+    }
+    let ret = match sig.results.as_slice() {
+        [] => String::new(),
+        [ty] => format!(" -> {}", rust_type(*ty)?),
+        many => format!(" -> ({})", rust_types(many)?.join(", ")),
+    };
+    let arg_list = (0..sig.params.len())
+        .map(|k| format!("a{k}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut lines = vec![
+        format!("pub fn call_ref_t{type_index}({params}){ret} {{"),
+        "    match f {".to_string(),
+    ];
+    for fidx in targets {
+        let expr = ctx.call_expr(fidx, &arg_list);
+        lines.push(format!("        {fidx}u32 => {expr},"));
+    }
+    lines.push("        _ => panic!(\"indirect call type mismatch\"),".to_string());
+    lines.push("    }".to_string());
+    lines.push("}".to_string());
+    Ok(lines)
 }
 
 /// The `pub trait Imports` declaration: one `import{j}` method per imported
