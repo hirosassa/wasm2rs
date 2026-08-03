@@ -164,8 +164,10 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                 for table_entry in reader {
                     let table_entry = table_entry?;
                     let ty = table_entry.ty;
-                    if !ty.element_type.is_func_ref() {
-                        return Err(TranspileError::Unsupported("non-funcref table".into()));
+                    if !(ty.element_type.is_func_ref() || ty.element_type.is_extern_ref()) {
+                        return Err(TranspileError::Unsupported(
+                            "table of a non-funcref/externref type".into(),
+                        ));
                     }
                     if ty.table64 || ty.shared {
                         return Err(TranspileError::Unsupported("64-bit or shared table".into()));
@@ -185,6 +187,7 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
                     table = Some(codegen::TableInfo {
                         min,
                         imported: false,
+                        element: ValType::Ref(ty.element_type),
                     });
                 }
             }
@@ -370,8 +373,10 @@ fn classify_import(
             Ok(())
         }
         TypeRef::Table(table_ty) => {
-            if !table_ty.element_type.is_func_ref() {
-                return Err(TranspileError::Unsupported("non-funcref table".into()));
+            if !(table_ty.element_type.is_func_ref() || table_ty.element_type.is_extern_ref()) {
+                return Err(TranspileError::Unsupported(
+                    "table of a non-funcref/externref type".into(),
+                ));
             }
             if table_ty.table64 || table_ty.shared {
                 return Err(TranspileError::Unsupported("64-bit or shared table".into()));
@@ -384,6 +389,7 @@ fn classify_import(
             *table = Some(codegen::TableInfo {
                 min,
                 imported: true,
+                element: ValType::Ref(table_ty.element_type),
             });
             Ok(())
         }

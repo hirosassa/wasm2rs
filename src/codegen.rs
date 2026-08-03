@@ -48,6 +48,9 @@ pub(crate) struct MemInfo {
 pub(crate) struct TableInfo {
     pub min: u32,
     pub imported: bool,
+    /// The table's element type (`funcref` or `externref`). Both are stored as a
+    /// `u32`, but `table.get` pushes an operand of this type.
+    pub element: ValType,
 }
 
 /// One element segment: function indices for the table. `offset` is `Some` for
@@ -801,6 +804,9 @@ struct ModuleCtx<'a> {
     has_memory: bool,
     /// Whether the module declares a table (so `self.table()` exists).
     has_table: bool,
+    /// The table's element type (`funcref` or `externref`), if a table exists;
+    /// `table.get` pushes an operand of this type.
+    table_element: Option<ValType>,
     /// Per-data-segment: whether it is passive (so `memory.init`/`data.drop`
     /// can reference it through a `data{d}` field), indexed by data index.
     data_passive: Vec<bool>,
@@ -921,6 +927,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,
         has_table,
+        table_element: table.map(|t| t.element),
         data_passive: data.iter().map(|d| d.offset.is_none()).collect(),
         elem_passive: elements
             .iter()
@@ -1891,9 +1898,10 @@ impl<'a> FuncGen<'a> {
         self.require_table()?;
         self.require_zero_index(table, "table.get")?;
         let index = self.pop()?;
+        let element = self.ctx.table_element.unwrap_or(ValType::FUNCREF);
         self.push(Val {
             code: format!("self.table()[({}) as u32 as usize]", index.code),
-            ty: ValType::FUNCREF,
+            ty: element,
             stable: false,
         });
         Ok(())
@@ -2044,24 +2052,27 @@ impl<'a> FuncGen<'a> {
         Ok(())
     }
 
-    /// `ref.null t`: push a null reference. Only `funcref` is supported (an
-    /// `externref` has no `u32` representation here).
+    /// `ref.null t`: push a null reference. Both `funcref` and `externref` are
+    /// represented as a `u32` (`u32::MAX` is null).
     fn ref_null(&mut self, hty: HeapType) -> Result<(), TranspileError> {
-        let is_func = matches!(
-            hty,
+        let ty = match hty {
             HeapType::Abstract {
                 ty: AbstractHeapType::Func,
                 ..
+            } => ValType::FUNCREF,
+            HeapType::Abstract {
+                ty: AbstractHeapType::Extern,
+                ..
+            } => ValType::EXTERNREF,
+            _ => {
+                return Err(TranspileError::Unsupported(format!(
+                    "ref.null of unsupported type {hty:?}"
+                )));
             }
-        );
-        if !is_func {
-            return Err(TranspileError::Unsupported(format!(
-                "ref.null of non-funcref type {hty:?}"
-            )));
-        }
+        };
         self.push(Val {
             code: "u32::MAX".to_string(),
-            ty: ValType::FUNCREF,
+            ty,
             stable: true,
         });
         Ok(())
@@ -2816,9 +2827,10 @@ fn rust_type(ty: ValType) -> Result<&'static str, TranspileError> {
         ValType::I64 => Ok("i64"),
         ValType::F32 => Ok("f32"),
         ValType::F64 => Ok("f64"),
-        // A `funcref` is a function index (`u32::MAX` is null), matching the
-        // table's element representation.
-        ValType::Ref(rt) if rt.is_func_ref() => Ok("u32"),
+        // A `funcref` is a function index and an `externref` is an opaque host
+        // handle; both are represented as a `u32` (`u32::MAX` is null), matching
+        // the table's element representation.
+        ValType::Ref(rt) if rt.is_func_ref() || rt.is_extern_ref() => Ok("u32"),
         other => Err(TranspileError::Unsupported(format!("value type {other:?}"))),
     }
 }
@@ -2842,8 +2854,8 @@ fn unsigned_type(ty: ValType) -> Result<&'static str, TranspileError> {
 fn default_value(ty: ValType) -> &'static str {
     match ty {
         ValType::F32 | ValType::F64 => "0.0",
-        // A default `funcref` is null.
-        ValType::Ref(rt) if rt.is_func_ref() => "u32::MAX",
+        // A default `funcref`/`externref` is null.
+        ValType::Ref(rt) if rt.is_func_ref() || rt.is_extern_ref() => "u32::MAX",
         _ => "0",
     }
 }
@@ -2906,6 +2918,12 @@ pub(crate) fn const_expr_to_rust(expr: &ConstExpr<'_>) -> Result<String, Transpi
             }
             Operator::F64Const { value: v } => {
                 value = Some(format!("f64::from_bits({}u64)", v.bits()));
+            }
+            // A `funcref`/`externref` initializer: null is `u32::MAX`, and
+            // `ref.func f` is the function's index.
+            Operator::RefNull { .. } => value = Some("u32::MAX".to_string()),
+            Operator::RefFunc { function_index } => {
+                value = Some(format!("{function_index}u32"));
             }
             Operator::End => {}
             other => {
