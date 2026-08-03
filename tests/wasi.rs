@@ -145,6 +145,132 @@ fn main() {
     assert!(status.success(), "host dispatch assertion failed");
 }
 
+// argv: `args_sizes_get(argc_ptr, buf_size_ptr)` then `args_get(argv_ptr,
+// buf_ptr)`. `run` writes argc/buf_size at 0/4, the argv pointer table at 8 and
+// the argument bytes at 64. The values come from the process's real argv.
+const ARGS: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "args_sizes_get"
+        (func $sizes (param i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "args_get"
+        (func $get (param i32 i32) (result i32)))
+      (memory 1)
+      (func (export "run")
+        (drop (call $sizes (i32.const 0) (i32.const 4)))
+        (drop (call $get (i32.const 8) (i32.const 64)))))
+    "#;
+
+#[test]
+fn args_sizes_get_and_args_get_reflect_process_argv() {
+    // `run` is func2 (imports occupy 0 and 1). The generated body checks the
+    // written memory against `std::env::args()`, so it is self-verifying under
+    // whatever argv the child is launched with.
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    i.func2();
+    let expected: Vec<String> = std::env::args().collect();
+    let argc = u32::from_le_bytes([i.mem()[0], i.mem()[1], i.mem()[2], i.mem()[3]]);
+    assert_eq!(argc as usize, expected.len());
+    let buf_size = u32::from_le_bytes([i.mem()[4], i.mem()[5], i.mem()[6], i.mem()[7]]);
+    let want_size: usize = expected.iter().map(|s| s.len() + 1).sum();
+    assert_eq!(buf_size as usize, want_size);
+    for (k, arg) in expected.iter().enumerate() {
+        let pe = 8 + k * 4;
+        let ptr = u32::from_le_bytes([i.mem()[pe], i.mem()[pe + 1], i.mem()[pe + 2], i.mem()[pe + 3]]) as usize;
+        assert_eq!(&i.mem()[ptr..ptr + arg.len()], arg.as_bytes());
+        assert_eq!(i.mem()[ptr + arg.len()], 0);
+    }
+}
+";
+    let bin = compile("args", ARGS, extra);
+    let status = Command::new(&bin)
+        .args(["alpha", "beta"])
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "argv assertions failed");
+}
+
+// environ mirrors argv but the strings are `KEY=VALUE` from the environment.
+const ENVIRON: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "environ_sizes_get"
+        (func $sizes (param i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "environ_get"
+        (func $get (param i32 i32) (result i32)))
+      (memory 1)
+      (func (export "run")
+        (drop (call $sizes (i32.const 0) (i32.const 4)))
+        (drop (call $get (i32.const 8) (i32.const 64)))))
+    "#;
+
+#[test]
+fn environ_sizes_get_and_environ_get_reflect_process_environ() {
+    // Compare as a sorted set since environ order is unspecified.
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    i.func2();
+    let mut expected: Vec<String> = std::env::vars().map(|(k, v)| format!(\"{k}={v}\")).collect();
+    expected.sort();
+    let count = u32::from_le_bytes([i.mem()[0], i.mem()[1], i.mem()[2], i.mem()[3]]) as usize;
+    assert_eq!(count, expected.len());
+    let mut got: Vec<String> = Vec::new();
+    for k in 0..count {
+        let pe = 8 + k * 4;
+        let mut p = u32::from_le_bytes([i.mem()[pe], i.mem()[pe + 1], i.mem()[pe + 2], i.mem()[pe + 3]]) as usize;
+        let mut bytes: Vec<u8> = Vec::new();
+        while i.mem()[p] != 0 {
+            bytes.push(i.mem()[p]);
+            p += 1;
+        }
+        got.push(String::from_utf8(bytes).unwrap());
+    }
+    got.sort();
+    assert_eq!(got, expected);
+}
+";
+    let bin = compile("environ", ENVIRON, extra);
+    // Clear the inherited environment for a deterministic, exact comparison.
+    let status = Command::new(&bin)
+        .env_clear()
+        .env("FOO", "bar")
+        .env("BAZ", "qux")
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "environ assertions failed");
+}
+
+// clock_time_get writes the current time in nanoseconds (u64) at the pointer.
+const CLOCK: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "clock_time_get"
+        (func $now (param i32 i64 i32) (result i32)))
+      (memory 1)
+      (func (export "run")
+        (drop (call $now (i32.const 0) (i64.const 0) (i32.const 0)))))
+    "#;
+
+#[test]
+fn clock_time_get_writes_a_plausible_nanosecond_timestamp() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    i.func1();
+    let ns = u64::from_le_bytes([
+        i.mem()[0], i.mem()[1], i.mem()[2], i.mem()[3],
+        i.mem()[4], i.mem()[5], i.mem()[6], i.mem()[7],
+    ]);
+    // After 2020-01-01 and before 2100 in nanoseconds since the Unix epoch.
+    assert!(ns > 1_577_836_800_000_000_000, \"timestamp too small: {ns}\");
+    assert!(ns < 4_102_444_800_000_000_000, \"timestamp too large: {ns}\");
+}
+";
+    let bin = compile("clock", CLOCK, extra);
+    let status = Command::new(&bin).status().expect("run generated binary");
+    assert!(status.success(), "clock assertions failed");
+}
+
 // `fd_write` reads iovecs from linear memory, so a module importing it without
 // declaring a memory cannot be honoured natively; transpile must reject it
 // rather than emit code that references a non-existent `self.mem()`.

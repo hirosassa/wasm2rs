@@ -97,6 +97,11 @@ pub(crate) struct ImportInfo {
 pub(crate) enum WasiFn {
     ProcExit,
     FdWrite,
+    ArgsSizesGet,
+    ArgsGet,
+    EnvironSizesGet,
+    EnvironGet,
+    ClockTimeGet,
 }
 
 impl WasiFn {
@@ -115,22 +120,38 @@ impl WasiFn {
         let candidate = match name {
             "proc_exit" => WasiFn::ProcExit,
             "fd_write" => WasiFn::FdWrite,
+            "args_sizes_get" => WasiFn::ArgsSizesGet,
+            "args_get" => WasiFn::ArgsGet,
+            "environ_sizes_get" => WasiFn::EnvironSizesGet,
+            "environ_get" => WasiFn::EnvironGet,
+            "clock_time_get" => WasiFn::ClockTimeGet,
             _ => return None,
         };
         (params == candidate.params() && results == candidate.results()).then_some(candidate)
     }
 
     fn params(self) -> &'static [ValType] {
+        use ValType::{I32, I64};
         match self {
-            WasiFn::ProcExit => &[ValType::I32],
-            WasiFn::FdWrite => &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+            WasiFn::ProcExit => &[I32],
+            WasiFn::FdWrite => &[I32, I32, I32, I32],
+            WasiFn::ArgsSizesGet
+            | WasiFn::ArgsGet
+            | WasiFn::EnvironSizesGet
+            | WasiFn::EnvironGet => &[I32, I32],
+            WasiFn::ClockTimeGet => &[I32, I64, I32],
         }
     }
 
     fn results(self) -> &'static [ValType] {
         match self {
             WasiFn::ProcExit => &[],
-            WasiFn::FdWrite => &[ValType::I32],
+            WasiFn::FdWrite
+            | WasiFn::ArgsSizesGet
+            | WasiFn::ArgsGet
+            | WasiFn::EnvironSizesGet
+            | WasiFn::EnvironGet
+            | WasiFn::ClockTimeGet => &[ValType::I32],
         }
     }
 
@@ -139,16 +160,19 @@ impl WasiFn {
         match self {
             WasiFn::ProcExit => "wasi_proc_exit",
             WasiFn::FdWrite => "wasi_fd_write",
+            WasiFn::ArgsSizesGet => "wasi_args_sizes_get",
+            WasiFn::ArgsGet => "wasi_args_get",
+            WasiFn::EnvironSizesGet => "wasi_environ_sizes_get",
+            WasiFn::EnvironGet => "wasi_environ_get",
+            WasiFn::ClockTimeGet => "wasi_clock_time_get",
         }
     }
 
     /// Whether the native body accesses linear memory (`self.mem()`), so a
     /// module using it must declare or import a memory.
     fn needs_memory(self) -> bool {
-        match self {
-            WasiFn::ProcExit => false,
-            WasiFn::FdWrite => true,
-        }
+        // `proc_exit` is the only recognised function that never touches memory.
+        !matches!(self, WasiFn::ProcExit)
     }
 
     /// The source lines of the native implementation, emitted into the `impl`.
@@ -189,8 +213,89 @@ impl WasiFn {
                 "    0",
                 "}",
             ]),
+            // `args_sizes_get(argc, argv_buf_size)` reports the argument count
+            // and the total byte size of the argument strings (each NUL-
+            // terminated), taken from the process's real argv.
+            WasiFn::ArgsSizesGet => sizes_lines("wasi_args_sizes_get", "std::env::args()"),
+            // `args_get(argv, argv_buf)` writes each argument's pointer into the
+            // `argv` array and its NUL-terminated bytes into `argv_buf`.
+            WasiFn::ArgsGet => get_lines("wasi_args_get", "std::env::args()"),
+            // environ mirrors argv, but each string is `KEY=VALUE`.
+            WasiFn::EnvironSizesGet => sizes_lines(
+                "wasi_environ_sizes_get",
+                "std::env::vars().map(|(k, v)| format!(\"{k}={v}\"))",
+            ),
+            WasiFn::EnvironGet => get_lines(
+                "wasi_environ_get",
+                "std::env::vars().map(|(k, v)| format!(\"{k}={v}\"))",
+            ),
+            // `clock_time_get(clock_id, precision, time)` writes the current
+            // time in nanoseconds since the Unix epoch (the clock id and
+            // precision are ignored). A pre-epoch clock yields 0.
+            WasiFn::ClockTimeGet => owned(&[
+                "fn wasi_clock_time_get(&mut self, a0: i32, a1: i64, a2: i32) -> i32 {",
+                "    let now = std::time::SystemTime::now()",
+                "        .duration_since(std::time::UNIX_EPOCH)",
+                "        .map(|d| d.as_nanos() as u64)",
+                "        .unwrap_or(0);",
+                "    let t = a2 as u32 as usize;",
+                "    self.mem_mut()[t..t + 8].copy_from_slice(&now.to_le_bytes());",
+                "    0",
+                "}",
+            ]),
         }
     }
+}
+
+/// The body of a WASI `*_sizes_get` method: count the strings yielded by
+/// `source` and their total NUL-terminated byte size, writing both as `u32`.
+fn sizes_lines(method: &str, source: &str) -> Vec<String> {
+    let mut lines = vec![
+        format!("fn {method}(&mut self, a0: i32, a1: i32) -> i32 {{"),
+        format!("    let items: Vec<String> = {source}.collect();"),
+    ];
+    lines.extend(
+        [
+            "    let count = items.len() as u32;",
+            "    let size: u32 = items.iter().map(|s| s.len() as u32 + 1).sum();",
+            "    let c = a0 as u32 as usize;",
+            "    self.mem_mut()[c..c + 4].copy_from_slice(&count.to_le_bytes());",
+            "    let b = a1 as u32 as usize;",
+            "    self.mem_mut()[b..b + 4].copy_from_slice(&size.to_le_bytes());",
+            "    0",
+            "}",
+        ]
+        .map(str::to_string),
+    );
+    lines
+}
+
+/// The body of a WASI `*_get` method: write each string yielded by `source`
+/// into the `a1` buffer (NUL-terminated) and its pointer into the `a0` array.
+fn get_lines(method: &str, source: &str) -> Vec<String> {
+    let mut lines = vec![
+        format!("fn {method}(&mut self, a0: i32, a1: i32) -> i32 {{"),
+        format!("    let items: Vec<String> = {source}.collect();"),
+    ];
+    lines.extend(
+        [
+            "    let mut pv = a0 as u32 as usize;",
+            "    let mut pb = a1 as u32 as usize;",
+            "    for item in &items {",
+            "        let bytes = item.as_bytes();",
+            "        self.mem_mut()[pv..pv + 4].copy_from_slice(&(pb as u32).to_le_bytes());",
+            "        pv += 4;",
+            "        self.mem_mut()[pb..pb + bytes.len()].copy_from_slice(bytes);",
+            "        pb += bytes.len();",
+            "        self.mem_mut()[pb] = 0;",
+            "        pb += 1;",
+            "    }",
+            "    0",
+            "}",
+        ]
+        .map(str::to_string),
+    );
+    lines
 }
 
 /// An imported global: its type and mutability. Imported globals occupy the low
