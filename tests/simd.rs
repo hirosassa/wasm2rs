@@ -1096,3 +1096,138 @@ fn lane_swizzle() {
          assert_eq!(func4(), 0);",
     );
 }
+
+#[test]
+fn lane_load_splat() {
+    // load*_splat reads one element from memory and broadcasts it to every lane.
+    expect_ok(
+        "load_splat",
+        r#"
+        (module
+          (memory 1)
+          (func (result i32)
+            (v128.store (i32.const 0)
+              (v128.const i8x16 0xAB 0x11 0x22 0x33 0 0 0 0 0 0 0 0 0 0 0 0))
+            (i8x16.extract_lane_u 5 (v128.load8_splat (i32.const 0))))
+          (func (result i32)
+            (v128.store (i32.const 0) (v128.const i16x8 0x1234 0 0 0 0 0 0 0))
+            (i16x8.extract_lane_u 3 (v128.load16_splat (i32.const 0))))
+          (func (result i32)
+            (v128.store (i32.const 0) (v128.const i32x4 0xDEADBEEF 0 0 0))
+            (i32x4.extract_lane 3 (v128.load32_splat (i32.const 0))))
+          (func (result i64)
+            (v128.store (i32.const 0) (v128.const i64x2 0x1122334455667788 0))
+            (i64x2.extract_lane 1 (v128.load64_splat (i32.const 0)))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0() as u32, 0xAB);\n    \
+         assert_eq!(inst.func1(), 0x1234);\n    \
+         assert_eq!(inst.func2() as u32, 0xDEADBEEF);\n    \
+         assert_eq!(inst.func3(), 0x1122334455667788i64);",
+    );
+}
+
+#[test]
+fn lane_load_zero() {
+    // load*_zero reads 32/64 bits into the low lane and zeroes the rest.
+    expect_ok(
+        "load_zero",
+        r#"
+        (module
+          (memory 1)
+          (func (result i32)
+            (v128.store (i32.const 0)
+              (v128.const i32x4 0xAABBCCDD 0x11223344 0x55667788 0x99AABBCC))
+            (i32x4.extract_lane 0 (v128.load32_zero (i32.const 0))))
+          (func (result i32)
+            (v128.store (i32.const 0)
+              (v128.const i32x4 0xAABBCCDD 0x11223344 0x55667788 0x99AABBCC))
+            (i32x4.extract_lane 1 (v128.load32_zero (i32.const 0))))
+          (func (result i64)
+            (v128.store (i32.const 0)
+              (v128.const i64x2 0x1122334455667788 -1))
+            (i64x2.extract_lane 0 (v128.load64_zero (i32.const 0))))
+          (func (result i64)
+            (v128.store (i32.const 0)
+              (v128.const i64x2 0x1122334455667788 -1))
+            (i64x2.extract_lane 1 (v128.load64_zero (i32.const 0)))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0() as u32, 0xAABBCCDD);\n    \
+         assert_eq!(inst.func1(), 0);\n    \
+         assert_eq!(inst.func2(), 0x1122334455667788i64);\n    \
+         assert_eq!(inst.func3(), 0);",
+    );
+}
+
+#[test]
+fn lane_load_lane() {
+    // load*_lane replaces one lane of the given vector with an element read from
+    // memory, leaving the other lanes untouched.
+    expect_ok(
+        "load_lane",
+        r#"
+        (module
+          (memory 1)
+          (func (result i32)
+            (v128.store (i32.const 0)
+              (v128.const i8x16 0x99 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0))
+            (i8x16.extract_lane_u 2
+              (v128.load8_lane 2 (i32.const 0)
+                (v128.const i8x16 0x11 0x11 0x11 0x11 0x11 0x11 0x11 0x11
+                                  0x11 0x11 0x11 0x11 0x11 0x11 0x11 0x11))))
+          (func (result i32)
+            (v128.store (i32.const 0)
+              (v128.const i8x16 0x99 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0))
+            (i8x16.extract_lane_u 3
+              (v128.load8_lane 2 (i32.const 0)
+                (v128.const i8x16 0x11 0x11 0x11 0x11 0x11 0x11 0x11 0x11
+                                  0x11 0x11 0x11 0x11 0x11 0x11 0x11 0x11))))
+          (func (result i32)
+            (v128.store (i32.const 0) (v128.const i32x4 0xCAFEBABE 0 0 0))
+            (i32x4.extract_lane 1
+              (v128.load32_lane 1 (i32.const 0) (v128.const i32x4 7 7 7 7))))
+          (func (result i64)
+            (v128.store (i32.const 0) (v128.const i64x2 0x0123456789ABCDEF 0))
+            (i64x2.extract_lane 0
+              (v128.load64_lane 0 (i32.const 0) (v128.const i64x2 9 9)))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0() as u32, 0x99);\n    \
+         assert_eq!(inst.func1() as u32, 0x11);\n    \
+         assert_eq!(inst.func2() as u32, 0xCAFEBABE);\n    \
+         assert_eq!(inst.func3(), 0x0123456789ABCDEFi64);",
+    );
+}
+
+#[test]
+fn lane_store_lane() {
+    // store*_lane writes one lane of a vector to memory, read back as a scalar.
+    expect_ok(
+        "store_lane",
+        r#"
+        (module
+          (memory 1)
+          (func (result i32)
+            (v128.store8_lane 3 (i32.const 0)
+              (v128.const i8x16 0x11 0x22 0x33 0x77 0 0 0 0 0 0 0 0 0 0 0 0))
+            (i32.load8_u (i32.const 0)))
+          (func (result i32)
+            (v128.store16_lane 2 (i32.const 0)
+              (v128.const i16x8 0 0 0xBEEF 0 0 0 0 0))
+            (i32.load16_u (i32.const 0)))
+          (func (result i32)
+            (v128.store32_lane 1 (i32.const 0) (v128.const i32x4 0 0xFEEDFACE 0 0))
+            (i32.load (i32.const 0)))
+          (func (result i64)
+            (v128.store64_lane 1 (i32.const 0)
+              (v128.const i64x2 0 0x1122334455667788))
+            (i64.load (i32.const 0))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(), 0x77);\n    \
+         assert_eq!(inst.func1(), 0xBEEF);\n    \
+         assert_eq!(inst.func2() as u32, 0xFEEDFACE);\n    \
+         assert_eq!(inst.func3(), 0x1122334455667788i64);",
+    );
+}

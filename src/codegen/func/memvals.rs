@@ -160,6 +160,57 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    /// `v128.load*_lane`: read one element from memory into lane `lane` of the
+    /// v128 on the stack, leaving the other lanes intact. Pops the vector (on
+    /// top) then the address, and pushes the updated vector.
+    pub(super) fn load_lane(
+        &mut self,
+        helper: Helper,
+        memarg: MemArg,
+        lane: u8,
+    ) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        let offset = memarg_offset(memarg)?;
+        let value = self.pop()?;
+        let addr = self.pop()?;
+        self.used_helpers.insert(helper);
+        // The result reads memory, which a store can change, so it is never stable.
+        self.push_combined(
+            format!(
+                "self.{}(({}) as u32, {offset}u32, {}, {lane})",
+                helper_name(helper),
+                addr.code,
+                value.code
+            ),
+            ValType::V128,
+            false,
+        )
+    }
+
+    /// `v128.store*_lane`: write lane `lane` of the v128 on the stack to memory.
+    /// Pops the vector (on top) then the address, and pushes nothing.
+    pub(super) fn store_lane(
+        &mut self,
+        helper: Helper,
+        memarg: MemArg,
+        lane: u8,
+    ) -> Result<(), TranspileError> {
+        self.require_memory()?;
+        let offset = memarg_offset(memarg)?;
+        // Memory is about to change; fix any operand that reads from it.
+        self.spill_nonstable()?;
+        let value = self.pop()?;
+        let addr = self.pop()?;
+        self.used_helpers.insert(helper);
+        self.line(format!(
+            "self.{}(({}) as u32, {offset}u32, {}, {lane});",
+            helper_name(helper),
+            addr.code,
+            value.code
+        ));
+        Ok(())
+    }
+
     /// Lower an atomic read-modify-write. The instance owns its memory, so this
     /// is a plain load of the old value, a `combine` with the operand, and a
     /// store of the result; the (zero-extended) old value is pushed. `load` reads

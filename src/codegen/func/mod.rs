@@ -978,6 +978,51 @@ impl<'a> FuncGen<'a> {
             // Byte permutes: dynamic swizzle and constant-index shuffle.
             Operator::I8x16Swizzle => self.call_simd_binop("i8x16_swizzle")?,
             Operator::I8x16Shuffle { lanes } => self.call_simd_shuffle(lanes)?,
+
+            // Memory-to-lane loads: splat (broadcast), zero-extend, and single
+            // lane load/store. splat/zero take just an address like a plain load.
+            Operator::V128Load8Splat { memarg } => {
+                self.load(Helper::Load8Splat, ValType::V128, memarg)?
+            }
+            Operator::V128Load16Splat { memarg } => {
+                self.load(Helper::Load16Splat, ValType::V128, memarg)?
+            }
+            Operator::V128Load32Splat { memarg } => {
+                self.load(Helper::Load32Splat, ValType::V128, memarg)?
+            }
+            Operator::V128Load64Splat { memarg } => {
+                self.load(Helper::Load64Splat, ValType::V128, memarg)?
+            }
+            Operator::V128Load32Zero { memarg } => {
+                self.load(Helper::Load32Zero, ValType::V128, memarg)?
+            }
+            Operator::V128Load64Zero { memarg } => {
+                self.load(Helper::Load64Zero, ValType::V128, memarg)?
+            }
+            Operator::V128Load8Lane { memarg, lane } => {
+                self.load_lane(Helper::Load8Lane, memarg, lane)?
+            }
+            Operator::V128Load16Lane { memarg, lane } => {
+                self.load_lane(Helper::Load16Lane, memarg, lane)?
+            }
+            Operator::V128Load32Lane { memarg, lane } => {
+                self.load_lane(Helper::Load32Lane, memarg, lane)?
+            }
+            Operator::V128Load64Lane { memarg, lane } => {
+                self.load_lane(Helper::Load64Lane, memarg, lane)?
+            }
+            Operator::V128Store8Lane { memarg, lane } => {
+                self.store_lane(Helper::Store8Lane, memarg, lane)?
+            }
+            Operator::V128Store16Lane { memarg, lane } => {
+                self.store_lane(Helper::Store16Lane, memarg, lane)?
+            }
+            Operator::V128Store32Lane { memarg, lane } => {
+                self.store_lane(Helper::Store32Lane, memarg, lane)?
+            }
+            Operator::V128Store64Lane { memarg, lane } => {
+                self.store_lane(Helper::Store64Lane, memarg, lane)?
+            }
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
             }
