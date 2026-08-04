@@ -391,6 +391,14 @@ pub(super) fn render_simd_helpers(used: &HashSet<&'static str>) -> String {
             blocks.push(reduce_lines(r).join("\n"));
         }
     }
+    // Byte-permute helpers don't fit the tables above (they permute bytes rather
+    // than apply a per-lane op), so each is a fixed self-contained function.
+    if used.contains("i8x16_swizzle") {
+        blocks.push(swizzle_lines().join("\n"));
+    }
+    if used.contains("i8x16_shuffle") {
+        blocks.push(shuffle_lines().join("\n"));
+    }
     let mut out = blocks.join("\n\n");
     if !out.is_empty() {
         out.push('\n');
@@ -692,4 +700,54 @@ fn reduce_lines(r: &Reduce) -> Vec<String> {
             "}".to_string(),
         ],
     }
+}
+
+/// `i8x16.swizzle`: index the first vector by each byte of the second, yielding
+/// 0 where the (unsigned) index is 16 or more. A byte permute, so unlike the
+/// lane helpers it selects whole bytes rather than applying a per-lane op.
+fn swizzle_lines() -> Vec<String> {
+    vec![
+        "fn i8x16_swizzle(a: u128, b: u128) -> u128 {".to_string(),
+        "    let a = a.to_le_bytes();".to_string(),
+        "    let b = b.to_le_bytes();".to_string(),
+        "    let mut r = [0u8; 16];".to_string(),
+        "    let mut i = 0;".to_string(),
+        "    while i < 16 {".to_string(),
+        "        let j = b[i] as usize;".to_string(),
+        "        if j < 16 {".to_string(),
+        "            r[i] = a[j];".to_string(),
+        "        }".to_string(),
+        "        i += 1;".to_string(),
+        "    }".to_string(),
+        "    u128::from_le_bytes(r)".to_string(),
+        "}".to_string(),
+    ]
+}
+
+/// `i8x16.shuffle`: pick each output byte from the 32-byte `a ++ b` window by the
+/// constant index vector `idx` (baked in by the caller). A valid module only uses
+/// indices `0..32`; any larger index yields 0, keeping the helper panic-free (the
+/// transpiler does not pre-validate modules) like the other generated helpers.
+fn shuffle_lines() -> Vec<String> {
+    vec![
+        "fn i8x16_shuffle(a: u128, b: u128, idx: u128) -> u128 {".to_string(),
+        "    let a = a.to_le_bytes();".to_string(),
+        "    let b = b.to_le_bytes();".to_string(),
+        "    let idx = idx.to_le_bytes();".to_string(),
+        "    let mut r = [0u8; 16];".to_string(),
+        "    let mut i = 0;".to_string(),
+        "    while i < 16 {".to_string(),
+        "        let j = idx[i] as usize;".to_string(),
+        "        r[i] = if j < 16 {".to_string(),
+        "            a[j]".to_string(),
+        "        } else if j < 32 {".to_string(),
+        "            b[j - 16]".to_string(),
+        "        } else {".to_string(),
+        "            0".to_string(),
+        "        };".to_string(),
+        "        i += 1;".to_string(),
+        "    }".to_string(),
+        "    u128::from_le_bytes(r)".to_string(),
+        "}".to_string(),
+    ]
 }

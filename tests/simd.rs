@@ -1022,3 +1022,77 @@ fn lane_bitmask() {
          assert_eq!(func3(), 1);",
     );
 }
+
+#[test]
+fn lane_shuffle() {
+    // i8x16.shuffle picks each output byte from a 32-byte window: index < 16
+    // selects the first vector, 16..32 the second, per the immediate lanes.
+    expect_ok(
+        "lane_shuffle",
+        r#"
+        (module
+          (func (result i32)
+            (i8x16.extract_lane_u 0
+              (i8x16.shuffle 0 16 1 17 2 18 3 19 4 20 5 21 6 22 7 23
+                (v128.const i8x16 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+                (v128.const i8x16 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31))))
+          (func (result i32)
+            (i8x16.extract_lane_u 1
+              (i8x16.shuffle 0 16 1 17 2 18 3 19 4 20 5 21 6 22 7 23
+                (v128.const i8x16 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+                (v128.const i8x16 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31))))
+          (func (result i32)
+            (i8x16.extract_lane_u 15
+              (i8x16.shuffle 0 16 1 17 2 18 3 19 4 20 5 21 6 22 7 23
+                (v128.const i8x16 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+                (v128.const i8x16 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31)))))
+        "#,
+        // r = 0 16 1 17 2 18 3 19 4 20 5 21 6 22 7 23; lanes 0,1,15.
+        "assert_eq!(func0(), 0);\n    \
+         assert_eq!(func1(), 16);\n    \
+         assert_eq!(func2(), 23);",
+    );
+}
+
+#[test]
+fn lane_swizzle() {
+    // i8x16.swizzle indexes the first vector by the second's bytes; an index of
+    // 16 or more (unsigned) yields 0.
+    expect_ok(
+        "lane_swizzle",
+        r#"
+        (module
+          (func (result i32)
+            (i8x16.extract_lane_u 0
+              (i8x16.swizzle
+                (v128.const i8x16 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25)
+                (v128.const i8x16 0 5 15 16 200 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i8x16.extract_lane_u 1
+              (i8x16.swizzle
+                (v128.const i8x16 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25)
+                (v128.const i8x16 0 5 15 16 200 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i8x16.extract_lane_u 2
+              (i8x16.swizzle
+                (v128.const i8x16 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25)
+                (v128.const i8x16 0 5 15 16 200 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i8x16.extract_lane_u 3
+              (i8x16.swizzle
+                (v128.const i8x16 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25)
+                (v128.const i8x16 0 5 15 16 200 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i8x16.extract_lane_u 4
+              (i8x16.swizzle
+                (v128.const i8x16 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25)
+                (v128.const i8x16 0 5 15 16 200 0 0 0 0 0 0 0 0 0 0 0)))))
+        "#,
+        // indices 0->a[0]=10, 5->a[5]=15, 15->a[15]=25, 16->0, 200->0.
+        "assert_eq!(func0(), 10);\n    \
+         assert_eq!(func1(), 15);\n    \
+         assert_eq!(func2(), 25);\n    \
+         assert_eq!(func3(), 0);\n    \
+         assert_eq!(func4(), 0);",
+    );
+}

@@ -109,6 +109,20 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(format!("{name}({})", a.code), ValType::V128, a.stable)
     }
 
+    /// `i8x16.shuffle`: a binary op with a constant 16-byte index vector baked in
+    /// as a third argument (see `i8x16_shuffle` in `simd_rt.rs`).
+    pub(super) fn call_simd_shuffle(&mut self, lanes: [u8; 16]) -> Result<(), TranspileError> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        self.used_simd.insert("i8x16_shuffle");
+        let idx = u128::from_le_bytes(lanes);
+        self.push_combined(
+            format!("i8x16_shuffle({}, {}, {idx}u128)", a.code, b.code),
+            ValType::V128,
+            a.stable && b.stable,
+        )
+    }
+
     /// A lane-reducing op `name(a: u128) -> i32` (see `simd_rt.rs`): pop the
     /// v128 operand and push the scalar result. Used by `all_true`/`bitmask`.
     pub(super) fn call_simd_reduce(&mut self, name: &'static str) -> Result<(), TranspileError> {

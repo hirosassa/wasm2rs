@@ -974,6 +974,10 @@ impl<'a> FuncGen<'a> {
             Operator::I16x8Bitmask => self.call_simd_reduce("i16x8_bitmask")?,
             Operator::I32x4Bitmask => self.call_simd_reduce("i32x4_bitmask")?,
             Operator::I64x2Bitmask => self.call_simd_reduce("i64x2_bitmask")?,
+
+            // Byte permutes: dynamic swizzle and constant-index shuffle.
+            Operator::I8x16Swizzle => self.call_simd_binop("i8x16_swizzle")?,
+            Operator::I8x16Shuffle { lanes } => self.call_simd_shuffle(lanes)?,
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
             }
