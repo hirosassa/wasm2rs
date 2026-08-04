@@ -938,6 +938,23 @@ impl<'a> FuncGen<'a> {
             // Widening dot product (i16 pairs to i32) and Q15 rounding multiply.
             Operator::I32x4DotI16x8S => self.call_simd_binop("i32x4_dot_i16x8_s")?,
             Operator::I16x8Q15MulrSatS => self.call_simd_binop("i16x8_q15mulr_sat_s")?,
+
+            // Float <-> integer lane conversions (trunc_sat, convert, demote,
+            // promote). Each is a single-vector width-changing helper.
+            Operator::I32x4TruncSatF32x4S => self.call_simd_unop("i32x4_trunc_sat_f32x4_s")?,
+            Operator::I32x4TruncSatF32x4U => self.call_simd_unop("i32x4_trunc_sat_f32x4_u")?,
+            Operator::I32x4TruncSatF64x2SZero => {
+                self.call_simd_unop("i32x4_trunc_sat_f64x2_s_zero")?
+            }
+            Operator::I32x4TruncSatF64x2UZero => {
+                self.call_simd_unop("i32x4_trunc_sat_f64x2_u_zero")?
+            }
+            Operator::F32x4ConvertI32x4S => self.call_simd_unop("f32x4_convert_i32x4_s")?,
+            Operator::F32x4ConvertI32x4U => self.call_simd_unop("f32x4_convert_i32x4_u")?,
+            Operator::F64x2ConvertLowI32x4S => self.call_simd_unop("f64x2_convert_low_i32x4_s")?,
+            Operator::F64x2ConvertLowI32x4U => self.call_simd_unop("f64x2_convert_low_i32x4_u")?,
+            Operator::F32x4DemoteF64x2Zero => self.call_simd_unop("f32x4_demote_f64x2_zero")?,
+            Operator::F64x2PromoteLowF32x4 => self.call_simd_unop("f64x2_promote_low_f32x4")?,
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
             }

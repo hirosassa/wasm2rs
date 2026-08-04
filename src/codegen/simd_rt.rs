@@ -232,6 +232,11 @@ enum WideKind {
         min: &'static str,
         max: &'static str,
     },
+    /// `trunc_sat_..._zero`/`demote_..._zero`: convert a single vector's lanes to
+    /// a narrower width into the low lanes, zeroing the rest. Input driven like
+    /// `Narrow`, but takes one vector and relies on the `as` cast (which saturates
+    /// float-to-int: NaN to 0, out of range to the bounds) rather than clamping.
+    NarrowZero,
     /// `extmul_low`/`extmul_high`: widen the low or high half (`off`) of both
     /// vectors' lanes and multiply pairwise. The product fits the wider lane.
     ExtMul { off: u32 },
@@ -297,6 +302,21 @@ const WIDE: &[Wide] = &[
     wide("i32x4_extadd_pairwise_i16x8_s", "i16", "i32", 2, 4, WideKind::ExtAddPairwise),
     wide("i32x4_extadd_pairwise_i16x8_u", "u16", "u32", 2, 4, WideKind::ExtAddPairwise),
     wide("i32x4_dot_i16x8_s", "i16", "i32", 2, 4, WideKind::Dot),
+    // Float <-> integer lane conversions. Rust's `as` cast already saturates
+    // float-to-int, so `trunc_sat` needs no extra clamp. Those whose output is
+    // filled from the source's low bytes (4->4, or low-half 4->8) reuse
+    // `Extend { off: 0 }`; the `_zero` variants (8->4, two lanes to the low half,
+    // upper lanes zeroed) use `NarrowZero`.
+    wide("i32x4_trunc_sat_f32x4_s", "f32", "i32", 4, 4, WideKind::Extend { off: 0 }),
+    wide("i32x4_trunc_sat_f32x4_u", "f32", "u32", 4, 4, WideKind::Extend { off: 0 }),
+    wide("f32x4_convert_i32x4_s",   "i32", "f32", 4, 4, WideKind::Extend { off: 0 }),
+    wide("f32x4_convert_i32x4_u",   "u32", "f32", 4, 4, WideKind::Extend { off: 0 }),
+    wide("f64x2_convert_low_i32x4_s", "i32", "f64", 4, 8, WideKind::Extend { off: 0 }),
+    wide("f64x2_convert_low_i32x4_u", "u32", "f64", 4, 8, WideKind::Extend { off: 0 }),
+    wide("f64x2_promote_low_f32x4",   "f32", "f64", 4, 8, WideKind::Extend { off: 0 }),
+    wide("i32x4_trunc_sat_f64x2_s_zero", "f64", "i32", 8, 4, WideKind::NarrowZero),
+    wide("i32x4_trunc_sat_f64x2_u_zero", "f64", "u32", 8, 4, WideKind::NarrowZero),
+    wide("f32x4_demote_f64x2_zero",      "f64", "f32", 8, 4, WideKind::NarrowZero),
 ];
 
 /// Render the used lane helpers as module-scope free functions, in [`LANE`] then
@@ -409,7 +429,9 @@ fn lane_lines(lane: &Lane) -> Vec<String> {
 /// adjacent widened products of both vectors, wrapping on overflow. `Narrow` is
 /// input driven: it walks both inputs in `in_bytes` steps, saturating each lane
 /// into `[min, max]` before casting down, writing the first vector's results to
-/// the low 8 bytes and the second's to the high 8.
+/// the low 8 bytes and the second's to the high 8. `NarrowZero` is input driven
+/// over one vector, casting each lane down (the `as` cast saturates float-to-int)
+/// into the low lanes and leaving the upper lanes zero.
 fn wide_lines(w: &Wide) -> Vec<String> {
     let &Wide {
         name,
@@ -463,6 +485,25 @@ fn wide_lines(w: &Wide) -> Vec<String> {
             format!(
                 "        r[o + 8..o + 8 + {out_bytes}]\
                  .copy_from_slice(&(y.clamp({min}, {max}) as {out_elem}).to_le_bytes());"
+            ),
+            format!("        o += {out_bytes};"),
+            format!("        s += {in_bytes};"),
+            "    }".to_string(),
+            "    u128::from_le_bytes(r)".to_string(),
+            "}".to_string(),
+        ],
+        WideKind::NarrowZero => vec![
+            format!("fn {name}(a: u128) -> u128 {{"),
+            "    let a = a.to_le_bytes();".to_string(),
+            "    let mut r = [0u8; 16];".to_string(),
+            "    let mut o = 0;".to_string(),
+            "    let mut s = 0;".to_string(),
+            "    while s < 16 {".to_string(),
+            format!(
+                "        let x = {in_elem}::from_le_bytes(a[s..s + {in_bytes}].try_into().unwrap());"
+            ),
+            format!(
+                "        r[o..o + {out_bytes}].copy_from_slice(&(x as {out_elem}).to_le_bytes());"
             ),
             format!("        o += {out_bytes};"),
             format!("        s += {in_bytes};"),

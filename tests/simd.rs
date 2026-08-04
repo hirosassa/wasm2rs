@@ -745,3 +745,151 @@ fn v128_bitselect_and_any_true() {
          assert_eq!(func2(), 1);",
     );
 }
+
+#[test]
+fn lane_trunc_sat() {
+    // i32x4.trunc_sat_f32x4_s/u: saturating truncation matches Rust's float-to-int
+    // `as` cast: NaN -> 0, out-of-range clamps to the type's bounds.
+    expect_ok(
+        "lane_trunc_sat",
+        r#"
+        (module
+          (func (result i32)
+            (i32x4.extract_lane 0 (i32x4.trunc_sat_f32x4_s (v128.const f32x4 2.5 nan 1e10 -1e10))))
+          (func (result i32)
+            (i32x4.extract_lane 1 (i32x4.trunc_sat_f32x4_s (v128.const f32x4 2.5 nan 1e10 -1e10))))
+          (func (result i32)
+            (i32x4.extract_lane 2 (i32x4.trunc_sat_f32x4_s (v128.const f32x4 2.5 nan 1e10 -1e10))))
+          (func (result i32)
+            (i32x4.extract_lane 3 (i32x4.trunc_sat_f32x4_s (v128.const f32x4 2.5 nan 1e10 -1e10))))
+          (func (result i32)
+            (i32x4.extract_lane 0 (i32x4.trunc_sat_f32x4_u (v128.const f32x4 -1.0 3.9 1e10 0))))
+          (func (result i32)
+            (i32x4.extract_lane 1 (i32x4.trunc_sat_f32x4_u (v128.const f32x4 -1.0 3.9 1e10 0))))
+          (func (result i32)
+            (i32x4.extract_lane 2 (i32x4.trunc_sat_f32x4_u (v128.const f32x4 -1.0 3.9 1e10 0)))))
+        "#,
+        // s: 2.5->2, NaN->0, 1e10->i32::MAX, -1e10->i32::MIN.
+        // u: -1.0->0, 3.9->3, 1e10->u32::MAX.
+        "assert_eq!(func0(), 2);\n    \
+         assert_eq!(func1(), 0);\n    \
+         assert_eq!(func2(), i32::MAX);\n    \
+         assert_eq!(func3(), i32::MIN);\n    \
+         assert_eq!(func4(), 0);\n    \
+         assert_eq!(func5(), 3);\n    \
+         assert_eq!(func6() as u32, u32::MAX);",
+    );
+}
+
+#[test]
+fn lane_trunc_sat_zero() {
+    // i32x4.trunc_sat_f64x2_s/u_zero: truncate the two f64 lanes into the low two
+    // i32 lanes; the upper two lanes are zero-filled.
+    expect_ok(
+        "lane_trunc_sat_zero",
+        r#"
+        (module
+          (func (result i32)
+            (i32x4.extract_lane 0 (i32x4.trunc_sat_f64x2_s_zero (v128.const f64x2 2.5 -3.5))))
+          (func (result i32)
+            (i32x4.extract_lane 1 (i32x4.trunc_sat_f64x2_s_zero (v128.const f64x2 2.5 -3.5))))
+          (func (result i32)
+            (i32x4.extract_lane 2 (i32x4.trunc_sat_f64x2_s_zero (v128.const f64x2 2.5 -3.5))))
+          (func (result i32)
+            (i32x4.extract_lane 0 (i32x4.trunc_sat_f64x2_u_zero (v128.const f64x2 -1.0 5.9))))
+          (func (result i32)
+            (i32x4.extract_lane 1 (i32x4.trunc_sat_f64x2_u_zero (v128.const f64x2 -1.0 5.9)))))
+        "#,
+        // 2.5->2, -3.5->-3, lane2 zero-filled; -1.0->0, 5.9->5.
+        "assert_eq!(func0(), 2);\n    \
+         assert_eq!(func1(), -3);\n    \
+         assert_eq!(func2(), 0);\n    \
+         assert_eq!(func3(), 0);\n    \
+         assert_eq!(func4(), 5);",
+    );
+}
+
+#[test]
+fn lane_convert() {
+    // f32x4.convert_i32x4_s/u: widen each i32 lane to f32. The `_u` variant reads
+    // the lane as u32, so lane 0xFFFFFFFF becomes 2^32, not -1.
+    expect_ok(
+        "lane_convert",
+        r#"
+        (module
+          (func (result f32)
+            (f32x4.extract_lane 0 (f32x4.convert_i32x4_s (v128.const i32x4 -5 7 0 0))))
+          (func (result f32)
+            (f32x4.extract_lane 1 (f32x4.convert_i32x4_s (v128.const i32x4 -5 7 0 0))))
+          (func (result f32)
+            (f32x4.extract_lane 0 (f32x4.convert_i32x4_u (v128.const i32x4 -1 10 0 0)))))
+        "#,
+        // -5->-5.0, 7->7.0; unsigned 0xFFFFFFFF = 4294967295 rounds to 2^32.
+        "assert_eq!(func0(), -5.0f32);\n    \
+         assert_eq!(func1(), 7.0f32);\n    \
+         assert_eq!(func2(), 4294967296.0f32);",
+    );
+}
+
+#[test]
+fn lane_convert_low() {
+    // f64x2.convert_low_i32x4_s/u: convert the low two i32 lanes to f64; the upper
+    // two source lanes are ignored.
+    expect_ok(
+        "lane_convert_low",
+        r#"
+        (module
+          (func (result f64)
+            (f64x2.extract_lane 0 (f64x2.convert_low_i32x4_s (v128.const i32x4 -5 7 999 999))))
+          (func (result f64)
+            (f64x2.extract_lane 1 (f64x2.convert_low_i32x4_s (v128.const i32x4 -5 7 999 999))))
+          (func (result f64)
+            (f64x2.extract_lane 0 (f64x2.convert_low_i32x4_u (v128.const i32x4 -1 0 0 0)))))
+        "#,
+        // -5->-5.0, 7->7.0 (lane 2/3 ignored); unsigned 0xFFFFFFFF = 4294967295.0.
+        "assert_eq!(func0(), -5.0f64);\n    \
+         assert_eq!(func1(), 7.0f64);\n    \
+         assert_eq!(func2(), 4294967295.0f64);",
+    );
+}
+
+#[test]
+fn lane_demote() {
+    // f32x4.demote_f64x2_zero: narrow the two f64 lanes to the low two f32 lanes;
+    // the upper two lanes are zero-filled.
+    expect_ok(
+        "lane_demote",
+        r#"
+        (module
+          (func (result f32)
+            (f32x4.extract_lane 0 (f32x4.demote_f64x2_zero (v128.const f64x2 1.5 -2.5))))
+          (func (result f32)
+            (f32x4.extract_lane 1 (f32x4.demote_f64x2_zero (v128.const f64x2 1.5 -2.5))))
+          (func (result f32)
+            (f32x4.extract_lane 2 (f32x4.demote_f64x2_zero (v128.const f64x2 1.5 -2.5)))))
+        "#,
+        // 1.5->1.5, -2.5->-2.5, lane2 zero-filled.
+        "assert_eq!(func0(), 1.5f32);\n    \
+         assert_eq!(func1(), -2.5f32);\n    \
+         assert_eq!(func2(), 0.0f32);",
+    );
+}
+
+#[test]
+fn lane_promote() {
+    // f64x2.promote_low_f32x4: widen the low two f32 lanes to f64; the upper two
+    // source lanes are ignored.
+    expect_ok(
+        "lane_promote",
+        r#"
+        (module
+          (func (result f64)
+            (f64x2.extract_lane 0 (f64x2.promote_low_f32x4 (v128.const f32x4 1.5 -2.5 9 9))))
+          (func (result f64)
+            (f64x2.extract_lane 1 (f64x2.promote_low_f32x4 (v128.const f32x4 1.5 -2.5 9 9)))))
+        "#,
+        // 1.5->1.5, -2.5->-2.5 (lane 2/3 ignored).
+        "assert_eq!(func0(), 1.5f64);\n    \
+         assert_eq!(func1(), -2.5f64);",
+    );
+}
