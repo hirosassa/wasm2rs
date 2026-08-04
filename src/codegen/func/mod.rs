@@ -1041,6 +1041,30 @@ impl<'a> FuncGen<'a> {
             Operator::V128Store64Lane { memarg, lane } => {
                 self.store_lane(Helper::Store64Lane, memarg, lane)?
             }
+            // Relaxed SIMD, deterministic lowering. Each of these picks one
+            // spec-permitted behaviour and reuses the matching non-relaxed helper:
+            // relaxed_swizzle == swizzle (index >= 16 -> 0), relaxed_trunc ==
+            // trunc_sat (Rust's saturating float->int cast), relaxed_min/max ==
+            // the plain lane min/max, relaxed_q15mulr == the saturating one, and
+            // relaxed_laneselect == bitselect.
+            Operator::I8x16RelaxedSwizzle => self.call_simd_binop("i8x16_swizzle")?,
+            Operator::I32x4RelaxedTruncF32x4S => self.call_simd_unop("i32x4_trunc_sat_f32x4_s")?,
+            Operator::I32x4RelaxedTruncF32x4U => self.call_simd_unop("i32x4_trunc_sat_f32x4_u")?,
+            Operator::I32x4RelaxedTruncF64x2SZero => {
+                self.call_simd_unop("i32x4_trunc_sat_f64x2_s_zero")?
+            }
+            Operator::I32x4RelaxedTruncF64x2UZero => {
+                self.call_simd_unop("i32x4_trunc_sat_f64x2_u_zero")?
+            }
+            Operator::F32x4RelaxedMin => self.call_simd_binop("f32x4_min")?,
+            Operator::F32x4RelaxedMax => self.call_simd_binop("f32x4_max")?,
+            Operator::F64x2RelaxedMin => self.call_simd_binop("f64x2_min")?,
+            Operator::F64x2RelaxedMax => self.call_simd_binop("f64x2_max")?,
+            Operator::I16x8RelaxedQ15mulrS => self.call_simd_binop("i16x8_q15mulr_sat_s")?,
+            Operator::I8x16RelaxedLaneselect
+            | Operator::I16x8RelaxedLaneselect
+            | Operator::I32x4RelaxedLaneselect
+            | Operator::I64x2RelaxedLaneselect => self.v128_bitselect()?,
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
             }

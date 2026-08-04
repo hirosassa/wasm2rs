@@ -1285,3 +1285,140 @@ fn lane_widening_load() {
          assert_eq!(inst.func8(), 0x12345678i64);",
     );
 }
+
+#[test]
+fn relaxed_laneselect() {
+    // relaxed_laneselect deterministically lowers to v128.bitselect:
+    // (a & m) | (b & !m). A per-lane all-ones mask picks `a`, all-zero picks `b`.
+    // All four lane widths share the same whole-register bitselect codegen.
+    expect_ok(
+        "relaxed_laneselect",
+        r#"
+        (module
+          (func (param i32) (result i32)
+            (i8x16.extract_lane_u 0
+              (i8x16.relaxed_laneselect
+                (v128.const i8x16 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA
+                                  0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA)
+                (v128.const i8x16 0x55 0x55 0x55 0x55 0x55 0x55 0x55 0x55
+                                  0x55 0x55 0x55 0x55 0x55 0x55 0x55 0x55)
+                (v128.const i8x16 0xFF 0x00 0xFF 0x00 0xFF 0x00 0xFF 0x00
+                                  0xFF 0x00 0xFF 0x00 0xFF 0x00 0xFF 0x00))))
+          (func (param i32) (result i32)
+            (i8x16.extract_lane_u 1
+              (i8x16.relaxed_laneselect
+                (v128.const i8x16 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA
+                                  0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA 0xAA)
+                (v128.const i8x16 0x55 0x55 0x55 0x55 0x55 0x55 0x55 0x55
+                                  0x55 0x55 0x55 0x55 0x55 0x55 0x55 0x55)
+                (v128.const i8x16 0xFF 0x00 0xFF 0x00 0xFF 0x00 0xFF 0x00
+                                  0xFF 0x00 0xFF 0x00 0xFF 0x00 0xFF 0x00))))
+          (func (param i32) (result i32)
+            (i16x8.extract_lane_u 1
+              (i16x8.relaxed_laneselect
+                (v128.const i16x8 0x1111 0x1111 0x1111 0x1111 0x1111 0x1111 0x1111 0x1111)
+                (v128.const i16x8 0x2222 0x2222 0x2222 0x2222 0x2222 0x2222 0x2222 0x2222)
+                (v128.const i16x8 0xFFFF 0x0000 0xFFFF 0x0000 0xFFFF 0x0000 0xFFFF 0x0000))))
+          (func (param i32) (result i32)
+            (i32x4.extract_lane 0
+              (i32x4.relaxed_laneselect
+                (v128.const i32x4 0xAAAAAAAA 0xAAAAAAAA 0xAAAAAAAA 0xAAAAAAAA)
+                (v128.const i32x4 0x55555555 0x55555555 0x55555555 0x55555555)
+                (v128.const i32x4 0xFFFFFFFF 0x00000000 0xFFFFFFFF 0x00000000))))
+          (func (param i32) (result i64)
+            (i64x2.extract_lane 1
+              (i64x2.relaxed_laneselect
+                (v128.const i64x2 0x1122334455667788 0x1122334455667788)
+                (v128.const i64x2 0x99AABBCCDDEEFF00 0x99AABBCCDDEEFF00)
+                (v128.const i64x2 0xFFFFFFFFFFFFFFFF 0x0000000000000000)))))
+        "#,
+        "assert_eq!(func0(0), 0xAA);\n    \
+         assert_eq!(func1(0), 0x55);\n    \
+         assert_eq!(func2(0), 0x2222);\n    \
+         assert_eq!(func3(0) as u32, 0xAAAAAAAA);\n    \
+         assert_eq!(func4(0) as u64, 0x99AABBCCDDEEFF00);",
+    );
+}
+
+#[test]
+fn relaxed_swizzle_and_trunc() {
+    // relaxed_swizzle lowers to i8x16.swizzle (index >= 16 yields 0); relaxed_trunc
+    // lowers to the saturating trunc_sat helpers (Rust's `as` float->int cast is
+    // saturating: NaN -> 0, out-of-range -> the type's bound).
+    expect_ok(
+        "relaxed_swizzle_trunc",
+        r#"
+        (module
+          (func (param i32) (result i32)
+            (i8x16.extract_lane_u 0
+              (i8x16.relaxed_swizzle
+                (v128.const i8x16 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)
+                (v128.const i8x16 15 0 16 3 0 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (param i32) (result i32)
+            (i8x16.extract_lane_u 2
+              (i8x16.relaxed_swizzle
+                (v128.const i8x16 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)
+                (v128.const i8x16 15 0 16 3 0 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (param i32) (result i32)
+            (i32x4.extract_lane 1
+              (i32x4.relaxed_trunc_f32x4_s (v128.const f32x4 1.5 -2.9 3.0 -4.0))))
+          (func (param i32) (result i32)
+            (i32x4.extract_lane 0
+              (i32x4.relaxed_trunc_f32x4_u (v128.const f32x4 4.9 0 0 0))))
+          (func (param i32) (result i32)
+            (i32x4.extract_lane 1
+              (i32x4.relaxed_trunc_f64x2_s_zero (v128.const f64x2 -7.0 9.0))))
+          (func (param i32) (result i32)
+            (i32x4.extract_lane 2
+              (i32x4.relaxed_trunc_f64x2_s_zero (v128.const f64x2 -7.0 9.0))))
+          (func (param i32) (result i32)
+            (i32x4.extract_lane 0
+              (i32x4.relaxed_trunc_f64x2_u_zero (v128.const f64x2 12.7 0.0)))))
+        "#,
+        "assert_eq!(func0(0), 16);\n    \
+         assert_eq!(func1(0), 0);\n    \
+         assert_eq!(func2(0), -2);\n    \
+         assert_eq!(func3(0), 4);\n    \
+         assert_eq!(func4(0), 9);\n    \
+         assert_eq!(func5(0), 0);\n    \
+         assert_eq!(func6(0), 12);",
+    );
+}
+
+#[test]
+fn relaxed_min_max_and_q15mulr() {
+    // relaxed_min/max lower to the f32x4/f64x2 min/max helpers; relaxed_q15mulr_s
+    // to the saturating Q15 rounding-multiply helper.
+    expect_ok(
+        "relaxed_min_max_q15",
+        r#"
+        (module
+          (func (param i32) (result f32)
+            (f32x4.extract_lane 1
+              (f32x4.relaxed_min (v128.const f32x4 1 2 3 4)
+                                 (v128.const f32x4 3 -1 5 0))))
+          (func (param i32) (result f32)
+            (f32x4.extract_lane 0
+              (f32x4.relaxed_max (v128.const f32x4 1 2 3 4)
+                                 (v128.const f32x4 3 -1 5 0))))
+          (func (param i32) (result f64)
+            (f64x2.extract_lane 0
+              (f64x2.relaxed_min (v128.const f64x2 2.5 -8.0)
+                                 (v128.const f64x2 -4.0 1.0))))
+          (func (param i32) (result f64)
+            (f64x2.extract_lane 1
+              (f64x2.relaxed_max (v128.const f64x2 2.5 -8.0)
+                                 (v128.const f64x2 -4.0 1.0))))
+          (func (param i32) (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.relaxed_q15mulr_s
+                (v128.const i16x8 0x4000 0 0 0 0 0 0 0)
+                (v128.const i16x8 0x4000 0 0 0 0 0 0 0)))))
+        "#,
+        "assert_eq!(func0(0), -1.0);\n    \
+         assert_eq!(func1(0), 3.0);\n    \
+         assert_eq!(func2(0), -4.0);\n    \
+         assert_eq!(func3(0), 1.0);\n    \
+         assert_eq!(func4(0), 0x2000);",
+    );
+}

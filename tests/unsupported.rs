@@ -137,15 +137,16 @@ fn multi_value_import_result_is_rejected() {
 
 #[test]
 fn unsupported_operator_is_rejected_with_the_operator_named() {
-    // A not-yet-implemented SIMD instruction (relaxed SIMD is a later round) is
-    // rejected with the operator named, so the gap is diagnosable rather than a
-    // generic failure. (The v128 foundation plus lane arithmetic, conversions,
-    // reductions, byte permutes, and all memory/lane/widening loads are
+    // A not-yet-implemented SIMD instruction (the relaxed fused-multiply-add and
+    // dot-product ops are a later round) is rejected with the operator named, so
+    // the gap is diagnosable rather than a generic failure. (The v128 foundation
+    // plus lane arithmetic, conversions, reductions, byte permutes, all
+    // memory/lane/widening loads, and the reuse-based relaxed ops are
     // implemented; see tests/simd.rs.)
     assert_unsupported(
-        r#"(module (func (param v128 v128) (result v128)
-            (i8x16.relaxed_swizzle (local.get 0) (local.get 1))))"#,
-        "I8x16RelaxedSwizzle",
+        r#"(module (func (param v128 v128 v128) (result v128)
+            (f32x4.relaxed_madd (local.get 0) (local.get 1) (local.get 2))))"#,
+        "F32x4RelaxedMadd",
     );
 }
 
