@@ -999,6 +999,24 @@ impl<'a> FuncGen<'a> {
             Operator::V128Load64Zero { memarg } => {
                 self.load(Helper::Load64Zero, ValType::V128, memarg)?
             }
+            Operator::V128Load8x8S { memarg } => {
+                self.load(Helper::Load8x8S, ValType::V128, memarg)?
+            }
+            Operator::V128Load8x8U { memarg } => {
+                self.load(Helper::Load8x8U, ValType::V128, memarg)?
+            }
+            Operator::V128Load16x4S { memarg } => {
+                self.load(Helper::Load16x4S, ValType::V128, memarg)?
+            }
+            Operator::V128Load16x4U { memarg } => {
+                self.load(Helper::Load16x4U, ValType::V128, memarg)?
+            }
+            Operator::V128Load32x2S { memarg } => {
+                self.load(Helper::Load32x2S, ValType::V128, memarg)?
+            }
+            Operator::V128Load32x2U { memarg } => {
+                self.load(Helper::Load32x2U, ValType::V128, memarg)?
+            }
             Operator::V128Load8Lane { memarg, lane } => {
                 self.load_lane(Helper::Load8Lane, memarg, lane)?
             }

@@ -137,15 +137,15 @@ fn multi_value_import_result_is_rejected() {
 
 #[test]
 fn unsupported_operator_is_rejected_with_the_operator_named() {
-    // A not-yet-implemented SIMD instruction (widening loads are a later round)
-    // is rejected with the operator named, so the gap is diagnosable rather than
-    // a generic failure. (The v128 foundation plus lane arithmetic, conversions,
-    // reductions, byte permutes, and memory/lane loads are implemented; see
-    // tests/simd.rs.)
+    // A not-yet-implemented SIMD instruction (relaxed SIMD is a later round) is
+    // rejected with the operator named, so the gap is diagnosable rather than a
+    // generic failure. (The v128 foundation plus lane arithmetic, conversions,
+    // reductions, byte permutes, and all memory/lane/widening loads are
+    // implemented; see tests/simd.rs.)
     assert_unsupported(
-        r#"(module (memory 1) (func (param i32) (result v128)
-            (v128.load8x8_s (local.get 0))))"#,
-        "V128Load8x8S",
+        r#"(module (func (param v128 v128) (result v128)
+            (i8x16.relaxed_swizzle (local.get 0) (local.get 1))))"#,
+        "I8x16RelaxedSwizzle",
     );
 }
 

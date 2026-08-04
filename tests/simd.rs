@@ -1231,3 +1231,57 @@ fn lane_store_lane() {
          assert_eq!(inst.func3(), 0x1122334455667788i64);",
     );
 }
+
+#[test]
+fn lane_widening_load() {
+    // load{8x8,16x4,32x2}_{s,u} read eight bytes and extend each source lane to a
+    // double-width lane: `_s` sign-extends, `_u` zero-extends. The `_s`/`_u`
+    // split and the per-lane stride are the two things worth pinning down.
+    expect_ok(
+        "widening_load",
+        r#"
+        (module
+          (memory 1)
+          (func (result i32)
+            (v128.store (i32.const 0)
+              (v128.const i8x16 0xFF 0x02 0 0 0 0 0 0 0 0 0 0 0 0 0 0))
+            (i16x8.extract_lane_u 0 (v128.load8x8_s (i32.const 0))))
+          (func (result i32)
+            (v128.store (i32.const 0)
+              (v128.const i8x16 0xFF 0x02 0 0 0 0 0 0 0 0 0 0 0 0 0 0))
+            (i16x8.extract_lane_u 0 (v128.load8x8_u (i32.const 0))))
+          (func (result i32)
+            (v128.store (i32.const 0)
+              (v128.const i8x16 0xFF 0x02 0 0 0 0 0 0 0 0 0 0 0 0 0 0))
+            (i16x8.extract_lane_u 1 (v128.load8x8_s (i32.const 0))))
+          (func (result i32)
+            (v128.store (i32.const 0) (v128.const i16x8 0xFFFF 0x1234 0 0 0 0 0 0))
+            (i32x4.extract_lane 0 (v128.load16x4_s (i32.const 0))))
+          (func (result i32)
+            (v128.store (i32.const 0) (v128.const i16x8 0xFFFF 0x1234 0 0 0 0 0 0))
+            (i32x4.extract_lane 0 (v128.load16x4_u (i32.const 0))))
+          (func (result i32)
+            (v128.store (i32.const 0) (v128.const i16x8 0xFFFF 0x1234 0 0 0 0 0 0))
+            (i32x4.extract_lane 1 (v128.load16x4_u (i32.const 0))))
+          (func (result i64)
+            (v128.store (i32.const 0) (v128.const i32x4 0xFFFFFFFF 0x12345678 0 0))
+            (i64x2.extract_lane 0 (v128.load32x2_s (i32.const 0))))
+          (func (result i64)
+            (v128.store (i32.const 0) (v128.const i32x4 0xFFFFFFFF 0x12345678 0 0))
+            (i64x2.extract_lane 0 (v128.load32x2_u (i32.const 0))))
+          (func (result i64)
+            (v128.store (i32.const 0) (v128.const i32x4 0xFFFFFFFF 0x12345678 0 0))
+            (i64x2.extract_lane 1 (v128.load32x2_s (i32.const 0)))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(), 0xFFFF);\n    \
+         assert_eq!(inst.func1(), 0x00FF);\n    \
+         assert_eq!(inst.func2(), 0x0002);\n    \
+         assert_eq!(inst.func3(), -1);\n    \
+         assert_eq!(inst.func4(), 0xFFFF);\n    \
+         assert_eq!(inst.func5(), 0x1234);\n    \
+         assert_eq!(inst.func6(), -1i64);\n    \
+         assert_eq!(inst.func7() as u64, 0xFFFFFFFF);\n    \
+         assert_eq!(inst.func8(), 0x12345678i64);",
+    );
+}
