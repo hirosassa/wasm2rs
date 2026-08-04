@@ -1071,17 +1071,25 @@ fn hoist_decl(line: &str) -> Option<(String, String)> {
     let binding = lhs[..colon].trim_end();
     let ty = lhs[colon + 1..].trim();
     let default = type_default(ty);
-    let decl = if let Some(names) = binding.strip_prefix('(').and_then(|b| b.strip_suffix(')')) {
-        // A tuple binding needs `mut` on each name: `let (mut a, mut b): …`.
-        let muts: Vec<String> = names
-            .split(',')
-            .map(|n| format!("mut {}", n.trim()))
-            .collect();
-        format!("let ({}): {ty} = {default};", muts.join(", "))
-    } else {
-        format!("let mut {binding}: {ty} = {default};")
-    };
-    let assign = format!("{binding} = {init}");
+    let (decl, assign) =
+        if let Some(names) = binding.strip_prefix('(').and_then(|b| b.strip_suffix(')')) {
+            // A tuple binding. The hoisted declaration needs `mut` on every name
+            // (each is reassigned by the arm), while the assignment's LHS pattern
+            // must carry none. The source binding may already spell `mut` on some
+            // names (batched locals do), so strip it before re-forming each side.
+            let bare: Vec<&str> = names
+                .split(',')
+                .map(|n| n.trim().strip_prefix("mut ").unwrap_or(n.trim()))
+                .collect();
+            let muts: Vec<String> = bare.iter().map(|n| format!("mut {n}")).collect();
+            let decl = format!("let ({}): {ty} = {default};", muts.join(", "));
+            let assign = format!("({}) = {init}", bare.join(", "));
+            (decl, assign)
+        } else {
+            let decl = format!("let mut {binding}: {ty} = {default};");
+            let assign = format!("{binding} = {init}");
+            (decl, assign)
+        };
     Some((decl, assign))
 }
 

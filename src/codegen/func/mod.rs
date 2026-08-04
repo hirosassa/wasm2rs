@@ -162,17 +162,46 @@ impl<'a> FuncGen<'a> {
 
         let mut cur = Vec::new();
         // Declared locals default to zero; parameters arrive already bound.
-        for (i, ty) in local_types.iter().enumerate().skip(params.len()) {
-            let keyword = if mutable_locals.contains(&index_u32(i)?) {
-                "let mut"
+        // Consecutive locals of the same Rust type collapse into one tuple
+        // binding (`let (mut l1, l2): (i32, i32) = (0, 0);`) so a function with
+        // many locals emits a handful of lines rather than one per local; a
+        // single local of a type stays a plain scalar binding. `mut` is applied
+        // per-local, only to the ones actually mutated.
+        let mut i = params.len();
+        while i < local_types.len() {
+            let ty = local_types[i];
+            let mut run_end = i + 1;
+            while run_end < local_types.len() && local_types[run_end] == ty {
+                run_end += 1;
+            }
+            let rty = rust_type(ty)?;
+            let default = default_value(ty);
+            if run_end - i == 1 {
+                let keyword = if mutable_locals.contains(&index_u32(i)?) {
+                    "let mut"
+                } else {
+                    "let"
+                };
+                cur.push(Node::Line(format!("{keyword} l{i}: {rty} = {default};")));
             } else {
-                "let"
-            };
-            cur.push(Node::Line(format!(
-                "{keyword} l{i}: {} = {};",
-                rust_type(*ty)?,
-                default_value(*ty)
-            )));
+                let mut names = Vec::with_capacity(run_end - i);
+                for j in i..run_end {
+                    let mutp = if mutable_locals.contains(&index_u32(j)?) {
+                        "mut "
+                    } else {
+                        ""
+                    };
+                    names.push(format!("{mutp}l{j}"));
+                }
+                let count = run_end - i;
+                let tys = vec![rty; count].join(", ");
+                let defaults = vec![default; count].join(", ");
+                cur.push(Node::Line(format!(
+                    "let ({}): ({tys}) = ({defaults});",
+                    names.join(", ")
+                )));
+            }
+            i = run_end;
         }
 
         Ok(Self {
