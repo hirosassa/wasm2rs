@@ -109,6 +109,19 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(format!("{name}({})", a.code), ValType::V128, a.stable)
     }
 
+    /// A lane shift `name(a: u128, s: i32) -> u128` (see `simd_rt.rs`): pop the
+    /// i32 shift count then the v128 operand.
+    pub(super) fn call_simd_shift(&mut self, name: &'static str) -> Result<(), TranspileError> {
+        let s = self.pop()?;
+        let v = self.pop()?;
+        self.used_simd.insert(name);
+        self.push_combined(
+            format!("{name}({}, {})", v.code, s.code),
+            ValType::V128,
+            v.stable && s.stable,
+        )
+    }
+
     /// A whole-register bitwise op against a constant `mask`, used for float
     /// `neg` (`^` the lane sign bits) and `abs` (`&` the magnitude bits). These
     /// are exact sign-bit rewrites, so unlike the arithmetic lane helpers they

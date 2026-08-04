@@ -386,6 +386,100 @@ fn float_lane_rounding() {
 }
 
 #[test]
+fn lane_compare_integer() {
+    // Lane comparisons yield an all-ones mask (read back as -1 via a signed
+    // extract) where the predicate holds, else zero. lt_s and lt_u differ on the
+    // sign bit: 0x80 is -128 signed but 128 unsigned.
+    expect_ok(
+        "lane_compare_int",
+        r#"
+        (module
+          (func (result i32)
+            (i32x4.extract_lane 0
+              (i32x4.eq (v128.const i32x4 1 2 3 4) (v128.const i32x4 1 0 3 0))))
+          (func (result i32)
+            (i32x4.extract_lane 1
+              (i32x4.eq (v128.const i32x4 1 2 3 4) (v128.const i32x4 1 0 3 0))))
+          (func (result i32)
+            (i8x16.extract_lane_s 0
+              (i8x16.lt_s (i8x16.splat (i32.const 0x80)) (i8x16.splat (i32.const 1)))))
+          (func (result i32)
+            (i8x16.extract_lane_s 0
+              (i8x16.lt_u (i8x16.splat (i32.const 0x80)) (i8x16.splat (i32.const 1)))))
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.ge_s (v128.const i16x8 5 0 0 0 0 0 0 0)
+                          (v128.const i16x8 5 0 0 0 0 0 0 0)))))
+        "#,
+        "assert_eq!(func0(), -1);\n    \
+         assert_eq!(func1(), 0);\n    \
+         assert_eq!(func2(), -1);\n    \
+         assert_eq!(func3(), 0);\n    \
+         assert_eq!(func4(), -1);",
+    );
+}
+
+#[test]
+fn lane_compare_float() {
+    // Float lane comparisons; NaN makes eq false and ne true. The 32-/64-bit
+    // masks are read with i32x4/i64x2 extract_lane.
+    expect_ok(
+        "lane_compare_float",
+        r#"
+        (module
+          (func (result i32)
+            (i32x4.extract_lane 0
+              (f32x4.lt (v128.const f32x4 1 2 3 4) (v128.const f32x4 2 2 2 2))))
+          (func (result i32)
+            (i32x4.extract_lane 1
+              (f32x4.lt (v128.const f32x4 1 2 3 4) (v128.const f32x4 2 2 2 2))))
+          (func (result i32)
+            (i32x4.extract_lane 0
+              (f32x4.eq (v128.const f32x4 nan 0 0 0) (v128.const f32x4 nan 0 0 0))))
+          (func (result i32)
+            (i32x4.extract_lane 0
+              (f32x4.ne (v128.const f32x4 nan 0 0 0) (v128.const f32x4 nan 0 0 0))))
+          (func (result i64)
+            (i64x2.extract_lane 0
+              (f64x2.ge (v128.const f64x2 5 1) (v128.const f64x2 5 2)))))
+        "#,
+        "assert_eq!(func0(), -1);\n    \
+         assert_eq!(func1(), 0);\n    \
+         assert_eq!(func2(), 0);\n    \
+         assert_eq!(func3(), -1);\n    \
+         assert_eq!(func4(), -1i64);",
+    );
+}
+
+#[test]
+fn lane_shift() {
+    // Lane shifts take an i32 count modulo the lane width. shr_s is arithmetic
+    // (sign-extending), shr_u logical.
+    expect_ok(
+        "lane_shift",
+        r#"
+        (module
+          (func (result i32)
+            (i32x4.extract_lane 0 (i32x4.shl (v128.const i32x4 1 0 0 0) (i32.const 4))))
+          (func (result i32)
+            (i8x16.extract_lane_s 0 (i8x16.shr_s (i8x16.splat (i32.const 0x80)) (i32.const 1))))
+          (func (result i32)
+            (i8x16.extract_lane_u 0 (i8x16.shr_u (i8x16.splat (i32.const 0x80)) (i32.const 1))))
+          (func (result i64)
+            (i64x2.extract_lane 0 (i64x2.shl (v128.const i64x2 1 0) (i32.const 40))))
+          (func (result i32)
+            (i32x4.extract_lane 0 (i32x4.shl (v128.const i32x4 1 0 0 0) (i32.const 36)))))
+        "#,
+        // 1<<4 = 16; -128>>1 = -64; 128>>1 = 64; 1<<40; 36 mod 32 = 4 so 1<<4 = 16.
+        "assert_eq!(func0(), 16);\n    \
+         assert_eq!(func1(), -64);\n    \
+         assert_eq!(func2(), 64);\n    \
+         assert_eq!(func3(), 1i64 << 40);\n    \
+         assert_eq!(func4(), 16);",
+    );
+}
+
+#[test]
 fn v128_bitselect_and_any_true() {
     expect_ok(
         "bitselect_anytrue",
