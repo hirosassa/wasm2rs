@@ -110,6 +110,11 @@ const LANE: &[Lane] = &[
     lane("i8x16_sub_sat_u", "u8", 1, Shape::Binary, Combine::Method("saturating_sub")),
     lane("i16x8_sub_sat_s", "i16", 2, Shape::Binary, Combine::Method("saturating_sub")),
     lane("i16x8_sub_sat_u", "u16", 2, Shape::Binary, Combine::Method("saturating_sub")),
+    // Q15 fixed-point rounding multiply: (a*b + 0x4000) >> 15, saturated to i16.
+    // The product needs an i32 intermediate, so the lane read stays i16.
+    lane("i16x8_q15mulr_sat_s", "i16", 2, Shape::Binary, Combine::Expr(
+        "(((x as i32) * (y as i32) + 0x4000) >> 15).clamp(i16::MIN as i32, i16::MAX as i32) as i16",
+    )),
     // Float arithmetic.
     lane("f32x4_add", "f32", 4, Shape::Binary, Combine::Infix("+")),
     lane("f64x2_add", "f64", 8, Shape::Binary, Combine::Infix("+")),
@@ -227,6 +232,14 @@ enum WideKind {
         min: &'static str,
         max: &'static str,
     },
+    /// `extmul_low`/`extmul_high`: widen the low or high half (`off`) of both
+    /// vectors' lanes and multiply pairwise. The product fits the wider lane.
+    ExtMul { off: u32 },
+    /// `extadd_pairwise`: widen and sum each adjacent lane pair of one vector.
+    ExtAddPairwise,
+    /// `dot`: per output lane, sum the two adjacent widened products of both
+    /// vectors, wrapping on the (rare) overflow as wasm's two's-complement add.
+    Dot,
 }
 
 const fn wide(
@@ -267,6 +280,23 @@ const WIDE: &[Wide] = &[
     wide("i8x16_narrow_i16x8_u", "i16", "u8",  2, 1, WideKind::Narrow { min: "0",               max: "u8::MAX as i16" }),
     wide("i16x8_narrow_i32x4_s", "i32", "i16", 4, 2, WideKind::Narrow { min: "i16::MIN as i32", max: "i16::MAX as i32" }),
     wide("i16x8_narrow_i32x4_u", "i32", "u16", 4, 2, WideKind::Narrow { min: "0",               max: "u16::MAX as i32" }),
+    wide("i16x8_extmul_low_i8x16_s",  "i8",  "i16", 1, 2, WideKind::ExtMul { off: 0 }),
+    wide("i16x8_extmul_high_i8x16_s", "i8",  "i16", 1, 2, WideKind::ExtMul { off: 8 }),
+    wide("i16x8_extmul_low_i8x16_u",  "u8",  "u16", 1, 2, WideKind::ExtMul { off: 0 }),
+    wide("i16x8_extmul_high_i8x16_u", "u8",  "u16", 1, 2, WideKind::ExtMul { off: 8 }),
+    wide("i32x4_extmul_low_i16x8_s",  "i16", "i32", 2, 4, WideKind::ExtMul { off: 0 }),
+    wide("i32x4_extmul_high_i16x8_s", "i16", "i32", 2, 4, WideKind::ExtMul { off: 8 }),
+    wide("i32x4_extmul_low_i16x8_u",  "u16", "u32", 2, 4, WideKind::ExtMul { off: 0 }),
+    wide("i32x4_extmul_high_i16x8_u", "u16", "u32", 2, 4, WideKind::ExtMul { off: 8 }),
+    wide("i64x2_extmul_low_i32x4_s",  "i32", "i64", 4, 8, WideKind::ExtMul { off: 0 }),
+    wide("i64x2_extmul_high_i32x4_s", "i32", "i64", 4, 8, WideKind::ExtMul { off: 8 }),
+    wide("i64x2_extmul_low_i32x4_u",  "u32", "u64", 4, 8, WideKind::ExtMul { off: 0 }),
+    wide("i64x2_extmul_high_i32x4_u", "u32", "u64", 4, 8, WideKind::ExtMul { off: 8 }),
+    wide("i16x8_extadd_pairwise_i8x16_s", "i8",  "i16", 1, 2, WideKind::ExtAddPairwise),
+    wide("i16x8_extadd_pairwise_i8x16_u", "u8",  "u16", 1, 2, WideKind::ExtAddPairwise),
+    wide("i32x4_extadd_pairwise_i16x8_s", "i16", "i32", 2, 4, WideKind::ExtAddPairwise),
+    wide("i32x4_extadd_pairwise_i16x8_u", "u16", "u32", 2, 4, WideKind::ExtAddPairwise),
+    wide("i32x4_dot_i16x8_s", "i16", "i32", 2, 4, WideKind::Dot),
 ];
 
 /// Render the used lane helpers as module-scope free functions, in [`LANE`] then
@@ -371,11 +401,15 @@ fn lane_lines(lane: &Lane) -> Vec<String> {
     lines
 }
 
-/// The source lines of one width-changing helper. `Extend` walks its output in
-/// `out_bytes` steps from source offset `off`, casting each source lane to the
-/// wider `out_elem`. `Narrow` walks both inputs in `in_bytes` steps, saturating
-/// each lane into `[min, max]` before casting down, writing the first vector's
-/// results to the low 8 bytes and the second's to the high 8.
+/// The source lines of one width-changing helper. All but `Narrow` are output
+/// driven (iterate output lanes, widen source lane(s), write). `Extend` casts
+/// each source lane at offset `off` up to `out_elem`. `ExtMul` reads a matching
+/// lane from both vectors at `off` and multiplies them widened. `ExtAddPairwise`
+/// widens and sums each adjacent lane pair of one vector. `Dot` sums the two
+/// adjacent widened products of both vectors, wrapping on overflow. `Narrow` is
+/// input driven: it walks both inputs in `in_bytes` steps, saturating each lane
+/// into `[min, max]` before casting down, writing the first vector's results to
+/// the low 8 bytes and the second's to the high 8.
 fn wide_lines(w: &Wide) -> Vec<String> {
     let &Wide {
         name,
@@ -385,6 +419,9 @@ fn wide_lines(w: &Wide) -> Vec<String> {
         out_bytes,
         ..
     } = w;
+    // The pairwise kinds (`ExtAddPairwise`, `Dot`) advance two source lanes per
+    // output lane.
+    let two = 2 * in_bytes;
     match w.kind {
         WideKind::Extend { off } => vec![
             format!("fn {name}(a: u128) -> u128 {{"),
@@ -429,6 +466,88 @@ fn wide_lines(w: &Wide) -> Vec<String> {
             ),
             format!("        o += {out_bytes};"),
             format!("        s += {in_bytes};"),
+            "    }".to_string(),
+            "    u128::from_le_bytes(r)".to_string(),
+            "}".to_string(),
+        ],
+        WideKind::ExtMul { off } => vec![
+            format!("fn {name}(a: u128, b: u128) -> u128 {{"),
+            "    let a = a.to_le_bytes();".to_string(),
+            "    let b = b.to_le_bytes();".to_string(),
+            "    let mut r = [0u8; 16];".to_string(),
+            "    let mut o = 0;".to_string(),
+            format!("    let mut s = {off};"),
+            "    while o < 16 {".to_string(),
+            format!(
+                "        let x = {in_elem}::from_le_bytes(a[s..s + {in_bytes}].try_into().unwrap());"
+            ),
+            format!(
+                "        let y = {in_elem}::from_le_bytes(b[s..s + {in_bytes}].try_into().unwrap());"
+            ),
+            format!(
+                "        r[o..o + {out_bytes}]\
+                 .copy_from_slice(&((x as {out_elem}) * (y as {out_elem})).to_le_bytes());"
+            ),
+            format!("        o += {out_bytes};"),
+            format!("        s += {in_bytes};"),
+            "    }".to_string(),
+            "    u128::from_le_bytes(r)".to_string(),
+            "}".to_string(),
+        ],
+        WideKind::ExtAddPairwise => vec![
+            format!("fn {name}(a: u128) -> u128 {{"),
+            "    let a = a.to_le_bytes();".to_string(),
+            "    let mut r = [0u8; 16];".to_string(),
+            "    let mut o = 0;".to_string(),
+            "    let mut s = 0;".to_string(),
+            "    while o < 16 {".to_string(),
+            format!(
+                "        let x = {in_elem}::from_le_bytes(a[s..s + {in_bytes}].try_into().unwrap());"
+            ),
+            format!(
+                "        let y = {in_elem}\
+                 ::from_le_bytes(a[s + {in_bytes}..s + {two}].try_into().unwrap());"
+            ),
+            format!(
+                "        r[o..o + {out_bytes}]\
+                 .copy_from_slice(&((x as {out_elem}) + (y as {out_elem})).to_le_bytes());"
+            ),
+            format!("        o += {out_bytes};"),
+            format!("        s += {two};"),
+            "    }".to_string(),
+            "    u128::from_le_bytes(r)".to_string(),
+            "}".to_string(),
+        ],
+        WideKind::Dot => vec![
+            format!("fn {name}(a: u128, b: u128) -> u128 {{"),
+            "    let a = a.to_le_bytes();".to_string(),
+            "    let b = b.to_le_bytes();".to_string(),
+            "    let mut r = [0u8; 16];".to_string(),
+            "    let mut o = 0;".to_string(),
+            "    let mut s = 0;".to_string(),
+            "    while o < 16 {".to_string(),
+            format!(
+                "        let a0 = {in_elem}\
+                 ::from_le_bytes(a[s..s + {in_bytes}].try_into().unwrap()) as {out_elem};"
+            ),
+            format!(
+                "        let b0 = {in_elem}\
+                 ::from_le_bytes(b[s..s + {in_bytes}].try_into().unwrap()) as {out_elem};"
+            ),
+            format!(
+                "        let a1 = {in_elem}\
+                 ::from_le_bytes(a[s + {in_bytes}..s + {two}].try_into().unwrap()) as {out_elem};"
+            ),
+            format!(
+                "        let b1 = {in_elem}\
+                 ::from_le_bytes(b[s + {in_bytes}..s + {two}].try_into().unwrap()) as {out_elem};"
+            ),
+            format!(
+                "        r[o..o + {out_bytes}]\
+                 .copy_from_slice(&(a0 * b0).wrapping_add(a1 * b1).to_le_bytes());"
+            ),
+            format!("        o += {out_bytes};"),
+            format!("        s += {two};"),
             "    }".to_string(),
             "    u128::from_le_bytes(r)".to_string(),
             "}".to_string(),

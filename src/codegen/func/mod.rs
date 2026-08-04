@@ -909,6 +909,35 @@ impl<'a> FuncGen<'a> {
             Operator::I8x16NarrowI16x8U => self.call_simd_binop("i8x16_narrow_i16x8_u")?,
             Operator::I16x8NarrowI32x4S => self.call_simd_binop("i16x8_narrow_i32x4_s")?,
             Operator::I16x8NarrowI32x4U => self.call_simd_binop("i16x8_narrow_i32x4_u")?,
+            // Widening pairwise multiply of the low/high half of both vectors.
+            Operator::I16x8ExtMulLowI8x16S => self.call_simd_binop("i16x8_extmul_low_i8x16_s")?,
+            Operator::I16x8ExtMulHighI8x16S => self.call_simd_binop("i16x8_extmul_high_i8x16_s")?,
+            Operator::I16x8ExtMulLowI8x16U => self.call_simd_binop("i16x8_extmul_low_i8x16_u")?,
+            Operator::I16x8ExtMulHighI8x16U => self.call_simd_binop("i16x8_extmul_high_i8x16_u")?,
+            Operator::I32x4ExtMulLowI16x8S => self.call_simd_binop("i32x4_extmul_low_i16x8_s")?,
+            Operator::I32x4ExtMulHighI16x8S => self.call_simd_binop("i32x4_extmul_high_i16x8_s")?,
+            Operator::I32x4ExtMulLowI16x8U => self.call_simd_binop("i32x4_extmul_low_i16x8_u")?,
+            Operator::I32x4ExtMulHighI16x8U => self.call_simd_binop("i32x4_extmul_high_i16x8_u")?,
+            Operator::I64x2ExtMulLowI32x4S => self.call_simd_binop("i64x2_extmul_low_i32x4_s")?,
+            Operator::I64x2ExtMulHighI32x4S => self.call_simd_binop("i64x2_extmul_high_i32x4_s")?,
+            Operator::I64x2ExtMulLowI32x4U => self.call_simd_binop("i64x2_extmul_low_i32x4_u")?,
+            Operator::I64x2ExtMulHighI32x4U => self.call_simd_binop("i64x2_extmul_high_i32x4_u")?,
+            // Widening add of each adjacent lane pair of one vector.
+            Operator::I16x8ExtAddPairwiseI8x16S => {
+                self.call_simd_unop("i16x8_extadd_pairwise_i8x16_s")?
+            }
+            Operator::I16x8ExtAddPairwiseI8x16U => {
+                self.call_simd_unop("i16x8_extadd_pairwise_i8x16_u")?
+            }
+            Operator::I32x4ExtAddPairwiseI16x8S => {
+                self.call_simd_unop("i32x4_extadd_pairwise_i16x8_s")?
+            }
+            Operator::I32x4ExtAddPairwiseI16x8U => {
+                self.call_simd_unop("i32x4_extadd_pairwise_i16x8_u")?
+            }
+            // Widening dot product (i16 pairs to i32) and Q15 rounding multiply.
+            Operator::I32x4DotI16x8S => self.call_simd_binop("i32x4_dot_i16x8_s")?,
+            Operator::I16x8Q15MulrSatS => self.call_simd_binop("i16x8_q15mulr_sat_s")?,
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
             }

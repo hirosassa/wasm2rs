@@ -604,6 +604,125 @@ fn lane_narrow() {
 }
 
 #[test]
+fn lane_extmul() {
+    // extmul_low/high widen the low or high half of both vectors' lanes and
+    // multiply them pairwise; the product always fits the double-width lane.
+    expect_ok(
+        "lane_extmul",
+        r#"
+        (module
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.extmul_low_i8x16_s
+                (v128.const i8x16 100 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)
+                (v128.const i8x16 100 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16))))
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.extmul_high_i8x16_s
+                (v128.const i8x16 0 0 0 0 0 0 0 0 7 0 0 0 0 0 0 0)
+                (v128.const i8x16 0 0 0 0 0 0 0 0 3 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i16x8.extract_lane_u 0
+              (i16x8.extmul_low_i8x16_u (i8x16.splat (i32.const 200)) (i8x16.splat (i32.const 200)))))
+          (func (result i32)
+            (i32x4.extract_lane 0
+              (i32x4.extmul_low_i16x8_s (v128.const i16x8 1000 0 0 0 0 0 0 0)
+                                        (v128.const i16x8 1000 0 0 0 0 0 0 0))))
+          (func (result i64)
+            (i64x2.extract_lane 0
+              (i64x2.extmul_low_i32x4_s (v128.const i32x4 100000 0 0 0)
+                                        (v128.const i32x4 100000 0 0 0)))))
+        "#,
+        // 100*100; high lane0=byte8: 7*3; 200*200 as u16; 1000*1000; 100000*100000.
+        "assert_eq!(func0(), 10000);\n    \
+         assert_eq!(func1(), 21);\n    \
+         assert_eq!(func2(), 40000);\n    \
+         assert_eq!(func3(), 1000000);\n    \
+         assert_eq!(func4(), 10_000_000_000i64);",
+    );
+}
+
+#[test]
+fn lane_q15mulr_sat() {
+    // q15mulr_sat_s: fixed-point Q15 multiply, (a*b + 0x4000) >> 15, saturated
+    // to the signed 16-bit range. Only -1.0 * -1.0 saturates.
+    expect_ok(
+        "lane_q15mulr_sat",
+        r#"
+        (module
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.q15mulr_sat_s (i16x8.splat (i32.const 0x4000)) (i16x8.splat (i32.const 0x4000)))))
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.q15mulr_sat_s (i16x8.splat (i32.const -32768)) (i16x8.splat (i32.const -32768))))))
+        "#,
+        // (0x4000*0x4000 + 0x4000) >> 15 = 8192; (-32768^2 + 0x4000) >> 15 = 32768 -> 32767.
+        "assert_eq!(func0(), 8192);\n    \
+         assert_eq!(func1(), 32767);",
+    );
+}
+
+#[test]
+fn lane_extadd_pairwise() {
+    // extadd_pairwise widens and sums each adjacent lane pair of one vector.
+    expect_ok(
+        "lane_extadd_pairwise",
+        r#"
+        (module
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.extadd_pairwise_i8x16_s
+                (v128.const i8x16 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16))))
+          (func (result i32)
+            (i16x8.extract_lane_s 1
+              (i16x8.extadd_pairwise_i8x16_s
+                (v128.const i8x16 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16))))
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.extadd_pairwise_i8x16_s
+                (v128.const i8x16 -1 -2 0 0 0 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i32x4.extract_lane 0
+              (i32x4.extadd_pairwise_i16x8_u (v128.const i16x8 100 200 0 0 0 0 0 0)))))
+        "#,
+        // 1+2; 3+4; -1+-2; 100+200.
+        "assert_eq!(func0(), 3);\n    \
+         assert_eq!(func1(), 7);\n    \
+         assert_eq!(func2(), -3);\n    \
+         assert_eq!(func3(), 300);",
+    );
+}
+
+#[test]
+fn lane_dot() {
+    // i32x4.dot_i16x8_s: per output lane, sum the two adjacent i16 products with
+    // two's-complement (wrapping) addition of the exact i32 products.
+    expect_ok(
+        "lane_dot",
+        r#"
+        (module
+          (func (result i32)
+            (i32x4.extract_lane 0
+              (i32x4.dot_i16x8_s (v128.const i16x8 1 2 3 4 5 6 7 8)
+                                 (v128.const i16x8 5 6 7 8 1 2 3 4))))
+          (func (result i32)
+            (i32x4.extract_lane 1
+              (i32x4.dot_i16x8_s (v128.const i16x8 1 2 3 4 5 6 7 8)
+                                 (v128.const i16x8 5 6 7 8 1 2 3 4))))
+          (func (result i32)
+            (i32x4.extract_lane 0
+              (i32x4.dot_i16x8_s (v128.const i16x8 -32768 -32768 0 0 0 0 0 0)
+                                 (v128.const i16x8 -32768 -32768 0 0 0 0 0 0)))))
+        "#,
+        // 1*5+2*6=17; 3*7+4*8=53; 2^30+2^30=2^31 wraps to i32::MIN.
+        "assert_eq!(func0(), 17);\n    \
+         assert_eq!(func1(), 53);\n    \
+         assert_eq!(func2(), i32::MIN);",
+    );
+}
+
+#[test]
 fn v128_bitselect_and_any_true() {
     expect_ok(
         "bitselect_anytrue",
