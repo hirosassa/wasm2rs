@@ -183,6 +183,53 @@ fn v128_bitwise_ops() {
 }
 
 #[test]
+fn integer_lane_add_sub_mul() {
+    // Lane-wise wrapping arithmetic. Build vectors with splat/replace, operate,
+    // read a lane back. i8x16 lanes wrap at 8 bits.
+    expect_ok(
+        "int_lane_arith",
+        r#"
+        (module
+          (func (result i32)
+            (i8x16.extract_lane_s 0
+              (i8x16.add (i8x16.splat (i32.const 100)) (i8x16.splat (i32.const 100)))))
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.sub (v128.const i16x8 5 0 0 0 0 0 0 0)
+                         (v128.const i16x8 8 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i32x4.extract_lane 2
+              (i32x4.mul (v128.const i32x4 0 0 7 0) (v128.const i32x4 0 0 6 0))))
+          (func (result i64)
+            (i64x2.extract_lane 1
+              (i64x2.add (v128.const i64x2 0 1000000000000)
+                         (v128.const i64x2 0 337203685477)))))
+        "#,
+        // 100+100 = 200 as i8 wraps to -56; 5-8 = -3; 7*6 = 42;
+        // 1_000_000_000_000 + 337_203_685_477 = 1_337_203_685_477 (i64 lane).
+        "assert_eq!(func0(), -56);\n    \
+         assert_eq!(func1(), -3);\n    \
+         assert_eq!(func2(), 42);\n    \
+         assert_eq!(func3(), 1337203685477i64);",
+    );
+}
+
+#[test]
+fn integer_lane_neg() {
+    expect_ok(
+        "int_lane_neg",
+        r#"
+        (module
+          (func (result i32)
+            (i32x4.extract_lane 1 (i32x4.neg (v128.const i32x4 10 20 30 40))))
+          (func (result i32)
+            (i8x16.extract_lane_s 0 (i8x16.neg (i8x16.splat (i32.const 1))))))
+        "#,
+        "assert_eq!(func0(), -20);\n    assert_eq!(func1(), -1);",
+    );
+}
+
+#[test]
 fn v128_bitselect_and_any_true() {
     expect_ok(
         "bitselect_anytrue",

@@ -312,6 +312,7 @@ impl<'a> super::FuncGen<'a> {
         Ok(GenMeta {
             helpers: self.used_helpers,
             rt: self.used_rt,
+            simd: self.used_simd,
             dispatch_sigs: self.dispatch_sigs,
             uses_eh: self.uses_eh,
         })

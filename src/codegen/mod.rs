@@ -32,12 +32,14 @@ mod helpers;
 mod info;
 mod render;
 mod runtime;
+mod simd_rt;
 mod wasi;
 
 use self::func::FuncGen;
 use self::helpers::helper_name;
 use self::render::{chunk_prelude, render_lib_root, render_module};
 use self::runtime::{render_rt_helpers, rt_name};
+use self::simd_rt::render_simd_helpers;
 
 pub(crate) use self::const_expr::{const_expr_to_rust, const_expr_u32};
 pub(crate) use self::info::{
@@ -119,6 +121,8 @@ struct GenMeta {
     helpers: HashSet<Helper>,
     /// Module-scope free-function runtime helpers.
     rt: HashSet<Rt>,
+    /// Module-scope lane-wise SIMD helpers, tracked by function name.
+    simd: HashSet<&'static str>,
     /// `call_indirect` type indices needing a `call_ref_t{ti}` dispatch method.
     dispatch_sigs: HashSet<u32>,
     /// Whether the function uses legacy exception handling, so the module needs
@@ -1233,6 +1237,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     let mut sources = Vec::with_capacity(parts.funcs.len());
     let mut used: HashSet<Helper> = HashSet::new();
     let mut used_rt: HashSet<Rt> = HashSet::new();
+    let mut used_simd: HashSet<&'static str> = HashSet::new();
     let mut dispatch_sigs: HashSet<u32> = HashSet::new();
     let mut uses_eh = false;
     for (index, f) in parts.funcs.iter().enumerate() {
@@ -1244,6 +1249,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         let meta = generate_function_into(parts.imports.len() + index, f, &ctx, "", &mut src)?;
         used.extend(meta.helpers);
         used_rt.extend(meta.rt);
+        used_simd.extend(meta.simd);
         dispatch_sigs.extend(meta.dispatch_sigs);
         uses_eh |= meta.uses_eh;
         sources.push(src);
@@ -1252,6 +1258,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     // Free-function runtime helpers live at module scope, above the functions
     // (or the `struct Instance`) that call them, in both module shapes.
     let rt_helpers = render_rt_helpers(&used_rt);
+    let simd_helpers = render_simd_helpers(&used_simd);
 
     let body = if !stateful {
         sources.join("\n")
@@ -1266,6 +1273,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         prelude.push('\n');
     }
     prelude.push_str(&rt_helpers);
+    prelude.push_str(&simd_helpers);
     Ok(if prelude.is_empty() {
         body
     } else {
@@ -1323,6 +1331,7 @@ pub(crate) fn generate_module_split(
     // otherwise self-contained, so it can be emitted and dropped immediately.
     let mut used: HashSet<Helper> = HashSet::new();
     let mut used_rt: HashSet<Rt> = HashSet::new();
+    let mut used_simd: HashSet<&'static str> = HashSet::new();
     let mut dispatch_sigs: HashSet<u32> = HashSet::new();
     let mut uses_eh = false;
 
@@ -1348,6 +1357,7 @@ pub(crate) fn generate_module_split(
         let meta = generate_function_into(base + index, f, &ctx, line_prefix, &mut chunk)?;
         used.extend(meta.helpers);
         used_rt.extend(meta.rt);
+        used_simd.extend(meta.simd);
         dispatch_sigs.extend(meta.dispatch_sigs);
         uses_eh |= meta.uses_eh;
         funcs_in_chunk += 1;
@@ -1379,15 +1389,13 @@ pub(crate) fn generate_module_split(
     let n_chunks = chunk_index;
 
     // The root is emitted last, once the used-helper/dispatch sets are complete.
-    let root = render_lib_root(
-        parts,
-        &ctx,
-        stateful,
-        &used,
-        &used_rt,
-        &dispatch_sigs,
-        n_chunks,
-    )?;
+    let deps = render::RootDeps {
+        helpers: &used,
+        rt: &used_rt,
+        simd: &used_simd,
+        dispatch_sigs: &dispatch_sigs,
+    };
+    let root = render_lib_root(parts, &ctx, stateful, &deps, n_chunks)?;
     // The exception type lives at the crate root so every chunk's `use super::*`
     // sees it, ahead of everything else in `lib.rs`.
     let root = if uses_eh {

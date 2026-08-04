@@ -122,6 +122,8 @@ pub(super) struct FuncGen<'a> {
     used_helpers: HashSet<Helper>,
     /// Free-function runtime helpers this function relies on.
     used_rt: HashSet<Rt>,
+    /// Lane-wise SIMD free-function helpers this function relies on, by name.
+    used_simd: HashSet<&'static str>,
     /// `call_indirect` type indices this function dispatches through; each needs
     /// a `call_ref_t{ti}` method on the instance.
     dispatch_sigs: HashSet<u32>,
@@ -189,6 +191,7 @@ impl<'a> FuncGen<'a> {
             trailing: None,
             used_helpers: HashSet::new(),
             used_rt: HashSet::new(),
+            used_simd: HashSet::new(),
             dispatch_sigs: HashSet::new(),
             uses_eh: false,
             try_barriers: Vec::new(),
@@ -757,6 +760,23 @@ impl<'a> FuncGen<'a> {
             Operator::V128AndNot => self.v128_andnot()?,
             Operator::V128Bitselect => self.v128_bitselect()?,
             Operator::V128AnyTrue => self.v128_any_true()?,
+            // Lane-wise integer arithmetic (wrapping), one helper per lane
+            // type; see `simd_rt.rs`. There is no `i8x16.mul` in the spec.
+            Operator::I8x16Add => self.call_simd_binop("i8x16_add")?,
+            Operator::I16x8Add => self.call_simd_binop("i16x8_add")?,
+            Operator::I32x4Add => self.call_simd_binop("i32x4_add")?,
+            Operator::I64x2Add => self.call_simd_binop("i64x2_add")?,
+            Operator::I8x16Sub => self.call_simd_binop("i8x16_sub")?,
+            Operator::I16x8Sub => self.call_simd_binop("i16x8_sub")?,
+            Operator::I32x4Sub => self.call_simd_binop("i32x4_sub")?,
+            Operator::I64x2Sub => self.call_simd_binop("i64x2_sub")?,
+            Operator::I16x8Mul => self.call_simd_binop("i16x8_mul")?,
+            Operator::I32x4Mul => self.call_simd_binop("i32x4_mul")?,
+            Operator::I64x2Mul => self.call_simd_binop("i64x2_mul")?,
+            Operator::I8x16Neg => self.call_simd_unop("i8x16_neg")?,
+            Operator::I16x8Neg => self.call_simd_unop("i16x8_neg")?,
+            Operator::I32x4Neg => self.call_simd_unop("i32x4_neg")?,
+            Operator::I64x2Neg => self.call_simd_unop("i64x2_neg")?,
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
             }

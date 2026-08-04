@@ -395,26 +395,45 @@ pub(super) fn chunk_prelude(parts: &ModuleParts<'_>, stateful: bool) -> String {
 /// its `new`, the shared helper/dispatch methods and the `Imports` trait — every
 /// part of [`render_module`] except the per-function bodies, which live in the
 /// chunk files.
+/// The module-wide helper dependencies aggregated across every function, needed
+/// only to render the crate root. Grouped so the root renderer takes one set
+/// reference instead of four separate arguments.
+pub(super) struct RootDeps<'a> {
+    pub(super) helpers: &'a HashSet<Helper>,
+    pub(super) rt: &'a HashSet<super::Rt>,
+    pub(super) simd: &'a HashSet<&'static str>,
+    pub(super) dispatch_sigs: &'a HashSet<u32>,
+}
+
 pub(super) fn render_lib_root(
     parts: &ModuleParts<'_>,
     ctx: &ModuleCtx<'_>,
     stateful: bool,
-    used: &HashSet<Helper>,
-    used_rt: &HashSet<super::Rt>,
-    dispatch_sigs: &HashSet<u32>,
+    deps: &RootDeps<'_>,
     n_chunks: usize,
 ) -> Result<String, TranspileError> {
     let mut out = String::new();
-    let rt_helpers = render_rt_helpers(used_rt);
+    let rt_helpers = render_rt_helpers(deps.rt);
     if !rt_helpers.is_empty() {
         out.push_str(&rt_helpers);
+        out.push('\n');
+    }
+    let simd_helpers = super::render_simd_helpers(deps.simd);
+    if !simd_helpers.is_empty() {
+        out.push_str(&simd_helpers);
         out.push('\n');
     }
 
     if stateful {
         // The header impl carries no function bodies; those are added by the
         // chunk files' own `impl Instance` blocks.
-        out.push_str(&render_module(parts, ctx, &[], used, dispatch_sigs)?);
+        out.push_str(&render_module(
+            parts,
+            ctx,
+            &[],
+            deps.helpers,
+            deps.dispatch_sigs,
+        )?);
         out.push('\n');
     }
 

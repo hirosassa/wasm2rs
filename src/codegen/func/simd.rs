@@ -89,6 +89,26 @@ impl<'a> super::FuncGen<'a> {
         )
     }
 
+    /// A binary lane-wise op `name(a, b) -> u128` (see `simd_rt.rs`): pop two
+    /// v128 operands and push the helper call. Pure, so stable when both are.
+    pub(super) fn call_simd_binop(&mut self, name: &'static str) -> Result<(), TranspileError> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        self.used_simd.insert(name);
+        self.push_combined(
+            format!("{name}({}, {})", a.code, b.code),
+            ValType::V128,
+            a.stable && b.stable,
+        )
+    }
+
+    /// A unary lane-wise op `name(a) -> u128` (see `simd_rt.rs`).
+    pub(super) fn call_simd_unop(&mut self, name: &'static str) -> Result<(), TranspileError> {
+        let a = self.pop()?;
+        self.used_simd.insert(name);
+        self.push_combined(format!("{name}({})", a.code), ValType::V128, a.stable)
+    }
+
     /// Push a `v128.const` literal from its 16 little-endian bytes.
     pub(super) fn v128_const(&mut self, bytes: &[u8; 16]) {
         self.push(Val {

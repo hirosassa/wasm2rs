@@ -137,14 +137,15 @@ fn multi_value_import_result_is_rejected() {
 
 #[test]
 fn unsupported_operator_is_rejected_with_the_operator_named() {
-    // A not-yet-implemented SIMD instruction (lane arithmetic is round 2) is
+    // A not-yet-implemented SIMD instruction (shuffle is a later round) is
     // rejected with the operator named, so the gap is diagnosable rather than a
-    // generic failure. (The v128 foundation — const/load/store/splat/extract/
-    // replace/bitwise — is implemented; see tests/simd.rs.)
+    // generic failure. (The v128 foundation plus lane arithmetic is implemented;
+    // see tests/simd.rs.)
     assert_unsupported(
         r#"(module (func (result v128)
-            (i32x4.add (v128.const i32x4 0 0 0 0) (v128.const i32x4 0 0 0 0))))"#,
-        "I32x4Add",
+            (i8x16.shuffle 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+              (v128.const i32x4 0 0 0 0) (v128.const i32x4 0 0 0 0))))"#,
+        "I8x16Shuffle",
     );
 }
 
