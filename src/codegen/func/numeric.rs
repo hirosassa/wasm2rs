@@ -1,6 +1,6 @@
 use wasmparser::ValType;
 
-use super::super::{Rt, Val, rt_name, rust_type, unsigned_type};
+use super::super::{Rt, Val, condition_code, rt_name, rust_type, unsigned_type};
 use crate::TranspileError;
 
 impl<'a> super::FuncGen<'a> {
@@ -255,8 +255,10 @@ impl<'a> super::FuncGen<'a> {
         // is later embedded in a larger expression (e.g. as an operator arm).
         self.push_combined(
             format!(
-                "(if {} != 0 {{ {} }} else {{ {} }})",
-                cond.code, a.code, b.code
+                "(if {} {{ {} }} else {{ {} }})",
+                condition_code(&cond.code),
+                a.code,
+                b.code
             ),
             a.ty,
             cond.stable && a.stable && b.stable,

@@ -4,8 +4,8 @@ use wasmparser::{BlockType, ValType};
 
 use super::super::{
     BrArm, BranchEscape, CatchArm, CatchKind, EXC_TYPE, Frame, FrameKind, Node, RegionNode,
-    TryRegionNode, TryState, Val, decode_exc_value, default_value, encode_exc_value, index_u32,
-    reachable_after, rust_type,
+    TryRegionNode, TryState, Val, condition_code, decode_exc_value, default_value,
+    encode_exc_value, index_u32, reachable_after, rust_type,
 };
 use crate::TranspileError;
 
@@ -80,7 +80,7 @@ impl<'a> super::FuncGen<'a> {
         // The condition is consumed before the surrounding stack is spilled, so
         // it is popped here rather than inside `push_frame`.
         let cond = self.pop()?;
-        self.push_frame(FrameKind::If, blockty, Some(format!("{} != 0", cond.code)))
+        self.push_frame(FrameKind::If, blockty, Some(condition_code(&cond.code)))
     }
 
     /// Spill the operand stack, allocate a label, and push a fresh frame that
@@ -319,7 +319,7 @@ impl<'a> super::FuncGen<'a> {
             }
             Some(cond) if vars.is_empty() => {
                 self.node(Node::BrIf {
-                    cond: cond.code,
+                    cond: condition_code(&cond.code),
                     label,
                     is_loop,
                     assigns: Vec::new(),
@@ -331,7 +331,7 @@ impl<'a> super::FuncGen<'a> {
                 self.spill_nonstable()?;
                 let assigns = self.carried_assigns(vars)?;
                 self.node(Node::BrIf {
-                    cond: cond.code,
+                    cond: condition_code(&cond.code),
                     label,
                     is_loop,
                     assigns,
@@ -368,7 +368,7 @@ impl<'a> super::FuncGen<'a> {
                 self.spill_nonstable()?;
                 let assigns = self.carried_assigns(vars)?;
                 let (code, out_var) = self.record_branch_escape(target_idx, is_loop, label)?;
-                self.line(format!("if {} != 0 {{", cond.code));
+                self.line(format!("if {} {{", condition_code(&cond.code)));
                 for (var, value) in assigns {
                     self.line(format!("{var} = {value};"));
                 }

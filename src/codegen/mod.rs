@@ -391,6 +391,39 @@ fn render_nodes_into(nodes: Vec<Node>, depth: usize, line_prefix: &str, out: &mu
     }
 }
 
+/// Render a wasm i32 condition value as a Rust `bool`. A comparison is emitted
+/// as `i32::from(<cmp>)`, so a branch condition's `i32::from(<cmp>) != 0`
+/// collapses to just `<cmp>`; any other value keeps an explicit `!= 0`.
+pub(crate) fn condition_code(code: &str) -> String {
+    match bool_inner(code) {
+        Some(inner) => inner.to_string(),
+        None => format!("{code} != 0"),
+    }
+}
+
+/// If `code` is exactly `i32::from(<balanced>)` — the shape a comparison emits —
+/// return the inner boolean expression; otherwise `None`. The balance check
+/// ensures the stripped parentheses are the outermost pair, so a compound like
+/// `(i32::from(a) & i32::from(b))` (which does not start with `i32::from(`) or a
+/// truncated match is never unwrapped.
+fn bool_inner(code: &str) -> Option<&str> {
+    let inner = code.strip_prefix("i32::from(")?.strip_suffix(')')?;
+    let mut depth: i32 = 0;
+    for b in inner.bytes() {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 { Some(inner) } else { None }
+}
+
 /// Render a `br_if` node as nested Rust, matching the byte layout the eager
 /// renderer produced: a one-line `if` when it carries no values, or a
 /// multi-line `if` whose body assigns the carried values (with the historic
@@ -408,12 +441,12 @@ fn render_br_if_nested(
     if assigns.is_empty() {
         push_body_line(
             out,
-            &format!("if {cond} != 0 {{ {keyword} 'l{label}; }}"),
+            &format!("if {cond} {{ {keyword} 'l{label}; }}"),
             depth,
             line_prefix,
         );
     } else {
-        push_body_line(out, &format!("if {cond} != 0 {{"), depth, line_prefix);
+        push_body_line(out, &format!("if {cond} {{"), depth, line_prefix);
         for (var, value) in assigns {
             push_body_line(out, &format!("    {var} = {value};"), depth, line_prefix);
         }
@@ -882,7 +915,7 @@ impl Flattener {
                         ..
                     } => {
                         let target = self.labels[&label];
-                        let mut line = format!("if {cond} != 0 {{ ");
+                        let mut line = format!("if {cond} {{ ");
                         for (var, value) in assigns {
                             line.push_str(&format!("{var} = {value}; "));
                         }
