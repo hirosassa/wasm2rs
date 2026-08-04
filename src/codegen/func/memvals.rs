@@ -139,11 +139,7 @@ impl<'a> super::FuncGen<'a> {
         // The result depends on memory contents, which a store can change, so
         // it is never stable.
         self.push_combined(
-            format!(
-                "self.{}(({}) as u32, {offset}u32)",
-                helper_name(helper),
-                addr.code
-            ),
+            format!("self.{}({}, {offset}u32)", helper_name(helper), addr.code),
             ty,
             false,
         )
@@ -160,7 +156,7 @@ impl<'a> super::FuncGen<'a> {
         let addr = self.pop()?;
         self.used_helpers.insert(helper);
         self.line(format!(
-            "self.{}(({}) as u32, {offset}u32, {});",
+            "self.{}({}, {offset}u32, {});",
             helper_name(helper),
             addr.code,
             value.code
@@ -185,7 +181,7 @@ impl<'a> super::FuncGen<'a> {
         // The result reads memory, which a store can change, so it is never stable.
         self.push_combined(
             format!(
-                "self.{}(({}) as u32, {offset}u32, {}, {lane})",
+                "self.{}({}, {offset}u32, {}, {lane})",
                 helper_name(helper),
                 addr.code,
                 value.code
@@ -213,7 +209,7 @@ impl<'a> super::FuncGen<'a> {
         let addr = self.pop()?;
         self.used_helpers.insert(helper);
         self.line(format!(
-            "self.{}(({}) as u32, {offset}u32, {}, {lane});",
+            "self.{}({}, {offset}u32, {}, {lane});",
             helper_name(helper),
             addr.code,
             value.code
@@ -242,7 +238,7 @@ impl<'a> super::FuncGen<'a> {
         self.used_helpers.insert(store);
         // `addr` feeds both the load and the store, so bind it once.
         let addr_tmp = self.fresh_temp();
-        self.line(format!("let {addr_tmp}: u32 = ({}) as u32;", addr.code));
+        self.line(format!("let {addr_tmp}: i32 = {};", addr.code));
         let old = self.fresh_temp();
         self.line(format!(
             "let {old} = self.{}({addr_tmp}, {offset}u32);",
@@ -283,7 +279,7 @@ impl<'a> super::FuncGen<'a> {
         self.used_helpers.insert(load);
         self.used_helpers.insert(store);
         let addr_tmp = self.fresh_temp();
-        self.line(format!("let {addr_tmp}: u32 = ({}) as u32;", addr.code));
+        self.line(format!("let {addr_tmp}: i32 = {};", addr.code));
         let old = self.fresh_temp();
         self.line(format!(
             "let {old} = self.{}({addr_tmp}, {offset}u32);",
@@ -338,7 +334,7 @@ impl<'a> super::FuncGen<'a> {
         self.used_helpers.insert(load);
         let name = self.fresh_temp();
         self.line(format!(
-            "let {name}: i32 = if self.{}(({}) as u32, {offset}u32) != ({}) {{ 1 }} \
+            "let {name}: i32 = if self.{}({}, {offset}u32) != ({}) {{ 1 }} \
              else {{ panic!(\"atomic.wait on a single-threaded instance would block forever\") }};",
             helper_name(load),
             addr.code,
