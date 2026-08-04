@@ -137,16 +137,16 @@ fn multi_value_import_result_is_rejected() {
 
 #[test]
 fn unsupported_operator_is_rejected_with_the_operator_named() {
-    // A not-yet-implemented SIMD instruction (the relaxed fused-multiply-add and
-    // dot-product ops are a later round) is rejected with the operator named, so
-    // the gap is diagnosable rather than a generic failure. (The v128 foundation
-    // plus lane arithmetic, conversions, reductions, byte permutes, all
-    // memory/lane/widening loads, and the reuse-based relaxed ops are
-    // implemented; see tests/simd.rs.)
+    // A not-yet-implemented operator (here a tail call from the tail-call
+    // proposal) is rejected with the operator named, so the gap is diagnosable
+    // rather than a generic failure. The whole SIMD/v128 proposal, including
+    // relaxed SIMD, is now implemented (see tests/simd.rs), so this points at a
+    // non-SIMD feature instead.
     assert_unsupported(
-        r#"(module (func (param v128 v128 v128) (result v128)
-            (f32x4.relaxed_madd (local.get 0) (local.get 1) (local.get 2))))"#,
-        "F32x4RelaxedMadd",
+        r#"(module
+            (func $f (result i32) (i32.const 1))
+            (func (result i32) (return_call $f)))"#,
+        "ReturnCall",
     );
 }
 

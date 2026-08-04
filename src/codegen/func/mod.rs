@@ -1065,6 +1065,19 @@ impl<'a> FuncGen<'a> {
             | Operator::I16x8RelaxedLaneselect
             | Operator::I32x4RelaxedLaneselect
             | Operator::I64x2RelaxedLaneselect => self.v128_bitselect()?,
+            // Relaxed fused-multiply-add and dot-product-accumulate: ternary lane
+            // ops (relaxed_dot below is the one binary case). The deterministic
+            // lowering is unfused a*b(+/-)c and a saturating integer dot.
+            Operator::F32x4RelaxedMadd => self.call_simd_ternop("f32x4_relaxed_madd")?,
+            Operator::F32x4RelaxedNmadd => self.call_simd_ternop("f32x4_relaxed_nmadd")?,
+            Operator::F64x2RelaxedMadd => self.call_simd_ternop("f64x2_relaxed_madd")?,
+            Operator::F64x2RelaxedNmadd => self.call_simd_ternop("f64x2_relaxed_nmadd")?,
+            Operator::I16x8RelaxedDotI8x16I7x16S => {
+                self.call_simd_binop("i16x8_relaxed_dot_i8x16_i7x16_s")?
+            }
+            Operator::I32x4RelaxedDotI8x16I7x16AddS => {
+                self.call_simd_ternop("i32x4_relaxed_dot_i8x16_i7x16_add_s")?
+            }
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
             }

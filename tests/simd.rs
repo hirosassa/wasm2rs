@@ -1422,3 +1422,72 @@ fn relaxed_min_max_and_q15mulr() {
          assert_eq!(func4(0), 0x2000);",
     );
 }
+
+#[test]
+fn relaxed_madd_and_nmadd() {
+    // relaxed_madd(a, b, c) is deterministically the unfused a*b + c per lane;
+    // relaxed_nmadd is -(a*b) + c.
+    expect_ok(
+        "relaxed_madd",
+        r#"
+        (module
+          (func (param i32) (result f32)
+            (f32x4.extract_lane 0
+              (f32x4.relaxed_madd (v128.const f32x4 2 3 4 5)
+                                  (v128.const f32x4 5 6 7 8)
+                                  (v128.const f32x4 1 1 1 1))))
+          (func (param i32) (result f32)
+            (f32x4.extract_lane 0
+              (f32x4.relaxed_nmadd (v128.const f32x4 2 3 4 5)
+                                   (v128.const f32x4 5 6 7 8)
+                                   (v128.const f32x4 1 1 1 1))))
+          (func (param i32) (result f64)
+            (f64x2.extract_lane 1
+              (f64x2.relaxed_madd (v128.const f64x2 2 3)
+                                  (v128.const f64x2 5 6)
+                                  (v128.const f64x2 10 20))))
+          (func (param i32) (result f64)
+            (f64x2.extract_lane 1
+              (f64x2.relaxed_nmadd (v128.const f64x2 2 3)
+                                   (v128.const f64x2 5 6)
+                                   (v128.const f64x2 10 20)))))
+        "#,
+        "assert_eq!(func0(0), 11.0);\n    \
+         assert_eq!(func1(0), -9.0);\n    \
+         assert_eq!(func2(0), 38.0);\n    \
+         assert_eq!(func3(0), 2.0);",
+    );
+}
+
+#[test]
+fn relaxed_dot_products() {
+    // i16x8.relaxed_dot_i8x16_i7x16_s: for each i16 lane, sum the two adjacent
+    // i8*i8 products (operands kept in i7 range so no saturation is triggered).
+    // The _add_s form adds a further widening pairwise reduction into i32 lanes
+    // plus an i32x4 accumulator.
+    expect_ok(
+        "relaxed_dot",
+        r#"
+        (module
+          (func (param i32) (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.relaxed_dot_i8x16_i7x16_s
+                (v128.const i8x16 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+                (v128.const i8x16 4 5 0 0 0 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (param i32) (result i32)
+            (i16x8.extract_lane_s 1
+              (i16x8.relaxed_dot_i8x16_i7x16_s
+                (v128.const i8x16 0 0 -2 3 0 0 0 0 0 0 0 0 0 0 0 0)
+                (v128.const i8x16 0 0 6 -4 0 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (param i32) (result i32)
+            (i32x4.extract_lane 0
+              (i32x4.relaxed_dot_i8x16_i7x16_add_s
+                (v128.const i8x16 2 3 4 5 0 0 0 0 0 0 0 0 0 0 0 0)
+                (v128.const i8x16 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0)
+                (v128.const i32x4 100 0 0 0)))))
+        "#,
+        "assert_eq!(func0(0), 23);\n    \
+         assert_eq!(func1(0), -24);\n    \
+         assert_eq!(func2(0), 114);",
+    );
+}

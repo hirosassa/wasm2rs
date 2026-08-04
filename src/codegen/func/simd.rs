@@ -102,6 +102,21 @@ impl<'a> super::FuncGen<'a> {
         )
     }
 
+    /// A ternary lane-wise op `name(a, b, c) -> u128` (see `simd_rt.rs`): pop the
+    /// three v128 operands (`c` is on top) and push the helper call. Used by the
+    /// relaxed fused-multiply-add and dot-product-accumulate ops.
+    pub(super) fn call_simd_ternop(&mut self, name: &'static str) -> Result<(), TranspileError> {
+        let c = self.pop()?;
+        let b = self.pop()?;
+        let a = self.pop()?;
+        self.used_simd.insert(name);
+        self.push_combined(
+            format!("{name}({}, {}, {})", a.code, b.code, c.code),
+            ValType::V128,
+            a.stable && b.stable && c.stable,
+        )
+    }
+
     /// A unary lane-wise op `name(a) -> u128` (see `simd_rt.rs`).
     pub(super) fn call_simd_unop(&mut self, name: &'static str) -> Result<(), TranspileError> {
         let a = self.pop()?;
