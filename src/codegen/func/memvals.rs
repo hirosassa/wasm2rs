@@ -11,13 +11,17 @@ impl<'a> super::FuncGen<'a> {
         keep: bool,
     ) -> Result<(), TranspileError> {
         // Fix any operand that reads a mutable local before we overwrite it.
-        self.spill_nonstable()?;
+        // `local.set` consumes the value here, so inline it and freeze only the
+        // survivors below. `local.tee` leaves the value on the stack, so it must
+        // itself be frozen (a later use must not observe the overwritten local).
         let value = if keep {
+            self.spill_nonstable()?;
             self.stack
                 .last()
                 .cloned()
                 .ok_or(TranspileError::StackUnderflow)?
         } else {
+            self.freeze_survivors(1)?;
             self.pop()?
         };
         self.line(format!("l{local_index} = {};", value.code));
@@ -73,7 +77,9 @@ impl<'a> super::FuncGen<'a> {
                 "set of immutable global".into(),
             ));
         }
-        self.spill_nonstable()?;
+        // The value is consumed here, so inline it; freeze only the survivors
+        // below it against this store's effect on the global.
+        self.freeze_survivors(1)?;
         let value = self.pop()?;
         if imported {
             self.line(format!(
@@ -146,8 +152,10 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn store(&mut self, helper: Helper, memarg: MemArg) -> Result<(), TranspileError> {
         self.require_memory()?;
         let offset = memarg_offset(memarg)?;
-        // Memory is about to change; fix any operand that reads from it.
-        self.spill_nonstable()?;
+        // Memory is about to change; fix any operand that reads from it. The
+        // address and value are consumed here, so inline them and freeze only
+        // the survivors below.
+        self.freeze_survivors(2)?;
         let value = self.pop()?;
         let addr = self.pop()?;
         self.used_helpers.insert(helper);
@@ -197,8 +205,10 @@ impl<'a> super::FuncGen<'a> {
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
         let offset = memarg_offset(memarg)?;
-        // Memory is about to change; fix any operand that reads from it.
-        self.spill_nonstable()?;
+        // Memory is about to change; fix any operand that reads from it. The
+        // address and value are consumed here, so inline them and freeze only
+        // the survivors below.
+        self.freeze_survivors(2)?;
         let value = self.pop()?;
         let addr = self.pop()?;
         self.used_helpers.insert(helper);

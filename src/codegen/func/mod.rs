@@ -1175,7 +1175,24 @@ impl<'a> FuncGen<'a> {
     /// Materialise every non-stable operand into a `let` temporary so its value
     /// is fixed across an upcoming control-flow boundary or local mutation.
     fn spill_nonstable(&mut self) -> Result<(), TranspileError> {
-        for i in 0..self.stack.len() {
+        self.freeze_survivors(0)
+    }
+
+    /// Freeze the non-stable operands that *survive* an upcoming boundary into
+    /// `let` temporaries, leaving the top `keep` operands — the ones the
+    /// boundary consumes in place, in program order — as inline expressions.
+    ///
+    /// A deferred non-stable operand only ever *reads* state (a mutable local,
+    /// a mutable or imported global, or a memory load; anything side-effecting
+    /// or trapping is materialised to a stable temp the moment it is produced).
+    /// So evaluating a consumed operand at the boundary cannot change a
+    /// survivor, and the consumed operands are evaluated in wasm push order
+    /// (left to right) exactly where the boundary emits them. That makes
+    /// inlining the consumed operands sound while the survivors are still
+    /// pinned against the boundary's own side effects.
+    fn freeze_survivors(&mut self, keep: usize) -> Result<(), TranspileError> {
+        let survivors = self.stack.len().saturating_sub(keep);
+        for i in 0..survivors {
             if self.stack[i].stable {
                 continue;
             }

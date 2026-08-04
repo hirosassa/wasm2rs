@@ -17,10 +17,11 @@ impl<'a> super::FuncGen<'a> {
         let param_count = params.len();
         let results = results.to_vec();
 
-        // A call may read and write memory and globals. Freezing every operand
-        // first both materialises the arguments and pins any earlier value that
+        // A call may read and write memory and globals. The arguments are
+        // consumed here (evaluated in push order at the call site), so inline
+        // them; freeze only the survivors below, pinning any earlier value that
         // must not observe the call's side effects (spill-before-mutation).
-        self.spill_nonstable()?;
+        self.freeze_survivors(param_count)?;
 
         let mut args = Vec::with_capacity(param_count);
         for _ in 0..param_count {
@@ -73,10 +74,13 @@ impl<'a> super::FuncGen<'a> {
             .filter(|&fidx| self.ctx.full_sig(fidx) == want)
             .collect();
 
-        // Freeze operands (arguments and the table index) before the call, both
-        // to share them across every match arm and to pin any earlier value
-        // against the callee's side effects (spill-before-mutation).
-        self.spill_nonstable()?;
+        // The table index (top of stack) is consumed into the `entry` binding
+        // below, which is emitted *before* the dispatch call — so only the index
+        // may inline. The arguments must stay spilled to temporaries so they are
+        // evaluated in wasm order (arguments before the index) rather than being
+        // pulled after the `entry` computation. Spilling also pins any earlier
+        // value against the callee's side effects (spill-before-mutation).
+        self.freeze_survivors(1)?;
         let index = self.pop()?;
         let mut args = Vec::with_capacity(sig.params.len());
         for _ in 0..sig.params.len() {
