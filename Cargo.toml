@@ -9,3 +9,8 @@ mimalloc = "0.1"
 
 [dev-dependencies]
 wat = "1.255.0"
+
+# Keep file:line info for panics/test failures but drop full variable/type
+# debug info. Shrinks the 54 test binaries and cuts link time on macOS.
+[profile.dev]
+debug = "line-tables-only"
