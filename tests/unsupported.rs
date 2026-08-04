@@ -185,3 +185,49 @@ fn non_constant_global_initializer_is_rejected() {
         "global initializer",
     );
 }
+
+#[test]
+fn memory_instruction_without_a_memory_section_is_rejected() {
+    // A body that touches linear memory in a module that declares none must be
+    // rejected rather than emitting code that references a non-existent field.
+    assert_unsupported(
+        r#"(module (func (result i32) i32.const 0 i32.load))"#,
+        "memory instruction without a memory section",
+    );
+    // `memory.size` reaches the same guard through a different opcode.
+    assert_unsupported(
+        r#"(module (func (result i32) memory.size))"#,
+        "memory instruction without a memory section",
+    );
+}
+
+#[test]
+fn table_instruction_without_a_table_section_is_rejected() {
+    assert_unsupported(
+        r#"(module (func (result funcref) i32.const 0 table.get 0))"#,
+        "table instruction without a table section",
+    );
+}
+
+#[test]
+fn set_of_an_immutable_global_is_rejected() {
+    // `global.set` on a non-`mut` global is invalid; wasm2rs rejects it with a
+    // specific reason rather than generating an assignment to an immutable field.
+    assert_unsupported(
+        r#"(module (global i32 (i32.const 1)) (func i32.const 2 global.set 0))"#,
+        "set of immutable global",
+    );
+}
+
+#[test]
+fn non_function_composite_type_is_rejected() {
+    // GC struct/array types parse but wasm2rs only lowers function types.
+    assert_unsupported(
+        r#"(module (type (struct (field i32))))"#,
+        "non-function composite type",
+    );
+    assert_unsupported(
+        r#"(module (type (array i32)))"#,
+        "non-function composite type",
+    );
+}

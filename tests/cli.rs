@@ -70,3 +70,77 @@ fn single_file_output_matches_library() {
     let expected = wasm2rs::transpile(&wasm).expect("transpile ok");
     assert_eq!(written, expected);
 }
+
+/// With no output path the CLI writes the transpiled Rust to stdout, byte-for-byte
+/// identical to the library's `transpile`.
+#[test]
+fn no_output_arg_writes_to_stdout() {
+    let (_dir, input) = write_sample_wasm("stdout");
+
+    let out = Command::new(wasm2rs_bin())
+        .arg(&input)
+        .output()
+        .expect("run wasm2rs");
+    assert!(out.status.success(), "wasm2rs exited nonzero");
+
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let wasm = std::fs::read(&input).unwrap();
+    let expected = wasm2rs::transpile(&wasm).expect("transpile ok");
+    assert_eq!(stdout, expected);
+}
+
+/// With no arguments at all the CLI fails and prints the usage string, rather
+/// than panicking or exiting successfully.
+#[test]
+fn missing_input_argument_fails_with_usage() {
+    let out = Command::new(wasm2rs_bin()).output().expect("run wasm2rs");
+    assert!(!out.status.success(), "expected a nonzero exit");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("usage: wasm2rs"),
+        "expected usage on stderr, got: {stderr:?}",
+    );
+}
+
+/// A non-numeric `funcs_per_file` argument is rejected with a message naming the
+/// offending argument, not a panic from an unwrapped `parse`.
+#[test]
+fn non_numeric_split_argument_is_rejected() {
+    let (dir, input) = write_sample_wasm("bad_arg");
+    let out_dir = dir.join("out");
+
+    let out = Command::new(wasm2rs_bin())
+        .arg(&input)
+        .arg(&out_dir)
+        .arg("not-a-number")
+        .output()
+        .expect("run wasm2rs");
+    assert!(!out.status.success(), "expected a nonzero exit");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid funcs_per_file"),
+        "expected an invalid-argument message, got: {stderr:?}",
+    );
+}
+
+/// A missing input *file* (as opposed to a missing argument) fails with a read
+/// error that names the path.
+#[test]
+fn unreadable_input_file_fails_with_a_read_error() {
+    let missing = std::env::temp_dir().join("wasm2rs_definitely_missing_input.wasm");
+    let _ = std::fs::remove_file(&missing);
+
+    let out = Command::new(wasm2rs_bin())
+        .arg(&missing)
+        .output()
+        .expect("run wasm2rs");
+    assert!(!out.status.success(), "expected a nonzero exit");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot read"),
+        "expected a read error on stderr, got: {stderr:?}",
+    );
+}
