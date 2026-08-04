@@ -154,6 +154,19 @@ impl<'a> super::FuncGen<'a> {
         )
     }
 
+    /// A unary call to a pure free-function runtime helper `name(operand)`
+    /// yielding `result_ty` (used for the lane-splat helpers). The helper is
+    /// pure, so the result stays stable when the operand is.
+    pub(super) fn call_rt_unop(
+        &mut self,
+        rt: Rt,
+        result_ty: ValType,
+    ) -> Result<(), TranspileError> {
+        let a = self.pop()?;
+        self.used_rt.insert(rt);
+        self.push_combined(format!("{}({})", rt_name(rt), a.code), result_ty, a.stable)
+    }
+
     /// A unary call to a possibly-trapping runtime helper (the non-saturating
     /// float->int truncations, which trap on NaN or an out-of-range operand).
     /// Like div/rem the result is materialised here so the trap fires in

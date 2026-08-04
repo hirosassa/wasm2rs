@@ -25,6 +25,8 @@ pub(super) fn helper_name(helper: Helper) -> &'static str {
         Helper::Store8I64 => "store8_i64",
         Helper::Store16I64 => "store16_i64",
         Helper::Store32I64 => "store32_i64",
+        Helper::LoadV128 => "load_v128",
+        Helper::StoreV128 => "store_v128",
         Helper::Grow => "memory_grow",
         Helper::MemoryFill => "memory_fill",
         Helper::MemoryCopy => "memory_copy",
@@ -34,7 +36,7 @@ pub(super) fn helper_name(helper: Helper) -> &'static str {
 }
 
 /// All memory helpers, in a deterministic emission order.
-pub(super) const HELPER_ORDER: [Helper; 28] = [
+pub(super) const HELPER_ORDER: [Helper; 30] = [
     Helper::LoadI32,
     Helper::Load8U,
     Helper::Load8S,
@@ -58,6 +60,8 @@ pub(super) const HELPER_ORDER: [Helper; 28] = [
     Helper::Store8I64,
     Helper::Store16I64,
     Helper::Store32I64,
+    Helper::LoadV128,
+    Helper::StoreV128,
     Helper::Grow,
     Helper::MemoryFill,
     Helper::MemoryCopy,
@@ -206,6 +210,23 @@ pub(super) fn helper_lines(helper: Helper) -> Vec<String> {
             "fn store32_i64(&mut self, addr: u32, offset: u32, value: i64) {",
             "    let a = addr as usize + offset as usize;",
             "    self.mem_mut()[a..a + 4].copy_from_slice(&(value as u32).to_le_bytes());",
+            "}",
+        ]),
+        // A v128 load/store moves 16 bytes to/from memory as a little-endian
+        // `u128`; the slice access is bounds-checked, so an out-of-range access
+        // panics (a wasm trap).
+        Helper::LoadV128 => owned(&[
+            "fn load_v128(&self, addr: u32, offset: u32) -> u128 {",
+            "    let a = addr as usize + offset as usize;",
+            "    let mut b = [0u8; 16];",
+            "    b.copy_from_slice(&self.mem()[a..a + 16]);",
+            "    u128::from_le_bytes(b)",
+            "}",
+        ]),
+        Helper::StoreV128 => owned(&[
+            "fn store_v128(&mut self, addr: u32, offset: u32, value: u128) {",
+            "    let a = addr as usize + offset as usize;",
+            "    self.mem_mut()[a..a + 16].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         // `delta` is an unsigned page count. Growth past the wasm32 limit of

@@ -16,11 +16,17 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::I64TruncF32U => "i64_trunc_f32_u",
         Rt::I64TruncF64S => "i64_trunc_f64_s",
         Rt::I64TruncF64U => "i64_trunc_f64_u",
+        Rt::SplatI8x16 => "i8x16_splat",
+        Rt::SplatI16x8 => "i16x8_splat",
+        Rt::SplatI32x4 => "i32x4_splat",
+        Rt::SplatI64x2 => "i64x2_splat",
+        Rt::SplatF32x4 => "f32x4_splat",
+        Rt::SplatF64x2 => "f64x2_splat",
     }
 }
 
 /// All runtime free-function helpers, in a deterministic emission order.
-const RT_ORDER: [Rt; 12] = [
+const RT_ORDER: [Rt; 18] = [
     Rt::F32Min,
     Rt::F32Max,
     Rt::F64Min,
@@ -33,6 +39,12 @@ const RT_ORDER: [Rt; 12] = [
     Rt::I64TruncF32U,
     Rt::I64TruncF64S,
     Rt::I64TruncF64U,
+    Rt::SplatI8x16,
+    Rt::SplatI16x8,
+    Rt::SplatI32x4,
+    Rt::SplatI64x2,
+    Rt::SplatF32x4,
+    Rt::SplatF64x2,
 ];
 
 /// Render the used runtime helpers as module-scope free functions, in
@@ -96,7 +108,32 @@ fn rt_lines(rt: Rt) -> Vec<String> {
             TRUNC_U_F64_64,
             "x as u64 as i64",
         ),
+        Rt::SplatI8x16 => splat_lines("i8x16_splat", "i32", "x as u8 as u128", 8),
+        Rt::SplatI16x8 => splat_lines("i16x8_splat", "i32", "x as u16 as u128", 16),
+        Rt::SplatI32x4 => splat_lines("i32x4_splat", "i32", "x as u32 as u128", 32),
+        Rt::SplatI64x2 => splat_lines("i64x2_splat", "i64", "x as u64 as u128", 64),
+        Rt::SplatF32x4 => splat_lines("f32x4_splat", "f32", "x.to_bits() as u128", 32),
+        Rt::SplatF64x2 => splat_lines("f64x2_splat", "f64", "x.to_bits() as u128", 64),
     }
+}
+
+/// A lane-splat helper: place the scalar in the lowest `lane_bits`-wide lane,
+/// then double the filled width until all 128 bits are covered. Each `l |= l <<
+/// n` copies the already-filled low `n` bits into the next `n` bits, so after
+/// the last shift every lane holds the scalar.
+fn splat_lines(name: &str, scalar_ty: &str, low_lane: &str, lane_bits: u32) -> Vec<String> {
+    let mut lines = vec![
+        format!("fn {name}(x: {scalar_ty}) -> u128 {{"),
+        format!("    let mut l = {low_lane};"),
+    ];
+    let mut width = lane_bits;
+    while width < 128 {
+        lines.push(format!("    l |= l << {width};"));
+        width *= 2;
+    }
+    lines.push("    l".to_string());
+    lines.push("}".to_string());
+    lines
 }
 
 // The in-range predicates for the trapping truncations, following wasm2c's

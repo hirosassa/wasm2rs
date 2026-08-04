@@ -12,6 +12,7 @@ mod calls;
 mod control;
 mod memvals;
 mod numeric;
+mod simd;
 mod table;
 
 /// The binary operation of an atomic read-modify-write. Since the instance owns
@@ -676,6 +677,86 @@ impl<'a> FuncGen<'a> {
             Operator::CatchAll => self.handle_catch(None)?,
             Operator::Throw { tag_index } => self.emit_throw(tag_index)?,
             Operator::Rethrow { relative_depth } => self.emit_rethrow(relative_depth)?,
+            // SIMD/v128 (round 1: foundation). A v128 is a `u128`; see `simd.rs`.
+            Operator::V128Const { value } => self.v128_const(value.bytes()),
+            Operator::V128Load { memarg } => self.load(Helper::LoadV128, ValType::V128, memarg)?,
+            Operator::V128Store { memarg } => self.store(Helper::StoreV128, memarg)?,
+            // Splat: broadcast a scalar into every lane (pure runtime helpers).
+            Operator::I8x16Splat => self.call_rt_unop(Rt::SplatI8x16, ValType::V128)?,
+            Operator::I16x8Splat => self.call_rt_unop(Rt::SplatI16x8, ValType::V128)?,
+            Operator::I32x4Splat => self.call_rt_unop(Rt::SplatI32x4, ValType::V128)?,
+            Operator::I64x2Splat => self.call_rt_unop(Rt::SplatI64x2, ValType::V128)?,
+            Operator::F32x4Splat => self.call_rt_unop(Rt::SplatF32x4, ValType::V128)?,
+            Operator::F64x2Splat => self.call_rt_unop(Rt::SplatF64x2, ValType::V128)?,
+            // Extract one lane as a scalar. `_s`/`_u` variants sign- or
+            // zero-extend the sub-word lanes into the i32 result.
+            Operator::I8x16ExtractLaneS { lane } => {
+                self.extract_lane(lane, 8, ValType::I32, |s| {
+                    format!("({s} as u8 as i8 as i32)")
+                })?
+            }
+            Operator::I8x16ExtractLaneU { lane } => {
+                self.extract_lane(lane, 8, ValType::I32, |s| format!("({s} as u8 as i32)"))?
+            }
+            Operator::I16x8ExtractLaneS { lane } => {
+                self.extract_lane(lane, 16, ValType::I32, |s| {
+                    format!("({s} as u16 as i16 as i32)")
+                })?
+            }
+            Operator::I16x8ExtractLaneU { lane } => {
+                self.extract_lane(lane, 16, ValType::I32, |s| format!("({s} as u16 as i32)"))?
+            }
+            Operator::I32x4ExtractLane { lane } => {
+                self.extract_lane(lane, 32, ValType::I32, |s| format!("({s} as u32 as i32)"))?
+            }
+            Operator::I64x2ExtractLane { lane } => {
+                self.extract_lane(lane, 64, ValType::I64, |s| format!("({s} as u64 as i64)"))?
+            }
+            Operator::F32x4ExtractLane { lane } => {
+                self.extract_lane(lane, 32, ValType::F32, |s| {
+                    format!("f32::from_bits({s} as u32)")
+                })?
+            }
+            Operator::F64x2ExtractLane { lane } => {
+                self.extract_lane(lane, 64, ValType::F64, |s| {
+                    format!("f64::from_bits({s} as u64)")
+                })?
+            }
+            // Replace one lane with a scalar.
+            Operator::I8x16ReplaceLane { lane } => {
+                self.replace_lane(lane, 8, "0xFFu128", |x| format!("{x} as u8 as u128"))?
+            }
+            Operator::I16x8ReplaceLane { lane } => {
+                self.replace_lane(lane, 16, "0xFFFFu128", |x| format!("{x} as u16 as u128"))?
+            }
+            Operator::I32x4ReplaceLane { lane } => {
+                self.replace_lane(lane, 32, "0xFFFFFFFFu128", |x| {
+                    format!("{x} as u32 as u128")
+                })?
+            }
+            Operator::I64x2ReplaceLane { lane } => {
+                self.replace_lane(lane, 64, "0xFFFFFFFFFFFFFFFFu128", |x| {
+                    format!("{x} as u64 as u128")
+                })?
+            }
+            Operator::F32x4ReplaceLane { lane } => {
+                self.replace_lane(lane, 32, "0xFFFFFFFFu128", |x| {
+                    format!("{x}.to_bits() as u128")
+                })?
+            }
+            Operator::F64x2ReplaceLane { lane } => {
+                self.replace_lane(lane, 64, "0xFFFFFFFFFFFFFFFFu128", |x| {
+                    format!("{x}.to_bits() as u128")
+                })?
+            }
+            // Whole-register bitwise operations map straight to `u128` operators.
+            Operator::V128And => self.binop_infix("&")?,
+            Operator::V128Or => self.binop_infix("|")?,
+            Operator::V128Xor => self.binop_infix("^")?,
+            Operator::V128Not => self.v128_not()?,
+            Operator::V128AndNot => self.v128_andnot()?,
+            Operator::V128Bitselect => self.v128_bitselect()?,
+            Operator::V128AnyTrue => self.v128_any_true()?,
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
             }

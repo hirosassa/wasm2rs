@@ -72,6 +72,8 @@ enum Helper {
     Store8I64,
     Store16I64,
     Store32I64,
+    LoadV128,
+    StoreV128,
     Grow,
     MemoryFill,
     MemoryCopy,
@@ -97,6 +99,13 @@ enum Rt {
     I64TruncF32U,
     I64TruncF64S,
     I64TruncF64U,
+    // SIMD lane-splat helpers: broadcast a scalar into every lane of a v128.
+    SplatI8x16,
+    SplatI16x8,
+    SplatI32x4,
+    SplatI64x2,
+    SplatF32x4,
+    SplatF64x2,
 }
 
 /// The helper dependencies discovered while generating one function.
@@ -1482,6 +1491,9 @@ fn rust_type(ty: ValType) -> Result<&'static str, TranspileError> {
         // handle; both are represented as a `u32` (`u32::MAX` is null), matching
         // the table's element representation.
         ValType::Ref(rt) if rt.is_func_ref() || rt.is_extern_ref() => Ok("u32"),
+        // A v128 is a 128-bit value; it is held as a `u128` and lane operations
+        // reinterpret its bits (little-endian) into the relevant lane type.
+        ValType::V128 => Ok("u128"),
         other => Err(TranspileError::Unsupported(format!("value type {other:?}"))),
     }
 }
