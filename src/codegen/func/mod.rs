@@ -955,6 +955,25 @@ impl<'a> FuncGen<'a> {
             Operator::F64x2ConvertLowI32x4U => self.call_simd_unop("f64x2_convert_low_i32x4_u")?,
             Operator::F32x4DemoteF64x2Zero => self.call_simd_unop("f32x4_demote_f64x2_zero")?,
             Operator::F64x2PromoteLowF32x4 => self.call_simd_unop("f64x2_promote_low_f32x4")?,
+
+            // Integer lane abs, unsigned rounding average, and popcount.
+            Operator::I8x16Abs => self.call_simd_unop("i8x16_abs")?,
+            Operator::I16x8Abs => self.call_simd_unop("i16x8_abs")?,
+            Operator::I32x4Abs => self.call_simd_unop("i32x4_abs")?,
+            Operator::I64x2Abs => self.call_simd_unop("i64x2_abs")?,
+            Operator::I8x16AvgrU => self.call_simd_binop("i8x16_avgr_u")?,
+            Operator::I16x8AvgrU => self.call_simd_binop("i16x8_avgr_u")?,
+            Operator::I8x16Popcnt => self.call_simd_unop("i8x16_popcnt")?,
+
+            // Lane-reducing predicates: all_true and bitmask (v128 -> i32).
+            Operator::I8x16AllTrue => self.call_simd_reduce("i8x16_all_true")?,
+            Operator::I16x8AllTrue => self.call_simd_reduce("i16x8_all_true")?,
+            Operator::I32x4AllTrue => self.call_simd_reduce("i32x4_all_true")?,
+            Operator::I64x2AllTrue => self.call_simd_reduce("i64x2_all_true")?,
+            Operator::I8x16Bitmask => self.call_simd_reduce("i8x16_bitmask")?,
+            Operator::I16x8Bitmask => self.call_simd_reduce("i16x8_bitmask")?,
+            Operator::I32x4Bitmask => self.call_simd_reduce("i32x4_bitmask")?,
+            Operator::I64x2Bitmask => self.call_simd_reduce("i64x2_bitmask")?,
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
             }

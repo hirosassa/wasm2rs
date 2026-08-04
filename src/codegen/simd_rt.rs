@@ -37,6 +37,10 @@ enum Combine {
     },
     /// A custom single expression in `x` and `y` (used for `pmin`/`pmax`).
     Expr(&'static str),
+    /// wasm `avgr_u`: unsigned rounding average `(x + y + 1) / 2`. The sum is
+    /// computed in `u32` (wide enough for u8/u16 lanes) to avoid overflow, then
+    /// cast back to the lane type.
+    Avgr,
     /// A lane comparison `x <op> y` yielding an all-ones lane mask when true and
     /// zero when false, as wasm's vector predicates require.
     Compare(&'static str),
@@ -115,6 +119,15 @@ const LANE: &[Lane] = &[
     lane("i16x8_q15mulr_sat_s", "i16", 2, Shape::Binary, Combine::Expr(
         "(((x as i32) * (y as i32) + 0x4000) >> 15).clamp(i16::MIN as i32, i16::MAX as i32) as i16",
     )),
+    // Integer lane abs (wrapping, so iN::MIN maps to itself), unsigned rounding
+    // average, and per-byte population count.
+    lane("i8x16_abs", "i8", 1, Shape::Unary, Combine::Method("wrapping_abs")),
+    lane("i16x8_abs", "i16", 2, Shape::Unary, Combine::Method("wrapping_abs")),
+    lane("i32x4_abs", "i32", 4, Shape::Unary, Combine::Method("wrapping_abs")),
+    lane("i64x2_abs", "i64", 8, Shape::Unary, Combine::Method("wrapping_abs")),
+    lane("i8x16_avgr_u", "u8", 1, Shape::Binary, Combine::Avgr),
+    lane("i16x8_avgr_u", "u16", 2, Shape::Binary, Combine::Avgr),
+    lane("i8x16_popcnt", "u8", 1, Shape::Unary, Combine::Expr("x.count_ones() as u8")),
     // Float arithmetic.
     lane("f32x4_add", "f32", 4, Shape::Binary, Combine::Infix("+")),
     lane("f64x2_add", "f64", 8, Shape::Binary, Combine::Infix("+")),
@@ -319,8 +332,48 @@ const WIDE: &[Wide] = &[
     wide("f32x4_demote_f64x2_zero",      "f64", "f32", 8, 4, WideKind::NarrowZero),
 ];
 
-/// Render the used lane helpers as module-scope free functions, in [`LANE`] then
-/// [`WIDE`] order, separated by blank lines. Empty string if none are used.
+/// A lane-reducing helper `fn(a: u128) -> i32` that collapses a vector to a
+/// scalar. `elem` is the signed lane type (so `bitmask` can test the sign bit
+/// with `< 0`) and `bytes` its width.
+struct Reduce {
+    name: &'static str,
+    elem: &'static str,
+    bytes: u32,
+    kind: ReduceKind,
+}
+
+/// The two lane-reducing shapes.
+enum ReduceKind {
+    /// `all_true`: 1 if every lane is non-zero, else 0.
+    AllTrue,
+    /// `bitmask`: gather each lane's sign bit into bit `lane index` of an i32.
+    Bitmask,
+}
+
+const fn reduce(name: &'static str, elem: &'static str, bytes: u32, kind: ReduceKind) -> Reduce {
+    Reduce {
+        name,
+        elem,
+        bytes,
+        kind,
+    }
+}
+
+#[rustfmt::skip]
+const REDUCE: &[Reduce] = &[
+    reduce("i8x16_all_true", "i8",  1, ReduceKind::AllTrue),
+    reduce("i16x8_all_true", "i16", 2, ReduceKind::AllTrue),
+    reduce("i32x4_all_true", "i32", 4, ReduceKind::AllTrue),
+    reduce("i64x2_all_true", "i64", 8, ReduceKind::AllTrue),
+    reduce("i8x16_bitmask",  "i8",  1, ReduceKind::Bitmask),
+    reduce("i16x8_bitmask",  "i16", 2, ReduceKind::Bitmask),
+    reduce("i32x4_bitmask",  "i32", 4, ReduceKind::Bitmask),
+    reduce("i64x2_bitmask",  "i64", 8, ReduceKind::Bitmask),
+];
+
+/// Render the used lane helpers as module-scope free functions, in [`LANE`],
+/// [`WIDE`], then [`REDUCE`] order, separated by blank lines. Empty string if
+/// none are used.
 pub(super) fn render_simd_helpers(used: &HashSet<&'static str>) -> String {
     let mut blocks: Vec<String> = Vec::new();
     for lane in LANE {
@@ -331,6 +384,11 @@ pub(super) fn render_simd_helpers(used: &HashSet<&'static str>) -> String {
     for w in WIDE {
         if used.contains(w.name) {
             blocks.push(wide_lines(w).join("\n"));
+        }
+    }
+    for r in REDUCE {
+        if used.contains(r.name) {
+            blocks.push(reduce_lines(r).join("\n"));
         }
     }
     let mut out = blocks.join("\n\n");
@@ -368,6 +426,7 @@ fn combine_expr(lane: &Lane) -> String {
             elem = lane.elem,
         ),
         Combine::Expr(e) => e.to_string(),
+        Combine::Avgr => format!("(((x as u32) + (y as u32) + 1) >> 1) as {}", lane.elem),
         Combine::Compare(op) => {
             format!("if x {op} y {{ {}::MAX }} else {{ 0 }}", umask(lane.bytes))
         }
@@ -591,6 +650,45 @@ fn wide_lines(w: &Wide) -> Vec<String> {
             format!("        s += {two};"),
             "    }".to_string(),
             "    u128::from_le_bytes(r)".to_string(),
+            "}".to_string(),
+        ],
+    }
+}
+
+/// The source lines of one lane-reducing helper. Both read each lane as the
+/// signed `elem` in `bytes`-wide steps. `AllTrue` returns 0 as soon as a lane is
+/// zero, 1 otherwise. `Bitmask` sets bit `n` of the result from lane `n`'s sign.
+fn reduce_lines(r: &Reduce) -> Vec<String> {
+    let &Reduce {
+        name, elem, bytes, ..
+    } = r;
+    let read = format!("{elem}::from_le_bytes(a[i..i + {bytes}].try_into().unwrap())");
+    match r.kind {
+        ReduceKind::AllTrue => vec![
+            format!("fn {name}(a: u128) -> i32 {{"),
+            "    let a = a.to_le_bytes();".to_string(),
+            "    let mut i = 0;".to_string(),
+            "    while i < 16 {".to_string(),
+            format!("        if {read} == 0 {{"),
+            "            return 0;".to_string(),
+            "        }".to_string(),
+            format!("        i += {bytes};"),
+            "    }".to_string(),
+            "    1".to_string(),
+            "}".to_string(),
+        ],
+        ReduceKind::Bitmask => vec![
+            format!("fn {name}(a: u128) -> i32 {{"),
+            "    let a = a.to_le_bytes();".to_string(),
+            "    let mut m = 0i32;".to_string(),
+            "    let mut i = 0;".to_string(),
+            "    while i < 16 {".to_string(),
+            format!("        if {read} < 0 {{"),
+            format!("            m |= 1 << (i / {bytes});"),
+            "        }".to_string(),
+            format!("        i += {bytes};"),
+            "    }".to_string(),
+            "    m".to_string(),
             "}".to_string(),
         ],
     }

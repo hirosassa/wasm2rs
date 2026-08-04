@@ -893,3 +893,132 @@ fn lane_promote() {
          assert_eq!(func1(), -2.5f64);",
     );
 }
+
+#[test]
+fn lane_abs() {
+    // Integer lane abs is wrapping: iN::MIN maps to itself, matching wasm.
+    expect_ok(
+        "lane_abs",
+        r#"
+        (module
+          (func (result i32)
+            (i32x4.extract_lane 0 (i32x4.abs (v128.const i32x4 -5 5 -2147483648 0))))
+          (func (result i32)
+            (i32x4.extract_lane 2 (i32x4.abs (v128.const i32x4 -5 5 -2147483648 0))))
+          (func (result i32)
+            (i8x16.extract_lane_s 0
+              (i8x16.abs (v128.const i8x16 -5 -128 0 0 0 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i8x16.extract_lane_s 1
+              (i8x16.abs (v128.const i8x16 -5 -128 0 0 0 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i16x8.extract_lane_s 0 (i16x8.abs (v128.const i16x8 -300 0 0 0 0 0 0 0))))
+          (func (result i64)
+            (i64x2.extract_lane 0 (i64x2.abs (v128.const i64x2 -9000000000 0)))))
+        "#,
+        // -5->5, i32::MIN wraps to itself, -128 wraps to itself, -300->300.
+        "assert_eq!(func0(), 5);\n    \
+         assert_eq!(func1(), i32::MIN);\n    \
+         assert_eq!(func2(), 5);\n    \
+         assert_eq!(func3(), -128);\n    \
+         assert_eq!(func4(), 300);\n    \
+         assert_eq!(func5(), 9000000000i64);",
+    );
+}
+
+#[test]
+fn lane_avgr() {
+    // avgr_u rounds up: (a + b + 1) >> 1 as unsigned, with no overflow at the top.
+    expect_ok(
+        "lane_avgr",
+        r#"
+        (module
+          (func (result i32)
+            (i8x16.extract_lane_u 0
+              (i8x16.avgr_u (v128.const i8x16 3 255 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+                            (v128.const i8x16 4 255 0 0 0 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i8x16.extract_lane_u 1
+              (i8x16.avgr_u (v128.const i8x16 3 255 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+                            (v128.const i8x16 4 255 0 0 0 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i16x8.extract_lane_u 0
+              (i16x8.avgr_u (v128.const i16x8 100 0 0 0 0 0 0 0)
+                            (v128.const i16x8 201 0 0 0 0 0 0 0)))))
+        "#,
+        // (3+4+1)/2=4; (255+255+1)/2=255 (no overflow); (100+201+1)/2=151.
+        "assert_eq!(func0(), 4);\n    \
+         assert_eq!(func1(), 255);\n    \
+         assert_eq!(func2(), 151);",
+    );
+}
+
+#[test]
+fn lane_popcnt() {
+    // i8x16.popcnt counts set bits per byte.
+    expect_ok(
+        "lane_popcnt",
+        r#"
+        (module
+          (func (result i32)
+            (i8x16.extract_lane_u 0
+              (i8x16.popcnt (v128.const i8x16 0xFF 0x0F 0 0 0 0 0 0 0 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i8x16.extract_lane_u 1
+              (i8x16.popcnt (v128.const i8x16 0xFF 0x0F 0 0 0 0 0 0 0 0 0 0 0 0 0 0)))))
+        "#,
+        // popcount(0xFF)=8, popcount(0x0F)=4.
+        "assert_eq!(func0(), 8);\n    \
+         assert_eq!(func1(), 4);",
+    );
+}
+
+#[test]
+fn lane_all_true() {
+    // all_true: 1 if every lane is non-zero, else 0.
+    expect_ok(
+        "lane_all_true",
+        r#"
+        (module
+          (func (result i32) (i32x4.all_true (v128.const i32x4 1 2 3 4)))
+          (func (result i32) (i32x4.all_true (v128.const i32x4 1 0 3 4)))
+          (func (result i32)
+            (i8x16.all_true (v128.const i8x16 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1)))
+          (func (result i32)
+            (i8x16.all_true (v128.const i8x16 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0)))
+          (func (result i32) (i64x2.all_true (v128.const i64x2 5 7)))
+          (func (result i32) (i64x2.all_true (v128.const i64x2 5 0))))
+        "#,
+        "assert_eq!(func0(), 1);\n    \
+         assert_eq!(func1(), 0);\n    \
+         assert_eq!(func2(), 1);\n    \
+         assert_eq!(func3(), 0);\n    \
+         assert_eq!(func4(), 1);\n    \
+         assert_eq!(func5(), 0);",
+    );
+}
+
+#[test]
+fn lane_bitmask() {
+    // bitmask gathers the sign bit (MSB) of each lane into the low bits of an i32.
+    expect_ok(
+        "lane_bitmask",
+        r#"
+        (module
+          (func (result i32)
+            (i8x16.bitmask (v128.const i8x16 -1 1 -1 0 0 0 0 0 0 0 0 0 0 0 0 -128)))
+          (func (result i32)
+            (i32x4.bitmask (v128.const i32x4 -1 0 -2147483648 5)))
+          (func (result i32)
+            (i16x8.bitmask (v128.const i16x8 -1 0 0 0 0 0 0 -1)))
+          (func (result i32)
+            (i64x2.bitmask (v128.const i64x2 -1 5))))
+        "#,
+        // i8x16: bits 0,2,15 -> 1|4|0x8000 = 0x8005; i32x4: bits 0,2 -> 5;
+        // i16x8: bits 0,7 -> 1|0x80 = 129; i64x2: bit 0 -> 1.
+        "assert_eq!(func0(), 0x8005);\n    \
+         assert_eq!(func1(), 5);\n    \
+         assert_eq!(func2(), 129);\n    \
+         assert_eq!(func3(), 1);",
+    );
+}

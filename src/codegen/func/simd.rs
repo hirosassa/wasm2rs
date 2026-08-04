@@ -109,6 +109,14 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(format!("{name}({})", a.code), ValType::V128, a.stable)
     }
 
+    /// A lane-reducing op `name(a: u128) -> i32` (see `simd_rt.rs`): pop the
+    /// v128 operand and push the scalar result. Used by `all_true`/`bitmask`.
+    pub(super) fn call_simd_reduce(&mut self, name: &'static str) -> Result<(), TranspileError> {
+        let a = self.pop()?;
+        self.used_simd.insert(name);
+        self.push_combined(format!("{name}({})", a.code), ValType::I32, a.stable)
+    }
+
     /// A lane shift `name(a: u128, s: i32) -> u128` (see `simd_rt.rs`): pop the
     /// i32 shift count then the v128 operand.
     pub(super) fn call_simd_shift(&mut self, name: &'static str) -> Result<(), TranspileError> {
