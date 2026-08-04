@@ -623,3 +623,249 @@ fn main() {
         .expect("run generated binary");
     assert!(status.success(), "create_directory escape rejection failed");
 }
+
+// fd_readdir on the preopen fd 3 enumerates the current directory. The listing
+// must contain the synthetic "." and ".." plus a real marker file on disk.
+// Buffer at 1000 (len 4096); bufused stored at 400; `run` returns the errno.
+// Importing fd_readdir alone still provisions the file table (it forces it).
+const READDIR_FD3: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "fd_readdir"
+        (func $rd (param i32 i32 i32 i64 i32) (result i32)))
+      (memory 1)
+      (func (export "run") (result i32)
+        (call $rd (i32.const 3) (i32.const 1000) (i32.const 4096) (i64.const 0) (i32.const 400))))
+    "#;
+
+#[test]
+fn fd_readdir_on_preopen_lists_current_dir() {
+    let extra = r#"
+fn parse(mem: &[u8], base: usize, bufused: usize) -> Vec<(String, u8)> {
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while off + 24 <= bufused {
+        let hb = base + off;
+        let namlen =
+            u32::from_le_bytes([mem[hb + 16], mem[hb + 17], mem[hb + 18], mem[hb + 19]]) as usize;
+        let dtype = mem[hb + 20];
+        if off + 24 + namlen > bufused {
+            break;
+        }
+        off += 24;
+        let name = String::from_utf8(mem[base + off..base + off + namlen].to_vec()).unwrap();
+        off += namlen;
+        out.push((name, dtype));
+    }
+    out
+}
+
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 0, "readdir on fd 3 should succeed");
+    let bufused =
+        u32::from_le_bytes([i.mem()[400], i.mem()[401], i.mem()[402], i.mem()[403]]) as usize;
+    let names: Vec<String> = parse(i.mem(), 1000, bufused)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert!(names.iter().any(|n| n == "."), "listing must contain .");
+    assert!(names.iter().any(|n| n == ".."), "listing must contain ..");
+    assert!(
+        names.iter().any(|n| n == "marker.txt"),
+        "listing must contain the marker file, got {names:?}"
+    );
+}
+"#;
+    let (bin, dir) = compile("readdir_fd3", READDIR_FD3, extra);
+    std::fs::write(dir.join("marker.txt"), b"m").expect("write marker file");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "fd_readdir fd 3 assertions failed");
+}
+
+// fd_readdir enumerates a directory opened via path_open. A subdir "rd" holds
+// "a.txt" (file), "b.txt" (file), and "sub" (dir). path_open("rd") yields fd 4;
+// fd_readdir(4) packs dirents into a 512-byte buffer at 1000, storing bufused
+// at 400. The listing must be exactly {".","..","a.txt","b.txt","sub"} with the
+// right filetypes (directory=3, regular file=4).
+const READDIR_SUBDIR: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_open"
+        (func $po (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_readdir"
+        (func $rd (param i32 i32 i32 i64 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "rd")
+      (func (export "run") (result i32)
+        (drop (call $po (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 2)
+                        (i32.const 0) (i64.const 2) (i64.const 0) (i32.const 0) (i32.const 300)))
+        (call $rd (i32.load (i32.const 300)) (i32.const 1000) (i32.const 512) (i64.const 0) (i32.const 400))))
+    "#;
+
+#[test]
+fn fd_readdir_lists_an_opened_subdirectory_with_filetypes() {
+    let extra = r#"
+fn parse(mem: &[u8], base: usize, bufused: usize) -> Vec<(String, u8)> {
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while off + 24 <= bufused {
+        let hb = base + off;
+        let namlen =
+            u32::from_le_bytes([mem[hb + 16], mem[hb + 17], mem[hb + 18], mem[hb + 19]]) as usize;
+        let dtype = mem[hb + 20];
+        if off + 24 + namlen > bufused {
+            break;
+        }
+        off += 24;
+        let name = String::from_utf8(mem[base + off..base + off + namlen].to_vec()).unwrap();
+        off += namlen;
+        out.push((name, dtype));
+    }
+    out
+}
+
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func2(), 0, "readdir on the opened subdir should succeed");
+    let bufused =
+        u32::from_le_bytes([i.mem()[400], i.mem()[401], i.mem()[402], i.mem()[403]]) as usize;
+    let mut got = parse(i.mem(), 1000, bufused);
+    got.sort();
+    let mut want = vec![
+        (".".to_string(), 3u8),
+        ("..".to_string(), 3u8),
+        ("a.txt".to_string(), 4u8),
+        ("b.txt".to_string(), 4u8),
+        ("sub".to_string(), 3u8),
+    ];
+    want.sort();
+    assert_eq!(got, want, "readdir listing mismatch");
+}
+"#;
+    let (bin, dir) = compile("readdir_subdir", READDIR_SUBDIR, extra);
+    let rd = dir.join("rd");
+    let _ = std::fs::remove_dir_all(&rd);
+    std::fs::create_dir_all(rd.join("sub")).expect("seed subdir");
+    std::fs::write(rd.join("a.txt"), b"a").expect("seed a.txt");
+    std::fs::write(rd.join("b.txt"), b"b").expect("seed b.txt");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "fd_readdir subdir assertions failed");
+    let _ = std::fs::remove_dir_all(&rd);
+}
+
+// fd_readdir paginates: with a 40-byte buffer that holds one full record plus a
+// truncated next header, the guest resumes from the last complete entry's
+// `d_next` cookie until a call comes back un-truncated (bufused < buf_len). The
+// accumulated set must still be the full directory. `open` opens "rd" (fd at
+// 300); `readdir` takes a cookie and reads at buffer 1000 (len 40), bufused 400.
+const READDIR_PAGED: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_open"
+        (func $po (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_readdir"
+        (func $rd (param i32 i32 i32 i64 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "rd")
+      (func (export "open") (result i32)
+        (call $po (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 2)
+                  (i32.const 0) (i64.const 2) (i64.const 0) (i32.const 0) (i32.const 300)))
+      (func (export "readdir") (param i64) (result i32)
+        (call $rd (i32.load (i32.const 300)) (i32.const 1000) (i32.const 40) (local.get 0) (i32.const 400))))
+    "#;
+
+#[test]
+fn fd_readdir_paginates_across_a_small_buffer() {
+    let extra = r#"
+fn main() {
+    const BUF: usize = 1000;
+    const BUF_LEN: usize = 40;
+    let mut i = Instance::new();
+    assert_eq!(i.func2(), 0, "open should succeed");
+    let mut cookie: i64 = 0;
+    let mut all: Vec<String> = Vec::new();
+    loop {
+        assert_eq!(i.func3(cookie), 0, "readdir page should succeed");
+        let bufused =
+            u32::from_le_bytes([i.mem()[400], i.mem()[401], i.mem()[402], i.mem()[403]]) as usize;
+        let mut off = 0usize;
+        let mut last_next: Option<i64> = None;
+        while off + 24 <= bufused {
+            let hb = BUF + off;
+            let dnext = u64::from_le_bytes([
+                i.mem()[hb], i.mem()[hb + 1], i.mem()[hb + 2], i.mem()[hb + 3],
+                i.mem()[hb + 4], i.mem()[hb + 5], i.mem()[hb + 6], i.mem()[hb + 7],
+            ]) as i64;
+            let namlen = u32::from_le_bytes([
+                i.mem()[hb + 16], i.mem()[hb + 17], i.mem()[hb + 18], i.mem()[hb + 19],
+            ]) as usize;
+            if off + 24 + namlen > bufused {
+                break;
+            }
+            off += 24;
+            all.push(String::from_utf8(i.mem()[BUF + off..BUF + off + namlen].to_vec()).unwrap());
+            off += namlen;
+            last_next = Some(dnext);
+        }
+        if bufused < BUF_LEN {
+            break;
+        }
+        match last_next {
+            Some(n) => cookie = n,
+            None => panic!("buffer too small to hold even one entry"),
+        }
+    }
+    all.sort();
+    let mut want = vec![
+        ".".to_string(),
+        "..".to_string(),
+        "a.txt".to_string(),
+        "b.txt".to_string(),
+        "sub".to_string(),
+    ];
+    want.sort();
+    assert_eq!(all, want, "paginated readdir lost or duplicated entries");
+}
+"#;
+    let (bin, dir) = compile("readdir_paged", READDIR_PAGED, extra);
+    let rd = dir.join("rd");
+    let _ = std::fs::remove_dir_all(&rd);
+    std::fs::create_dir_all(rd.join("sub")).expect("seed subdir");
+    std::fs::write(rd.join("a.txt"), b"a").expect("seed a.txt");
+    std::fs::write(rd.join("b.txt"), b"b").expect("seed b.txt");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "fd_readdir pagination assertions failed");
+    let _ = std::fs::remove_dir_all(&rd);
+}
+
+#[test]
+fn fd_readdir_rejects_a_bogus_fd() {
+    // A descriptor that was never opened is EBADF (8).
+    let wat = r#"
+        (module
+          (import "wasi_snapshot_preview1" "fd_readdir"
+            (func $rd (param i32 i32 i32 i64 i32) (result i32)))
+          (memory 1)
+          (func (export "run") (result i32)
+            (call $rd (i32.const 99) (i32.const 1000) (i32.const 512) (i64.const 0) (i32.const 400))))
+        "#;
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 8, "readdir on a bogus fd must return EBADF");
+}
+"#;
+    let (bin, dir) = compile("readdir_bogus", wat, extra);
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "fd_readdir bogus fd assertions failed");
+}

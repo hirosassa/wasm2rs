@@ -48,6 +48,7 @@ pub(super) fn render_module(
                     | WasiFn::FdPrestatGet
                     | WasiFn::FdPrestatDirName
                     | WasiFn::FdFilestatGet
+                    | WasiFn::FdReaddir
             )
         )
     });
@@ -106,10 +107,13 @@ pub(super) fn render_module(
     for (i, g) in globals.iter().enumerate() {
         lines.push(format!("    g{}: {},", global_base + i, rust_type(g.ty)?));
     }
-    // Real files opened through `path_open`; descriptor N is `wasi_fds[N - 4]`
-    // (0-2 are stdio, 3 is the preopen directory).
+    // Files/directories opened through `path_open`; descriptor N is
+    // `wasi_fds[N - 4]` (0-2 are stdio, 3 is the preopen directory). Each slot
+    // keeps the open handle and its containment-checked relative path (the path
+    // is what `fd_readdir` re-opens with `read_dir`, since a `File` cannot be
+    // enumerated directly with std alone).
     if wasi_files {
-        lines.push("    wasi_fds: Vec<Option<std::fs::File>>,".to_string());
+        lines.push("    wasi_fds: Vec<Option<(std::fs::File, std::path::PathBuf)>>,".to_string());
     }
     // A retained passive segment is a `&'static` slice; `data.drop`/`elem.drop`
     // reset it to an empty slice.

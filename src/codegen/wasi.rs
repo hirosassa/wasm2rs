@@ -32,6 +32,7 @@ pub(crate) enum WasiFn {
     PathUnlinkFile,
     PathRename,
     PathSymlink,
+    FdReaddir,
 }
 
 impl WasiFn {
@@ -74,6 +75,7 @@ impl WasiFn {
             "path_unlink_file" => WasiFn::PathUnlinkFile,
             "path_rename" => WasiFn::PathRename,
             "path_symlink" => WasiFn::PathSymlink,
+            "fd_readdir" => WasiFn::FdReaddir,
             _ => return None,
         };
         (params == candidate.params() && results == candidate.results()).then_some(candidate)
@@ -107,6 +109,8 @@ impl WasiFn {
             WasiFn::PathRename => &[I32, I32, I32, I32, I32, I32],
             // fd, iovs, iovs_len, offset, nread/nwritten.
             WasiFn::FdPread | WasiFn::FdPwrite => &[I32, I32, I32, I64, I32],
+            // fd, buf, buf_len, cookie, bufused.
+            WasiFn::FdReaddir => &[I32, I32, I32, I64, I32],
             // fd, lookupflags, path, path_len, filestat_buf.
             WasiFn::PathFilestatGet => &[I32, I32, I32, I32, I32],
             // dirfd, dirflags, path, path_len, oflags, rights_base,
@@ -142,7 +146,8 @@ impl WasiFn {
             | WasiFn::PathRemoveDirectory
             | WasiFn::PathUnlinkFile
             | WasiFn::PathRename
-            | WasiFn::PathSymlink => &[ValType::I32],
+            | WasiFn::PathSymlink
+            | WasiFn::FdReaddir => &[ValType::I32],
         }
     }
 
@@ -175,6 +180,7 @@ impl WasiFn {
             WasiFn::PathUnlinkFile => "wasi_path_unlink_file",
             WasiFn::PathRename => "wasi_path_rename",
             WasiFn::PathSymlink => "wasi_path_symlink",
+            WasiFn::FdReaddir => "wasi_fd_readdir",
         }
     }
 
@@ -227,7 +233,7 @@ impl WasiFn {
                     body.extend([
                         "        _ => {",
                         "            let idx = a0 as u32 as usize;",
-                        "            match self.wasi_fds.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()) {",
+                        "            match self.wasi_fds.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {",
                         "                Some(f) => f.write_all(&buf).is_ok(),",
                         "                None => return 8,",
                         "            }",
@@ -276,7 +282,7 @@ impl WasiFn {
                     body.extend([
                         "        _ => {",
                         "            let idx = a0 as u32 as usize;",
-                        "            match self.wasi_fds.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()) {",
+                        "            match self.wasi_fds.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {",
                         "                Some(f) => match f.read(&mut tmp) { Ok(n) => n, Err(_) => return 29 },",
                         "                None => return 8,",
                         "            }",
@@ -333,7 +339,7 @@ impl WasiFn {
                 "        _ => return 28,",
                 "    };",
                 "    let idx = a0 as u32 as usize;",
-                "    let newoff = match self.wasi_fds.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()) {",
+                "    let newoff = match self.wasi_fds.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {",
                 "        Some(f) => match f.seek(pos) { Ok(n) => n, Err(_) => return 29 },",
                 "        None => return 70,",
                 "    };",
@@ -362,7 +368,7 @@ impl WasiFn {
                 "        3u8",
                 "    } else {",
                 "        let idx = a0 as u32 as usize;",
-                "        match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()) {",
+                "        match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
                 "            Some(_) => 4u8,",
                 "            None => return 8,",
                 "        }",
@@ -519,8 +525,8 @@ impl WasiFn {
                 "        },",
                 "    };",
                 "    let idx = match self.wasi_fds.iter().position(|s| s.is_none()) {",
-                "        Some(i) => { self.wasi_fds[i] = Some(file); i }",
-                "        None => { self.wasi_fds.push(Some(file)); self.wasi_fds.len() - 1 }",
+                "        Some(i) => { self.wasi_fds[i] = Some((file, rel)); i }",
+                "        None => { self.wasi_fds.push(Some((file, rel))); self.wasi_fds.len() - 1 }",
                 "    };",
                 "    let fd = idx as u32 + 4;",
                 "    let w = a8 as u32 as usize;",
@@ -540,7 +546,7 @@ impl WasiFn {
                 "        (3u8, 0u64)",
                 "    } else {",
                 "        let idx = a0 as u32 as usize;",
-                "        match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()) {",
+                "        match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
                 "            Some(f) => match f.metadata() { Ok(m) => (4u8, m.len()), Err(_) => return 29 },",
                 "            None => return 8,",
                 "        }",
@@ -593,7 +599,7 @@ impl WasiFn {
                 "        0 | 1 | 2 => return 70,",
                 "        _ => {",
                 "            let idx = a0 as u32 as usize;",
-                "            match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()) {",
+                "            match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
                 "                Some(f) => match f.read_at(&mut tmp, a3 as u64) { Ok(n) => n, Err(_) => return 29 },",
                 "                None => return 8,",
                 "            }",
@@ -641,7 +647,7 @@ impl WasiFn {
                 "        0 | 1 | 2 => return 70,",
                 "        _ => {",
                 "            let idx = a0 as u32 as usize;",
-                "            match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()) {",
+                "            match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
                 "                Some(f) => match f.write_at(&buf, a3 as u64) { Ok(n) => n, Err(_) => return 29 },",
                 "                None => return 8,",
                 "            }",
@@ -753,6 +759,80 @@ impl WasiFn {
                 body.extend(owned(&["}"]));
                 body
             }
+            // `fd_readdir(fd, buf, buf_len, cookie, bufused)` enumerates a
+            // directory: fd 3 is the preopen ".", and fd >= 4 is a directory
+            // opened via `path_open` (whose recorded path is re-opened with
+            // `read_dir`). It writes packed `dirent` records (a 24-byte header
+            // then the name) starting at `cookie`, stores the byte count at
+            // `bufused`, and truncates the final record when the buffer fills
+            // (then bufused == buf_len signals "call again"). A synthetic "."
+            // and ".." lead the listing; real entries follow sorted by name so a
+            // resumed `cookie` addresses the same slot. This is emitted only with
+            // a file table (`FdReaddir` forces `wasi_files`).
+            WasiFn::FdReaddir => owned(&[
+                "fn wasi_fd_readdir(&mut self, a0: i32, a1: i32, a2: i32, a3: i64, a4: i32) -> i32 {",
+                "    use std::os::unix::ffi::OsStrExt;",
+                "    use std::os::unix::fs::DirEntryExt;",
+                "    let dir = if a0 == 3 {",
+                "        std::path::PathBuf::from(\".\")",
+                "    } else {",
+                "        let idx = a0 as u32 as usize;",
+                "        match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()) {",
+                "            Some((_, p)) => p.clone(),",
+                "            None => return 8,",
+                "        }",
+                "    };",
+                "    let mut entries: Vec<(u64, Vec<u8>, u8)> = vec![(0, b\".\".to_vec(), 3u8), (0, b\"..\".to_vec(), 3u8)];",
+                "    let rd = match std::fs::read_dir(&dir) {",
+                "        Ok(rd) => rd,",
+                "        Err(e) => return match e.kind() {",
+                "            std::io::ErrorKind::NotFound => 44,",
+                "            std::io::ErrorKind::PermissionDenied => 2,",
+                "            _ => 29,",
+                "        },",
+                "    };",
+                "    let mut reals: Vec<(u64, Vec<u8>, u8)> = Vec::new();",
+                "    for ent in rd {",
+                "        let ent = match ent { Ok(e) => e, Err(_) => return 29 };",
+                "        let ftype = match ent.file_type() {",
+                "            Ok(t) => if t.is_dir() { 3u8 } else if t.is_symlink() { 7u8 } else if t.is_file() { 4u8 } else { 0u8 },",
+                "            Err(_) => 0u8,",
+                "        };",
+                "        reals.push((ent.ino(), ent.file_name().as_bytes().to_vec(), ftype));",
+                "    }",
+                "    reals.sort_by(|a, b| a.1.cmp(&b.1));",
+                "    entries.extend(reals);",
+                "    let buf = a1 as u32 as usize;",
+                "    let buf_len = a2 as u32 as usize;",
+                "    let start = a3 as u64 as usize;",
+                "    let mut used = 0usize;",
+                "    for (i, (ino, name, ftype)) in entries.iter().enumerate().skip(start) {",
+                "        if used >= buf_len {",
+                "            break;",
+                "        }",
+                "        let mut head = [0u8; 24];",
+                "        head[0..8].copy_from_slice(&((i as u64) + 1).to_le_bytes());",
+                "        head[8..16].copy_from_slice(&ino.to_le_bytes());",
+                "        head[16..20].copy_from_slice(&(name.len() as u32).to_le_bytes());",
+                "        head[20] = *ftype;",
+                "        let take = (buf_len - used).min(24);",
+                "        self.mem_mut()[buf + used..buf + used + take].copy_from_slice(&head[..take]);",
+                "        used += take;",
+                "        if take < 24 || used >= buf_len {",
+                "            break;",
+                "        }",
+                "        let take = (buf_len - used).min(name.len());",
+                "        self.mem_mut()[buf + used..buf + used + take].copy_from_slice(&name[..take]);",
+                "        used += take;",
+                "        if take < name.len() {",
+                "            break;",
+                "        }",
+                "    }",
+                "    let w = a4 as u32 as usize;",
+                "    self.mem_mut()[w..w + 4].copy_from_slice(&(used as u32).to_le_bytes());",
+                "    0",
+                "}",
+            ]),
         }
     }
 }
