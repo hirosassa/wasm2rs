@@ -845,6 +845,52 @@ fn main() {
     let _ = std::fs::remove_dir_all(&rd);
 }
 
+// path_link creates a hard link within the preopen (both dirfds are 3, both
+// paths contained). "orig.txt" (8 bytes) at 100 and "hard.txt" (8 bytes) at
+// 120; `run` returns the errno. The link must share the original's contents.
+const LINK: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_link"
+        (func $ln (param i32 i32 i32 i32 i32 i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "orig.txt")
+      (data (i32.const 120) "hard.txt")
+      (func (export "run") (result i32)
+        (call $ln (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 8)
+                  (i32.const 3) (i32.const 120) (i32.const 8))))
+    "#;
+
+#[test]
+fn path_link_creates_a_hard_link() {
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 0, "path_link should succeed");
+}
+"#;
+    let (bin, dir) = compile("link", LINK, extra);
+    let orig = dir.join("orig.txt");
+    let hard = dir.join("hard.txt");
+    let _ = std::fs::remove_file(&hard);
+    std::fs::write(&orig, b"linked-contents").expect("seed original");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "path_link assertions failed");
+    assert_eq!(
+        std::fs::read(&hard).expect("hard link should exist"),
+        b"linked-contents",
+    );
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        std::fs::metadata(&orig).expect("orig meta").ino(),
+        std::fs::metadata(&hard).expect("hard meta").ino(),
+        "a hard link shares the original's inode",
+    );
+    let _ = std::fs::remove_file(&hard);
+}
+
 #[test]
 fn fd_readdir_rejects_a_bogus_fd() {
     // A descriptor that was never opened is EBADF (8).

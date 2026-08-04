@@ -32,6 +32,7 @@ pub(crate) enum WasiFn {
     PathUnlinkFile,
     PathRename,
     PathSymlink,
+    PathLink,
     FdReaddir,
 }
 
@@ -75,6 +76,7 @@ impl WasiFn {
             "path_unlink_file" => WasiFn::PathUnlinkFile,
             "path_rename" => WasiFn::PathRename,
             "path_symlink" => WasiFn::PathSymlink,
+            "path_link" => WasiFn::PathLink,
             "fd_readdir" => WasiFn::FdReaddir,
             _ => return None,
         };
@@ -107,6 +109,9 @@ impl WasiFn {
             WasiFn::PathSymlink => &[I32, I32, I32, I32, I32],
             // fd, old_path, old_path_len, new_fd, new_path, new_path_len.
             WasiFn::PathRename => &[I32, I32, I32, I32, I32, I32],
+            // old_fd, old_flags, old_path, old_path_len, new_fd, new_path,
+            // new_path_len.
+            WasiFn::PathLink => &[I32, I32, I32, I32, I32, I32, I32],
             // fd, iovs, iovs_len, offset, nread/nwritten.
             WasiFn::FdPread | WasiFn::FdPwrite => &[I32, I32, I32, I64, I32],
             // fd, buf, buf_len, cookie, bufused.
@@ -147,6 +152,7 @@ impl WasiFn {
             | WasiFn::PathUnlinkFile
             | WasiFn::PathRename
             | WasiFn::PathSymlink
+            | WasiFn::PathLink
             | WasiFn::FdReaddir => &[ValType::I32],
         }
     }
@@ -180,6 +186,7 @@ impl WasiFn {
             WasiFn::PathUnlinkFile => "wasi_path_unlink_file",
             WasiFn::PathRename => "wasi_path_rename",
             WasiFn::PathSymlink => "wasi_path_symlink",
+            WasiFn::PathLink => "wasi_path_link",
             WasiFn::FdReaddir => "wasi_fd_readdir",
         }
     }
@@ -756,6 +763,23 @@ impl WasiFn {
                 body.extend(fs_result_lines(
                     "std::os::unix::fs::symlink(&target, &link)",
                 ));
+                body.extend(owned(&["}"]));
+                body
+            }
+            // `path_link(old_fd, old_flags, old_path, new_fd, new_path)` creates
+            // a hard link at `new_path` to `old_path`; both dirfds must be fd 3
+            // and both paths are contained. `old_flags` (symlink follow) is
+            // ignored (`std::fs::hard_link` does not follow the final symlink).
+            WasiFn::PathLink => {
+                let mut body = owned(&[
+                    "fn wasi_path_link(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32, a6: i32) -> i32 {",
+                    "    if a0 != 3 || a4 != 3 {",
+                    "        return 8;",
+                    "    }",
+                ]);
+                body.extend(contain_path("old", "a2", "a3"));
+                body.extend(contain_path("new", "a5", "a6"));
+                body.extend(fs_result_lines("std::fs::hard_link(&old, &new)"));
                 body.extend(owned(&["}"]));
                 body
             }
