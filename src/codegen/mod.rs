@@ -541,9 +541,20 @@ fn render_region_into(region: RegionNode, depth: usize, line_prefix: &str, out: 
     };
 
     if targeted {
-        push_body_line(out, &format!("'l{label}: loop {{"), depth, line_prefix);
+        // A `loop` has a back-edge (`br` to it `continue`s), so it stays a
+        // labelled `loop` and needs a trailing `break` to leave it when the body
+        // falls through. A `block`/`if` never loops, so it is a labelled block
+        // `'lN: { … }` that a `br` `break`s out of and that falls through its end
+        // naturally — no trailing break.
+        let is_loop = kind == FrameKind::Loop;
+        let header = if is_loop {
+            format!("'l{label}: loop {{")
+        } else {
+            format!("'l{label}: {{")
+        };
+        push_body_line(out, &header, depth, line_prefix);
         render_inner(out, body, els);
-        if reachable_at_end {
+        if is_loop && reachable_at_end {
             push_body_line(out, &format!("break 'l{label};"), inner_depth, line_prefix);
         }
         push_body_line(out, "}", depth, line_prefix);
