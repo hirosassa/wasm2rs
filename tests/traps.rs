@@ -121,6 +121,6 @@ fn out_of_bounds_memory_load_traps() {
              (memory 1)
              (func (export "f") (result i32) (i32.load (i32.const 100000))))"#,
         "let mut inst = Instance::new();\n    inst.func0();",
-        "index out of bounds",
+        "out of range for slice",
     );
 }

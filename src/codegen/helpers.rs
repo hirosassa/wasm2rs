@@ -121,7 +121,7 @@ pub(super) fn helper_lines(helper: Helper) -> Vec<String> {
         Helper::LoadI32 => owned(&[
             "fn r32(&self, addr: i32, offset: u32) -> i32 {",
             "    let a = addr as u32 as usize + offset as usize;",
-            "    i32::from_le_bytes([self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3]])",
+            "    i32::from_le_bytes(self.mem()[a..a + 4].try_into().unwrap())",
             "}",
         ]),
         Helper::Load8U => owned(&[
@@ -139,13 +139,13 @@ pub(super) fn helper_lines(helper: Helper) -> Vec<String> {
         Helper::Load16U => owned(&[
             "fn r16u(&self, addr: i32, offset: u32) -> i32 {",
             "    let a = addr as u32 as usize + offset as usize;",
-            "    u16::from_le_bytes([self.mem()[a], self.mem()[a + 1]]) as i32",
+            "    u16::from_le_bytes(self.mem()[a..a + 2].try_into().unwrap()) as i32",
             "}",
         ]),
         Helper::Load16S => owned(&[
             "fn r16s(&self, addr: i32, offset: u32) -> i32 {",
             "    let a = addr as u32 as usize + offset as usize;",
-            "    i16::from_le_bytes([self.mem()[a], self.mem()[a + 1]]) as i32",
+            "    i16::from_le_bytes(self.mem()[a..a + 2].try_into().unwrap()) as i32",
             "}",
         ]),
         Helper::StoreI32 => owned(&[
@@ -169,19 +169,19 @@ pub(super) fn helper_lines(helper: Helper) -> Vec<String> {
         Helper::LoadI64 => owned(&[
             "fn r64(&self, addr: i32, offset: u32) -> i64 {",
             "    let a = addr as u32 as usize + offset as usize;",
-            "    i64::from_le_bytes([self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3], self.mem()[a + 4], self.mem()[a + 5], self.mem()[a + 6], self.mem()[a + 7]])",
+            "    i64::from_le_bytes(self.mem()[a..a + 8].try_into().unwrap())",
             "}",
         ]),
         Helper::LoadF32 => owned(&[
             "fn rf32(&self, addr: i32, offset: u32) -> f32 {",
             "    let a = addr as u32 as usize + offset as usize;",
-            "    f32::from_le_bytes([self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3]])",
+            "    f32::from_le_bytes(self.mem()[a..a + 4].try_into().unwrap())",
             "}",
         ]),
         Helper::LoadF64 => owned(&[
             "fn rf64(&self, addr: i32, offset: u32) -> f64 {",
             "    let a = addr as u32 as usize + offset as usize;",
-            "    f64::from_le_bytes([self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3], self.mem()[a + 4], self.mem()[a + 5], self.mem()[a + 6], self.mem()[a + 7]])",
+            "    f64::from_le_bytes(self.mem()[a..a + 8].try_into().unwrap())",
             "}",
         ]),
         Helper::Load8UI64 => owned(&[
@@ -199,25 +199,25 @@ pub(super) fn helper_lines(helper: Helper) -> Vec<String> {
         Helper::Load16UI64 => owned(&[
             "fn r16u64(&self, addr: i32, offset: u32) -> i64 {",
             "    let a = addr as u32 as usize + offset as usize;",
-            "    u16::from_le_bytes([self.mem()[a], self.mem()[a + 1]]) as i64",
+            "    u16::from_le_bytes(self.mem()[a..a + 2].try_into().unwrap()) as i64",
             "}",
         ]),
         Helper::Load16SI64 => owned(&[
             "fn r16s64(&self, addr: i32, offset: u32) -> i64 {",
             "    let a = addr as u32 as usize + offset as usize;",
-            "    i16::from_le_bytes([self.mem()[a], self.mem()[a + 1]]) as i64",
+            "    i16::from_le_bytes(self.mem()[a..a + 2].try_into().unwrap()) as i64",
             "}",
         ]),
         Helper::Load32UI64 => owned(&[
             "fn r32u64(&self, addr: i32, offset: u32) -> i64 {",
             "    let a = addr as u32 as usize + offset as usize;",
-            "    u32::from_le_bytes([self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3]]) as i64",
+            "    u32::from_le_bytes(self.mem()[a..a + 4].try_into().unwrap()) as i64",
             "}",
         ]),
         Helper::Load32SI64 => owned(&[
             "fn r32s64(&self, addr: i32, offset: u32) -> i64 {",
             "    let a = addr as u32 as usize + offset as usize;",
-            "    i32::from_le_bytes([self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3]]) as i64",
+            "    i32::from_le_bytes(self.mem()[a..a + 4].try_into().unwrap()) as i64",
             "}",
         ]),
         Helper::StoreI64 => owned(&[
