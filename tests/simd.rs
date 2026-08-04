@@ -230,6 +230,162 @@ fn integer_lane_neg() {
 }
 
 #[test]
+fn float_lane_binary_arith() {
+    // Lane-wise f32x4/f64x2 add/sub/mul/div. All chosen values are exact in
+    // binary floating point so equality holds.
+    expect_ok(
+        "float_lane_binary",
+        r#"
+        (module
+          (func (result f32)
+            (f32x4.extract_lane 0
+              (f32x4.add (v128.const f32x4 1.5 2.5 3.5 4.5)
+                         (v128.const f32x4 0.5 0.5 0.5 0.5))))
+          (func (result f32)
+            (f32x4.extract_lane 1
+              (f32x4.sub (v128.const f32x4 10 20 30 40)
+                         (v128.const f32x4 1 2 3 4))))
+          (func (result f32)
+            (f32x4.extract_lane 2
+              (f32x4.mul (v128.const f32x4 1 2 3 4)
+                         (v128.const f32x4 5 5 5 5))))
+          (func (result f64)
+            (f64x2.extract_lane 0
+              (f64x2.div (v128.const f64x2 9 8) (v128.const f64x2 3 2))))
+          (func (result f64)
+            (f64x2.extract_lane 1
+              (f64x2.add (v128.const f64x2 1.25 2.5) (v128.const f64x2 0.25 0.5)))))
+        "#,
+        "assert_eq!(func0(), 2.0f32);\n    \
+         assert_eq!(func1(), 18.0f32);\n    \
+         assert_eq!(func2(), 15.0f32);\n    \
+         assert_eq!(func3(), 3.0f64);\n    \
+         assert_eq!(func4(), 3.0f64);",
+    );
+}
+
+#[test]
+fn float_lane_neg_abs_sqrt() {
+    // neg/abs are sign-bit rewrites (bit-exact, even for NaN); sqrt is per-lane.
+    expect_ok(
+        "float_lane_unary",
+        r#"
+        (module
+          (func (result f32)
+            (f32x4.extract_lane 0 (f32x4.neg (v128.const f32x4 2.5 0 0 0))))
+          (func (result f32)
+            (f32x4.extract_lane 0 (f32x4.abs (v128.const f32x4 -3.5 0 0 0))))
+          (func (result f32)
+            (f32x4.extract_lane 0 (f32x4.sqrt (v128.const f32x4 16 0 0 0))))
+          (func (result f64)
+            (f64x2.extract_lane 1 (f64x2.neg (v128.const f64x2 1 -4))))
+          (func (result f64)
+            (f64x2.extract_lane 1 (f64x2.abs (v128.const f64x2 1 -4))))
+          (func (result f64)
+            (f64x2.extract_lane 0 (f64x2.sqrt (v128.const f64x2 9 0))))
+          ;; A high f32 lane (lane 3), to confirm the neg sign mask is tiled
+          ;; across the whole register, not just the low lane.
+          (func (result f32)
+            (f32x4.extract_lane 3 (f32x4.neg (v128.const f32x4 0 0 0 6.5)))))
+        "#,
+        "assert_eq!(func0(), -2.5f32);\n    \
+         assert_eq!(func1(), 3.5f32);\n    \
+         assert_eq!(func2(), 4.0f32);\n    \
+         assert_eq!(func3(), 4.0f64);\n    \
+         assert_eq!(func4(), 4.0f64);\n    \
+         assert_eq!(func5(), 3.0f64);\n    \
+         assert_eq!(func6(), -6.5f32);",
+    );
+}
+
+#[test]
+fn float_lane_min_max() {
+    // wasm min/max return NaN if either operand is NaN, and for equal operands
+    // (±0) min keeps the negative, max the positive — mirroring the scalar
+    // `f32_min`/`f32_max` helpers.
+    expect_ok(
+        "float_lane_minmax",
+        r#"
+        (module
+          (func (result f32)
+            (f32x4.extract_lane 0
+              (f32x4.min (v128.const f32x4 3 3 3 3) (v128.const f32x4 5 5 5 5))))
+          (func (result f32)
+            (f32x4.extract_lane 0
+              (f32x4.max (v128.const f32x4 3 3 3 3) (v128.const f32x4 5 5 5 5))))
+          (func (result f32)
+            (f32x4.extract_lane 0
+              (f32x4.min (v128.const f32x4 nan 0 0 0) (v128.const f32x4 1 1 1 1))))
+          (func (result f32)
+            (f32x4.extract_lane 0
+              (f32x4.min (v128.const f32x4 -0.0 0 0 0) (v128.const f32x4 0.0 0 0 0))))
+          (func (result f32)
+            (f32x4.extract_lane 0
+              (f32x4.max (v128.const f32x4 -0.0 0 0 0) (v128.const f32x4 0.0 0 0 0)))))
+        "#,
+        "assert_eq!(func0(), 3.0f32);\n    \
+         assert_eq!(func1(), 5.0f32);\n    \
+         assert!(func2().is_nan());\n    \
+         assert!(func3().is_sign_negative() && func3() == 0.0f32);\n    \
+         assert!(!func4().is_sign_negative() && func4() == 0.0f32);",
+    );
+}
+
+#[test]
+fn float_lane_pmin_pmax() {
+    // Pseudo-min/max: pmin(a,b)=b<a?b:a, pmax(a,b)=a<b?b:a. With a NaN operand
+    // the comparison is false, so both return the first operand.
+    expect_ok(
+        "float_lane_pminmax",
+        r#"
+        (module
+          (func (result f32)
+            (f32x4.extract_lane 0
+              (f32x4.pmin (v128.const f32x4 3 3 3 3) (v128.const f32x4 5 5 5 5))))
+          (func (result f32)
+            (f32x4.extract_lane 0
+              (f32x4.pmax (v128.const f32x4 3 3 3 3) (v128.const f32x4 5 5 5 5))))
+          (func (result f64)
+            (f64x2.extract_lane 0
+              (f64x2.pmin (v128.const f64x2 1 1) (v128.const f64x2 nan nan))))
+          (func (result f64)
+            (f64x2.extract_lane 0
+              (f64x2.pmax (v128.const f64x2 1 1) (v128.const f64x2 nan nan)))))
+        "#,
+        "assert_eq!(func0(), 3.0f32);\n    \
+         assert_eq!(func1(), 5.0f32);\n    \
+         assert_eq!(func2(), 1.0f64);\n    \
+         assert_eq!(func3(), 1.0f64);",
+    );
+}
+
+#[test]
+fn float_lane_rounding() {
+    // ceil/floor/trunc and nearest (round half to even).
+    expect_ok(
+        "float_lane_rounding",
+        r#"
+        (module
+          (func (result f32)
+            (f32x4.extract_lane 0 (f32x4.ceil (v128.const f32x4 2.3 0 0 0))))
+          (func (result f32)
+            (f32x4.extract_lane 0 (f32x4.floor (v128.const f32x4 2.7 0 0 0))))
+          (func (result f32)
+            (f32x4.extract_lane 0 (f32x4.trunc (v128.const f32x4 -2.9 0 0 0))))
+          (func (result f64)
+            (f64x2.extract_lane 0 (f64x2.nearest (v128.const f64x2 2.5 3.5))))
+          (func (result f64)
+            (f64x2.extract_lane 1 (f64x2.nearest (v128.const f64x2 2.5 3.5)))))
+        "#,
+        "assert_eq!(func0(), 3.0f32);\n    \
+         assert_eq!(func1(), 2.0f32);\n    \
+         assert_eq!(func2(), -2.0f32);\n    \
+         assert_eq!(func3(), 2.0f64);\n    \
+         assert_eq!(func4(), 4.0f64);",
+    );
+}
+
+#[test]
 fn v128_bitselect_and_any_true() {
     expect_ok(
         "bitselect_anytrue",

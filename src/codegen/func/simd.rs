@@ -109,6 +109,19 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(format!("{name}({})", a.code), ValType::V128, a.stable)
     }
 
+    /// A whole-register bitwise op against a constant `mask`, used for float
+    /// `neg` (`^` the lane sign bits) and `abs` (`&` the magnitude bits). These
+    /// are exact sign-bit rewrites, so unlike the arithmetic lane helpers they
+    /// need no per-lane loop and stay bit-exact even for NaN.
+    pub(super) fn v128_mask_op(&mut self, op: char, mask: u128) -> Result<(), TranspileError> {
+        let v = self.pop()?;
+        self.push_combined(
+            format!("({} {op} 0x{mask:032x}u128)", v.code),
+            ValType::V128,
+            v.stable,
+        )
+    }
+
     /// Push a `v128.const` literal from its 16 little-endian bytes.
     pub(super) fn v128_const(&mut self, bytes: &[u8; 16]) {
         self.push(Val {

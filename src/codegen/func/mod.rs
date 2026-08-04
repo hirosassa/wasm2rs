@@ -777,6 +777,48 @@ impl<'a> FuncGen<'a> {
             Operator::I16x8Neg => self.call_simd_unop("i16x8_neg")?,
             Operator::I32x4Neg => self.call_simd_unop("i32x4_neg")?,
             Operator::I64x2Neg => self.call_simd_unop("i64x2_neg")?,
+            // Float lane arithmetic (round 3). neg/abs are exact sign-bit
+            // rewrites on the whole register; the rest are per-lane helpers
+            // (see `simd_rt.rs`). The sign masks tile one lane's sign / magnitude
+            // bit pattern across the 128-bit register.
+            Operator::F32x4Neg => {
+                self.v128_mask_op('^', 0x8000_0000_8000_0000_8000_0000_8000_0000)?
+            }
+            Operator::F64x2Neg => {
+                self.v128_mask_op('^', 0x8000_0000_0000_0000_8000_0000_0000_0000)?
+            }
+            Operator::F32x4Abs => {
+                self.v128_mask_op('&', 0x7fff_ffff_7fff_ffff_7fff_ffff_7fff_ffff)?
+            }
+            Operator::F64x2Abs => {
+                self.v128_mask_op('&', 0x7fff_ffff_ffff_ffff_7fff_ffff_ffff_ffff)?
+            }
+            Operator::F32x4Add => self.call_simd_binop("f32x4_add")?,
+            Operator::F64x2Add => self.call_simd_binop("f64x2_add")?,
+            Operator::F32x4Sub => self.call_simd_binop("f32x4_sub")?,
+            Operator::F64x2Sub => self.call_simd_binop("f64x2_sub")?,
+            Operator::F32x4Mul => self.call_simd_binop("f32x4_mul")?,
+            Operator::F64x2Mul => self.call_simd_binop("f64x2_mul")?,
+            Operator::F32x4Div => self.call_simd_binop("f32x4_div")?,
+            Operator::F64x2Div => self.call_simd_binop("f64x2_div")?,
+            Operator::F32x4Min => self.call_simd_binop("f32x4_min")?,
+            Operator::F64x2Min => self.call_simd_binop("f64x2_min")?,
+            Operator::F32x4Max => self.call_simd_binop("f32x4_max")?,
+            Operator::F64x2Max => self.call_simd_binop("f64x2_max")?,
+            Operator::F32x4PMin => self.call_simd_binop("f32x4_pmin")?,
+            Operator::F64x2PMin => self.call_simd_binop("f64x2_pmin")?,
+            Operator::F32x4PMax => self.call_simd_binop("f32x4_pmax")?,
+            Operator::F64x2PMax => self.call_simd_binop("f64x2_pmax")?,
+            Operator::F32x4Sqrt => self.call_simd_unop("f32x4_sqrt")?,
+            Operator::F64x2Sqrt => self.call_simd_unop("f64x2_sqrt")?,
+            Operator::F32x4Ceil => self.call_simd_unop("f32x4_ceil")?,
+            Operator::F64x2Ceil => self.call_simd_unop("f64x2_ceil")?,
+            Operator::F32x4Floor => self.call_simd_unop("f32x4_floor")?,
+            Operator::F64x2Floor => self.call_simd_unop("f64x2_floor")?,
+            Operator::F32x4Trunc => self.call_simd_unop("f32x4_trunc")?,
+            Operator::F64x2Trunc => self.call_simd_unop("f64x2_trunc")?,
+            Operator::F32x4Nearest => self.call_simd_unop("f32x4_nearest")?,
+            Operator::F64x2Nearest => self.call_simd_unop("f64x2_nearest")?,
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
             }
