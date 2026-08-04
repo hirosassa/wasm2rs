@@ -480,6 +480,130 @@ fn lane_shift() {
 }
 
 #[test]
+fn lane_add_sub_sat() {
+    // Saturating add/sub clamp to the lane's range instead of wrapping. Unlike
+    // the wrapping helpers these are signedness-dependent: `_s` clamps to the
+    // signed range, `_u` to the unsigned one.
+    expect_ok(
+        "lane_add_sub_sat",
+        r#"
+        (module
+          (func (result i32)
+            (i8x16.extract_lane_s 0
+              (i8x16.add_sat_s (i8x16.splat (i32.const 127)) (i8x16.splat (i32.const 10)))))
+          (func (result i32)
+            (i8x16.extract_lane_s 0
+              (i8x16.add_sat_s (i8x16.splat (i32.const -128)) (i8x16.splat (i32.const -10)))))
+          (func (result i32)
+            (i8x16.extract_lane_u 0
+              (i8x16.add_sat_u (i8x16.splat (i32.const 255)) (i8x16.splat (i32.const 10)))))
+          (func (result i32)
+            (i8x16.extract_lane_u 0
+              (i8x16.sub_sat_u (i8x16.splat (i32.const 0)) (i8x16.splat (i32.const 10)))))
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.add_sat_s (i16x8.splat (i32.const 32767)) (i16x8.splat (i32.const 1)))))
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.sub_sat_s (i16x8.splat (i32.const -32768)) (i16x8.splat (i32.const 1))))))
+        "#,
+        "assert_eq!(func0(), 127);\n    \
+         assert_eq!(func1(), -128);\n    \
+         assert_eq!(func2(), 255);\n    \
+         assert_eq!(func3(), 0);\n    \
+         assert_eq!(func4(), 32767);\n    \
+         assert_eq!(func5(), -32768);",
+    );
+}
+
+#[test]
+fn lane_extend() {
+    // extend_low/high sign- (`_s`) or zero-extend (`_u`) the low or high half of
+    // the lanes to double width. The high variants read source bytes 8..16.
+    expect_ok(
+        "lane_extend",
+        r#"
+        (module
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.extend_low_i8x16_s
+                (v128.const i8x16 -1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16))))
+          (func (result i32)
+            (i16x8.extract_lane_u 0
+              (i16x8.extend_low_i8x16_u
+                (v128.const i8x16 -1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16))))
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.extend_high_i8x16_s
+                (v128.const i8x16 -1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16))))
+          (func (result i32)
+            (i32x4.extract_lane 0
+              (i32x4.extend_low_i16x8_s (v128.const i16x8 -1 2 3 4 5 6 7 8))))
+          (func (result i64)
+            (i64x2.extract_lane 0
+              (i64x2.extend_high_i32x4_u (v128.const i32x4 -1 2 3 4)))))
+        "#,
+        // low_s lane0 = -1; low_u lane0 = 255; high_s lane0 = byte8 = 9;
+        // i32 low_s lane0 = -1; i64 high_u lane0 = source lane2 = 3.
+        "assert_eq!(func0(), -1);\n    \
+         assert_eq!(func1(), 255);\n    \
+         assert_eq!(func2(), 9);\n    \
+         assert_eq!(func3(), -1);\n    \
+         assert_eq!(func4(), 3i64);",
+    );
+}
+
+#[test]
+fn lane_narrow() {
+    // narrow saturates two vectors' lanes to half width (source read signed),
+    // concatenating the first vector's lanes then the second's. `_s` saturates
+    // to the signed range, `_u` to the unsigned one.
+    expect_ok(
+        "lane_narrow",
+        r#"
+        (module
+          (func (result i32)
+            (i8x16.extract_lane_s 0
+              (i8x16.narrow_i16x8_s (v128.const i16x8 300 -300 5 0 0 0 0 0)
+                                    (v128.const i16x8 100 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i8x16.extract_lane_s 1
+              (i8x16.narrow_i16x8_s (v128.const i16x8 300 -300 5 0 0 0 0 0)
+                                    (v128.const i16x8 100 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i8x16.extract_lane_s 8
+              (i8x16.narrow_i16x8_s (v128.const i16x8 300 -300 5 0 0 0 0 0)
+                                    (v128.const i16x8 100 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i8x16.extract_lane_u 0
+              (i8x16.narrow_i16x8_u (v128.const i16x8 300 -5 0 0 0 0 0 0)
+                                    (v128.const i16x8 0 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i8x16.extract_lane_u 1
+              (i8x16.narrow_i16x8_u (v128.const i16x8 300 -5 0 0 0 0 0 0)
+                                    (v128.const i16x8 0 0 0 0 0 0 0 0))))
+          (func (result i32)
+            (i16x8.extract_lane_s 0
+              (i16x8.narrow_i32x4_s (v128.const i32x4 100000 -100000 0 0)
+                                    (v128.const i32x4 0 0 0 0))))
+          (func (result i32)
+            (i16x8.extract_lane_s 1
+              (i16x8.narrow_i32x4_s (v128.const i32x4 100000 -100000 0 0)
+                                    (v128.const i32x4 0 0 0 0)))))
+        "#,
+        // s: 300->127, -300->-128, b lane0=100; u: 300->255, -5->0;
+        // i16 s: 100000->32767, -100000->-32768.
+        "assert_eq!(func0(), 127);\n    \
+         assert_eq!(func1(), -128);\n    \
+         assert_eq!(func2(), 100);\n    \
+         assert_eq!(func3(), 255);\n    \
+         assert_eq!(func4(), 0);\n    \
+         assert_eq!(func5(), 32767);\n    \
+         assert_eq!(func6(), -32768);",
+    );
+}
+
+#[test]
 fn v128_bitselect_and_any_true() {
     expect_ok(
         "bitselect_anytrue",

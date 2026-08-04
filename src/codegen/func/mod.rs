@@ -882,6 +882,33 @@ impl<'a> FuncGen<'a> {
             Operator::I16x8ShrU => self.call_simd_shift("i16x8_shr_u")?,
             Operator::I32x4ShrU => self.call_simd_shift("i32x4_shr_u")?,
             Operator::I64x2ShrU => self.call_simd_shift("i64x2_shr_u")?,
+            // Saturating add/sub (clamp instead of wrap).
+            Operator::I8x16AddSatS => self.call_simd_binop("i8x16_add_sat_s")?,
+            Operator::I8x16AddSatU => self.call_simd_binop("i8x16_add_sat_u")?,
+            Operator::I16x8AddSatS => self.call_simd_binop("i16x8_add_sat_s")?,
+            Operator::I16x8AddSatU => self.call_simd_binop("i16x8_add_sat_u")?,
+            Operator::I8x16SubSatS => self.call_simd_binop("i8x16_sub_sat_s")?,
+            Operator::I8x16SubSatU => self.call_simd_binop("i8x16_sub_sat_u")?,
+            Operator::I16x8SubSatS => self.call_simd_binop("i16x8_sub_sat_s")?,
+            Operator::I16x8SubSatU => self.call_simd_binop("i16x8_sub_sat_u")?,
+            // Widen the low/high half of the lanes to double width.
+            Operator::I16x8ExtendLowI8x16S => self.call_simd_unop("i16x8_extend_low_i8x16_s")?,
+            Operator::I16x8ExtendHighI8x16S => self.call_simd_unop("i16x8_extend_high_i8x16_s")?,
+            Operator::I16x8ExtendLowI8x16U => self.call_simd_unop("i16x8_extend_low_i8x16_u")?,
+            Operator::I16x8ExtendHighI8x16U => self.call_simd_unop("i16x8_extend_high_i8x16_u")?,
+            Operator::I32x4ExtendLowI16x8S => self.call_simd_unop("i32x4_extend_low_i16x8_s")?,
+            Operator::I32x4ExtendHighI16x8S => self.call_simd_unop("i32x4_extend_high_i16x8_s")?,
+            Operator::I32x4ExtendLowI16x8U => self.call_simd_unop("i32x4_extend_low_i16x8_u")?,
+            Operator::I32x4ExtendHighI16x8U => self.call_simd_unop("i32x4_extend_high_i16x8_u")?,
+            Operator::I64x2ExtendLowI32x4S => self.call_simd_unop("i64x2_extend_low_i32x4_s")?,
+            Operator::I64x2ExtendHighI32x4S => self.call_simd_unop("i64x2_extend_high_i32x4_s")?,
+            Operator::I64x2ExtendLowI32x4U => self.call_simd_unop("i64x2_extend_low_i32x4_u")?,
+            Operator::I64x2ExtendHighI32x4U => self.call_simd_unop("i64x2_extend_high_i32x4_u")?,
+            // Saturate two vectors' lanes to half width and concatenate.
+            Operator::I8x16NarrowI16x8S => self.call_simd_binop("i8x16_narrow_i16x8_s")?,
+            Operator::I8x16NarrowI16x8U => self.call_simd_binop("i8x16_narrow_i16x8_u")?,
+            Operator::I16x8NarrowI32x4S => self.call_simd_binop("i16x8_narrow_i32x4_s")?,
+            Operator::I16x8NarrowI32x4U => self.call_simd_binop("i16x8_narrow_i32x4_u")?,
             other => {
                 return Err(TranspileError::Unsupported(format!("operator {other:?}")));
             }

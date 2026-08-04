@@ -100,6 +100,16 @@ const LANE: &[Lane] = &[
     lane("i16x8_neg", "i16", 2, Shape::Unary, Combine::Method("wrapping_neg")),
     lane("i32x4_neg", "i32", 4, Shape::Unary, Combine::Method("wrapping_neg")),
     lane("i64x2_neg", "i64", 8, Shape::Unary, Combine::Method("wrapping_neg")),
+    // Integer saturating add/sub. Unlike wrapping these depend on signedness, so
+    // `_s` reads signed lanes and `_u` unsigned; the method clamps to that range.
+    lane("i8x16_add_sat_s", "i8", 1, Shape::Binary, Combine::Method("saturating_add")),
+    lane("i8x16_add_sat_u", "u8", 1, Shape::Binary, Combine::Method("saturating_add")),
+    lane("i16x8_add_sat_s", "i16", 2, Shape::Binary, Combine::Method("saturating_add")),
+    lane("i16x8_add_sat_u", "u16", 2, Shape::Binary, Combine::Method("saturating_add")),
+    lane("i8x16_sub_sat_s", "i8", 1, Shape::Binary, Combine::Method("saturating_sub")),
+    lane("i8x16_sub_sat_u", "u8", 1, Shape::Binary, Combine::Method("saturating_sub")),
+    lane("i16x8_sub_sat_s", "i16", 2, Shape::Binary, Combine::Method("saturating_sub")),
+    lane("i16x8_sub_sat_u", "u16", 2, Shape::Binary, Combine::Method("saturating_sub")),
     // Float arithmetic.
     lane("f32x4_add", "f32", 4, Shape::Binary, Combine::Infix("+")),
     lane("f64x2_add", "f64", 8, Shape::Binary, Combine::Infix("+")),
@@ -193,13 +203,84 @@ const LANE: &[Lane] = &[
     lane("i64x2_shr_u", "u64", 8, Shape::Shift, Combine::Shift(">>")),
 ];
 
-/// Render the used lane helpers as module-scope free functions, in [`LANE`]
-/// order, separated by blank lines. Returns an empty string if none are used.
+/// A width-changing lane helper, where the source and result lane widths differ.
+/// `in_elem`/`out_elem` are the source and result lane types (signed for `_s`,
+/// unsigned for `_u`) and `in_bytes`/`out_bytes` their widths.
+struct Wide {
+    name: &'static str,
+    in_elem: &'static str,
+    out_elem: &'static str,
+    in_bytes: u32,
+    out_bytes: u32,
+    kind: WideKind,
+}
+
+/// The two width-changing shapes.
+enum WideKind {
+    /// `extend_low`/`extend_high`: widen one vector's low or high half to double
+    /// width. `off` is the source byte offset of that half (0 low, 8 high).
+    Extend { off: u32 },
+    /// `narrow`: saturate two vectors' (signed) source lanes to half width and
+    /// concatenate, the first vector's lanes then the second's. `min`/`max` are
+    /// the saturation bounds as `in_elem` literals.
+    Narrow {
+        min: &'static str,
+        max: &'static str,
+    },
+}
+
+const fn wide(
+    name: &'static str,
+    in_elem: &'static str,
+    out_elem: &'static str,
+    in_bytes: u32,
+    out_bytes: u32,
+    kind: WideKind,
+) -> Wide {
+    Wide {
+        name,
+        in_elem,
+        out_elem,
+        in_bytes,
+        out_bytes,
+        kind,
+    }
+}
+
+/// All width-changing lane helpers, in emission order. `#[rustfmt::skip]` keeps
+/// one entry per line, matching [`LANE`].
+#[rustfmt::skip]
+const WIDE: &[Wide] = &[
+    wide("i16x8_extend_low_i8x16_s",  "i8",  "i16", 1, 2, WideKind::Extend { off: 0 }),
+    wide("i16x8_extend_high_i8x16_s", "i8",  "i16", 1, 2, WideKind::Extend { off: 8 }),
+    wide("i16x8_extend_low_i8x16_u",  "u8",  "u16", 1, 2, WideKind::Extend { off: 0 }),
+    wide("i16x8_extend_high_i8x16_u", "u8",  "u16", 1, 2, WideKind::Extend { off: 8 }),
+    wide("i32x4_extend_low_i16x8_s",  "i16", "i32", 2, 4, WideKind::Extend { off: 0 }),
+    wide("i32x4_extend_high_i16x8_s", "i16", "i32", 2, 4, WideKind::Extend { off: 8 }),
+    wide("i32x4_extend_low_i16x8_u",  "u16", "u32", 2, 4, WideKind::Extend { off: 0 }),
+    wide("i32x4_extend_high_i16x8_u", "u16", "u32", 2, 4, WideKind::Extend { off: 8 }),
+    wide("i64x2_extend_low_i32x4_s",  "i32", "i64", 4, 8, WideKind::Extend { off: 0 }),
+    wide("i64x2_extend_high_i32x4_s", "i32", "i64", 4, 8, WideKind::Extend { off: 8 }),
+    wide("i64x2_extend_low_i32x4_u",  "u32", "u64", 4, 8, WideKind::Extend { off: 0 }),
+    wide("i64x2_extend_high_i32x4_u", "u32", "u64", 4, 8, WideKind::Extend { off: 8 }),
+    wide("i8x16_narrow_i16x8_s", "i16", "i8",  2, 1, WideKind::Narrow { min: "i8::MIN as i16",  max: "i8::MAX as i16" }),
+    wide("i8x16_narrow_i16x8_u", "i16", "u8",  2, 1, WideKind::Narrow { min: "0",               max: "u8::MAX as i16" }),
+    wide("i16x8_narrow_i32x4_s", "i32", "i16", 4, 2, WideKind::Narrow { min: "i16::MIN as i32", max: "i16::MAX as i32" }),
+    wide("i16x8_narrow_i32x4_u", "i32", "u16", 4, 2, WideKind::Narrow { min: "0",               max: "u16::MAX as i32" }),
+];
+
+/// Render the used lane helpers as module-scope free functions, in [`LANE`] then
+/// [`WIDE`] order, separated by blank lines. Empty string if none are used.
 pub(super) fn render_simd_helpers(used: &HashSet<&'static str>) -> String {
     let mut blocks: Vec<String> = Vec::new();
     for lane in LANE {
         if used.contains(lane.name) {
             blocks.push(lane_lines(lane).join("\n"));
+        }
+    }
+    for w in WIDE {
+        if used.contains(w.name) {
+            blocks.push(wide_lines(w).join("\n"));
         }
     }
     let mut out = blocks.join("\n\n");
@@ -288,4 +369,69 @@ fn lane_lines(lane: &Lane) -> Vec<String> {
     lines.push("    u128::from_le_bytes(r)".to_string());
     lines.push("}".to_string());
     lines
+}
+
+/// The source lines of one width-changing helper. `Extend` walks its output in
+/// `out_bytes` steps from source offset `off`, casting each source lane to the
+/// wider `out_elem`. `Narrow` walks both inputs in `in_bytes` steps, saturating
+/// each lane into `[min, max]` before casting down, writing the first vector's
+/// results to the low 8 bytes and the second's to the high 8.
+fn wide_lines(w: &Wide) -> Vec<String> {
+    let &Wide {
+        name,
+        in_elem,
+        out_elem,
+        in_bytes,
+        out_bytes,
+        ..
+    } = w;
+    match w.kind {
+        WideKind::Extend { off } => vec![
+            format!("fn {name}(a: u128) -> u128 {{"),
+            "    let a = a.to_le_bytes();".to_string(),
+            "    let mut r = [0u8; 16];".to_string(),
+            "    let mut o = 0;".to_string(),
+            format!("    let mut s = {off};"),
+            "    while o < 16 {".to_string(),
+            format!(
+                "        let x = {in_elem}::from_le_bytes(a[s..s + {in_bytes}].try_into().unwrap());"
+            ),
+            format!(
+                "        r[o..o + {out_bytes}].copy_from_slice(&(x as {out_elem}).to_le_bytes());"
+            ),
+            format!("        o += {out_bytes};"),
+            format!("        s += {in_bytes};"),
+            "    }".to_string(),
+            "    u128::from_le_bytes(r)".to_string(),
+            "}".to_string(),
+        ],
+        WideKind::Narrow { min, max } => vec![
+            format!("fn {name}(a: u128, b: u128) -> u128 {{"),
+            "    let a = a.to_le_bytes();".to_string(),
+            "    let b = b.to_le_bytes();".to_string(),
+            "    let mut r = [0u8; 16];".to_string(),
+            "    let mut o = 0;".to_string(),
+            "    let mut s = 0;".to_string(),
+            "    while s < 16 {".to_string(),
+            format!(
+                "        let x = {in_elem}::from_le_bytes(a[s..s + {in_bytes}].try_into().unwrap());"
+            ),
+            format!(
+                "        r[o..o + {out_bytes}]\
+                 .copy_from_slice(&(x.clamp({min}, {max}) as {out_elem}).to_le_bytes());"
+            ),
+            format!(
+                "        let y = {in_elem}::from_le_bytes(b[s..s + {in_bytes}].try_into().unwrap());"
+            ),
+            format!(
+                "        r[o + 8..o + 8 + {out_bytes}]\
+                 .copy_from_slice(&(y.clamp({min}, {max}) as {out_elem}).to_le_bytes());"
+            ),
+            format!("        o += {out_bytes};"),
+            format!("        s += {in_bytes};"),
+            "    }".to_string(),
+            "    u128::from_le_bytes(r)".to_string(),
+            "}".to_string(),
+        ],
+    }
 }
