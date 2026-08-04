@@ -27,6 +27,11 @@ pub(crate) enum WasiFn {
     FdPread,
     FdPwrite,
     PathFilestatGet,
+    PathCreateDirectory,
+    PathRemoveDirectory,
+    PathUnlinkFile,
+    PathRename,
+    PathSymlink,
 }
 
 impl WasiFn {
@@ -64,6 +69,11 @@ impl WasiFn {
             "fd_pread" => WasiFn::FdPread,
             "fd_pwrite" => WasiFn::FdPwrite,
             "path_filestat_get" => WasiFn::PathFilestatGet,
+            "path_create_directory" => WasiFn::PathCreateDirectory,
+            "path_remove_directory" => WasiFn::PathRemoveDirectory,
+            "path_unlink_file" => WasiFn::PathUnlinkFile,
+            "path_rename" => WasiFn::PathRename,
+            "path_symlink" => WasiFn::PathSymlink,
             _ => return None,
         };
         (params == candidate.params() && results == candidate.results()).then_some(candidate)
@@ -86,7 +96,15 @@ impl WasiFn {
             | WasiFn::FdFilestatGet
             | WasiFn::ClockResGet => &[I32, I32],
             WasiFn::ClockTimeGet => &[I32, I64, I32],
-            WasiFn::FdPrestatDirName => &[I32, I32, I32],
+            // fd, path, path_len.
+            WasiFn::FdPrestatDirName
+            | WasiFn::PathCreateDirectory
+            | WasiFn::PathRemoveDirectory
+            | WasiFn::PathUnlinkFile => &[I32, I32, I32],
+            // old_path, old_path_len, fd, new_path, new_path_len.
+            WasiFn::PathSymlink => &[I32, I32, I32, I32, I32],
+            // fd, old_path, old_path_len, new_fd, new_path, new_path_len.
+            WasiFn::PathRename => &[I32, I32, I32, I32, I32, I32],
             // fd, iovs, iovs_len, offset, nread/nwritten.
             WasiFn::FdPread | WasiFn::FdPwrite => &[I32, I32, I32, I64, I32],
             // fd, lookupflags, path, path_len, filestat_buf.
@@ -119,7 +137,12 @@ impl WasiFn {
             | WasiFn::ClockResGet
             | WasiFn::FdPread
             | WasiFn::FdPwrite
-            | WasiFn::PathFilestatGet => &[ValType::I32],
+            | WasiFn::PathFilestatGet
+            | WasiFn::PathCreateDirectory
+            | WasiFn::PathRemoveDirectory
+            | WasiFn::PathUnlinkFile
+            | WasiFn::PathRename
+            | WasiFn::PathSymlink => &[ValType::I32],
         }
     }
 
@@ -147,6 +170,11 @@ impl WasiFn {
             WasiFn::FdPread => "wasi_fd_pread",
             WasiFn::FdPwrite => "wasi_fd_pwrite",
             WasiFn::PathFilestatGet => "wasi_path_filestat_get",
+            WasiFn::PathCreateDirectory => "wasi_path_create_directory",
+            WasiFn::PathRemoveDirectory => "wasi_path_remove_directory",
+            WasiFn::PathUnlinkFile => "wasi_path_unlink_file",
+            WasiFn::PathRename => "wasi_path_rename",
+            WasiFn::PathSymlink => "wasi_path_symlink",
         }
     }
 
@@ -675,8 +703,115 @@ impl WasiFn {
                 "    0",
                 "}",
             ]),
+            // `path_create_directory(fd, path)`, `path_remove_directory(fd,
+            // path)`, and `path_unlink_file(fd, path)` mutate a single path
+            // within the preopen (fd 3). Path containment is lexical, as in
+            // `path_open` (absolute paths and ".." escapes are ENOTCAPABLE, 76).
+            WasiFn::PathCreateDirectory => {
+                path_mutate_lines("wasi_path_create_directory", "std::fs::create_dir")
+            }
+            WasiFn::PathRemoveDirectory => {
+                path_mutate_lines("wasi_path_remove_directory", "std::fs::remove_dir")
+            }
+            WasiFn::PathUnlinkFile => {
+                path_mutate_lines("wasi_path_unlink_file", "std::fs::remove_file")
+            }
+            // `path_rename(fd, old_path, new_fd, new_path)` renames within the
+            // preopen; both dirfds must be fd 3 and both paths are contained.
+            WasiFn::PathRename => {
+                let mut body = owned(&[
+                    "fn wasi_path_rename(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32) -> i32 {",
+                    "    if a0 != 3 || a3 != 3 {",
+                    "        return 8;",
+                    "    }",
+                ]);
+                body.extend(contain_path("old", "a1", "a2"));
+                body.extend(contain_path("new", "a4", "a5"));
+                body.extend(fs_result_lines("std::fs::rename(&old, &new)"));
+                body.extend(owned(&["}"]));
+                body
+            }
+            // `path_symlink(old_path, fd, new_path)` creates a symlink at
+            // `new_path` (contained in the preopen, fd 3). `old_path` is the
+            // link's *contents* (an arbitrary target string), so it is copied
+            // verbatim and not containment-checked.
+            WasiFn::PathSymlink => {
+                let mut body = owned(&[
+                    "fn wasi_path_symlink(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32) -> i32 {",
+                    "    if a2 != 3 {",
+                    "        return 8;",
+                    "    }",
+                    "    let tp = a0 as u32 as usize;",
+                    "    let tlen = a1 as u32 as usize;",
+                    "    let traw = self.mem()[tp..tp + tlen].to_vec();",
+                    "    let target = match std::str::from_utf8(&traw) { Ok(s) => s.to_owned(), Err(_) => return 28 };",
+                ]);
+                body.extend(contain_path("link", "a3", "a4"));
+                body.extend(fs_result_lines(
+                    "std::os::unix::fs::symlink(&target, &link)",
+                ));
+                body.extend(owned(&["}"]));
+                body
+            }
         }
     }
+}
+
+/// The body of a single-path WASI mutator (`path_create_directory`,
+/// `path_remove_directory`, `path_unlink_file`): refuse a dirfd other than the
+/// preopen (fd 3), lexically contain the path, then apply `op` to it.
+fn path_mutate_lines(method: &str, op: &str) -> Vec<String> {
+    let mut body = vec![
+        format!("fn {method}(&mut self, a0: i32, a1: i32, a2: i32) -> i32 {{"),
+        "    if a0 != 3 {".to_string(),
+        "        return 8;".to_string(),
+        "    }".to_string(),
+    ];
+    body.extend(contain_path("rel", "a1", "a2"));
+    body.extend(fs_result_lines(&format!("{op}(&rel)")));
+    body.push("}".to_string());
+    body
+}
+
+/// Emit the lines that read a UTF-8 path from linear memory at (`ptr_arg`,
+/// `len_arg`) and build a lexically-contained relative `PathBuf` bound to a
+/// local named `out`. An absolute path or a `..` escape returns ENOTCAPABLE
+/// (76); invalid UTF-8 returns EINVAL (28). The scratch locals are derived from
+/// `out`, so two calls in one body (e.g. `path_rename`) do not collide.
+fn contain_path(out: &str, ptr_arg: &str, len_arg: &str) -> Vec<String> {
+    vec![
+        format!("    let {out}_p = {ptr_arg} as u32 as usize;"),
+        format!("    let {out}_len = {len_arg} as u32 as usize;"),
+        format!("    let {out}_raw = self.mem()[{out}_p..{out}_p + {out}_len].to_vec();"),
+        format!(
+            "    let {out}_s = match std::str::from_utf8(&{out}_raw) {{ Ok(s) => s.to_owned(), Err(_) => return 28 }};"
+        ),
+        format!("    let mut {out} = std::path::PathBuf::new();"),
+        format!("    for comp in std::path::Path::new(&{out}_s).components() {{"),
+        "        match comp {".to_string(),
+        format!("            std::path::Component::Normal(c) => {out}.push(c),"),
+        "            std::path::Component::CurDir => {}".to_string(),
+        "            _ => return 76,".to_string(),
+        "        }".to_string(),
+        "    }".to_string(),
+    ]
+}
+
+/// The trailing `match <call> { Ok(()) => 0, Err(e) => <errno by kind> }` shared
+/// by the path-mutating WASI methods that return only an errno. Error kinds map
+/// to the same errnos as `path_open`; anything else collapses to EIO (29).
+fn fs_result_lines(call: &str) -> Vec<String> {
+    vec![
+        format!("    match {call} {{"),
+        "        Ok(()) => 0,".to_string(),
+        "        Err(e) => match e.kind() {".to_string(),
+        "            std::io::ErrorKind::NotFound => 44,".to_string(),
+        "            std::io::ErrorKind::PermissionDenied => 2,".to_string(),
+        "            std::io::ErrorKind::AlreadyExists => 20,".to_string(),
+        "            _ => 29,".to_string(),
+        "        },".to_string(),
+        "    }".to_string(),
+    ]
 }
 
 /// The body of a WASI `*_sizes_get` method: count the strings yielded by

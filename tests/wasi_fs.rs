@@ -415,3 +415,211 @@ fn main() {
         "path_filestat_get escape rejection failed"
     );
 }
+
+// path_create_directory makes a directory within the preopen without a file
+// table. "newdir" (6 bytes) at offset 100; `run` returns the errno.
+const CREATE_DIR: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_create_directory"
+        (func $md (param i32 i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "newdir")
+      (func (export "run") (result i32)
+        (call $md (i32.const 3) (i32.const 100) (i32.const 6))))
+    "#;
+
+#[test]
+fn path_create_directory_makes_a_dir() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 0, \"create_directory should succeed\");
+}
+";
+    let (bin, dir) = compile("create_dir", CREATE_DIR, extra);
+    let made = dir.join("newdir");
+    let _ = std::fs::remove_dir(&made);
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "create_directory assertions failed");
+    assert!(made.is_dir(), "the directory should exist on disk");
+    let _ = std::fs::remove_dir(&made);
+}
+
+// path_remove_directory removes an (empty) directory within the preopen.
+// "rmdir" (5 bytes) at offset 100; `run` returns the errno.
+const RM_DIR: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_remove_directory"
+        (func $rd (param i32 i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "rmdir")
+      (func (export "run") (result i32)
+        (call $rd (i32.const 3) (i32.const 100) (i32.const 5))))
+    "#;
+
+#[test]
+fn path_remove_directory_removes_a_dir() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 0, \"remove_directory should succeed\");
+}
+";
+    let (bin, dir) = compile("rm_dir", RM_DIR, extra);
+    let target = dir.join("rmdir");
+    std::fs::create_dir_all(&target).expect("seed dir");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "remove_directory assertions failed");
+    assert!(!target.exists(), "the directory should be gone");
+}
+
+// path_unlink_file deletes a regular file within the preopen. "victim.txt"
+// (10 bytes) at offset 100; `run` returns the errno.
+const UNLINK: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_unlink_file"
+        (func $ul (param i32 i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "victim.txt")
+      (func (export "run") (result i32)
+        (call $ul (i32.const 3) (i32.const 100) (i32.const 10))))
+    "#;
+
+#[test]
+fn path_unlink_file_deletes_a_file() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 0, \"unlink_file should succeed\");
+}
+";
+    let (bin, dir) = compile("unlink", UNLINK, extra);
+    let victim = dir.join("victim.txt");
+    std::fs::write(&victim, b"delete me").expect("seed file");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "unlink_file assertions failed");
+    assert!(!victim.exists(), "the file should be gone");
+}
+
+// path_rename renames a file within the preopen (both dirfds are 3). "old.txt"
+// (7 bytes) at 100 and "new.txt" (7 bytes) at 120; `run` returns the errno.
+const RENAME: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_rename"
+        (func $mv (param i32 i32 i32 i32 i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "old.txt")
+      (data (i32.const 120) "new.txt")
+      (func (export "run") (result i32)
+        (call $mv (i32.const 3) (i32.const 100) (i32.const 7)
+                  (i32.const 3) (i32.const 120) (i32.const 7))))
+    "#;
+
+#[test]
+fn path_rename_moves_a_file() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 0, \"rename should succeed\");
+}
+";
+    let (bin, dir) = compile("rename", RENAME, extra);
+    let old = dir.join("old.txt");
+    let new = dir.join("new.txt");
+    let _ = std::fs::remove_file(&new);
+    std::fs::write(&old, b"renamed-contents").expect("seed file");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "rename assertions failed");
+    assert!(!old.exists(), "the old name should be gone");
+    assert_eq!(
+        std::fs::read(&new).expect("renamed file should exist"),
+        b"renamed-contents",
+    );
+    let _ = std::fs::remove_file(&new);
+}
+
+// path_symlink creates a symlink within the preopen. The target "input.txt"
+// (9 bytes, link *contents*, not containment-checked) is at 100; the link path
+// "link.txt" (8 bytes) at 120; `run` returns the errno.
+const SYMLINK: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_symlink"
+        (func $sl (param i32 i32 i32 i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "input.txt")
+      (data (i32.const 120) "link.txt")
+      (func (export "run") (result i32)
+        (call $sl (i32.const 100) (i32.const 9) (i32.const 3) (i32.const 120) (i32.const 8))))
+    "#;
+
+#[test]
+fn path_symlink_creates_a_symlink() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 0, \"symlink should succeed\");
+}
+";
+    let (bin, dir) = compile("symlink", SYMLINK, extra);
+    let link = dir.join("link.txt");
+    let _ = std::fs::remove_file(&link);
+    std::fs::write(dir.join("input.txt"), b"target-data").expect("seed target");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "symlink assertions failed");
+    let meta = std::fs::symlink_metadata(&link).expect("link should exist");
+    assert!(
+        meta.file_type().is_symlink(),
+        "link.txt should be a symlink"
+    );
+    assert_eq!(
+        std::fs::read_link(&link).expect("read_link"),
+        std::path::Path::new("input.txt"),
+        "the symlink target is stored verbatim",
+    );
+    assert_eq!(
+        std::fs::read(&link).expect("read through symlink"),
+        b"target-data",
+    );
+    let _ = std::fs::remove_file(&link);
+}
+
+#[test]
+fn path_create_directory_rejects_parent_directory_escape() {
+    // Like path_open, a path escaping the preopen via ".." is ENOTCAPABLE (76).
+    let wat = r#"
+        (module
+          (import "wasi_snapshot_preview1" "path_create_directory"
+            (func $md (param i32 i32 i32) (result i32)))
+          (memory 1)
+          (data (i32.const 100) "../escape")
+          (func (export "run") (result i32)
+            (call $md (i32.const 3) (i32.const 100) (i32.const 9))))
+        "#;
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func1(), 76, \"escaping the preopen must return ENOTCAPABLE\");
+}
+";
+    let (bin, dir) = compile("create_dir_escape", wat, extra);
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "create_directory escape rejection failed");
+}
