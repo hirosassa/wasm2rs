@@ -529,7 +529,7 @@ mod tests {
 
         assert_eq!(
             rust.trim(),
-            format!("{ATTR}pub fn func0(l0: i32, l1: i32) -> i32 {{\n    l0.wrapping_add(l1)\n}}"),
+            format!("{ATTR}pub fn func0(l0: i32, l1: i32) -> i32 {{\n    (l0).wrapping_add(l1)\n}}"),
         );
     }
 
@@ -549,7 +549,7 @@ mod tests {
 
         assert_eq!(
             rust.trim(),
-            format!("{ATTR}pub fn func0() -> i32 {{\n    2i32.wrapping_mul(3i32)\n}}"),
+            format!("{ATTR}pub fn func0() -> i32 {{\n    (2i32).wrapping_mul(3i32)\n}}"),
         );
     }
 
@@ -592,7 +592,7 @@ mod tests {
             rust.trim(),
             format!(
                 "{ATTR}pub fn func0(l0: i32) -> i32 {{\n    l0\n}}\n\n\
-                 {ATTR}pub fn func1(l0: i32, l1: i32) -> i32 {{\n    l0.wrapping_sub(l1)\n}}"
+                 {ATTR}pub fn func1(l0: i32, l1: i32) -> i32 {{\n    (l0).wrapping_sub(l1)\n}}"
             ),
         );
     }
@@ -820,7 +820,7 @@ impl Instance {
         assert_eq!(
             rust.trim(),
             format!(
-                "{ATTR}pub fn func0(l0: i32, l1: i32) -> i32 {{\n    l0.wrapping_add(l1)\n}}\n\n\
+                "{ATTR}pub fn func0(l0: i32, l1: i32) -> i32 {{\n    (l0).wrapping_add(l1)\n}}\n\n\
                  {ATTR}pub fn func1(l0: i32) -> i32 {{\n    \
                  let v0: i32 = func0(l0, 10i32);\n    v0\n}}"
             ),

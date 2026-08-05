@@ -8,9 +8,12 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn binop_method(&mut self, method: &str) -> Result<(), TranspileError> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
-        // Arithmetic/bitwise results keep the operand type (i32 or i64).
+        // Arithmetic/bitwise results keep the operand type (i32 or i64). The
+        // receiver is parenthesised: a bare negative-constant receiver such as
+        // `-2i32` would otherwise bind as `-(2i32.method(..))`, because a method
+        // call has higher precedence than unary minus in Rust.
         self.push_combined(
-            format!("{}.{method}({})", lhs.code, rhs.code),
+            format!("({}).{method}({})", lhs.code, rhs.code),
             lhs.ty,
             lhs.stable && rhs.stable,
         )
@@ -60,14 +63,18 @@ impl<'a> super::FuncGen<'a> {
         )
     }
 
-    /// A shift or rotate: `lhs.method(rhs as u32)`. `wrapping_shl`/`wrapping_shr`
+    /// A shift or rotate: `(lhs).method(rhs as u32)`. `wrapping_shl`/`wrapping_shr`
     /// and `rotate_left`/`rotate_right` all take the count mod the bit width, so
-    /// this matches wasm's masked shift/rotate count for both i32 and i64.
+    /// this matches wasm's masked shift/rotate count for both i32 and i64. The
+    /// receiver is parenthesised so a negative-constant `lhs` (e.g. the `-2` in
+    /// dlmalloc's `map & rotl(-2, idx)` bin-map clears) lowers as
+    /// `(-2i32).rotate_left(..)` rather than `-(2i32.rotate_left(..))` — rotation
+    /// does not commute with negation, so the unparenthesised form miscompiles.
     pub(super) fn shift_op(&mut self, method: &str) -> Result<(), TranspileError> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
         self.push_combined(
-            format!("{}.{method}({} as u32)", lhs.code, rhs.code),
+            format!("({}).{method}({} as u32)", lhs.code, rhs.code),
             lhs.ty,
             lhs.stable && rhs.stable,
         )
@@ -102,7 +109,7 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn rem_signed(&mut self) -> Result<(), TranspileError> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
-        self.materialize(format!("{}.wrapping_rem({})", lhs.code, rhs.code), lhs.ty)
+        self.materialize(format!("({}).wrapping_rem({})", lhs.code, rhs.code), lhs.ty)
     }
 
     /// Unsigned division (`op` = `/`) or remainder (`op` = `%`): reinterpret both
@@ -181,10 +188,12 @@ impl<'a> super::FuncGen<'a> {
         self.materialize(format!("{}({})", rt_name(rt), a.code), ty)
     }
 
-    /// A unary method call `operand.method()` (float math like `abs`, `sqrt`).
+    /// A unary method call `(operand).method()` (float math like `abs`, `sqrt`).
+    /// The receiver is parenthesised so a negative-constant operand does not bind
+    /// as `-(lit.method())` (a method call outranks unary minus in Rust).
     pub(super) fn unop_method(&mut self, method: &str) -> Result<(), TranspileError> {
         let a = self.pop()?;
-        self.push_combined(format!("{}.{method}()", a.code), a.ty, a.stable)
+        self.push_combined(format!("({}).{method}()", a.code), a.ty, a.stable)
     }
 
     /// wasm's bit-counting unary ops (`clz`/`ctz`/`popcnt`). Rust's
@@ -193,7 +202,9 @@ impl<'a> super::FuncGen<'a> {
     /// return `u32`, so the count is cast back to the operand's integer type.
     pub(super) fn bit_count(&mut self, ty: ValType, method: &str) -> Result<(), TranspileError> {
         let target = rust_type(ty)?;
-        self.convert(ty, |x| format!("({x}.{method}() as {target})"))
+        // Parenthesise the receiver: a negative-constant operand must lower as
+        // `(-2i32).leading_zeros()`, not `-(2i32.leading_zeros())`.
+        self.convert(ty, |x| format!("(({x}).{method}() as {target})"))
     }
 
     /// Floating-point negation, parenthesised so it composes as a subexpression.
