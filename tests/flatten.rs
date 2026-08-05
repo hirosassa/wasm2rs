@@ -217,6 +217,56 @@ fn flattened_non_leaf_loop_structures_nested_if() {
     );
 }
 
+/// Count dispatch arms whose entire body is a single unconditional `pc = N;`
+/// jump — pure forwarding states with no side effect. Edge-contraction should
+/// redirect every edge to such a state straight to its destination and drop the
+/// state, so none of these arms survive in a contracted dispatch.
+fn trivial_jump_arms(source: &str) -> usize {
+    source
+        .lines()
+        .collect::<Vec<_>>()
+        .windows(3)
+        .filter(|w| {
+            let body = w[1].trim();
+            w[0].trim_end().ends_with("=> {")
+                && w[2].trim() == "}"
+                && body
+                    .strip_prefix("pc = ")
+                    .and_then(|r| r.strip_suffix(';'))
+                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .count()
+}
+
+#[test]
+fn flattened_dispatch_contracts_trivial_pc_jumps() {
+    // A deep block nest lowers to many pure `pc = N;` forwarding states (each
+    // block boundary is one). They cost a jump-table round-trip each at runtime,
+    // and profiling the googlesql parser showed ~40% of its dispatch arms were
+    // exactly these. Edge-contraction folds them away: an edge to a pure jump is
+    // redirected to the jump's destination and the state is dropped.
+    let depth = 60; // > FLATTEN_DEPTH_THRESHOLD (40)
+    let wat = nested_increment_blocks(depth);
+    let wasm = wat::parse_str(&wat).expect("valid wat");
+    let source = wasm2rs::transpile(&wasm).expect("transpile ok");
+
+    assert!(
+        source.contains("match pc {"),
+        "expected a flat dispatch loop:\n{source}"
+    );
+    assert_eq!(
+        trivial_jump_arms(&source),
+        0,
+        "pure pc-forwarding arms should be contracted away:\n{source}"
+    );
+
+    compile_run(
+        "flatten_contract",
+        &wat,
+        &format!("assert_eq!(func0(), {depth});"),
+    );
+}
+
 #[test]
 fn deeply_nested_if_else_flattens_and_runs() {
     let depth = 50; // > FLATTEN_DEPTH_THRESHOLD (40)

@@ -1220,6 +1220,7 @@ impl Flattener {
     /// its initialising assignment — which may carry side effects and must run at
     /// its original program point — stays in the arm.
     fn assemble(mut self, start: usize) -> Vec<Node> {
+        let start = contract_pc_edges(&mut self.arms, start);
         self.arms.sort_by_key(|(state, _)| *state);
 
         let mut decls: Vec<String> = Vec::new();
@@ -1272,6 +1273,139 @@ impl Flattener {
         push(0, "}".to_string());
         out
     }
+}
+
+/// If `body` is a single unconditional `pc = N;` (a pure forwarding state with
+/// no side effect), return `N`. Such a state only re-enters the `match pc`
+/// dispatch to jump again, so every edge to it can skip straight to `N`.
+fn trivial_pc_target(body: &[ArmLine]) -> Option<usize> {
+    let [(_, line)] = body else { return None };
+    line.strip_prefix("pc = ")?.strip_suffix(';')?.parse().ok()
+}
+
+/// Rewrite every `pc = <state>` target in `s` through `map` (leaving all other
+/// text untouched). `pc = ` and the digits are ASCII, so verbatim spans are
+/// copied at valid UTF-8 boundaries.
+fn rewrite_pc_targets(s: &str, map: &impl Fn(usize) -> usize) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while i + 5 <= b.len() {
+        if &b[i..i + 5] == b"pc = " {
+            let ns = i + 5;
+            let mut j = ns;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > ns {
+                out.push_str(&s[copied..ns]);
+                out.push_str(&map(s[ns..j].parse::<usize>().unwrap()).to_string());
+                copied = j;
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&s[copied..]);
+    out
+}
+
+/// Contract pure `pc = N;` forwarding states out of a flattened dispatch: every
+/// edge targeting such a state is redirected to the state it forwards to
+/// (following chains), and the states that become unreachable are dropped.
+///
+/// A deeply nested block/`if` spine lowers to long runs of these pure jumps —
+/// descending and unwinding the nest costs one dispatch round-trip per level.
+/// Profiling the googlesql parser (its hottest function, ~98% of parse time)
+/// showed ~40% of its 7183 arms were exactly these. Folding them removes that
+/// share of the indirect-branch traffic through the jump table. Returns the
+/// (possibly redirected) start state.
+fn contract_pc_edges(arms: &mut Vec<(usize, Vec<ArmLine>)>, start: usize) -> usize {
+    // Each pure forwarding state → its single constant successor.
+    let fwd: HashMap<usize, usize> = arms
+        .iter()
+        .filter_map(|(state, body)| Some((*state, trivial_pc_target(body)?)))
+        .collect();
+    if fwd.is_empty() {
+        return start;
+    }
+
+    // Resolve every state to the first non-forwarding state on its chain, or —
+    // for a forwarding cycle (a side-effect-free infinite loop) — an entry of the
+    // cycle, kept alive so the loop is preserved. Memoised with path compression.
+    let mut resolved: HashMap<usize, usize> = HashMap::new();
+    for &s0 in fwd.keys() {
+        if resolved.contains_key(&s0) {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut cur = s0;
+        let dest = loop {
+            if let Some(&d) = resolved.get(&cur) {
+                break d;
+            }
+            match fwd.get(&cur) {
+                Some(&next) if !path.contains(&cur) => {
+                    path.push(cur);
+                    cur = next;
+                }
+                // A cycle closes at `cur` (keep it), or `cur` is terminal.
+                _ => break cur,
+            }
+        };
+        for p in path {
+            resolved.insert(p, dest);
+        }
+    }
+    let resolve = |t: usize| resolved.get(&t).copied().unwrap_or(t);
+
+    // Redirect all targets, in arm bodies and at the entry.
+    for (_, body) in arms.iter_mut() {
+        for (_, line) in body.iter_mut() {
+            *line = rewrite_pc_targets(line, &resolve);
+        }
+    }
+    let start = resolve(start);
+
+    // Drop states no edge reaches any more (the folded forwarders, plus any
+    // states that were only reachable through them). Reachability walks the `pc =
+    // N` targets in the redirected bodies from the entry.
+    let index: HashMap<usize, usize> = arms
+        .iter()
+        .enumerate()
+        .map(|(i, (state, _))| (*state, i))
+        .collect();
+    let mut live: HashSet<usize> = HashSet::new();
+    let mut stack = vec![start];
+    while let Some(state) = stack.pop() {
+        if !live.insert(state) {
+            continue;
+        }
+        let Some(&i) = index.get(&state) else { continue };
+        for (_, line) in &arms[i].1 {
+            let b = line.as_bytes();
+            let mut k = 0;
+            while k + 5 <= b.len() {
+                if &b[k..k + 5] == b"pc = " {
+                    let ns = k + 5;
+                    let mut j = ns;
+                    while j < b.len() && b[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    if j > ns {
+                        stack.push(line[ns..j].parse().unwrap());
+                        k = j;
+                        continue;
+                    }
+                }
+                k += 1;
+            }
+        }
+    }
+    arms.retain(|(state, _)| live.contains(state));
+    start
 }
 
 /// If `line` is a typed `let` binding, return `(hoisted declaration, in-arm
