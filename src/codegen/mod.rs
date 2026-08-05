@@ -1167,7 +1167,12 @@ impl Flattener {
     /// Render one region as structured Rust at `depth`, mirroring
     /// [`render_region_into`] but emitting arm lines and routing escaping branches
     /// through [`Self::structured_branch`].
-    fn render_structured_region(&mut self, region: RegionNode, depth: usize, out: &mut Vec<ArmLine>) {
+    fn render_structured_region(
+        &mut self,
+        region: RegionNode,
+        depth: usize,
+        out: &mut Vec<ArmLine>,
+    ) {
         let RegionNode {
             kind,
             label,
@@ -1383,7 +1388,9 @@ fn contract_pc_edges(arms: &mut Vec<(usize, Vec<ArmLine>)>, start: usize) -> usi
         if !live.insert(state) {
             continue;
         }
-        let Some(&i) = index.get(&state) else { continue };
+        let Some(&i) = index.get(&state) else {
+            continue;
+        };
         for (_, line) in &arms[i].1 {
             let b = line.as_bytes();
             let mut k = 0;

@@ -231,3 +231,34 @@ fn non_function_composite_type_is_rejected() {
         "non-function composite type",
     );
 }
+
+#[test]
+fn ref_null_of_a_non_reference_heaptype_is_rejected() {
+    // Only `funcref` and `externref` nulls are lowered (both to `u32::MAX`). A
+    // `ref.null` of a GC/exception abstract heaptype parses but has no `u32`
+    // representation, so it is rejected by name rather than mistranslated.
+    assert_unsupported(
+        r#"(module (func (result i32) (ref.is_null (ref.null exn))))"#,
+        "ref.null of unsupported type",
+    );
+    assert_unsupported(
+        r#"(module (func (result i32) (ref.is_null (ref.null any))))"#,
+        "ref.null of unsupported type",
+    );
+}
+
+#[test]
+fn call_indirect_without_a_table_is_rejected() {
+    // `call_indirect` needs a table to resolve the callee. A module that uses it
+    // with no table defined still assembles as valid wasm, but wasm2rs has
+    // nothing to dispatch through, so it rejects rather than emitting a call into
+    // a non-existent table. (The sibling "non-zero table index" guard is instead
+    // shadowed by the earlier "multiple tables" rejection, so it is unreachable
+    // from valid input and left untested by design.)
+    assert_unsupported(
+        r#"(module
+             (type $t (func))
+             (func (call_indirect (type $t) (i32.const 0))))"#,
+        "call_indirect without a table",
+    );
+}

@@ -206,7 +206,10 @@ fn flattened_non_leaf_loop_structures_nested_if() {
         has_structured_inner_loop(&source),
         "non-leaf loop should be structured with a nested if:\n{source}"
     );
-    assert!(max_indent(&source) < 60, "bounded nesting for a depth-1 loop");
+    assert!(
+        max_indent(&source) < 60,
+        "bounded nesting for a depth-1 loop"
+    );
 
     // Sum of odd numbers in [1, 45] = 1 + 3 + … + 45 = 23^2 = 529.
     let odds = (1..=depth).filter(|n| n % 2 == 1).sum::<usize>();

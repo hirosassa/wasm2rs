@@ -529,7 +529,9 @@ mod tests {
 
         assert_eq!(
             rust.trim(),
-            format!("{ATTR}pub fn func0(l0: i32, l1: i32) -> i32 {{\n    (l0).wrapping_add(l1)\n}}"),
+            format!(
+                "{ATTR}pub fn func0(l0: i32, l1: i32) -> i32 {{\n    (l0).wrapping_add(l1)\n}}"
+            ),
         );
     }
 

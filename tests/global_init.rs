@@ -106,3 +106,26 @@ fn funcref_global_initializer_holds_the_function_index() {
          assert_eq!(inst.func1(), 0u32);",
     );
 }
+
+#[test]
+fn null_funcref_global_initializer_is_the_null_sentinel() {
+    // A `ref.null func` initializer lowers through the `RefNull` arm of
+    // `const_expr_to_rust` to the null-funcref sentinel `u32::MAX` — a distinct
+    // code path from `ref.func` (index) tested above and from `ref.null` in a
+    // function body (tests/reference.rs), which never touches the const-expr
+    // lowering. The getter (function 0) returns the raw funcref, and the
+    // `ref.is_null` probe (function 1) must see it as null. A regression that
+    // lowered null to `0` (a valid function index) would make `func1` return 0.
+    transpile_compile_run(
+        "null_funcref",
+        r#"
+        (module
+          (global funcref (ref.null func))
+          (func (export "g") (result funcref) (global.get 0))
+          (func (export "n") (result i32) (ref.is_null (global.get 0))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(), u32::MAX);\n    \
+         assert_eq!(inst.func1(), 1i32);",
+    );
+}
