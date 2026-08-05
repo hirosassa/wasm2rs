@@ -117,6 +117,106 @@ fn nested_if_else(depth: usize) -> String {
     format!("(module (func (export \"f\") (result i32) (local i32)\n{inner}\n(local.get 0)))")
 }
 
+/// Whether `source` has a flattened function whose inner leaf loop is emitted as
+/// a real labelled Rust `loop` (`'lN: loop {`) — a structured back-edge — rather
+/// than a `pc = <header>; continue 'sm` re-dispatch through the `match pc`. A
+/// flattened body otherwise only ever uses the `'sm` dispatch label, so any
+/// `'lN: loop {` line is the leaf-loop specialisation.
+fn has_structured_inner_loop(source: &str) -> bool {
+    source.lines().any(|line| {
+        let t = line.trim_start();
+        t.starts_with("'l") && t.contains(": loop {")
+    })
+}
+
+#[test]
+fn flattened_leaf_loop_uses_direct_continue() {
+    // A `loop` with no nested regions (a "leaf loop") wrapped in a deep block nest
+    // is flattened overall, but its back-edge (`br $lp`) should become a direct
+    // `continue 'lN` of a real nested `loop` — a predictable direct branch —
+    // instead of `pc = <header>; continue 'sm` back through the jump-table
+    // dispatch. Profiling the real googlesql parser showed that dispatch's
+    // indirect branch and the surrounding stack spills dominate per-parse cost.
+    let depth = 45; // > FLATTEN_DEPTH_THRESHOLD (40)
+    let wat = wrapped_countdown_loop(depth);
+    let wasm = wat::parse_str(&wat).expect("valid wat");
+    let source = wasm2rs::transpile(&wasm).expect("transpile ok");
+
+    // The wrapping blocks still push the function past the flatten threshold.
+    assert!(
+        source.contains("match pc {"),
+        "expected a flat dispatch loop:\n{source}"
+    );
+    // The leaf loop itself is de-dispatched into a structured labelled loop whose
+    // back-edge is a direct `continue`.
+    assert!(
+        has_structured_inner_loop(&source),
+        "leaf loop should be a structured 'lN: loop with a direct continue:\n{source}"
+    );
+    // Nesting stays bounded: the specialisation adds only one level.
+    assert!(max_indent(&source) < 40, "flat output should stay bounded");
+
+    let expected = depth * (depth + 1) / 2; // 45 + 44 + … + 1 = 1035
+    compile_run(
+        "flatten_leaf_loop_continue",
+        &wat,
+        &format!("assert_eq!(func0(), {expected});"),
+    );
+}
+
+/// A loop with a *nested* `if` in its body (subtree depth 1, so not a leaf loop)
+/// wrapped in a deep block nest. The whole function flattens, but the loop is
+/// still structured — its nested `if` renders as real `if { … }` inside the
+/// `'lN: loop`, and the back-edge is a direct `continue` — so per-iteration
+/// branches avoid the jump-table dispatch. Sums the odd values in `[1, depth]`.
+fn wrapped_loop_with_if(depth: usize) -> String {
+    let inner = "\
+(block $done
+  (loop $lp
+    (br_if $done (i32.eqz (local.get $i)))
+    (if (i32.rem_u (local.get $i) (i32.const 2))
+      (then (local.set $sum (i32.add (local.get $sum) (local.get $i)))))
+    (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+    (br $lp)))";
+    let open = "(block ".repeat(depth);
+    let close = ")".repeat(depth);
+    format!(
+        "(module (func (export \"h\") (result i32) (local $i i32) (local $sum i32)\n\
+         (local.set $i (i32.const {depth}))\n\
+         {open}{inner}{close}\n\
+         (local.get $sum)))"
+    )
+}
+
+#[test]
+fn flattened_non_leaf_loop_structures_nested_if() {
+    let depth = 45; // > FLATTEN_DEPTH_THRESHOLD (40)
+    let wat = wrapped_loop_with_if(depth);
+    let wasm = wat::parse_str(&wat).expect("valid wat");
+    let source = wasm2rs::transpile(&wasm).expect("transpile ok");
+
+    // Still flattened overall (the wrapping blocks exceed the threshold).
+    assert!(
+        source.contains("match pc {"),
+        "expected a flat dispatch loop:\n{source}"
+    );
+    // The loop is structured even though its body nests an `if` — a leaf-only
+    // specialisation would have left it as pc-dispatch with no `'lN: loop`.
+    assert!(
+        has_structured_inner_loop(&source),
+        "non-leaf loop should be structured with a nested if:\n{source}"
+    );
+    assert!(max_indent(&source) < 60, "bounded nesting for a depth-1 loop");
+
+    // Sum of odd numbers in [1, 45] = 1 + 3 + … + 45 = 23^2 = 529.
+    let odds = (1..=depth).filter(|n| n % 2 == 1).sum::<usize>();
+    compile_run(
+        "flatten_non_leaf_loop",
+        &wat,
+        &format!("assert_eq!(func0(), {odds});"),
+    );
+}
+
 #[test]
 fn deeply_nested_if_else_flattens_and_runs() {
     let depth = 50; // > FLATTEN_DEPTH_THRESHOLD (40)

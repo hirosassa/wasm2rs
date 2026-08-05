@@ -826,6 +826,31 @@ fn can_flatten(nodes: &[Node]) -> bool {
     true
 }
 
+/// Depth budget for structuring a loop: a back-edge loop whose body nests no
+/// deeper than this is emitted as a real `'lN: loop { … }` (with its nested
+/// `if`/`block`/`loop` also structured) instead of state-machine arms. A
+/// structured loop sits on the flat dispatch's shallow base, so its rendered
+/// nesting is at most a small constant plus this budget — kept comfortably under
+/// the parser limit that [`FLATTEN_DEPTH_THRESHOLD`] guards. Loops deeper than
+/// this stay on the generic flat path. (Measured on real modules, back-edge
+/// loops nest ≤45, so this captures nearly all of them.)
+const STRUCT_BUDGET: usize = 32;
+
+/// Whether the flattener can emit `region` as a structured `'lN: loop { … }`
+/// rather than dispatch arms: a `loop` that is actually branched back to
+/// (`targeted`), whose body nests within [`STRUCT_BUDGET`], and whose subtree
+/// the structured renderer can emit (no `try`, no condition-less `if` — the same
+/// constructs [`can_flatten`] rejects). Requiring a real back-edge guarantees
+/// the structured loop's `'lN` label and `continue 'lN` are used (an unused
+/// label would fail `-D warnings`) and keeps the specialisation to loops that
+/// actually repeat.
+fn is_structurable_loop(region: &RegionNode) -> bool {
+    region.kind == FrameKind::Loop
+        && region.targeted
+        && subtree_depth(&region.body) <= STRUCT_BUDGET
+        && can_flatten(&region.body)
+}
+
 /// Lower a structured body to a flat state machine: `let mut pc = …; 'sm: loop {
 /// match pc { … } }`. Each control region becomes one or more flat `match` arms
 /// linked by `pc` assignments, so the rendered nesting is a small constant
@@ -839,6 +864,25 @@ fn can_flatten(nodes: &[Node]) -> bool {
 /// a result: a value-returning function with no `trailing` never falls through,
 /// so its exit state is unreachable. Returns the flat body as already-indented
 /// [`Node::Line`]s.
+/// Max region-nesting depth within `nodes` (0 if nothing nested). Bounds how
+/// deep a structured loop would render; [`is_structurable_loop`] uses it to keep
+/// the specialised nesting well under rustc's parser limit.
+fn subtree_depth(nodes: &[Node]) -> usize {
+    let mut max = 0;
+    for node in nodes {
+        let d = match node {
+            Node::Region(r) => {
+                let els = r.els.as_deref().map_or(0, subtree_depth);
+                1 + subtree_depth(&r.body).max(els)
+            }
+            Node::Try(t) => 1 + subtree_depth(&t.body),
+            _ => 0,
+        };
+        max = max.max(d);
+    }
+    max
+}
+
 fn flatten_body(nodes: Vec<Node>, trailing: Option<String>, returns_value: bool) -> Vec<Node> {
     let mut f = Flattener {
         arms: Vec::new(),
@@ -855,15 +899,20 @@ fn flatten_body(nodes: Vec<Node>, trailing: Option<String>, returns_value: bool)
         None if returns_value => "unreachable!();".to_string(),
         None => "return;".to_string(),
     };
-    f.arms.push((exit, vec![exit_stmt]));
+    f.arms.push((exit, vec![(0, exit_stmt)]));
     f.lower(nodes, start, exit);
     f.assemble(start)
 }
 
+/// One statement of a dispatch arm: its indent *relative to the arm body* (0 for
+/// an ordinary flat statement; >0 for lines nested inside a structured loop) and
+/// the statement text. [`Flattener::assemble`] adds the arm's base indent.
+type ArmLine = (usize, String);
+
 /// Builds the flat `match pc { … }` arms while linearising a structured body.
 struct Flattener {
     /// Completed dispatch arms: `(state id, its statements)`.
-    arms: Vec<(usize, Vec<String>)>,
+    arms: Vec<(usize, Vec<ArmLine>)>,
     /// Next unused state id.
     next_state: usize,
     /// wasm region label → the state a branch to it jumps to (a loop's header,
@@ -897,7 +946,7 @@ impl Flattener {
         let mut worklist: Vec<(Vec<Node>, usize, usize)> = vec![(nodes, entry, after)];
         while let Some((nodes, entry, after)) = worklist.pop() {
             let mut state = entry;
-            let mut stmts: Vec<String> = Vec::new();
+            let mut stmts: Vec<ArmLine> = Vec::new();
             let mut reachable = true;
             for node in nodes {
                 if !reachable {
@@ -907,15 +956,15 @@ impl Flattener {
                     continue;
                 }
                 match node {
-                    Node::Line(text) => stmts.push(text),
+                    Node::Line(text) => stmts.push((0, text)),
                     Node::Term(text) => {
-                        stmts.push(text);
+                        stmts.push((0, text));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         reachable = false;
                     }
                     Node::Br { label, .. } => {
                         let target = self.labels[&label];
-                        stmts.push(format!("pc = {target};"));
+                        stmts.push((0, format!("pc = {target};")));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         reachable = false;
                     }
@@ -932,7 +981,7 @@ impl Flattener {
                         }
                         line.push_str(&format!("pc = {target}; continue 'sm; }}"));
                         self.uses_continue = true;
-                        stmts.push(line);
+                        stmts.push((0, line));
                     }
                     Node::Region(region) if region.kind == FrameKind::If => {
                         // Dispatch to the `then`/`else` entry, then rejoin at
@@ -946,14 +995,34 @@ impl Flattener {
                             Some(_) => self.alloc(),
                             None => cont,
                         };
-                        stmts.push(format!(
-                            "if {cond} {{ pc = {then_e}; }} else {{ pc = {else_e}; }}"
+                        stmts.push((
+                            0,
+                            format!("if {cond} {{ pc = {then_e}; }} else {{ pc = {else_e}; }}"),
                         ));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         worklist.push((body, then_e, cont));
                         if let Some(els) = els {
                             worklist.push((els, else_e, cont));
                         }
+                        state = cont;
+                    }
+                    Node::Region(region) if is_structurable_loop(&region) => {
+                        // A back-edge loop shallow enough to structure: emit a real
+                        // `'lN: loop { … }` (its nested `if`/`block`/`loop` also
+                        // structured) in one arm, so the hot back-edge is a direct
+                        // `continue 'lN` and per-iteration branches are direct,
+                        // instead of `pc = …; continue 'sm` back through the
+                        // jump-table dispatch (which profiling showed dominates the
+                        // real parser's cost). The enclosing block nest still
+                        // flattens, so rendered nesting grows only by the loop's own
+                        // bounded depth. The loop's label stays out of `self.labels`
+                        // so a branch to it resolves structurally, not to a state.
+                        let header = self.alloc();
+                        let cont = self.alloc();
+                        stmts.push((0, format!("pc = {header};")));
+                        self.arms.push((state, std::mem::take(&mut stmts)));
+                        let loop_arm = self.render_structured_loop(region, cont);
+                        self.arms.push((header, loop_arm));
                         state = cont;
                     }
                     Node::Region(region) => {
@@ -966,7 +1035,7 @@ impl Flattener {
                             _ => cont,
                         };
                         self.labels.insert(region.label, branch_target);
-                        stmts.push(format!("pc = {inner};"));
+                        stmts.push((0, format!("pc = {inner};")));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         worklist.push((region.body, inner, cont));
                         state = cont;
@@ -978,7 +1047,7 @@ impl Flattener {
                         // still emitted correctly rather than dropped.
                         let mut buf = String::new();
                         render_try_into(t, 0, "", &mut buf);
-                        stmts.push(buf.trim_end().to_string());
+                        stmts.push((0, buf.trim_end().to_string()));
                     }
                     Node::BrTable { selector, arms } => {
                         // Each arm assigns its target's carried variables then
@@ -993,16 +1062,152 @@ impl Flattener {
                             line.push_str(&format!("pc = {target}; }} "));
                         }
                         line.push('}');
-                        stmts.push(line);
+                        stmts.push((0, line));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         reachable = false;
                     }
                 }
             }
             if reachable {
-                stmts.push(format!("pc = {after};"));
+                stmts.push((0, format!("pc = {after};")));
                 self.arms.push((state, stmts));
             }
+        }
+    }
+
+    /// Render a structurable loop (checked by [`is_structurable_loop`]) as a real
+    /// `'l{label}: loop { … }` occupying one dispatch arm. The body — including
+    /// any nested `if`/`block`/`loop` — is emitted as structured Rust, so
+    /// back-edges and in-loop branches are direct `break`/`continue`s. A branch
+    /// that leaves the whole structured subtree (its target is an enclosing
+    /// flattened region, hence a state in `self.labels`) becomes `pc = <state>;
+    /// continue 'sm`, exiting both the loop and the dispatch. A natural
+    /// fall-through off the loop's end `break`s and resumes the dispatch at `cont`.
+    ///
+    /// Lines carry an indent relative to the arm body; [`Self::assemble`] adds the
+    /// arm's base indent.
+    fn render_structured_loop(&mut self, region: RegionNode, cont: usize) -> Vec<ArmLine> {
+        let mut out = Vec::new();
+        let reachable_at_end = region.reachable_at_end;
+        // The loop and its subtree render structurally; only the trailing
+        // dispatch resumption (`pc = cont`) links back to the flat machine.
+        self.render_structured_region(region, 0, &mut out);
+        // A loop that can fall through its end exits to `cont`; one that only ever
+        // back-edges or diverges has no `break`, so the `loop` is `!` and nothing
+        // may follow it (an unreachable `pc = cont` would fail `-D warnings`).
+        if reachable_at_end {
+            out.push((0, format!("pc = {cont};")));
+        }
+        out
+    }
+
+    /// Render a structured node list at `depth` (indent relative to the arm
+    /// body). Branch targets inside this subtree resolve to structured
+    /// `break`/`continue 'lN`; a target that is a flattened state (present in
+    /// `self.labels`) becomes `pc = <state>; continue 'sm`.
+    fn render_structured(&mut self, nodes: Vec<Node>, depth: usize, out: &mut Vec<ArmLine>) {
+        for node in nodes {
+            match node {
+                Node::Line(text) | Node::Term(text) => out.push((depth, text)),
+                Node::Br { label, is_loop } => {
+                    out.push((depth, self.structured_branch(label, is_loop, "")));
+                }
+                Node::BrIf {
+                    cond,
+                    label,
+                    is_loop,
+                    assigns,
+                } => {
+                    if assigns.is_empty() {
+                        let br = self.structured_branch(label, is_loop, "");
+                        out.push((depth, format!("if {cond} {{ {br} }}")));
+                    } else {
+                        out.push((depth, format!("if {cond} {{")));
+                        for (var, value) in assigns {
+                            out.push((depth + 1, format!("{var} = {value};")));
+                        }
+                        let br = self.structured_branch(label, is_loop, "");
+                        out.push((depth + 1, br));
+                        out.push((depth, "}".to_string()));
+                    }
+                }
+                Node::BrTable { selector, arms } => {
+                    out.push((depth, format!("match ({selector}) as u32 {{")));
+                    for arm in arms {
+                        let assigns: String = arm
+                            .assigns
+                            .iter()
+                            .map(|(var, value)| format!("{var} = {value}; "))
+                            .collect();
+                        let br = self.structured_branch(arm.label, arm.is_loop, &assigns);
+                        out.push((depth + 1, format!("{} => {{ {br} }},", arm.pattern)));
+                    }
+                    out.push((depth, "}".to_string()));
+                }
+                Node::Region(region) => self.render_structured_region(region, depth, out),
+                Node::Try(_) => unreachable!("is_structurable_loop rejects `try` subtrees"),
+            }
+        }
+    }
+
+    /// A structured branch to `label`: `continue`/`break 'l{label}` when the
+    /// target is a region in this subtree, or `pc = <state>; continue 'sm` when it
+    /// is an enclosing flattened region (a state in `self.labels`). `assigns` is a
+    /// prebuilt run of `var = value; ` statements that must precede the branch.
+    fn structured_branch(&mut self, label: usize, is_loop: bool, assigns: &str) -> String {
+        if let Some(&state) = self.labels.get(&label) {
+            self.uses_continue = true;
+            format!("{assigns}pc = {state}; continue 'sm;")
+        } else {
+            let keyword = if is_loop { "continue" } else { "break" };
+            format!("{assigns}{keyword} 'l{label};")
+        }
+    }
+
+    /// Render one region as structured Rust at `depth`, mirroring
+    /// [`render_region_into`] but emitting arm lines and routing escaping branches
+    /// through [`Self::structured_branch`].
+    fn render_structured_region(&mut self, region: RegionNode, depth: usize, out: &mut Vec<ArmLine>) {
+        let RegionNode {
+            kind,
+            label,
+            targeted,
+            reachable_at_end,
+            cond,
+            body,
+            els,
+        } = region;
+        // A targeted region is wrapped in a label so a branch to it can
+        // `break`/`continue` here; its content renders one level deeper.
+        let inner_depth = if targeted { depth + 1 } else { depth };
+        if targeted {
+            let header = if kind == FrameKind::Loop {
+                format!("'l{label}: loop {{")
+            } else {
+                format!("'l{label}: {{")
+            };
+            out.push((depth, header));
+        }
+        match kind {
+            FrameKind::Block | FrameKind::Loop => self.render_structured(body, inner_depth, out),
+            FrameKind::If => {
+                let cond = cond.unwrap_or_default();
+                out.push((inner_depth, format!("if {cond} {{")));
+                self.render_structured(body, inner_depth + 1, out);
+                if let Some(els) = els {
+                    out.push((inner_depth, "} else {".to_string()));
+                    self.render_structured(els, inner_depth + 1, out);
+                }
+                out.push((inner_depth, "}".to_string()));
+            }
+        }
+        if targeted {
+            // A `loop` falling through its end needs a trailing `break` to leave
+            // it; a `block`/`if` falls through its labelled scope naturally.
+            if kind == FrameKind::Loop && reachable_at_end {
+                out.push((inner_depth, format!("break 'l{label};")));
+            }
+            out.push((depth, "}".to_string()));
         }
     }
 
@@ -1019,18 +1224,18 @@ impl Flattener {
 
         let mut decls: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        let mut rewritten: Vec<(usize, Vec<String>)> = Vec::with_capacity(self.arms.len());
+        let mut rewritten: Vec<(usize, Vec<ArmLine>)> = Vec::with_capacity(self.arms.len());
         for (state, stmts) in self.arms {
             let mut arm = Vec::with_capacity(stmts.len());
-            for stmt in stmts {
+            for (indent, stmt) in stmts {
                 match hoist_decl(&stmt) {
                     Some((decl, assign)) => {
                         if seen.insert(decl.clone()) {
                             decls.push(decl);
                         }
-                        arm.push(assign);
+                        arm.push((indent, assign));
                     }
-                    None => arm.push(stmt),
+                    None => arm.push((indent, stmt)),
                 }
             }
             rewritten.push((state, arm));
@@ -1054,8 +1259,11 @@ impl Flattener {
         push(1, "match pc {".to_string());
         for (state, stmts) in rewritten {
             push(2, format!("{state} => {{"));
-            for stmt in stmts {
-                push(3, stmt);
+            // A structured-loop arm nests lines inside `'lN: loop { … }`; each line
+            // carries its indent relative to the arm body (0 for ordinary flat
+            // statements).
+            for (indent, stmt) in stmts {
+                push(3 + indent, stmt);
             }
             push(2, "}".to_string());
         }
