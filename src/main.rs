@@ -12,7 +12,7 @@
 use std::io::Write as _;
 use std::process::ExitCode;
 
-use wasm2rs::{SplitOptions, transpile_split};
+use wasm2rs::{SplitOptions, cargo_manifest, transpile_split};
 
 // Transpiling a huge module churns roughly a gigabyte of output through
 // countless short-lived `String` allocations. The system allocator keeps the
@@ -80,6 +80,26 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+/// Derive a valid Cargo package name from the output directory's final
+/// component. Non-alphanumeric characters become `_` (so the default lib target,
+/// which mirrors the package name, is a legal Rust identifier); a name that is
+/// empty or starts with a digit is prefixed to stay a valid crate name.
+fn crate_name(dir: &str) -> String {
+    let base = std::path::Path::new(dir)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let sanitized: String = base
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    match sanitized.chars().next() {
+        None => "wasm_module".to_string(),
+        Some(c) if c.is_ascii_digit() => format!("m_{sanitized}"),
+        Some(_) => sanitized,
+    }
+}
+
 /// Parse an optional numeric CLI argument, defaulting to `0` when absent.
 fn parse_usize_arg(arg: Option<String>, name: &str) -> Result<usize, String> {
     match arg {
@@ -99,6 +119,15 @@ fn write_split(
     max_bytes_per_file: usize,
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
+
+    // The chunks form a crate but carry no build settings of their own. Drop a
+    // recommended `Cargo.toml` (size-optimized release profile, `[lib]` pointed
+    // at `lib.rs`) next to them so the emitted crate builds compactly out of the
+    // box. The package name is derived from the output directory.
+    let manifest_path = std::path::Path::new(dir).join("Cargo.toml");
+    std::fs::write(&manifest_path, cargo_manifest(&crate_name(dir)))
+        .map_err(|e| format!("cannot write {}: {e}", manifest_path.display()))?;
+
     let opts = SplitOptions {
         funcs_per_file,
         max_bytes_per_file,

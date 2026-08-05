@@ -91,6 +91,37 @@ impl SplitOptions {
     }
 }
 
+/// The recommended `Cargo.toml` for a split crate, named `package_name`.
+///
+/// A split module is emitted as a bare `lib.rs` root plus `funcs_{n}.rs` chunks
+/// with no build settings of their own, so a consumer who just runs `cargo
+/// build --release` would compile at Cargo's defaults and get an inflated
+/// binary. This manifest supplies a size-optimized-but-still-fast
+/// `[profile.release]`: `opt-level = 3` preserves the flattened-dispatch speed,
+/// while thin LTO, a single codegen unit, abort-on-panic (which drops the
+/// unwinding tables) and `strip` shrink the release binary without trading away
+/// speed. The `[lib] path` points at the crate-root `lib.rs` this tool writes
+/// (not Cargo's default `src/lib.rs`), and the generated code depends only on
+/// `std`, so there is no `[dependencies]` section.
+pub fn cargo_manifest(package_name: &str) -> String {
+    format!(
+        "[package]\n\
+         name = \"{package_name}\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2021\"\n\
+         \n\
+         [lib]\n\
+         path = \"lib.rs\"\n\
+         \n\
+         [profile.release]\n\
+         opt-level = 3\n\
+         lto = \"thin\"\n\
+         codegen-units = 1\n\
+         panic = \"abort\"\n\
+         strip = true\n"
+    )
+}
+
 /// Transpile a wasm binary into a single Rust source string.
 ///
 /// Convenience wrapper over [`transpile_split`] with [`SplitOptions::single_file`];

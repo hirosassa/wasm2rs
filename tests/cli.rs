@@ -71,6 +71,50 @@ fn single_file_output_matches_library() {
     assert_eq!(written, expected);
 }
 
+/// Splitting into a directory also drops a `Cargo.toml` next to the sources so
+/// the emitted crate builds out of the box. The strong oracle is a real
+/// `cargo build --release` of that crate: it proves the manifest is valid TOML
+/// Cargo accepts, that `[lib] path = "lib.rs"` wires the root and its chunk
+/// submodules together, and that the size profile is honored — none of which a
+/// string check on the manifest could establish.
+#[test]
+fn split_output_ships_a_buildable_cargo_manifest() {
+    let (dir, input) = write_sample_wasm("manifest");
+    let out_dir = dir.join("crate");
+
+    let status = Command::new(wasm2rs_bin())
+        .arg(&input)
+        .arg(&out_dir)
+        .arg("1")
+        .status()
+        .expect("run wasm2rs");
+    assert!(status.success(), "wasm2rs exited nonzero");
+
+    let manifest = std::fs::read_to_string(out_dir.join("Cargo.toml"))
+        .expect("split output should include a Cargo.toml");
+    assert!(
+        manifest.contains("[profile.release]"),
+        "manifest missing release profile:\n{manifest}"
+    );
+
+    // Build the emitted crate as its own package. `--offline` keeps the test
+    // hermetic; the generated code depends only on `std`, so nothing is fetched.
+    let build = Command::new(env!("CARGO"))
+        .current_dir(&out_dir)
+        .args(["build", "--release", "--offline"])
+        .output()
+        .expect("run cargo build");
+    assert!(
+        build.status.success(),
+        "generated crate failed to build:\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&build.stderr),
+    );
+    assert!(
+        out_dir.join("target/release").is_dir(),
+        "release artifacts were not produced"
+    );
+}
+
 /// With no output path the CLI writes the transpiled Rust to stdout, byte-for-byte
 /// identical to the library's `transpile`.
 #[test]
