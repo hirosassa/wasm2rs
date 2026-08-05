@@ -266,6 +266,13 @@ pub(super) fn render_module(
         inner.push(format!(
             "fn mem_mut(&mut self) -> &mut Vec<u8> {{ {borrow_mut} }}"
         ));
+        // Public accessor so a host embedding this `Instance` can marshal bytes
+        // into and out of linear memory (e.g. write an RPC request buffer and
+        // read the response). `&mut` covers both reads and writes since a host
+        // driving the module already holds it mutably.
+        inner.push(format!(
+            "pub fn memory(&mut self) -> &mut Vec<u8> {{ {borrow_mut} }}"
+        ));
     }
 
     // Uniform table accessors, mirroring the memory ones: a defined table is a
