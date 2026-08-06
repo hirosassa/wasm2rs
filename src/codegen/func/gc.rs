@@ -398,6 +398,95 @@ impl super::FuncGen<'_> {
         });
         Ok(())
     }
+
+    /// `ref.eq`: pop two `eqref` handles and push `1`/`0` for identity equality.
+    /// Two nulls are equal; two objects compare by `Rc` pointer identity on their
+    /// shared slots; a null and an object are unequal.
+    pub(super) fn ref_eq(&mut self) -> Result<(), TranspileError> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        let code = format!(
+            "(match (&({}), &({})) {{ \
+             (GcRef::Null, GcRef::Null) => 1i32, \
+             (GcRef::Obj {{ slots: __x, .. }}, GcRef::Obj {{ slots: __y, .. }}) => \
+             i32::from(std::rc::Rc::ptr_eq(__x, __y)), \
+             _ => 0i32 }})",
+            a.code, b.code
+        );
+        self.push_combined(code, ValType::I32, false)
+    }
+
+    /// `ref.as_non_null`: pop a nullable ref, trap on null, else pass the handle
+    /// through typed as a non-null ref (still a `GcRef`).
+    pub(super) fn ref_as_non_null(&mut self) -> Result<(), TranspileError> {
+        let r = self.pop()?;
+        let ty = r.ty;
+        let code = format!(
+            "{{ let __r = ({}); \
+             if matches!(__r, GcRef::Null) {{ panic!(\"ref.as_non_null on null\") }} else {{ __r }} }}",
+            r.code
+        );
+        self.materialize(code, ty)
+    }
+
+    /// `br_on_null $l`: branch to `$l` when the popped ref is null (the ref is
+    /// dropped, so the branch carries only the target block's other values), else
+    /// fall through leaving the now-non-null ref on the stack.
+    pub(super) fn br_on_null(&mut self, depth: u32) -> Result<(), TranspileError> {
+        // Pin the ref into a stable temp: it is dropped on the null (taken) path
+        // and pushed back for fall-through, so it must not be re-evaluated.
+        let r = self.pop()?;
+        let ty = r.ty;
+        let temp = self.fresh_temp();
+        self.line(format!("let {temp}: GcRef = {};", r.code));
+        // At this point the operand stack top is exactly the block's non-ref
+        // results (the ref has been popped), so `branch` carries them on the null
+        // path and leaves them for fall-through.
+        self.branch(
+            depth,
+            Some(Val {
+                code: format!("i32::from(matches!({temp}, GcRef::Null))"),
+                ty: ValType::I32,
+                stable: true,
+            }),
+        )?;
+        // Fall-through continues with the ref (non-null) back on the stack.
+        self.push(Val {
+            code: temp,
+            ty,
+            stable: true,
+        });
+        Ok(())
+    }
+
+    /// `br_on_non_null $l`: branch to `$l` when the popped ref is non-null,
+    /// carrying it (as non-null) plus the block's other values; else fall through
+    /// with the ref dropped.
+    pub(super) fn br_on_non_null(&mut self, depth: u32) -> Result<(), TranspileError> {
+        let r = self.pop()?;
+        let ty = r.ty;
+        let temp = self.fresh_temp();
+        self.line(format!("let {temp}: GcRef = {};", r.code));
+        // Push the ref back as the stack-top carried value so `branch` carries it
+        // on the (non-null) taken path.
+        self.push(Val {
+            code: temp.clone(),
+            ty,
+            stable: true,
+        });
+        self.branch(
+            depth,
+            Some(Val {
+                code: format!("i32::from(!matches!({temp}, GcRef::Null))"),
+                ty: ValType::I32,
+                stable: true,
+            }),
+        )?;
+        // `branch` (br_if-style) left the ref on the stack for fall-through, but
+        // `br_on_non_null` drops it on the null path, so remove it here.
+        self.pop()?;
+        Ok(())
+    }
 }
 
 /// Apply a packed field's sign/zero extension to a plain `i32` read, when the

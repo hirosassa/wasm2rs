@@ -788,6 +788,14 @@ impl<'a> FuncGen<'a> {
                 from_ref_type,
                 to_ref_type,
             } => self.br_on_cast(relative_depth, from_ref_type, to_ref_type, false)?,
+            // Null/equality reference ops (phase 4c-2). `ref.eq` compares two
+            // handles by identity; `ref.as_non_null` narrows a nullable ref
+            // (trapping on null); `br_on_null`/`br_on_non_null` branch on
+            // nullness (only the latter carries the ref, dropping it otherwise).
+            Operator::RefEq => self.ref_eq()?,
+            Operator::RefAsNonNull => self.ref_as_non_null()?,
+            Operator::BrOnNull { relative_depth } => self.br_on_null(relative_depth)?,
+            Operator::BrOnNonNull { relative_depth } => self.br_on_non_null(relative_depth)?,
             Operator::Return => self.emit_return()?,
             // Legacy exception handling: a `try` region protects its body and
             // dispatches thrown exceptions to matching `catch`/`catch_all`

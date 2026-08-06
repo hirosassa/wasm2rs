@@ -256,15 +256,12 @@ fn unsupported_composite_type_is_rejected() {
 
 #[test]
 fn ref_null_of_a_non_reference_heaptype_is_rejected() {
-    // Only `funcref` and `externref` nulls are lowered (both to `u32::MAX`). A
-    // `ref.null` of a GC/exception abstract heaptype parses but has no `u32`
+    // `funcref`/`externref` nulls lower to the `u32::MAX` sentinel and the
+    // abstract GC heaptypes (`any`/`eq`/`struct`/`array`/`none`) lower to the
+    // managed `GcRef::Null`. An `exn` (exception) reference has neither
     // representation, so it is rejected by name rather than mistranslated.
     assert_unsupported(
         r#"(module (func (result i32) (ref.is_null (ref.null exn))))"#,
-        "ref.null of unsupported type",
-    );
-    assert_unsupported(
-        r#"(module (func (result i32) (ref.is_null (ref.null any))))"#,
         "ref.null of unsupported type",
     );
 }

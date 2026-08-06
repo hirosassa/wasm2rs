@@ -198,6 +198,21 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn ref_null_dispatch(&mut self, hty: HeapType) -> Result<(), TranspileError> {
         match self.gc_type_index(hty) {
             Some(module_idx) => self.ref_null_gc(module_idx),
+            // An abstract GC heap type (`any`/`eq`/`struct`/`array`/`none`) is a
+            // managed `GcRef`, so its null is the `GcRef::Null` handle carried
+            // with the abstract ref type.
+            None if super::super::abstract_is_gc(hty) => {
+                self.push(Val {
+                    code: "GcRef::Null".to_string(),
+                    ty: ValType::Ref(wasmparser::RefType::new(true, hty).ok_or_else(|| {
+                        TranspileError::Unsupported(
+                            "ref.null: cannot form abstract ref type".into(),
+                        )
+                    })?),
+                    stable: true,
+                });
+                Ok(())
+            }
             None => self.ref_null(hty),
         }
     }

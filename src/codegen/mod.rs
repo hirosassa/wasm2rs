@@ -1803,7 +1803,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         prelude.push_str(EXC_DEF);
         prelude.push('\n');
     }
-    if declares_gc_types(parts.type_kinds) {
+    if needs_gc_types(parts)? {
         prelude.push_str(GCREF_DEF);
         prelude.push('\n');
     }
@@ -1934,7 +1934,7 @@ pub(crate) fn generate_module_split(
     // The exception type and the managed value model live at the crate root so
     // every chunk's `use super::*` sees them, ahead of everything else in
     // `lib.rs`.
-    let root = if declares_gc_types(parts.type_kinds) {
+    let root = if needs_gc_types(parts)? {
         format!("{GCREF_DEF}\n{root}")
     } else {
         root
@@ -2005,6 +2005,30 @@ fn declares_gc_types(type_kinds: &[CompositeKind]) -> bool {
     type_kinds
         .iter()
         .any(|k| matches!(k, CompositeKind::Struct(_) | CompositeKind::Array(_)))
+}
+
+/// Whether the managed value model ([`GCREF_DEF`]) must be emitted: either the
+/// module declares a struct/array type, or a body introduces an abstract GC
+/// reference (e.g. `ref.null any`), which also lowers to a `GcRef` even without
+/// any concrete GC type declared.
+fn needs_gc_types(parts: &ModuleParts<'_>) -> Result<bool, TranspileError> {
+    Ok(declares_gc_types(parts.type_kinds) || uses_abstract_gc(parts.funcs)?)
+}
+
+/// Whether any function body creates an abstract GC reference via `ref.null` of
+/// an `any`/`eq`/`struct`/`array`/`none` heap type (the only way a `GcRef` value
+/// arises without a concrete struct/array type being declared).
+fn uses_abstract_gc(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
+    for input in funcs {
+        for op in input.body.get_operators_reader()? {
+            if let Operator::RefNull { hty } = op?
+                && abstract_is_gc(hty)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Whether any function body uses `call_ref`/`return_call_ref`.
@@ -2079,6 +2103,9 @@ fn rust_type(ty: ValType, kinds: &[CompositeKind]) -> Result<&'static str, Trans
         {
             Ok("i32")
         }
+        // An abstract GC reference (`any`/`eq`/`struct`/`array`/`none`) is a
+        // managed `GcRef` handle.
+        ValType::Ref(rt) if abstract_is_gc(rt.heap_type()) => Ok("GcRef"),
         // A concrete typed reference `(ref $t)` / `(ref null $t)`. A funcref-typed
         // one lowers to `u32` (a function index) like the abstract `funcref`,
         // while a struct/array-typed one is a managed `GcRef` handle.
@@ -2094,6 +2121,24 @@ fn rust_type(ty: ValType, kinds: &[CompositeKind]) -> Result<&'static str, Trans
         ValType::V128 => Ok("u128"),
         other => Err(TranspileError::Unsupported(format!("value type {other:?}"))),
     }
+}
+
+/// Whether a heap type is one of the abstract GC heap types (`any`/`eq`/`struct`
+/// /`array`/`none`), which lower to the managed `GcRef` value model. The abstract
+/// `func`/`nofunc`/`extern`/`noextern` and `i31` types are deliberately excluded
+/// (they keep the `u32`/`i32` lowering).
+fn abstract_is_gc(hty: HeapType) -> bool {
+    matches!(
+        hty,
+        HeapType::Abstract {
+            ty: AbstractHeapType::Any
+                | AbstractHeapType::Eq
+                | AbstractHeapType::Struct
+                | AbstractHeapType::Array
+                | AbstractHeapType::None,
+            ..
+        }
+    )
 }
 
 /// Whether a concrete heap type names a struct or array type (a managed `GcRef`)
@@ -2134,8 +2179,13 @@ fn unsigned_type(ty: ValType) -> Result<&'static str, TranspileError> {
 fn default_value(ty: ValType, kinds: &[CompositeKind]) -> &'static str {
     match ty {
         ValType::F32 | ValType::F64 => "0.0",
-        // A struct/array reference defaults to the managed null handle.
-        ValType::Ref(rt) if concrete_is_gc(rt.heap_type(), kinds) => "GcRef::Null",
+        // A struct/array reference (concrete or an abstract GC type) defaults to
+        // the managed null handle.
+        ValType::Ref(rt)
+            if concrete_is_gc(rt.heap_type(), kinds) || abstract_is_gc(rt.heap_type()) =>
+        {
+            "GcRef::Null"
+        }
         // A default `funcref`/`externref` (and any concrete typed funcref) is
         // null. An `i31ref` defaults to a zero payload, so it falls to `"0"`.
         ValType::Ref(rt)
