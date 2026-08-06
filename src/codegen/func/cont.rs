@@ -22,11 +22,11 @@
 //! rejected for now. The operand stack must still be empty at every suspend
 //! point. Anything else is rejected as `Unsupported` and revisited later.
 
-use wasmparser::{FunctionBody, Operator, ValType};
+use wasmparser::{FunctionBody, HeapType, Operator, ValType};
 
 use super::super::{
     ALLOW, CompositeKind, GenMeta, Node, TypeSig, Val, flatten_cont_body, index_u32,
-    render_body_into, render_nodes_into,
+    render_body_into, render_nodes_into, rust_type,
 };
 use crate::TranspileError;
 
@@ -123,6 +123,21 @@ fn cont_underlying_sig<'a>(
     types.get(*func_ty as usize).ok_or_else(|| {
         TranspileError::Unsupported("continuation underlying function type out of range".into())
     })
+}
+
+/// The module type index a concrete reference `(ref $t)` points at (e.g. the
+/// self-continuation type in a `switch` target's trailing parameter). Rejects
+/// abstract or out-of-module references, which cannot name a continuation type.
+fn concrete_ref_index(ty: ValType) -> Result<u32, TranspileError> {
+    if let ValType::Ref(rt) = ty
+        && let HeapType::Concrete(idx) = rt.heap_type()
+        && let Some(module_idx) = idx.as_module_index()
+    {
+        return Ok(module_idx);
+    }
+    Err(TranspileError::Unsupported(
+        "switch requires a concrete continuation reference".into(),
+    ))
 }
 
 impl super::FuncGen<'_> {
@@ -259,6 +274,9 @@ impl super::FuncGen<'_> {
                                 "match self.cont_step_func{g}(&mut __frame.sub, &[]) {{ \
                                  StepResult::Suspend {{ tag: __t, payload: __p }} => {{ \
                                  {save}StepResult::Suspend {{ tag: __t, payload: __p }} }}, \
+                                 StepResult::Switch {{ tag: __t, target: __tgt, args: __a }} => {{ \
+                                 {save}StepResult::Switch {{ tag: __t, target: __tgt, args: __a }} \
+                                 }}, \
                                  StepResult::Return({bind}) => StepResult::Return(vec![{payload}]) }}"
                             )
                         }
@@ -269,6 +287,45 @@ impl super::FuncGen<'_> {
                     };
                     arms.push(arm);
                     break;
+                }
+                Operator::Switch {
+                    cont_type_index,
+                    tag_index,
+                } => {
+                    if !self.frames.is_empty() {
+                        return Err(TranspileError::Unsupported(
+                            "switch inside nested control flow in a continuation body (phase \
+                             8-2: a switch crossing a region is not yet lowered)"
+                                .into(),
+                        ));
+                    }
+                    if checkpoint.is_some() {
+                        return Err(TranspileError::Unsupported(
+                            "switch after a cross-call checkpoint (phase 8)".into(),
+                        ));
+                    }
+                    let (payload_tys, injected_tys) =
+                        self.switch_transfer_types(cont_type_index)?;
+                    // Fix the evaluation order across the suspension boundary:
+                    // freeze every operand into a temp so the target handle and the
+                    // payload read stable names in the returned `Switch`.
+                    self.spill_nonstable()?;
+                    // The target continuation handle is on top; the payload `t1*`
+                    // sits below it and is handed to that target.
+                    let target = self.pop()?;
+                    let payload = self.encode_stack_tail(&payload_tys)?;
+                    let stmts = self.take_arm_statements()?;
+                    let save = self.save_mutated_locals()?;
+                    let next = pc + 1;
+                    arms.push(format!(
+                        "{stmts}{save}__frame.pc = {next}u32; StepResult::Switch {{ \
+                         tag: {tag_index}u32, target: {}, args: vec![{payload}] }}",
+                        target.code
+                    ));
+                    pc = next;
+                    // Control switches back here carrying `t2*` — the
+                    // self-continuation's parameters — as the next step's `__args`.
+                    self.push_injected(&injected_tys)?;
                 }
                 other @ (Operator::Try { .. }
                 | Operator::TryTable { .. }
@@ -556,8 +613,16 @@ impl super::FuncGen<'_> {
             .get(tag_index as usize)
             .ok_or_else(|| TranspileError::Unsupported("suspend: unknown tag index".into()))?
             .clone();
-        for (i, ty) in result_tys.iter().enumerate() {
-            let code = decode_from_i64(&format!("__args[{i}]"), *ty)?;
+        self.push_injected(&result_tys)
+    }
+
+    /// Push, as the resumed state's initial operands, the values the next step's
+    /// `__args` will carry — the resumer's injection at a suspend/switch point.
+    /// Each is decoded from its `i64` slot; a continuation/funcref handle rides as
+    /// a `u32` (see [`Self::unerase_from_i64`]).
+    fn push_injected(&mut self, tys: &[ValType]) -> Result<(), TranspileError> {
+        for (i, ty) in tys.iter().enumerate() {
+            let code = self.unerase_from_i64(&format!("__args[{i}]"), *ty)?;
             self.push(Val {
                 code,
                 ty: *ty,
@@ -565,6 +630,38 @@ impl super::FuncGen<'_> {
             });
         }
         Ok(())
+    }
+
+    /// Decode an `i64` slot back to a wasm value, extending [`decode_from_i64`]
+    /// (numeric only) with the `u32`-lowering references — a `funcref`/`contref`
+    /// handle — which a `switch` transfers and delivers back as a self-reference.
+    /// Managed (`GcRef`) references still have no `i64` erasure and are rejected.
+    fn unerase_from_i64(&self, expr: &str, ty: ValType) -> Result<String, TranspileError> {
+        if matches!(ty, ValType::Ref(_)) && rust_type(ty, self.ctx.type_kinds)? == "u32" {
+            return Ok(format!("(({expr}) as u32)"));
+        }
+        decode_from_i64(expr, ty)
+    }
+
+    /// The types a `switch $ct2 $tag` transfers to its target and receives back.
+    /// `$ct2 = cont $ft2` with `$ft2 : [t1* (ref $ct_self)] -> [tr*]`: the payload
+    /// `t1*` (all of `$ft2`'s parameters but the trailing self-reference) is handed
+    /// to the target, and the self-reference names the continuation type
+    /// `$ct_self`, whose parameters `t2*` are delivered as operands when control
+    /// switches back. Returns `(t1*, t2*)`.
+    fn switch_transfer_types(
+        &self,
+        cont_type_index: u32,
+    ) -> Result<(Vec<ValType>, Vec<ValType>), TranspileError> {
+        let sig = cont_underlying_sig(self.ctx.type_kinds, self.ctx.types, cont_type_index)?;
+        let (self_ref, payload) = sig.params.split_last().ok_or_else(|| {
+            TranspileError::Unsupported(
+                "switch target continuation has no self-reference parameter".into(),
+            )
+        })?;
+        let self_cont = concrete_ref_index(*self_ref)?;
+        let injected = cont_param_types(self.ctx.type_kinds, self.ctx.types, self_cont)?;
+        Ok((payload.to_vec(), injected))
     }
 
     /// Write the step function's opening: the `#[allow]` line, the `pub fn
@@ -601,7 +698,7 @@ impl super::FuncGen<'_> {
             src.push_str(line_prefix);
             src.push_str("    if __frame.pc == 0u32 {\n");
             for (i, ty) in params.iter().enumerate() {
-                let decoded = decode_from_i64(&format!("__args[{i}]"), *ty)?;
+                let decoded = self.unerase_from_i64(&format!("__args[{i}]"), *ty)?;
                 src.push_str(line_prefix);
                 src.push_str(&format!("        __frame.l{i} = {decoded};\n"));
             }

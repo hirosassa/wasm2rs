@@ -418,6 +418,27 @@ impl<'a> super::FuncGen<'a> {
         cont_type_index: u32,
         resume_table: &wasmparser::ResumeTable,
     ) -> Result<(), TranspileError> {
+        // A `(on $tag switch)` handler turns this resume into a trampoline that
+        // follows switches through a chain of continuations (see below). Its
+        // on-label arms would need to hand a suspending continuation back to the
+        // label using the *currently driven* handle, not the originally resumed
+        // one — re-dispatching a suspend across the switch chain — which is not
+        // lowered yet. Reject the mix rather than mistranslate it (phase 8).
+        let has_switch = resume_table
+            .handlers
+            .iter()
+            .any(|h| matches!(h, wasmparser::Handle::OnSwitch { .. }));
+        let has_label = resume_table
+            .handlers
+            .iter()
+            .any(|h| matches!(h, wasmparser::Handle::OnLabel { .. }));
+        if has_switch && has_label {
+            return Err(TranspileError::Unsupported(
+                "resume combining a switch handler with a suspend-to-label handler (phase 8)"
+                    .into(),
+            ));
+        }
+
         // The handle is referenced twice (the step call and, on suspension, the
         // reused continuation), so materialise it into a stable temporary. Below
         // it on the stack sit the continuation's parameters, which this resume
@@ -440,17 +461,30 @@ impl<'a> super::FuncGen<'a> {
         for (arg, ty) in args.iter().zip(&param_tys) {
             encoded.push(super::cont::encode_to_i64(&arg.code, *ty)?);
         }
+        // A `(on $tag switch)` handler makes this resume a trampoline: it follows
+        // each switch to a new continuation with new injected args, so the stepped
+        // handle and the args live in mutable bindings a `'drive` loop rewrites.
+        // Without one, the older single-step form (a fixed handle, an array of
+        // args) suffices.
         let args_var = self.fresh_temp();
-        self.line(format!(
-            "let {args_var}: [i64; {}] = [{}];",
-            param_tys.len(),
-            encoded.join(", ")
-        ));
+        if has_switch {
+            self.line(format!(
+                "let mut {args_var}: Vec<i64> = vec![{}];",
+                encoded.join(", ")
+            ));
+        } else {
+            self.line(format!(
+                "let {args_var}: [i64; {}] = [{}];",
+                param_tys.len(),
+                encoded.join(", ")
+            ));
+        }
         self.spill_nonstable()?;
 
         // The Return path pushes the continuation's result values; hold them in
-        // per-result temporaries assigned only on that arm (the suspend arm
-        // diverges via its branch, so definite assignment holds).
+        // per-result temporaries assigned only on that arm (the suspend/switch
+        // arms diverge via their branch or `continue`, so definite assignment
+        // holds).
         let results =
             super::cont::cont_result_types(self.ctx.type_kinds, self.ctx.types, cont_type_index)?;
         let mut result_holders = Vec::with_capacity(results.len());
@@ -463,64 +497,56 @@ impl<'a> super::FuncGen<'a> {
             result_holders.push(name);
         }
 
-        self.line(format!(
-            "match self.cont_step({handle_var}, &{args_var}) {{"
-        ));
+        // The trampoline steps `cur_var` (initially the resumed handle); a plain
+        // resume steps the fixed handle directly.
+        let cur_var = self.fresh_temp();
+        if has_switch {
+            self.line(format!("let mut {cur_var}: u32 = {handle_var};"));
+            self.line("'drive: loop {");
+            self.line(format!("match self.cont_step({cur_var}, &{args_var}) {{"));
+        } else {
+            self.line(format!(
+                "match self.cont_step({handle_var}, &{args_var}) {{"
+            ));
+        }
         let return_pat = if results.is_empty() { "_" } else { "__vals" };
         self.line(format!("StepResult::Return({return_pat}) => {{"));
         self.assign_decoded(&result_holders, &results, "__vals")?;
+        if has_switch {
+            // A returning continuation ends the trampoline; its results fall
+            // through to the resume's continuation below.
+            self.line("break 'drive;");
+        }
         self.line("}");
 
         for handler in &resume_table.handlers {
-            let (tag, label_depth) = match *handler {
-                wasmparser::Handle::OnLabel { tag, label } => (tag, label),
-                wasmparser::Handle::OnSwitch { .. } => {
-                    return Err(TranspileError::Unsupported(
-                        "resume (on $tag switch) handler (phase 8)".into(),
-                    ));
+            match *handler {
+                wasmparser::Handle::OnLabel { tag, label } => {
+                    self.emit_resume_on_label(tag, label, &handle_var)?;
                 }
-            };
-            let payload_tys = self
-                .ctx
-                .tags
-                .get(tag as usize)
-                .ok_or_else(|| TranspileError::Unsupported("resume: unknown tag index".into()))?
-                .clone();
-            let (is_loop, label, vars) = match self.resolve_target(label_depth)? {
-                BranchTarget::Direct {
-                    is_loop,
-                    label,
-                    vars,
-                } => (is_loop, label, vars),
-                BranchTarget::Escape { .. } => {
-                    return Err(TranspileError::Unsupported(
-                        "resume handler crossing a try body (phase 5)".into(),
+                wasmparser::Handle::OnSwitch { tag } => {
+                    // Follow the switch: `cont_step` has already reified the parked
+                    // switcher (`cur_var`), so append its handle as the target's
+                    // trailing self-reference and drive the target with the switch
+                    // payload as its injected args.
+                    self.line(format!(
+                        "StepResult::Switch {{ tag: __t, target: __tgt, args: __sa }} if __t == \
+                         {tag}u32 => {{"
                     ));
+                    self.line(format!(
+                        "let mut __next = __sa; __next.push({cur_var} as i64);"
+                    ));
+                    self.line(format!("{cur_var} = __tgt; {args_var} = __next;"));
+                    self.line("continue 'drive;");
+                    self.line("}");
                 }
-            };
-            // The handler block receives the tag payload followed by the
-            // continuation reference, so it must yield exactly that arity.
-            if vars.len() != payload_tys.len() + 1 {
-                return Err(TranspileError::Unsupported(
-                    "resume handler block does not yield (payload.., contref)".into(),
-                ));
             }
-            let payload_pat = if payload_tys.is_empty() { "_" } else { "__pl" };
-            self.line(format!(
-                "StepResult::Suspend {{ tag: __t, payload: {payload_pat} }} if __t == {tag}u32 => {{"
-            ));
-            // The handler block yields the payload followed by the continuation,
-            // so decode the payload into the leading vars and set the trailing
-            // var to the (advanced, one-shot) handle reused in place.
-            self.assign_decoded(&vars, &payload_tys, "__pl")?;
-            let cont_var = vars.last().ok_or(TranspileError::StackUnderflow)?;
-            self.line(format!("{cont_var} = {handle_var};"));
-            let keyword = if is_loop { "continue" } else { "break" };
-            self.line(format!("{keyword} 'l{label};"));
-            self.line("}");
         }
         self.line("_ => panic!(\"resume: unhandled continuation suspend tag\"),");
         self.line("}");
+        if has_switch {
+            self.line("}");
+        }
 
         for (name, ty) in result_holders.into_iter().zip(&results) {
             self.push(Val {
@@ -529,6 +555,54 @@ impl<'a> super::FuncGen<'a> {
                 stable: true,
             });
         }
+        Ok(())
+    }
+
+    /// Emit one `(on $tag $label)` resume handler arm: on a matching suspend,
+    /// decode the tag payload into the target block's leading result variables,
+    /// hand it the reused (one-shot) continuation handle in the trailing variable,
+    /// and branch there. Shared by the plain and switch-driver forms of `resume`.
+    fn emit_resume_on_label(
+        &mut self,
+        tag: u32,
+        label_depth: u32,
+        handle_var: &str,
+    ) -> Result<(), TranspileError> {
+        let payload_tys = self
+            .ctx
+            .tags
+            .get(tag as usize)
+            .ok_or_else(|| TranspileError::Unsupported("resume: unknown tag index".into()))?
+            .clone();
+        let (is_loop, label, vars) = match self.resolve_target(label_depth)? {
+            BranchTarget::Direct {
+                is_loop,
+                label,
+                vars,
+            } => (is_loop, label, vars),
+            BranchTarget::Escape { .. } => {
+                return Err(TranspileError::Unsupported(
+                    "resume handler crossing a try body (phase 5)".into(),
+                ));
+            }
+        };
+        // The handler block receives the tag payload followed by the continuation
+        // reference, so it must yield exactly that arity.
+        if vars.len() != payload_tys.len() + 1 {
+            return Err(TranspileError::Unsupported(
+                "resume handler block does not yield (payload.., contref)".into(),
+            ));
+        }
+        let payload_pat = if payload_tys.is_empty() { "_" } else { "__pl" };
+        self.line(format!(
+            "StepResult::Suspend {{ tag: __t, payload: {payload_pat} }} if __t == {tag}u32 => {{"
+        ));
+        self.assign_decoded(&vars, &payload_tys, "__pl")?;
+        let cont_var = vars.last().ok_or(TranspileError::StackUnderflow)?;
+        self.line(format!("{cont_var} = {handle_var};"));
+        let keyword = if is_loop { "continue" } else { "break" };
+        self.line(format!("{keyword} 'l{label};"));
+        self.line("}");
         Ok(())
     }
 

@@ -937,6 +937,90 @@ fn loop_param_survives_suspend() {
 }
 
 #[test]
+fn switch_transfers_control_to_another_continuation() {
+    // `switch $cb $t` (P8) transfers control directly from continuation `$a` to
+    // continuation `$b`, handing it `$a`'s payload plus a reified reference to
+    // `$a` itself (the target's trailing `(ref $ca_s)` parameter). The resume
+    // that started `$a` carries an `(on $t switch)` handler, so it becomes a
+    // trampoline: it drives `$a` until `$a` switches, then follows the switch to
+    // `$b`, and returns whatever the continuation eventually returns.
+    //
+    // `$a` creates `$b`, computes 11, and switches to `$b`; `$b` receives 11 (and
+    // the reference to `$a`, which it ignores) and returns 11 + 2 = 13. `$a` is
+    // parked at its switch forever, so its `i32.const 999` tail never runs.
+    compile_run(
+        "cont_switch_oneway",
+        r#"(module
+            (type $ht (func (result i32)))
+            (tag $t (type $ht))
+            (type $fa (func (result i32)))
+            (type $ca (cont $fa))
+            (type $fa_s (func (result i32)))
+            (type $ca_s (cont $fa_s))
+            (type $fb (func (param i32) (param (ref $ca_s)) (result i32)))
+            (type $cb (cont $fb))
+            (func $a (type $fa)
+              i32.const 11
+              ref.func $b cont.new $cb
+              switch $cb $t
+              i32.const 999)
+            (func $b (type $fb)
+              local.get 0 i32.const 2 i32.add)
+            (func (export "run") (type $fa)
+              ref.func $a cont.new $ca
+              resume $ca (on $t switch)))"#,
+        // `$a` is func0 and `$b` is func1 (both step functions); the exported
+        // `run` is func2.
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 13);",
+    );
+}
+
+#[test]
+fn switch_round_trips_between_two_continuations() {
+    // A symmetric coroutine round trip (P8): `$a` switches to `$b` handing it a
+    // value, `$b` switches back to `$a` handing it a value, and `$a` returns.
+    // Each switch delivers the switcher's payload plus a reified reference to the
+    // switcher itself (the self-reference `t2*`), so the reference flows through
+    // the `i64`-erased argument slots as a `u32` handle.
+    //
+    // `$a` sends 10; `$b` computes 10 + 2 = 12 and sends it back; `$a` receives
+    // 12, drops the (fresh) reference to `$b`, and returns 12 + 100 = 112. `$b`
+    // is parked at its switch-back forever, so its `unreachable` tail never runs.
+    // The mutually-recursive continuation types (`$a`'s reified type names `$b`'s
+    // and vice versa) live in one `rec` group.
+    compile_run(
+        "cont_switch_round_trip",
+        r#"(module
+            (type $ht (func (result i32)))
+            (tag $t (type $ht))
+            (type $fa (func (result i32)))
+            (type $ca (cont $fa))
+            (rec
+              (type $fb (func (param i32) (param (ref $ca2)) (result i32)))
+              (type $cb (cont $fb))
+              (type $fa2 (func (param i32) (param (ref $cb)) (result i32)))
+              (type $ca2 (cont $fa2)))
+            (func $a (type $fa)
+              i32.const 10
+              ref.func $b cont.new $cb
+              switch $cb $t
+              drop
+              i32.const 100 i32.add)
+            (func $b (type $fb)
+              local.get 0 i32.const 2 i32.add
+              local.get 1
+              switch $ca2 $t
+              drop)
+            (func (export "run") (type $fa)
+              ref.func $a cont.new $ca
+              resume $ca (on $t switch)))"#,
+        // `$a` is func0 and `$b` is func1 (both step functions); the exported
+        // `run` is func2.
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 112);",
+    );
+}
+
+#[test]
 fn null_cont_local_defaults_to_null() {
     // A local typed `(ref null $ct)` defaults to the null handle, so reading it
     // back and testing `ref.is_null` reports null (1) without any assignment.

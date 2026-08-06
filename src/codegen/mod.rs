@@ -1222,6 +1222,10 @@ impl Flattener {
                                      StepResult::Suspend {{ tag: __t, payload: __p }} => {{ \
                                      {save}__frame.pc = {call}u32; \
                                      return StepResult::Suspend {{ tag: __t, payload: __p }}; }} \
+                                     StepResult::Switch {{ tag: __t, target: __tgt, args: __a }} => \
+                                     {{ {save}__frame.pc = {call}u32; \
+                                     return StepResult::Switch {{ tag: __t, target: __tgt, args: __a \
+                                     }}; }} \
                                      StepResult::Return(__cret) => {{ __frame.ostack = __cret; \
                                      pc = {resume}; }} }}"
                                 ),

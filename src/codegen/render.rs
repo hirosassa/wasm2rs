@@ -542,6 +542,10 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Result<Vec<String>, Transp
         "pub enum StepResult {".to_string(),
         "    Return(Vec<i64>),".to_string(),
         "    Suspend { tag: u32, payload: Vec<i64> },".to_string(),
+        // A `switch` parks the running continuation and transfers directly to
+        // `target`, handing it `args` (the switch payload); the driving `resume`
+        // (its `(on $tag switch)` handler) follows the transfer — see `resume`.
+        "    Switch { tag: u32, target: u32, args: Vec<i64> },".to_string(),
         "}".to_string(),
         String::new(),
     ];
@@ -655,7 +659,10 @@ fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
     }
     lines.extend([
         "    };".to_string(),
-        "    if let StepResult::Suspend { .. } = __r {".to_string(),
+        // A one-shot continuation is kept only while still live: both a suspend
+        // and a switch park it (it may be resumed/switched-to again), while a
+        // return consumes it.
+        "    if let StepResult::Suspend { .. } | StepResult::Switch { .. } = __r {".to_string(),
         "        self.conts[__h as usize] = Some(__obj);".to_string(),
         "    }".to_string(),
         "    __r".to_string(),

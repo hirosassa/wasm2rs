@@ -290,6 +290,77 @@ fn resume_throw_with_suspend_handlers_is_rejected() {
 }
 
 #[test]
+fn switch_inside_a_region_is_rejected() {
+    // `switch` is implemented at the top level of a continuation body (see
+    // tests/cont.rs), where each state is a straight-line arm. A switch nested
+    // inside a `block`/`loop`/`if` would need the `pc` state machine threaded
+    // through the region (the flat lowering, as suspend already does) — phase
+    // 8-2 — so for now it is rejected rather than mistranslated.
+    assert_unsupported(
+        r#"(module
+            (type $ht (func (result i32)))
+            (tag $t (type $ht))
+            (type $fa (func (result i32)))
+            (type $ca (cont $fa))
+            (type $fa_s (func (result i32)))
+            (type $ca_s (cont $fa_s))
+            (type $fb (func (param i32) (param (ref $ca_s)) (result i32)))
+            (type $cb (cont $fb))
+            (func $a (type $fa)
+              (block
+                i32.const 11
+                ref.func $b cont.new $cb
+                switch $cb $t)
+              i32.const 999)
+            (func $b (type $fb)
+              local.get 0 i32.const 2 i32.add)
+            (func (export "run") (type $fa)
+              ref.func $a cont.new $ca
+              resume $ca (on $t switch)))"#,
+        "switch inside nested control flow",
+    );
+}
+
+#[test]
+fn resume_mixing_switch_and_label_handlers_is_rejected() {
+    // A single `resume` can carry an `(on $tag switch)` handler (the switch
+    // trampoline, see tests/cont.rs) or `(on $tag $label)` suspend handlers, but
+    // not both at once: the trampoline follows switches through a chain of
+    // continuations, so handing a suspending continuation back to a label would
+    // have to use the *currently driven* handle rather than the originally
+    // resumed one. That re-dispatch is not lowered yet (phase 8), so the mix is
+    // rejected rather than mistranslated into handing back the wrong handle.
+    assert_unsupported(
+        r#"(module
+            (type $ht (func (result i32)))
+            (tag $t (type $ht))
+            (tag $y (param i32))
+            (type $fa (func (result i32)))
+            (type $ca (cont $fa))
+            (type $fa_s (func (result i32)))
+            (type $ca_s (cont $fa_s))
+            (type $fb (func (param i32) (param (ref $ca_s)) (result i32)))
+            (type $cb (cont $fb))
+            (func $a (type $fa)
+              i32.const 11
+              ref.func $b cont.new $cb
+              switch $cb $t
+              i32.const 999)
+            (func $b (type $fb)
+              local.get 0 i32.const 2 i32.add)
+            (func (export "run") (type $fa)
+              (local $k (ref null $ca))
+              (block $on_yield (result i32 (ref $ca))
+                ref.func $a cont.new $ca
+                resume $ca (on $y $on_yield) (on $t switch)
+                return)
+              local.set $k
+              drop))"#,
+        "combining a switch handler with a suspend-to-label handler",
+    );
+}
+
+#[test]
 fn continuation_body_also_called_directly_is_rejected() {
     // A function used as a continuation body is emitted only as a resumable
     // step function, never as an ordinary `func{N}`, so also calling it
