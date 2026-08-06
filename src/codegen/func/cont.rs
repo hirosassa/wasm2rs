@@ -159,6 +159,26 @@ impl super::FuncGen<'_> {
                          tag: {tag_index}u32, payload: vec![{payload}] }}"
                     ));
                     pc = next;
+                    // `suspend $t : [p*] -> [r*]`: the results `r*` are the
+                    // values the resuming side injects, delivered as the next
+                    // step's `__args`. Push them as the resumed state's initial
+                    // operands so the code after the suspend consumes them.
+                    let result_tys = self
+                        .ctx
+                        .tag_results
+                        .get(tag_index as usize)
+                        .ok_or_else(|| {
+                            TranspileError::Unsupported("suspend: unknown tag index".into())
+                        })?
+                        .clone();
+                    for (i, ty) in result_tys.iter().enumerate() {
+                        let code = decode_from_i64(&format!("__args[{i}]"), *ty)?;
+                        self.push(Val {
+                            code,
+                            ty: *ty,
+                            stable: true,
+                        });
+                    }
                 }
                 Operator::Call { function_index }
                     if self.ctx.step_set.binary_search(&function_index).is_ok() =>

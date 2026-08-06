@@ -111,11 +111,15 @@ pub(crate) struct ImportedGlobalInfo {
     pub mutable: bool,
 }
 
-/// An exception tag: the parameter types of the exception it declares. Tags
-/// occupy their own index space (imported tags first, then defined ones), which
-/// `throw`/`catch` reference. Exceptions carry parameters but no results.
+/// A tag: the parameter (and, for control tags, result) types of the underlying
+/// function type it names. Tags occupy their own index space (imported tags
+/// first, then defined ones), which `throw`/`catch`/`suspend` reference.
+/// Exception tags carry parameters but no results; a stack-switching control
+/// tag also carries results — the values a `resume` injects when it resumes a
+/// continuation suspended on that tag.
 pub(crate) struct TagInfo {
     pub params: Vec<ValType>,
+    pub results: Vec<ValType>,
 }
 
 /// One function to translate: its signature plus its body.

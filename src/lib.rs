@@ -483,7 +483,9 @@ where
     )
 }
 
-/// Resolve a tag's referenced function type into its exception payload types.
+/// Resolve a tag's referenced function type into its parameter and result
+/// types (results are empty for an exception tag, non-empty for a
+/// stack-switching control tag).
 fn tag_info(
     func_type_idx: u32,
     signatures: &[Signature],
@@ -493,6 +495,7 @@ fn tag_info(
         .ok_or_else(|| TranspileError::Unsupported("tag type index out of range".into()))?;
     Ok(codegen::TagInfo {
         params: sig.params.clone(),
+        results: sig.results.clone(),
     })
 }
 

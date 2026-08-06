@@ -1574,9 +1574,14 @@ struct ModuleCtx<'a> {
     /// internalise `anyref`s through the per-instance `extern_box: Vec<GcRef>`.
     /// Emits (and initialises) that field.
     uses_extern_box: bool,
-    /// Per-tag exception payload types, indexed by tag index (imported tags
-    /// first, then defined). `throw`/`catch` resolve their tag index here.
+    /// Per-tag payload (parameter) types, indexed by tag index (imported tags
+    /// first, then defined). `throw`/`catch`/`suspend` resolve their tag index
+    /// here.
     tags: Vec<Vec<ValType>>,
+    /// Per-tag result types, indexed like [`tags`](Self::tags). Empty for an
+    /// exception tag; for a stack-switching control tag these are the values a
+    /// `resume` injects back into the continuation it resumes.
+    tag_results: Vec<Vec<ValType>>,
     /// Function indices reachable as continuation bodies (the target of a
     /// `ref.func` fed into `cont.new`), sorted and deduplicated. These are
     /// emitted as resumable `cont_step_func{N}` state machines rather than
@@ -1804,6 +1809,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         is_method: stateful,
         uses_extern_box,
         tags: parts.tags.iter().map(|t| t.params.clone()).collect(),
+        tag_results: parts.tags.iter().map(|t| t.results.clone()).collect(),
         cont_bodies,
         step_set,
         checkpoint_callee,

@@ -356,6 +356,47 @@ fn continuation_parameter_survives_a_suspend() {
 }
 
 #[test]
+fn resume_sends_a_value_back_into_a_suspend() {
+    // A bidirectional generator (P5b): the tag `$ch` carries a parameter (the
+    // value yielded up) *and* a result (the value sent back down on resume).
+    // `$gen` yields 10 via `suspend $ch`, and that suspend then evaluates to the
+    // value the next `resume` injects; it adds 100 and returns. The driver's
+    // first `resume` (no args) drives to the suspend; the second `resume` sends
+    // 5 back, so `$gen` returns 5 + 100 = 105. If the sent value were not
+    // injected, the suspend would leave nothing on the stack and the add would
+    // underflow — so this exercises the result-injection path end to end.
+    //
+    // The reused continuation has a *different* type ($ct2, whose underlying
+    // function takes the injected i32) than the fresh one ($ct), mirroring how
+    // a suspend re-types the continuation to expect the tag's results.
+    compile_run(
+        "cont_resume_send",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (type $ft2 (func (param i32) (result i32)))
+            (type $ct2 (cont $ft2))
+            (tag $ch (param i32) (result i32))
+            (func $gen (result i32)
+              i32.const 10 suspend $ch
+              i32.const 100 i32.add)
+            (func (export "run") (result i32)
+              (local $k (ref null $ct2))
+              (block $on_ch (result i32 (ref $ct2))
+                ref.func $gen cont.new $ct
+                resume $ct (on $ch $on_ch)
+                return)
+              local.set $k
+              drop
+              i32.const 5
+              local.get $k
+              resume $ct2))"#,
+        // `$gen` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 105);",
+    );
+}
+
+#[test]
 fn null_cont_local_defaults_to_null() {
     // A local typed `(ref null $ct)` defaults to the null handle, so reading it
     // back and testing `ref.is_null` reports null (1) without any assignment.
