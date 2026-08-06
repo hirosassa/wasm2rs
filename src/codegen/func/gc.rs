@@ -796,6 +796,45 @@ impl super::FuncGen<'_> {
         self.push_combined(code, ValType::I32, false)
     }
 
+    /// `extern.convert_any`: internalise an `anyref` into an `externref`. Null
+    /// maps to the null externref (`u32::MAX`); a managed handle is pushed onto
+    /// the per-instance `extern_box` and its index returned as the `u32`
+    /// externref, so `any.convert_extern` can recover the same handle.
+    pub(super) fn extern_convert_any(&mut self) -> Result<(), TranspileError> {
+        let a = self.pop()?;
+        // Borrow (not move) the operand: it may be a local reused afterwards.
+        let code = format!(
+            "{{ match &({}) {{ GcRef::Null => u32::MAX, \
+             __x => {{ let __i = self.extern_box.len() as u32; \
+             self.extern_box.push(__x.clone()); __i }} }} }}",
+            a.code
+        );
+        self.materialize(code, ValType::EXTERNREF)
+    }
+
+    /// `any.convert_extern`: externalise an `externref` back into an `anyref`.
+    /// The null externref (`u32::MAX`) maps to `GcRef::Null`; any other value is
+    /// an index into `extern_box` (produced by `extern.convert_any`) whose handle
+    /// is cloned back out. A host-provided externref is out of scope (it would
+    /// index outside the box and trap).
+    pub(super) fn any_convert_extern(&mut self) -> Result<(), TranspileError> {
+        let e = self.pop()?;
+        let rt = RefType::new(
+            true,
+            HeapType::Abstract {
+                shared: false,
+                ty: AbstractHeapType::Any,
+            },
+        )
+        .ok_or_else(|| TranspileError::Unsupported("cannot form anyref type".into()))?;
+        let code = format!(
+            "{{ let __e = ({}); if __e == u32::MAX {{ GcRef::Null }} \
+             else {{ self.extern_box[__e as usize].clone() }} }}",
+            e.code
+        );
+        self.materialize(code, ValType::Ref(rt))
+    }
+
     /// `ref.as_non_null`: pop a nullable ref, trap on null, else pass the handle
     /// through typed as a non-null ref (still a `GcRef`).
     pub(super) fn ref_as_non_null(&mut self) -> Result<(), TranspileError> {

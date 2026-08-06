@@ -156,6 +156,11 @@ pub(super) fn render_module(
             lines.push(format!("    elem{e}: &'static [u32],"));
         }
     }
+    // The externref internalisation box: `extern.convert_any` pushes a managed
+    // handle here and returns its index as the `u32` externref.
+    if ctx.uses_extern_box {
+        lines.push("    extern_box: Vec<GcRef>,".to_string());
+    }
     lines.push("}".to_string());
     lines.push(String::new());
 
@@ -253,6 +258,9 @@ pub(super) fn render_module(
             if seg.offset.is_none() && !seg.declared {
                 inner.push(format!("        elem{e}: &ELEM{e},"));
             }
+        }
+        if ctx.uses_extern_box {
+            inner.push("        extern_box: Vec::new(),".to_string());
         }
         Ok(())
     };

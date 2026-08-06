@@ -826,6 +826,10 @@ impl<'a> FuncGen<'a> {
             // handles by identity; `ref.as_non_null` narrows a nullable ref
             // (trapping on null); `br_on_null`/`br_on_non_null` branch on
             // nullness (only the latter carries the ref, dropping it otherwise).
+            // Bridge the `extern` and `any` hierarchies (forces the module
+            // stateful; see `uses_extern_convert`).
+            Operator::ExternConvertAny => self.extern_convert_any()?,
+            Operator::AnyConvertExtern => self.any_convert_extern()?,
             Operator::RefEq => self.ref_eq()?,
             Operator::RefAsNonNull => self.ref_as_non_null()?,
             Operator::BrOnNull { relative_depth } => self.br_on_null(relative_depth)?,

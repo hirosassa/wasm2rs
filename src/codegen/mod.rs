@@ -1570,6 +1570,10 @@ struct ModuleCtx<'a> {
     elem_passive: Vec<bool>,
     /// Whether functions are emitted as `&mut self` methods (stateful module).
     is_method: bool,
+    /// Whether any body uses `extern.convert_any`/`any.convert_extern`, which
+    /// internalise `anyref`s through the per-instance `extern_box: Vec<GcRef>`.
+    /// Emits (and initialises) that field.
+    uses_extern_box: bool,
     /// Per-tag exception payload types, indexed by tag index (imported tags
     /// first, then defined). `throw`/`catch` resolve their tag index here.
     tags: Vec<Vec<ValType>>,
@@ -1730,12 +1734,14 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
     // `struct Instance`, so a body that uses either forces statefulness even
     // when the module carries no other state. (`ref.func` alone does not — it
     // just pushes a `u32`.)
+    let uses_extern_box = uses_extern_convert(funcs)?;
     let stateful = has_memory
         || has_table
         || has_imports
         || !globals.is_empty()
         || uses_call_ref(funcs)?
-        || uses_array_segment_ops(funcs)?;
+        || uses_array_segment_ops(funcs)?
+        || uses_extern_box;
 
     let ctx = ModuleCtx {
         imports,
@@ -1757,6 +1763,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
             .map(|e| e.offset.is_none() && !e.declared)
             .collect(),
         is_method: stateful,
+        uses_extern_box,
         tags: parts.tags.iter().map(|t| t.params.clone()).collect(),
     };
     Ok((ctx, stateful))
@@ -2030,7 +2037,12 @@ fn uses_abstract_gc(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
         for op in input.body.get_operators_reader()? {
             match op? {
                 Operator::RefNull { hty } if abstract_is_gc(hty) => return Ok(true),
-                Operator::RefI31 => return Ok(true),
+                // `ref.i31` produces a `GcRef::I31`; the convert ops produce/consume
+                // a managed `anyref`. All need the value model emitted even with no
+                // struct/array type declared.
+                Operator::RefI31 | Operator::AnyConvertExtern | Operator::ExternConvertAny => {
+                    return Ok(true);
+                }
                 _ => {}
             }
         }
@@ -2074,6 +2086,22 @@ fn uses_array_segment_ops(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileErro
                     | Operator::ArrayNewElem { .. }
                     | Operator::ArrayInitElem { .. }
             ) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Whether any function body uses `extern.convert_any`/`any.convert_extern`.
+///
+/// These bridge the `extern` and `any` hierarchies through the per-instance
+/// `extern_box: Vec<GcRef>`, which only exists on a `struct Instance`, so a body
+/// using either forces statefulness (like `call_ref`).
+fn uses_extern_convert(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
+    for input in funcs {
+        for op in input.body.get_operators_reader()? {
+            if matches!(op?, Operator::AnyConvertExtern | Operator::ExternConvertAny) {
                 return Ok(true);
             }
         }
