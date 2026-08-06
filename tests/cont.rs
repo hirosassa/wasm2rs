@@ -397,6 +397,96 @@ fn resume_sends_a_value_back_into_a_suspend() {
 }
 
 #[test]
+fn nested_if_in_a_continuation_body_without_suspend() {
+    // A continuation body may contain nested structured control flow as long as
+    // no `suspend` crosses it (P5b-2a). Here `$gen` selects 7 via an `if`
+    // (no suspend anywhere), then adds 100 and returns 107. The `if` region is a
+    // single straight-line chunk inside the (only) pc state; a single `resume`
+    // (no handlers) drives it straight to its return.
+    compile_run(
+        "cont_nested_if_no_suspend",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (func $gen (result i32)
+              i32.const 1
+              (if (result i32)
+                (then i32.const 7)
+                (else i32.const 0))
+              i32.const 100
+              i32.add)
+            (func (export "run") (result i32)
+              ref.func $gen cont.new $ct
+              resume $ct))"#,
+        // `$gen` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 107);",
+    );
+}
+
+#[test]
+fn nested_block_after_a_suspend_in_a_continuation_body() {
+    // Nested control flow in a *non-initial* pc state (P5b-2a). `$gen` yields 10,
+    // then — after the resume — computes 20 inside a `block` (no suspend inside)
+    // and returns 20 + 5 = 25. The driver resumes until it returns, accumulating
+    // 10 + 25 = 35. This exercises a region rendered into an arm that runs after
+    // a suspend boundary (pc > 0).
+    compile_run(
+        "cont_block_after_suspend",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              i32.const 10 suspend $yield
+              (block $b (result i32) i32.const 20)
+              i32.const 5 i32.add)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        // `$gen` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 35);",
+    );
+}
+
+#[test]
+fn diverging_tail_after_a_suspend_compiles() {
+    // A continuation body may diverge before its `end` (here an infinite `loop`
+    // in a post-suspend state). The step function must still *compile* under
+    // `-D warnings`: the diverging arm emits no trailing `StepResult::Return`
+    // (which would be unreachable) and never reads the operand stack (which
+    // would underflow). `$gen` yields 42, then — if resumed again — loops
+    // forever; the driver resumes it exactly once and keeps the yielded 42, so
+    // the diverging arm is compiled but never executed.
+    compile_run(
+        "cont_diverging_tail",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              i32.const 42 suspend $yield
+              (loop $l br $l))
+            (func (export "run") (result i32)
+              (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (block $on_yield (result i32 (ref $ct))
+                local.get $k resume $ct (on $yield $on_yield)
+                return)
+              local.set $k))"#,
+        // `$gen` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 42);",
+    );
+}
+
+#[test]
 fn null_cont_local_defaults_to_null() {
     // A local typed `(ref null $ct)` defaults to the null handle, so reading it
     // back and testing `ref.is_null` reports null (1) without any assignment.

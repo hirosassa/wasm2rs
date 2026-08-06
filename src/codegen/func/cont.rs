@@ -13,13 +13,18 @@
 //!
 //! A continuation body may have locals (kept in the frame across suspends) and
 //! numeric parameters (injected by the first `resume` and decoded into their
-//! parameter locals at `pc == 0`). It must still have no nested control flow,
-//! and its operand stack must be empty at every suspend point. Anything else is
-//! rejected as `Unsupported` and revisited in a later phase.
+//! parameter locals at `pc == 0`). It may also contain nested structured
+//! control flow (`block`/`loop`/`if` and the branches into them), provided no
+//! `suspend` (nor a cross-call checkpoint) occurs *inside* a region — such a
+//! region uses Rust's own control flow and renders as a single straight-line
+//! chunk within one `pc` state. A `suspend` that crosses a region boundary
+//! would have to weave the `pc` machine through the nested structure and is
+//! rejected for now. The operand stack must still be empty at every suspend
+//! point. Anything else is rejected as `Unsupported` and revisited later.
 
 use wasmparser::{FunctionBody, Operator, ValType};
 
-use super::super::{ALLOW, CompositeKind, GenMeta, Node, TypeSig, Val, index_u32};
+use super::super::{ALLOW, CompositeKind, GenMeta, TypeSig, Val, index_u32, render_nodes_into};
 use crate::TranspileError;
 
 /// Encode a wasm value (given its Rust expression `code` and type) into the
@@ -131,6 +136,13 @@ impl super::FuncGen<'_> {
         for op in body.get_operators_reader()? {
             match op? {
                 Operator::Suspend { tag_index } => {
+                    if !self.frames.is_empty() {
+                        return Err(TranspileError::Unsupported(
+                            "suspend inside nested control flow in a continuation body (phase \
+                             5b-2b: a suspend crossing a region is not yet lowered)"
+                                .into(),
+                        ));
+                    }
                     if checkpoint.is_some() {
                         return Err(TranspileError::Unsupported(
                             "suspend after a cross-call checkpoint (phase 5: a checkpoint must be \
@@ -192,9 +204,26 @@ impl super::FuncGen<'_> {
                         "return_call across a continuation (phase 5)".into(),
                     ));
                 }
+                Operator::End if !self.frames.is_empty() => {
+                    // A nested region's end (`block`/`loop`/`if`): the ordinary
+                    // lowering closes it into a `Node::Region` in `self.cur`,
+                    // which `take_arm_statements` renders into the current arm as
+                    // straight-line Rust control flow.
+                    self.emit_op(Operator::End)?;
+                }
                 Operator::End => {
-                    // No nested control flow is allowed, so this is the function
-                    // end: the remaining stack is the function's results.
+                    // Control that diverges before the outermost `end` (e.g. an
+                    // infinite `loop`) makes any trailing `StepResult::Return`
+                    // unreachable and leaves the operand stack unreadable, so —
+                    // like `end_function` — emit only the (already diverging)
+                    // statements as the arm. A checkpoint sits in reachable tail
+                    // position, so it never coincides with an unreachable end.
+                    if !self.reachable {
+                        arms.push(self.take_arm_statements()?);
+                        break;
+                    }
+                    // The outermost `end`: the remaining stack is the function's
+                    // results.
                     let results = self.results.clone();
                     let payload = self.encode_stack_tail(&results)?;
                     let arm = match checkpoint {
@@ -237,20 +266,13 @@ impl super::FuncGen<'_> {
                     arms.push(arm);
                     break;
                 }
-                other @ (Operator::Block { .. }
-                | Operator::Loop { .. }
-                | Operator::If { .. }
-                | Operator::Else
-                | Operator::Try { .. }
+                other @ (Operator::Try { .. }
                 | Operator::TryTable { .. }
                 | Operator::Return
-                | Operator::Br { .. }
-                | Operator::BrIf { .. }
-                | Operator::BrTable { .. }
                 | Operator::Resume { .. }
                 | Operator::Unreachable) => {
                     return Err(TranspileError::Unsupported(format!(
-                        "operator {other:?} in a continuation body (phase 4)"
+                        "operator {other:?} in a continuation body (phase 5b-2b)"
                     )));
                 }
                 other => self.emit_op(other)?,
@@ -338,6 +360,13 @@ impl super::FuncGen<'_> {
                 "more than one cross-call checkpoint in a continuation body (phase 5)".into(),
             ));
         }
+        if !self.frames.is_empty() {
+            return Err(TranspileError::Unsupported(
+                "cross-call checkpoint inside nested control flow in a continuation body (phase \
+                 5b-2b)"
+                    .into(),
+            ));
+        }
         let (params, results) = self.ctx.full_sig(callee as usize).ok_or_else(|| {
             TranspileError::Unsupported("checkpoint call to unknown function".into())
         })?;
@@ -387,24 +416,15 @@ impl super::FuncGen<'_> {
         Ok(encoded.join(", "))
     }
 
-    /// Drain the statements queued for the current `pc` state (from `local.set`,
-    /// operand spills, and the like) as an inline, space-separated string. Phase
-    /// 5b has no nested control flow in a continuation body, so every queued node
-    /// is a straight-line statement; anything else is rejected.
+    /// Drain the nodes queued for the current `pc` state (from `local.set`,
+    /// operand spills, and any nested `block`/`loop`/`if` regions that contain no
+    /// suspend) and render them into Rust source for the arm. Regions render via
+    /// the ordinary [`render_nodes_into`], so their branches use Rust's own
+    /// `'lN` labels and control flow — self-contained within this one state.
     fn take_arm_statements(&mut self) -> Result<String, TranspileError> {
+        let nodes = std::mem::take(&mut self.cur);
         let mut out = String::new();
-        for node in std::mem::take(&mut self.cur) {
-            // Only straight-line statements reach here in phase 5b; a
-            // control-flow node (from a nested region or a `return`/branch) is
-            // already rejected upstream, so this is a defensive guard.
-            let Node::Line(text) = node else {
-                return Err(TranspileError::Unsupported(
-                    "unsupported control flow in a continuation body (phase 5b)".into(),
-                ));
-            };
-            out.push_str(&text);
-            out.push(' ');
-        }
+        render_nodes_into(nodes, 0, "", &mut out);
         Ok(out)
     }
 
