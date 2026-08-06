@@ -474,6 +474,46 @@ fn continuation_parameter_survives_a_suspend() {
 }
 
 #[test]
+fn resume_throw_raises_the_exception_at_the_suspend_point() {
+    // `resume_throw $ct $exn` resumes a suspended continuation by raising an
+    // exception at its suspension point instead of continuing normally (P7). With
+    // no exception handler inside the continuation body, the injected exception
+    // propagates straight out to the resumer. `$gen` yields 10 and would return 99
+    // if resumed normally; instead the driver `resume_throw`s `$cancel(7)` into it,
+    // caught by the surrounding `try` — so the result is the caught payload 7, and
+    // the continuation never runs its `i32.const 99` tail.
+    compile_run(
+        "cont_resume_throw",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (type $ft0 (func (result i32)))
+            (type $ct0 (cont $ft0))
+            (tag $yield (param i32))
+            (tag $cancel (param i32))
+            (func $gen (result i32)
+              i32.const 10 suspend $yield
+              i32.const 99)
+            (func (export "run") (result i32)
+              (local $k (ref null $ct0))
+              (block $on_yield (result i32 (ref $ct0))
+                ref.func $gen cont.new $ct
+                resume $ct (on $yield $on_yield)
+                unreachable)
+              local.set $k
+              drop
+              try (result i32)
+                i32.const 7
+                local.get $k
+                resume_throw $ct0 $cancel
+              catch $cancel
+              end))"#,
+        // `$gen` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 7);",
+    );
+}
+
+#[test]
 fn cont_bind_supplies_a_leading_parameter() {
     // `cont.bind` partially applies a continuation's leading parameters (P6).
     // `$add` takes two i32 parameters; `cont.bind $ct $ct1` binds the first (10),

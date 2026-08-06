@@ -1015,6 +1015,14 @@ impl<'a> super::FuncGen<'a> {
     /// Emit a `throw $tag`: pop the payload operands, bit-encode them, and raise
     /// the exception as a `panic_any` so an enclosing `try` can catch it.
     pub(super) fn emit_throw(&mut self, tag_index: u32) -> Result<(), TranspileError> {
+        self.emit_throw_payload(tag_index)
+    }
+
+    /// Pop tag `tag_index`'s payload off the operand stack (top-first) and raise
+    /// it as a `panic_any` of [`EXC_TYPE`], marking the program point unreachable.
+    /// Shared by `throw` and `resume_throw` (which first pops and consumes the
+    /// continuation it abandons).
+    fn emit_throw_payload(&mut self, tag_index: u32) -> Result<(), TranspileError> {
         self.uses_eh = true;
         let params = self
             .ctx
@@ -1035,6 +1043,36 @@ impl<'a> super::FuncGen<'a> {
         self.reachable = false;
         self.dead_nesting = 0;
         Ok(())
+    }
+
+    /// `resume_throw $ct $exn`: resume a suspended continuation by raising
+    /// exception `$exn` at its suspension point instead of continuing normally.
+    /// A continuation body cannot (yet) install an exception handler, so the
+    /// injected exception always propagates straight out to here — equivalent to
+    /// abandoning the continuation and raising the exception in the resumer. The
+    /// resume handlers would only fire on a re-suspend after an *internal* catch,
+    /// which cannot happen, so a non-empty table is rejected.
+    pub(super) fn resume_throw(
+        &mut self,
+        cont_type_index: u32,
+        tag_index: u32,
+        resume_table: &wasmparser::ResumeTable,
+    ) -> Result<(), TranspileError> {
+        super::cont::require_cont_type(self.ctx.type_kinds, cont_type_index)?;
+        if !resume_table.handlers.is_empty() {
+            return Err(TranspileError::Unsupported(
+                "resume_throw with suspend handlers (needs an exception handler inside the \
+                 continuation body, phase 7)"
+                    .into(),
+            ));
+        }
+        // The continuation reference sits on top of the exception payload; pop and
+        // consume it (one-shot — the throw abandons it) before raising the payload.
+        let handle = self.pop()?;
+        let handle_var = self.fresh_temp();
+        self.line(format!("let {handle_var}: u32 = {};", handle.code));
+        self.line(format!("let _ = self.conts[{handle_var} as usize].take();"));
+        self.emit_throw_payload(tag_index)
     }
 
     /// Emit a `rethrow`: re-raise the exception caught by the targeted enclosing

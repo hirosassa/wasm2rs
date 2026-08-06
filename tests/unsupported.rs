@@ -260,6 +260,36 @@ fn suspend_outside_a_continuation_is_rejected() {
 }
 
 #[test]
+fn resume_throw_with_suspend_handlers_is_rejected() {
+    // `resume_throw` is implemented (see tests/cont.rs), but only for the case
+    // where the injected exception propagates straight out of the continuation:
+    // a continuation body cannot install an exception handler, so its suspend
+    // handlers could only fire after an internal catch that never happens. A
+    // resume_throw carrying an `(on $tag $label)` handler is therefore rejected
+    // rather than mistranslated into an unreachable dispatch.
+    assert_unsupported(
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (tag $cancel (param i32))
+            (func $gen (result i32)
+              i32.const 1 suspend $yield
+              i32.const 2)
+            (func (export "run") (result i32)
+              (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (block $on_yield (result i32 (ref $ct))
+                i32.const 0
+                local.get $k
+                resume_throw $ct $cancel (on $yield $on_yield)
+                return)
+              drop))"#,
+        "resume_throw with suspend handlers",
+    );
+}
+
+#[test]
 fn continuation_body_also_called_directly_is_rejected() {
     // A function used as a continuation body is emitted only as a resumable
     // step function, never as an ordinary `func{N}`, so also calling it

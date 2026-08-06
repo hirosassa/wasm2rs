@@ -64,6 +64,22 @@ pub(super) fn decode_from_i64(expr: &str, ty: ValType) -> Result<String, Transpi
     })
 }
 
+/// Validate that `cont_type_index` names a continuation type, without needing its
+/// underlying signature (used where only the kind matters, e.g. `resume_throw`).
+pub(super) fn require_cont_type(
+    type_kinds: &[CompositeKind],
+    cont_type_index: u32,
+) -> Result<(), TranspileError> {
+    let idx = usize::try_from(cont_type_index)
+        .map_err(|_| TranspileError::Unsupported("continuation type index too large".into()))?;
+    match type_kinds.get(idx) {
+        Some(CompositeKind::Cont(_)) => Ok(()),
+        _ => Err(TranspileError::Unsupported(format!(
+            "type index {cont_type_index} is not a continuation type"
+        ))),
+    }
+}
+
 /// The result types of the function type underlying a continuation type index.
 pub(super) fn cont_result_types(
     type_kinds: &[CompositeKind],
