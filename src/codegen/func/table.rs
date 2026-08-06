@@ -293,13 +293,14 @@ impl<'a> super::FuncGen<'a> {
         )
     }
 
-    /// `i31.get_u`: read an `i31ref` payload zero-extended. The payload already
-    /// has its top bit clear, so masking is harmless. A null handle traps.
-    pub(super) fn i31_get_u(&mut self) -> Result<(), TranspileError> {
+    /// Emit an `i31.get_{s,u}`: read the `GcRef::I31` payload through
+    /// `payload_expr` (in which `__v` is the raw i32 payload), trapping on a null
+    /// handle. Keeps the operand's stability (a pure read).
+    fn i31_get(&mut self, payload_expr: &str) -> Result<(), TranspileError> {
         let r = self.pop()?;
         self.push_combined(
             format!(
-                "(match ({}) {{ GcRef::I31(__v) => (__v) & 0x7FFF_FFFFi32, \
+                "(match ({}) {{ GcRef::I31(__v) => {payload_expr}, \
                  _ => panic!(\"i31.get on null\") }})",
                 r.code
             ),
@@ -308,19 +309,16 @@ impl<'a> super::FuncGen<'a> {
         )
     }
 
+    /// `i31.get_u`: read an `i31ref` payload zero-extended. The payload already
+    /// has its top bit clear, so masking is harmless. A null handle traps.
+    pub(super) fn i31_get_u(&mut self) -> Result<(), TranspileError> {
+        self.i31_get("(__v) & 0x7FFF_FFFFi32")
+    }
+
     /// `i31.get_s`: read an `i31ref` payload sign-extended from bit 30. Shifting
     /// left by one lands bit 30 in the sign position, then an arithmetic right
     /// shift replicates it back down. A null handle traps.
     pub(super) fn i31_get_s(&mut self) -> Result<(), TranspileError> {
-        let r = self.pop()?;
-        self.push_combined(
-            format!(
-                "(match ({}) {{ GcRef::I31(__v) => ((__v) << 1) >> 1, \
-                 _ => panic!(\"i31.get on null\") }})",
-                r.code
-            ),
-            ValType::I32,
-            r.stable,
-        )
+        self.i31_get("((__v) << 1) >> 1")
     }
 }

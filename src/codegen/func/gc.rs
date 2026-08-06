@@ -199,6 +199,26 @@ impl super::FuncGen<'_> {
         }
     }
 
+    /// The [`SlotShape`] backing array type `type_index`'s element.
+    fn array_element_shape(&self, type_index: u32) -> Result<SlotShape, TranspileError> {
+        SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)
+    }
+
+    /// The [`SlotShape`] backing field `field_index` of struct type `type_index`.
+    fn struct_field_shape(
+        &self,
+        type_index: u32,
+        field_index: u32,
+    ) -> Result<SlotShape, TranspileError> {
+        let field = self
+            .struct_fields(type_index)?
+            .get(field_index as usize)
+            .ok_or_else(|| {
+                TranspileError::Unsupported(format!("struct field {field_index} out of range"))
+            })?;
+        SlotShape::of(field.storage, self.ctx.type_kinds)
+    }
+
     /// The module type index of a concrete struct/array heap type, or `None` for
     /// a funcref/externref/abstract or otherwise non-managed heap type.
     pub(super) fn gc_type_index(&self, hty: wasmparser::HeapType) -> Option<u32> {
@@ -253,13 +273,7 @@ impl super::FuncGen<'_> {
         field_index: u32,
         ext: Option<bool>,
     ) -> Result<(), TranspileError> {
-        let shape = {
-            let fields = self.struct_fields(type_index)?;
-            let field = fields.get(field_index as usize).ok_or_else(|| {
-                TranspileError::Unsupported(format!("struct field {field_index} out of range"))
-            })?;
-            SlotShape::of(field.storage, self.ctx.type_kinds)?
-        };
+        let shape = self.struct_field_shape(type_index, field_index)?;
         let r = self.pop()?;
         let (read, ty) = shape.read(&format!("&__b[{field_index}]"))?;
         let inner = format!(
@@ -277,13 +291,7 @@ impl super::FuncGen<'_> {
         type_index: u32,
         field_index: u32,
     ) -> Result<(), TranspileError> {
-        let shape = {
-            let fields = self.struct_fields(type_index)?;
-            let field = fields.get(field_index as usize).ok_or_else(|| {
-                TranspileError::Unsupported(format!("struct field {field_index} out of range"))
-            })?;
-            SlotShape::of(field.storage, self.ctx.type_kinds)?
-        };
+        let shape = self.struct_field_shape(type_index, field_index)?;
         self.freeze_survivors(2)?;
         let value = self.pop()?;
         let r = self.pop()?;
@@ -298,7 +306,7 @@ impl super::FuncGen<'_> {
     /// `array.new $t`: pop `size` (top) then the init value and allocate an array
     /// of `size` copies of the init value.
     pub(super) fn array_new(&mut self, type_index: u32) -> Result<(), TranspileError> {
-        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
+        let shape = self.array_element_shape(type_index)?;
         self.freeze_survivors(2)?;
         let size = self.pop()?;
         let init = self.pop()?;
@@ -319,7 +327,7 @@ impl super::FuncGen<'_> {
         type_index: u32,
         ext: Option<bool>,
     ) -> Result<(), TranspileError> {
-        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
+        let shape = self.array_element_shape(type_index)?;
         self.freeze_survivors(2)?;
         let index = self.pop()?;
         let r = self.pop()?;
@@ -334,7 +342,7 @@ impl super::FuncGen<'_> {
 
     /// `array.set $t`: pop `value` (top), then `index`, then the ref.
     pub(super) fn array_set(&mut self, type_index: u32) -> Result<(), TranspileError> {
-        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
+        let shape = self.array_element_shape(type_index)?;
         self.freeze_survivors(3)?;
         let value = self.pop()?;
         let index = self.pop()?;
@@ -377,8 +385,7 @@ impl super::FuncGen<'_> {
     /// `array.new_default $t`: pop `size` (top) and allocate an array of `size`
     /// default (0 / null) elements.
     pub(super) fn array_new_default(&mut self, type_index: u32) -> Result<(), TranspileError> {
-        let default = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?
-            .default_slot()?;
+        let default = self.array_element_shape(type_index)?.default_slot()?;
         let size = self.pop()?;
         let code = format!(
             "{{ let __n = ({}) as usize; \
@@ -396,7 +403,7 @@ impl super::FuncGen<'_> {
         type_index: u32,
         array_size: u32,
     ) -> Result<(), TranspileError> {
-        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
+        let shape = self.array_element_shape(type_index)?;
         let n = array_size as usize;
         // Freeze anything below the elements, then pop them (top is last).
         self.freeze_survivors(n)?;
@@ -417,7 +424,7 @@ impl super::FuncGen<'_> {
     /// on top). Write `size` copies of `value` into the array starting at
     /// `offset`. An out-of-range write traps.
     pub(super) fn array_fill(&mut self, type_index: u32) -> Result<(), TranspileError> {
-        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
+        let shape = self.array_element_shape(type_index)?;
         self.freeze_survivors(4)?;
         let size = self.pop()?;
         let value = self.pop()?;
@@ -440,12 +447,9 @@ impl super::FuncGen<'_> {
     /// self-copy (both handles backed by the same `Rc`) neither double-borrows nor
     /// corrupts on overlap. Out-of-range indexing traps.
     pub(super) fn array_copy(&mut self, type_index_dst: u32) -> Result<(), TranspileError> {
-        // The whole `GcSlot`s are copied, so the destination element shape
-        // governs and no per-element rewrap is needed.
-        let _ = SlotShape::of(
-            self.array_element(type_index_dst)?.storage,
-            self.ctx.type_kinds,
-        )?;
+        // Validate the destination element type is representable; the whole
+        // `GcSlot`s are copied, so no per-element rewrap is needed.
+        self.array_element_shape(type_index_dst)?;
         self.freeze_survivors(5)?;
         let size = self.pop()?;
         let src_offset = self.pop()?;
@@ -474,7 +478,7 @@ impl super::FuncGen<'_> {
         data_index: u32,
     ) -> Result<(), TranspileError> {
         self.require_passive(&self.ctx.data_passive, data_index, "data")?;
-        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
+        let shape = self.array_element_shape(type_index)?;
         let (esize, slot) = shape.read_le_bytes("__seg", "__base")?;
         self.freeze_survivors(2)?;
         let size = self.pop()?;
@@ -501,7 +505,7 @@ impl super::FuncGen<'_> {
         data_index: u32,
     ) -> Result<(), TranspileError> {
         self.require_passive(&self.ctx.data_passive, data_index, "data")?;
-        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
+        let shape = self.array_element_shape(type_index)?;
         let (esize, slot) = shape.read_le_bytes("__seg", "__base")?;
         self.freeze_survivors(4)?;
         let size = self.pop()?;
@@ -573,7 +577,7 @@ impl super::FuncGen<'_> {
     /// Require array type `type_index`'s element to be a funcref/externref
     /// (`GcSlot::Func`-backed), the only element an element segment can fill.
     fn require_func_element(&self, type_index: u32, op: &str) -> Result<(), TranspileError> {
-        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
+        let shape = self.array_element_shape(type_index)?;
         if matches!(shape, SlotShape::Func(_)) {
             Ok(())
         } else {

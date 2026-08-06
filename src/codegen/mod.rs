@@ -2028,45 +2028,50 @@ fn needs_gc_types(parts: &ModuleParts<'_>) -> Result<bool, TranspileError> {
     Ok(declares_gc_types(parts.type_kinds) || uses_abstract_gc(parts.funcs)?)
 }
 
-/// Whether any function body creates an abstract GC reference without a concrete
-/// struct/array type being declared: either `ref.null` of an abstract GC heap
-/// type (`any`/`eq`/`i31`/`struct`/`array`/`none`) or `ref.i31` (which produces a
-/// `GcRef::I31`). Both force the managed value model to be emitted.
-fn uses_abstract_gc(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
+/// Whether any function body contains an operator matching `pred`.
+///
+/// Reads a fresh operator reader per body (`get_operators_reader` yields an
+/// independent reader, so this does not disturb the real codegen walk later),
+/// short-circuiting on the first match.
+fn any_body_op(
+    funcs: &[FuncInput<'_>],
+    pred: impl Fn(&Operator<'_>) -> bool,
+) -> Result<bool, TranspileError> {
     for input in funcs {
         for op in input.body.get_operators_reader()? {
-            match op? {
-                Operator::RefNull { hty } if abstract_is_gc(hty) => return Ok(true),
-                // `ref.i31` produces a `GcRef::I31`; the convert ops produce/consume
-                // a managed `anyref`. All need the value model emitted even with no
-                // struct/array type declared.
-                Operator::RefI31 | Operator::AnyConvertExtern | Operator::ExternConvertAny => {
-                    return Ok(true);
-                }
-                _ => {}
+            if pred(&op?) {
+                return Ok(true);
             }
         }
     }
     Ok(false)
 }
 
-/// Whether any function body uses `call_ref`/`return_call_ref`.
-///
-/// The scan reads a fresh operator reader per body (`get_operators_reader`
-/// yields an independent reader, so this does not disturb the real codegen walk
-/// later), short-circuiting on the first match.
+/// Whether any function body creates an abstract GC reference without a concrete
+/// struct/array type being declared: either `ref.null` of an abstract GC heap
+/// type (`any`/`eq`/`i31`/`struct`/`array`/`none`), `ref.i31` (which produces a
+/// `GcRef::I31`), or a convert op (which produces/consumes a managed `anyref`).
+/// All force the managed value model to be emitted even with no struct/array
+/// type declared.
+fn uses_abstract_gc(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
+    any_body_op(funcs, |op| {
+        matches!(op, Operator::RefNull { hty } if abstract_is_gc(*hty))
+            || matches!(
+                op,
+                Operator::RefI31 | Operator::AnyConvertExtern | Operator::ExternConvertAny
+            )
+    })
+}
+
+/// Whether any function body uses `call_ref`/`return_call_ref`, which dispatch
+/// through a `self.call_ref_t{ti}` method and so force statefulness.
 fn uses_call_ref(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
-    for input in funcs {
-        for op in input.body.get_operators_reader()? {
-            if matches!(
-                op?,
-                Operator::CallRef { .. } | Operator::ReturnCallRef { .. }
-            ) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    any_body_op(funcs, |op| {
+        matches!(
+            op,
+            Operator::CallRef { .. } | Operator::ReturnCallRef { .. }
+        )
+    })
 }
 
 /// Whether any function body uses an array segment operator
@@ -2077,20 +2082,15 @@ fn uses_call_ref(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
 /// statefulness even when the module carries no other state (mirrors how
 /// `call_ref` forces it).
 fn uses_array_segment_ops(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
-    for input in funcs {
-        for op in input.body.get_operators_reader()? {
-            if matches!(
-                op?,
-                Operator::ArrayNewData { .. }
-                    | Operator::ArrayInitData { .. }
-                    | Operator::ArrayNewElem { .. }
-                    | Operator::ArrayInitElem { .. }
-            ) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    any_body_op(funcs, |op| {
+        matches!(
+            op,
+            Operator::ArrayNewData { .. }
+                | Operator::ArrayInitData { .. }
+                | Operator::ArrayNewElem { .. }
+                | Operator::ArrayInitElem { .. }
+        )
+    })
 }
 
 /// Whether any function body uses `extern.convert_any`/`any.convert_extern`.
@@ -2099,14 +2099,9 @@ fn uses_array_segment_ops(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileErro
 /// `extern_box: Vec<GcRef>`, which only exists on a `struct Instance`, so a body
 /// using either forces statefulness (like `call_ref`).
 fn uses_extern_convert(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
-    for input in funcs {
-        for op in input.body.get_operators_reader()? {
-            if matches!(op?, Operator::AnyConvertExtern | Operator::ExternConvertAny) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    any_body_op(funcs, |op| {
+        matches!(op, Operator::AnyConvertExtern | Operator::ExternConvertAny)
+    })
 }
 
 /// Collect the indices of locals written by `local.set`/`local.tee`.
