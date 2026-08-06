@@ -1,4 +1,4 @@
-use wasmparser::{FunctionBody, ValType};
+use wasmparser::{FunctionBody, StorageType, ValType};
 
 use super::WasiFn;
 
@@ -64,6 +64,26 @@ pub(crate) struct DataSegment {
 pub(crate) struct TypeSig {
     pub params: Vec<ValType>,
     pub results: Vec<ValType>,
+}
+
+/// One struct field or array element: its storage type, which may be packed
+/// (`i8`/`i16`, narrower than any `ValType`). Mutability is not tracked — the
+/// wasm binary is assumed already validated, so the transpiler does not re-check
+/// writes against a field's `mut` flag.
+pub(crate) struct FieldInfo {
+    pub storage: StorageType,
+}
+
+/// The kind of one entry in the module's type index space. Wasm's GC proposal
+/// interleaves function, struct and array types in a single index space, so
+/// every index maps to one of these; concrete references (`(ref $t)`) resolve
+/// their lowering (`u32` funcref vs managed `GcRef`) through this table. A
+/// function type's signature is resolved through the parallel `TypeSig` table
+/// (`ModuleCtx::types`), so `Func` carries no payload here.
+pub(crate) enum CompositeKind {
+    Func,
+    Struct(Vec<FieldInfo>),
+    Array(FieldInfo),
 }
 
 /// An imported function: its signature. Imported functions occupy the low end

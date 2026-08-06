@@ -264,11 +264,11 @@ impl<'a> super::FuncGen<'a> {
             [] => Ok((String::new(), Vec::new())),
             [ty] => {
                 let name = self.fresh_temp();
-                let prefix = format!("let {name}: {} = ", rust_type(*ty)?);
+                let prefix = format!("let {name}: {} = ", rust_type(*ty, self.ctx.type_kinds)?);
                 Ok((prefix, vec![(name, *ty)]))
             }
             many => {
-                let tys = rust_types(many)?;
+                let tys = rust_types(many, self.ctx.type_kinds)?;
                 let names: Vec<String> = many.iter().map(|_| self.fresh_temp()).collect();
                 let prefix = format!("let ({}): ({}) = ", names.join(", "), tys.join(", "));
                 let temps = names.into_iter().zip(many.iter().copied()).collect();
@@ -365,8 +365,8 @@ impl<'a> super::FuncGen<'a> {
             for (i, ty) in results.iter().enumerate() {
                 decls.push(Node::Line(format!(
                     "let mut __rv{i}: {} = {};",
-                    rust_type(*ty)?,
-                    default_value(*ty)
+                    rust_type(*ty, self.ctx.type_kinds)?,
+                    default_value(*ty, self.ctx.type_kinds)
                 )));
             }
             decls.append(&mut self.cur);
@@ -386,13 +386,19 @@ impl<'a> super::FuncGen<'a> {
             } else {
                 ""
             };
-            params_src.push_str(&format!("{keyword}l{i}: {}", rust_type(*ty)?));
+            params_src.push_str(&format!(
+                "{keyword}l{i}: {}",
+                rust_type(*ty, self.ctx.type_kinds)?
+            ));
         }
 
         let ret = match results {
             [] => String::new(),
-            [ty] => format!(" -> {}", rust_type(*ty)?),
-            many => format!(" -> ({})", rust_types(many)?.join(", ")),
+            [ty] => format!(" -> {}", rust_type(*ty, self.ctx.type_kinds)?),
+            many => format!(
+                " -> ({})",
+                rust_types(many, self.ctx.type_kinds)?.join(", ")
+            ),
         };
 
         // A deeply nested function is flattened to a `loop { match pc { … } }`

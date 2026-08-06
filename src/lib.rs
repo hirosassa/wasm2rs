@@ -155,6 +155,11 @@ where
     F: FnMut(SourceFile) -> Result<(), TranspileError>,
 {
     let mut signatures: Vec<Signature> = Vec::new();
+    // The kind (function / struct / array) of every entry in the type index
+    // space, parallel to `signatures` so a concrete reference can resolve its
+    // lowering. A non-function type still occupies a `signatures` slot (an empty
+    // placeholder) to keep the shared index space aligned for func lookups.
+    let mut type_kinds: Vec<codegen::CompositeKind> = Vec::new();
     let mut func_type_indices: Vec<u32> = Vec::new();
     let mut bodies: Vec<wasmparser::FunctionBody> = Vec::new();
     let mut globals: Vec<codegen::GlobalInfo> = Vec::new();
@@ -179,10 +184,40 @@ where
                         match &sub.composite_type.inner {
                             CompositeInnerType::Func(func_ty) => {
                                 signatures.push(signature_from(func_ty));
+                                type_kinds.push(codegen::CompositeKind::Func);
+                            }
+                            CompositeInnerType::Struct(struct_ty) => {
+                                // A struct/array type occupies a type index too;
+                                // record its kind and keep `signatures` aligned
+                                // with an empty placeholder (never read as a
+                                // function signature).
+                                signatures.push(Signature {
+                                    params: Vec::new(),
+                                    results: Vec::new(),
+                                });
+                                let fields = struct_ty
+                                    .fields
+                                    .iter()
+                                    .map(|f| codegen::FieldInfo {
+                                        storage: f.element_type,
+                                    })
+                                    .collect();
+                                type_kinds.push(codegen::CompositeKind::Struct(fields));
+                            }
+                            CompositeInnerType::Array(array_ty) => {
+                                signatures.push(Signature {
+                                    params: Vec::new(),
+                                    results: Vec::new(),
+                                });
+                                type_kinds.push(codegen::CompositeKind::Array(
+                                    codegen::FieldInfo {
+                                        storage: array_ty.0.element_type,
+                                    },
+                                ));
                             }
                             _ => {
                                 return Err(TranspileError::Unsupported(
-                                    "non-function composite type".into(),
+                                    "unsupported composite type".into(),
                                 ));
                             }
                         }
@@ -410,6 +445,7 @@ where
         imported_globals: &imported_globals,
         funcs: &funcs,
         types: &types,
+        type_kinds: &type_kinds,
         globals: &globals,
         memories: &memories,
         data: &data,

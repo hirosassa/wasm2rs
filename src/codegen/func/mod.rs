@@ -10,6 +10,7 @@ use crate::TranspileError;
 
 mod calls;
 mod control;
+mod gc;
 mod memvals;
 mod numeric;
 mod simd;
@@ -200,8 +201,8 @@ impl<'a> FuncGen<'a> {
             while run_end < local_types.len() && local_types[run_end] == ty {
                 run_end += 1;
             }
-            let rty = rust_type(ty)?;
-            let default = default_value(ty);
+            let rty = rust_type(ty, ctx.type_kinds)?;
+            let default = default_value(ty, ctx.type_kinds);
             if run_end - i == 1 {
                 let keyword = if mutable_locals.contains(&index_u32(i)?) {
                     "let mut"
@@ -695,7 +696,7 @@ impl<'a> FuncGen<'a> {
             Operator::ElemDrop { elem_index } => self.elem_drop(elem_index)?,
             // Reference types: a `funcref` is a `u32` function index on the
             // operand stack (`u32::MAX` is null).
-            Operator::RefNull { hty } => self.ref_null(hty)?,
+            Operator::RefNull { hty } => self.ref_null_dispatch(hty)?,
             Operator::RefFunc { function_index } => self.ref_func(function_index),
             Operator::RefIsNull => self.ref_is_null()?,
             // Table instructions. A table entry and a `funcref` operand are both
@@ -740,6 +741,35 @@ impl<'a> FuncGen<'a> {
             Operator::RefI31 => self.ref_i31()?,
             Operator::I31GetS => self.i31_get_s()?,
             Operator::I31GetU => self.i31_get_u()?,
+            // GC heap objects (phase 4b): `struct`/`array` values are managed
+            // `GcRef` handles; fields/elements are `GcSlot`s read/written by index.
+            Operator::StructNew { struct_type_index } => self.struct_new(struct_type_index)?,
+            Operator::StructGet {
+                struct_type_index,
+                field_index,
+            } => self.struct_get(struct_type_index, field_index, None)?,
+            Operator::StructGetS {
+                struct_type_index,
+                field_index,
+            } => self.struct_get(struct_type_index, field_index, Some(true))?,
+            Operator::StructGetU {
+                struct_type_index,
+                field_index,
+            } => self.struct_get(struct_type_index, field_index, Some(false))?,
+            Operator::StructSet {
+                struct_type_index,
+                field_index,
+            } => self.struct_set(struct_type_index, field_index)?,
+            Operator::ArrayNew { array_type_index } => self.array_new(array_type_index)?,
+            Operator::ArrayGet { array_type_index } => self.array_get(array_type_index, None)?,
+            Operator::ArrayGetS { array_type_index } => {
+                self.array_get(array_type_index, Some(true))?
+            }
+            Operator::ArrayGetU { array_type_index } => {
+                self.array_get(array_type_index, Some(false))?
+            }
+            Operator::ArraySet { array_type_index } => self.array_set(array_type_index)?,
+            Operator::ArrayLen => self.array_len()?,
             Operator::Return => self.emit_return()?,
             // Legacy exception handling: a `try` region protects its body and
             // dispatches thrown exceptions to matching `catch`/`catch_all`
@@ -1268,7 +1298,10 @@ impl<'a> FuncGen<'a> {
             let ty = self.stack[i].ty;
             let code = self.stack[i].code.clone();
             let name = self.fresh_temp();
-            self.line(format!("let {name}: {} = {code};", rust_type(ty)?));
+            self.line(format!(
+                "let {name}: {} = {code};",
+                rust_type(ty, self.ctx.type_kinds)?
+            ));
             self.stack[i] = Val {
                 code: name,
                 ty,

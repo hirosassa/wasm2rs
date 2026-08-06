@@ -87,7 +87,10 @@ impl<'a> super::FuncGen<'a> {
     /// materialise their side-effecting results.
     pub(super) fn materialize(&mut self, code: String, ty: ValType) -> Result<(), TranspileError> {
         let name = self.fresh_temp();
-        self.line(format!("let {name}: {} = {code};", rust_type(ty)?));
+        self.line(format!(
+            "let {name}: {} = {code};",
+            rust_type(ty, self.ctx.type_kinds)?
+        ));
         self.push(Val {
             code: name,
             ty,
@@ -119,7 +122,7 @@ impl<'a> super::FuncGen<'a> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
         let unsigned = unsigned_type(lhs.ty)?;
-        let signed = rust_type(lhs.ty)?;
+        let signed = rust_type(lhs.ty, self.ctx.type_kinds)?;
         self.materialize(
             format!(
                 "(({} as {unsigned}) {op} ({} as {unsigned})) as {signed}",
@@ -136,7 +139,7 @@ impl<'a> super::FuncGen<'a> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
         let unsigned = unsigned_type(lhs.ty)?;
-        let signed = rust_type(lhs.ty)?;
+        let signed = rust_type(lhs.ty, self.ctx.type_kinds)?;
         self.push_combined(
             format!(
                 "(({} as {unsigned}).{method}({} as u32) as {signed})",
@@ -201,7 +204,7 @@ impl<'a> super::FuncGen<'a> {
     /// exactly — including `clz(0)` and `ctz(0)` returning the full width — but
     /// return `u32`, so the count is cast back to the operand's integer type.
     pub(super) fn bit_count(&mut self, ty: ValType, method: &str) -> Result<(), TranspileError> {
-        let target = rust_type(ty)?;
+        let target = rust_type(ty, self.ctx.type_kinds)?;
         // Parenthesise the receiver: a negative-constant operand must lower as
         // `(-2i32).leading_zeros()`, not `-(2i32.leading_zeros())`.
         self.convert(ty, |x| format!("(({x}).{method}() as {target})"))

@@ -130,7 +130,11 @@ pub(super) fn render_module(
         lines.push("    table: Vec<u32>,".to_string());
     }
     for (i, g) in globals.iter().enumerate() {
-        lines.push(format!("    g{}: {},", global_base + i, rust_type(g.ty)?));
+        lines.push(format!(
+            "    g{}: {},",
+            global_base + i,
+            rust_type(g.ty, ctx.type_kinds)?
+        ));
     }
     // Files/directories opened through `path_open`; descriptor N is
     // `wasi_fds[N - 4]` (0-2 are stdio, 3 is the preopen directory). Each slot
@@ -788,12 +792,12 @@ fn dispatch_method_lines(
 
     let mut params = String::from("&mut self, f: u32");
     for (k, ty) in sig.params.iter().enumerate() {
-        params.push_str(&format!(", a{k}: {}", rust_type(*ty)?));
+        params.push_str(&format!(", a{k}: {}", rust_type(*ty, ctx.type_kinds)?));
     }
     let ret = match sig.results.as_slice() {
         [] => String::new(),
-        [ty] => format!(" -> {}", rust_type(*ty)?),
-        many => format!(" -> ({})", rust_types(many)?.join(", ")),
+        [ty] => format!(" -> {}", rust_type(*ty, ctx.type_kinds)?),
+        many => format!(" -> ({})", rust_types(many, ctx.type_kinds)?.join(", ")),
     };
     let arg_list = (0..sig.params.len())
         .map(|k| format!("a{k}"))
@@ -847,16 +851,16 @@ fn extern_registry_lines(
             .types
             .get(ti as usize)
             .ok_or_else(|| TranspileError::Unsupported("call_indirect: unknown type".into()))?;
-        let param_tys = rust_types(&sig.params)?.join(", ");
+        let param_tys = rust_types(&sig.params, ctx.type_kinds)?.join(", ");
         let ret = match sig.results.as_slice() {
             [] => String::new(),
-            [ty] => format!(" -> {}", rust_type(*ty)?),
-            many => format!(" -> ({})", rust_types(many)?.join(", ")),
+            [ty] => format!(" -> {}", rust_type(*ty, ctx.type_kinds)?),
+            many => format!(" -> ({})", rust_types(many, ctx.type_kinds)?.join(", ")),
         };
         let boxed = format!("Box<dyn FnMut({param_tys}){ret}>");
         let mut call_params = String::from("&mut self, slot: u32");
         for (k, ty) in sig.params.iter().enumerate() {
-            call_params.push_str(&format!(", a{k}: {}", rust_type(*ty)?));
+            call_params.push_str(&format!(", a{k}: {}", rust_type(*ty, ctx.type_kinds)?));
         }
         let arg_list = (0..sig.params.len())
             .map(|k| format!("a{k}"))
@@ -919,11 +923,11 @@ fn import_trait_lines(
         }
         let mut params = String::from("&mut self");
         for (k, ty) in im.params.iter().enumerate() {
-            params.push_str(&format!(", a{k}: {}", rust_type(*ty)?));
+            params.push_str(&format!(", a{k}: {}", rust_type(*ty, ctx.type_kinds)?));
         }
         let ret = match im.results.as_slice() {
             [] => String::new(),
-            [ty] => format!(" -> {}", rust_type(*ty)?),
+            [ty] => format!(" -> {}", rust_type(*ty, ctx.type_kinds)?),
             _ => {
                 return Err(TranspileError::Unsupported(
                     "multi-value import result".into(),
@@ -934,7 +938,7 @@ fn import_trait_lines(
     }
     // Each imported global gets a getter; a mutable one also gets a setter.
     for (k, g) in imported_globals.iter().enumerate() {
-        let ty = rust_type(g.ty)?;
+        let ty = rust_type(g.ty, ctx.type_kinds)?;
         lines.push(format!("    fn get_global{k}(&self) -> {ty};"));
         if g.mutable {
             lines.push(format!("    fn set_global{k}(&mut self, v: {ty});"));
@@ -954,14 +958,14 @@ fn import_trait_lines(
             .ok_or_else(|| TranspileError::Unsupported("call_indirect: unknown type".into()))?;
         let ret = match sig.results.as_slice() {
             [] => String::new(),
-            [ty] => format!(" -> {}", rust_type(*ty)?),
-            many => format!(" -> ({})", rust_types(many)?.join(", ")),
+            [ty] => format!(" -> {}", rust_type(*ty, ctx.type_kinds)?),
+            many => format!(" -> ({})", rust_types(many, ctx.type_kinds)?.join(", ")),
         };
         // Underscore the parameters: the default body ignores them, and an
         // override is free to rename them.
         let mut params = String::from("&mut self, _slot: u32");
         for (k, ty) in sig.params.iter().enumerate() {
-            params.push_str(&format!(", _a{k}: {}", rust_type(*ty)?));
+            params.push_str(&format!(", _a{k}: {}", rust_type(*ty, ctx.type_kinds)?));
         }
         lines.push(format!(
             "    fn call_ref_t{ti}({params}){ret} \

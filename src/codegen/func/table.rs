@@ -192,8 +192,17 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
-    /// `ref.null t`: push a null reference. Both `funcref` and `externref` are
-    /// represented as a `u32` (`u32::MAX` is null).
+    /// `ref.null t`: push a null reference, dispatching on the heap type. A
+    /// struct/array (managed) type yields `GcRef::Null`; a `funcref`/`externref`
+    /// yields the `u32::MAX` sentinel.
+    pub(super) fn ref_null_dispatch(&mut self, hty: HeapType) -> Result<(), TranspileError> {
+        match self.gc_type_index(hty) {
+            Some(module_idx) => self.ref_null_gc(module_idx),
+            None => self.ref_null(hty),
+        }
+    }
+
+    /// `ref.null t` for a `funcref`/`externref`: push the `u32::MAX` sentinel.
     pub(super) fn ref_null(&mut self, hty: HeapType) -> Result<(), TranspileError> {
         let ty = match hty {
             HeapType::Abstract {
@@ -227,14 +236,18 @@ impl<'a> super::FuncGen<'a> {
         });
     }
 
-    /// `ref.is_null`: pop a funcref and push 1 if it is null, else 0.
+    /// `ref.is_null`: pop a reference and push 1 if it is null, else 0. A managed
+    /// `GcRef` compares against `GcRef::Null`; a `u32` funcref/externref compares
+    /// against the `u32::MAX` sentinel.
     pub(super) fn ref_is_null(&mut self) -> Result<(), TranspileError> {
         let r = self.pop()?;
-        self.push_combined(
-            format!("i32::from({} == u32::MAX)", r.code),
-            ValType::I32,
-            r.stable,
-        )
+        let is_gc = super::super::rust_type(r.ty, self.ctx.type_kinds)? == "GcRef";
+        let code = if is_gc {
+            format!("(matches!({}, GcRef::Null) as i32)", r.code)
+        } else {
+            format!("i32::from({} == u32::MAX)", r.code)
+        };
+        self.push_combined(code, ValType::I32, r.stable)
     }
 
     /// `ref.i31`: narrow an `i32` to a 31-bit `i31ref` payload by masking off the

@@ -60,8 +60,8 @@ impl<'a> super::FuncGen<'a> {
             let name = self.fresh_temp();
             self.line(format!(
                 "let mut {name}: {} = {};",
-                rust_type(ty)?,
-                default_value(ty)
+                rust_type(ty, self.ctx.type_kinds)?,
+                default_value(ty, self.ctx.type_kinds)
             ));
             results.push((name, ty));
         }
@@ -146,7 +146,10 @@ impl<'a> super::FuncGen<'a> {
         for (i, &ty) in param_types.iter().enumerate() {
             let name = self.fresh_temp();
             let entry = self.stack[parent_height + i].code.clone();
-            self.line(format!("let mut {name}: {} = {entry};", rust_type(ty)?));
+            self.line(format!(
+                "let mut {name}: {} = {entry};",
+                rust_type(ty, self.ctx.type_kinds)?
+            ));
             self.stack[parent_height + i] = Val {
                 code: name.clone(),
                 ty,
@@ -732,7 +735,7 @@ impl<'a> super::FuncGen<'a> {
                         format!("{exc_var}.downcast_ref::<{EXC_TYPE}>().unwrap().values[{i}]");
                     binds.push(format!(
                         "let {var}: {} = {};",
-                        rust_type(*ty)?,
+                        rust_type(*ty, self.ctx.type_kinds)?,
                         decode_exc_value(*ty, &source)?
                     ));
                     pushed.push(Val {

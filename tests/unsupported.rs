@@ -244,15 +244,13 @@ fn set_of_an_immutable_global_is_rejected() {
 }
 
 #[test]
-fn non_function_composite_type_is_rejected() {
-    // GC struct/array types parse but wasm2rs only lowers function types.
+fn unsupported_composite_type_is_rejected() {
+    // GC `struct`/`array` composite types are now lowered (see tests/gc_heap.rs),
+    // but a `continuation` type (stack-switching proposal) still parses without a
+    // lowering, so it is rejected by name rather than mistranslated.
     assert_unsupported(
-        r#"(module (type (struct (field i32))))"#,
-        "non-function composite type",
-    );
-    assert_unsupported(
-        r#"(module (type (array i32)))"#,
-        "non-function composite type",
+        r#"(module (type $ft (func)) (type (cont $ft)))"#,
+        "unsupported composite type",
     );
 }
 

@@ -42,8 +42,8 @@ use self::simd_rt::render_simd_helpers;
 
 pub(crate) use self::const_expr::{const_expr_to_rust, const_expr_u32};
 pub(crate) use self::info::{
-    DataSegment, ElemSegment, FuncInput, GlobalInfo, ImportInfo, ImportedGlobalInfo, MemInfo,
-    TableInfo, TagInfo, TypeSig,
+    CompositeKind, DataSegment, ElemSegment, FieldInfo, FuncInput, GlobalInfo, ImportInfo,
+    ImportedGlobalInfo, MemInfo, TableInfo, TagInfo, TypeSig,
 };
 pub(crate) use self::wasi::WasiFn;
 
@@ -576,6 +576,42 @@ const EXC_DEF: &str = "\
 struct Wasm2RsException {
     tag: u32,
     values: Vec<u64>,
+}";
+
+/// The managed value model for heap-allocated `struct`/`array` objects (GC
+/// phase 4b). Every managed object — struct or array alike — is an
+/// `Rc<RefCell<Vec<GcSlot>>>`: a struct's slots are its fields in declaration
+/// order, an array's slots are its elements. `GcRef::Null` is the null
+/// reference. Reference cycles leak, since there is no tracing collector; that
+/// is acceptable for this phase. Emitted at module scope only when the module
+/// declares at least one struct/array type.
+const GCREF_DEF: &str = "\
+#[derive(Clone)]
+#[allow(dead_code)]
+enum GcRef {
+    Null,
+    Obj(std::rc::Rc<std::cell::RefCell<Vec<GcSlot>>>),
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+enum GcSlot {
+    I32(i32),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+    V128(u128),
+    Ref(GcRef),
+}
+
+#[allow(dead_code)]
+impl GcRef {
+    fn obj(&self) -> std::rc::Rc<std::cell::RefCell<Vec<GcSlot>>> {
+        match self {
+            GcRef::Obj(o) => o.clone(),
+            GcRef::Null => panic!(\"null reference\"),
+        }
+    }
 }";
 
 /// The Rust expression bit-encoding a payload operand of type `ty` (given as the
@@ -1494,6 +1530,10 @@ struct ModuleCtx<'a> {
     /// Every function type, so `call_indirect` can resolve its declared type
     /// index back to a signature.
     types: &'a [TypeSig],
+    /// The kind (function / struct / array) of every type index, so a concrete
+    /// reference and the struct/array operators can resolve field/element
+    /// storage and pick the right value lowering.
+    type_kinds: &'a [CompositeKind],
     /// Per-imported-global `(type, mutable)`, occupying the low global indices.
     imported_globals: Vec<(ValType, bool)>,
     /// Per-defined-global `(type, mutable)`, indexed after the imported globals.
@@ -1579,6 +1619,7 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) imported_globals: &'a [ImportedGlobalInfo],
     pub(crate) funcs: &'a [FuncInput<'a>],
     pub(crate) types: &'a [TypeSig],
+    pub(crate) type_kinds: &'a [CompositeKind],
     pub(crate) globals: &'a [GlobalInfo],
     /// Every linear memory, in index order (imported memories first, then
     /// defined). Empty when the module declares none.
@@ -1602,6 +1643,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         imported_globals,
         funcs,
         types,
+        type_kinds,
         globals,
         memories,
         data,
@@ -1652,6 +1694,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         imports,
         funcs,
         types,
+        type_kinds,
         imported_globals: imported_globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,
@@ -1716,6 +1759,10 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     let mut prelude = String::new();
     if uses_eh {
         prelude.push_str(EXC_DEF);
+        prelude.push('\n');
+    }
+    if declares_gc_types(parts.type_kinds) {
+        prelude.push_str(GCREF_DEF);
         prelude.push('\n');
     }
     prelude.push_str(&rt_helpers);
@@ -1842,8 +1889,14 @@ pub(crate) fn generate_module_split(
         dispatch_sigs: &dispatch_sigs,
     };
     let root = render_lib_root(parts, &ctx, stateful, &deps, n_chunks)?;
-    // The exception type lives at the crate root so every chunk's `use super::*`
-    // sees it, ahead of everything else in `lib.rs`.
+    // The exception type and the managed value model live at the crate root so
+    // every chunk's `use super::*` sees them, ahead of everything else in
+    // `lib.rs`.
+    let root = if declares_gc_types(parts.type_kinds) {
+        format!("{GCREF_DEF}\n{root}")
+    } else {
+        root
+    };
     let root = if uses_eh {
         format!("{EXC_DEF}\n{root}")
     } else {
@@ -1904,6 +1957,14 @@ fn indent(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Whether the module declares at least one struct or array type, so the
+/// managed value model ([`GCREF_DEF`]) must be emitted at module scope.
+fn declares_gc_types(type_kinds: &[CompositeKind]) -> bool {
+    type_kinds
+        .iter()
+        .any(|k| matches!(k, CompositeKind::Struct(_) | CompositeKind::Array(_)))
+}
+
 /// Whether any function body uses `call_ref`/`return_call_ref`.
 ///
 /// The scan reads a fresh operator reader per body (`get_operators_reader`
@@ -1954,7 +2015,7 @@ fn reachable_after(frame: &Frame, reachable_at_end: bool) -> bool {
     }
 }
 
-fn rust_type(ty: ValType) -> Result<&'static str, TranspileError> {
+fn rust_type(ty: ValType, kinds: &[CompositeKind]) -> Result<&'static str, TranspileError> {
     match ty {
         ValType::I32 => Ok("i32"),
         ValType::I64 => Ok("i64"),
@@ -1976,11 +2037,16 @@ fn rust_type(ty: ValType) -> Result<&'static str, TranspileError> {
         {
             Ok("i32")
         }
-        // A concrete typed reference `(ref $t)` / `(ref null $t)`. In phase 4a the
-        // only concrete refs that reach here name a *function* type (struct/array
-        // refs are rejected earlier at the type section), so every concrete ref is
-        // a funcref and lowers to `u32` like the abstract `funcref`.
-        ValType::Ref(rt) if matches!(rt.heap_type(), HeapType::Concrete(_)) => Ok("u32"),
+        // A concrete typed reference `(ref $t)` / `(ref null $t)`. A funcref-typed
+        // one lowers to `u32` (a function index) like the abstract `funcref`,
+        // while a struct/array-typed one is a managed `GcRef` handle.
+        ValType::Ref(rt) if matches!(rt.heap_type(), HeapType::Concrete(_)) => {
+            if concrete_is_gc(rt.heap_type(), kinds) {
+                Ok("GcRef")
+            } else {
+                Ok("u32")
+            }
+        }
         // A v128 is a 128-bit value; it is held as a `u128` and lane operations
         // reinterpret its bits (little-endian) into the relevant lane type.
         ValType::V128 => Ok("u128"),
@@ -1988,9 +2054,28 @@ fn rust_type(ty: ValType) -> Result<&'static str, TranspileError> {
     }
 }
 
+/// Whether a concrete heap type names a struct or array type (a managed `GcRef`)
+/// rather than a function type (a `u32` funcref). Unknown or non-module indices
+/// conservatively fall back to the funcref lowering.
+fn concrete_is_gc(hty: HeapType, kinds: &[CompositeKind]) -> bool {
+    let HeapType::Concrete(idx) = hty else {
+        return false;
+    };
+    let Some(module_idx) = idx.as_module_index() else {
+        return false;
+    };
+    matches!(
+        kinds.get(module_idx as usize),
+        Some(CompositeKind::Struct(_) | CompositeKind::Array(_))
+    )
+}
+
 /// The Rust type name of each value type, in order.
-fn rust_types(tys: &[ValType]) -> Result<Vec<&'static str>, TranspileError> {
-    tys.iter().map(|ty| rust_type(*ty)).collect()
+fn rust_types(
+    tys: &[ValType],
+    kinds: &[CompositeKind],
+) -> Result<Vec<&'static str>, TranspileError> {
+    tys.iter().map(|ty| rust_type(*ty, kinds)).collect()
 }
 
 /// The unsigned integer type used to reinterpret `ty` for unsigned operations.
@@ -2004,9 +2089,11 @@ fn unsigned_type(ty: ValType) -> Result<&'static str, TranspileError> {
     }
 }
 
-fn default_value(ty: ValType) -> &'static str {
+fn default_value(ty: ValType, kinds: &[CompositeKind]) -> &'static str {
     match ty {
         ValType::F32 | ValType::F64 => "0.0",
+        // A struct/array reference defaults to the managed null handle.
+        ValType::Ref(rt) if concrete_is_gc(rt.heap_type(), kinds) => "GcRef::Null",
         // A default `funcref`/`externref` (and any concrete typed funcref) is
         // null. An `i31ref` defaults to a zero payload, so it falls to `"0"`.
         ValType::Ref(rt)
