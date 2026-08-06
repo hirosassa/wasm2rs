@@ -225,6 +225,124 @@ fn checkpoint_result_may_be_discarded() {
 }
 
 #[test]
+fn checkpoint_combined_with_a_region_suspend() {
+    // A cross-call checkpoint AND a region-crossing suspend in the same body
+    // (P5b-2b, the last remaining gap). `$outer` suspends inside a `block` —
+    // yielding 10 — which forces the flat `pc`-machine lowering; then, after the
+    // resume, it `call`s `$inner` as a tail checkpoint. `$inner` itself suspends
+    // (yielding 7) before returning 3, so its suspend must unwind through
+    // `$outer`'s checkpoint state up to the top-level resumer, and resuming must
+    // re-enter that state and drive `$inner` to completion. `$inner`'s return (3)
+    // becomes `$outer`'s result. The driver accumulates 10 + 7 + 3 = 20.
+    compile_run(
+        "cont_checkpoint_in_region_body",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $outer (result i32)
+              (block $b
+                i32.const 10 suspend $yield)
+              call $inner)
+            (func $inner (result i32)
+              i32.const 7 suspend $yield
+              i32.const 3)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $outer cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        // `$outer` is func0 (a step function), `$inner` func1, `run` is func2.
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 20);",
+    );
+}
+
+#[test]
+fn statement_before_a_flat_checkpoint_runs_once() {
+    // A side-effecting statement immediately before a flat checkpoint must run
+    // exactly once, even though the callee suspends and the checkpoint state is
+    // re-entered on resume (P5b-2b). `$outer` suspends inside a `block` (yielding
+    // 5, forcing the flat path), then bumps a local `$c` by 1 and `call`s `$inner`
+    // (which yields 7 before returning 3). The `$c += 1` sits in the same pc-state
+    // as the checkpoint; if the state re-ran it on the callee-suspend re-entry,
+    // `$c` would reach 2. `$outer` returns `$inner`'s result + `$c` = 3 + 1 = 4, so
+    // the driver accumulates 5 + 7 + 4 = 16 (a re-run would give 17).
+    compile_run(
+        "cont_stmt_before_checkpoint",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $outer (result i32)
+              (local $c i32)
+              (block $b
+                i32.const 5 suspend $yield)
+              local.get $c i32.const 1 i32.add local.set $c
+              call $inner
+              local.get $c i32.add)
+            (func $inner (result i32)
+              i32.const 7 suspend $yield
+              i32.const 3)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $outer cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 16);",
+    );
+}
+
+#[test]
+fn checkpoint_result_survives_a_later_region_suspend() {
+    // A checkpoint whose result then flows through a *later* region suspend
+    // (P5b-2b). `$outer` first `call`s `$inner` as a tail-shaped checkpoint —
+    // `$inner` yields 7, then returns 3 — and feeds that 3 as the parameter of a
+    // `block` that suspends (yielding 100) before adding 5. So `$inner`'s result
+    // must first land in `__frame.ostack` (checkpoint return), then survive the
+    // region suspend as an operand re-saved into `__frame.ostack`, and finally be
+    // read back to compute 3 + 5 = 8. The driver accumulates 7 + 100 + 8 = 115.
+    compile_run(
+        "cont_checkpoint_then_region_suspend",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $outer (result i32)
+              call $inner
+              (block $b (param i32) (result i32)
+                i32.const 100 suspend $yield
+                i32.const 5 i32.add))
+            (func $inner (result i32)
+              i32.const 7 suspend $yield
+              i32.const 3)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $outer cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 115);",
+    );
+}
+
+#[test]
 fn local_survives_a_suspend() {
     // A generator that keeps state in a local across a suspend (P5b). `$gen`
     // stores 10 in `$c`, yields `$c` (10), then — after the resume — reads `$c`

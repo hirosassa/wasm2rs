@@ -335,17 +335,16 @@ impl super::FuncGen<'_> {
         // and the program point is still reachable (a diverging body never falls
         // through, so its exit stays unreachable).
         let mut return_payload: Option<String> = None;
+        // A cross-call checkpoint in the flat lowering: at most one per body, so
+        // the single nested `sub` frame is enough (matching `begin_checkpoint`).
+        let mut checkpoint: Option<u32> = None;
         for op in body.get_operators_reader()? {
             match op? {
                 Operator::Suspend { tag_index } => self.emit_suspend_node(tag_index)?,
                 Operator::Call { function_index }
                     if self.ctx.step_set.binary_search(&function_index).is_ok() =>
                 {
-                    return Err(TranspileError::Unsupported(
-                        "cross-call checkpoint combined with a suspend inside nested control flow \
-                         in a continuation body (phase 5b-2b)"
-                            .into(),
-                    ));
+                    self.emit_checkpoint_node(function_index, &mut checkpoint)?;
                 }
                 Operator::ReturnCall { function_index }
                     if self.ctx.step_set.binary_search(&function_index).is_ok() =>
@@ -450,6 +449,78 @@ impl super::FuncGen<'_> {
         Ok(format!("__frame.ostack = vec![{}]; ", encoded.join(", ")))
     }
 
+    /// Record a cross-call checkpoint as a [`Node::Checkpoint`] in the body tree
+    /// (flat lowering). Like [`Self::begin_checkpoint`] it requires a clean
+    /// boundary — the checkpoint sits at region depth 0, the callee takes no
+    /// parameters, and the operand stack is empty (the checkpoint state clobbers
+    /// `__frame.ostack` with the callee's return, so no survivor may sit there) —
+    /// and allows only one per body, since the frame holds a single nested `sub`.
+    /// The callee's results are pushed as operands reading back from
+    /// `__frame.ostack`, where the checkpoint state stores the callee's return.
+    ///
+    /// Unlike `begin_checkpoint`, pending nodes in `self.cur` are fine: in the
+    /// flat lowering `self.cur` is the whole body tree (earlier nodes become
+    /// earlier `pc` states), not a single arm's pending statements.
+    fn emit_checkpoint_node(
+        &mut self,
+        callee: u32,
+        checkpoint: &mut Option<u32>,
+    ) -> Result<(), TranspileError> {
+        let results = self.check_checkpoint_boundary(callee, checkpoint, false)?;
+        let save = self.save_mutated_locals()?;
+        self.cur.push(Node::Checkpoint { callee, save });
+        for (i, ty) in results.iter().enumerate() {
+            let code = decode_from_i64(&format!("__frame.ostack[{i}]"), *ty)?;
+            self.push(Val {
+                code,
+                ty: *ty,
+                stable: true,
+            });
+        }
+        *checkpoint = Some(callee);
+        Ok(())
+    }
+
+    /// Shared validation for both cross-call checkpoint lowerings: at most one
+    /// checkpoint per body, region depth 0, a no-parameter callee, and an empty
+    /// operand stack. `require_empty_cur` additionally rejects pending nodes in
+    /// `self.cur` — the arm-splitting path needs it (a later arm cannot see an
+    /// earlier arm's pending statements), while the flat path does not (`self.cur`
+    /// is the whole body tree). Returns the callee's result types.
+    fn check_checkpoint_boundary(
+        &self,
+        callee: u32,
+        checkpoint: &Option<u32>,
+        require_empty_cur: bool,
+    ) -> Result<Vec<ValType>, TranspileError> {
+        if checkpoint.is_some() {
+            return Err(TranspileError::Unsupported(
+                "more than one cross-call checkpoint in a continuation body (phase 5)".into(),
+            ));
+        }
+        if !self.frames.is_empty() {
+            return Err(TranspileError::Unsupported(
+                "cross-call checkpoint inside nested control flow in a continuation body (phase \
+                 5b-2b)"
+                    .into(),
+            ));
+        }
+        let (params, results) = self.ctx.full_sig(callee as usize).ok_or_else(|| {
+            TranspileError::Unsupported("checkpoint call to unknown function".into())
+        })?;
+        if !params.is_empty() {
+            return Err(TranspileError::Unsupported(
+                "cross-call checkpoint to a continuation with parameters (phase 5)".into(),
+            ));
+        }
+        if !self.stack.is_empty() || (require_empty_cur && !self.cur.is_empty()) {
+            return Err(TranspileError::Unsupported(
+                "non-empty operand stack before a cross-call checkpoint (phase 5)".into(),
+            ));
+        }
+        Ok(results.to_vec())
+    }
+
     /// Pop and `i64`-encode a `suspend $tag`'s payload (the operand-stack tail
     /// matching the tag's parameter types) into the comma-joined form a
     /// `StepResult::Suspend` carries. Shared by both cont lowerings.
@@ -547,32 +618,7 @@ impl super::FuncGen<'_> {
         callee: u32,
         checkpoint: &mut Option<u32>,
     ) -> Result<(), TranspileError> {
-        if checkpoint.is_some() {
-            return Err(TranspileError::Unsupported(
-                "more than one cross-call checkpoint in a continuation body (phase 5)".into(),
-            ));
-        }
-        if !self.frames.is_empty() {
-            return Err(TranspileError::Unsupported(
-                "cross-call checkpoint inside nested control flow in a continuation body (phase \
-                 5b-2b)"
-                    .into(),
-            ));
-        }
-        let (params, results) = self.ctx.full_sig(callee as usize).ok_or_else(|| {
-            TranspileError::Unsupported("checkpoint call to unknown function".into())
-        })?;
-        if !params.is_empty() {
-            return Err(TranspileError::Unsupported(
-                "cross-call checkpoint to a continuation with parameters (phase 5)".into(),
-            ));
-        }
-        let results = results.to_vec();
-        if !self.stack.is_empty() || !self.cur.is_empty() {
-            return Err(TranspileError::Unsupported(
-                "non-empty operand stack before a cross-call checkpoint (phase 5)".into(),
-            ));
-        }
+        let results = self.check_checkpoint_boundary(callee, checkpoint, true)?;
         for (i, ty) in results.iter().enumerate() {
             let code = decode_from_i64(&format!("__cret[{i}]"), *ty)?;
             self.push(Val {

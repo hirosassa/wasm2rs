@@ -317,6 +317,17 @@ enum Node {
         payload: String,
         save: String,
     },
+    /// A cross-call checkpoint (cont-flatten path only): a tail `call` to another
+    /// step function `callee`. Splits the `pc` state machine into a state that
+    /// drives `self.cont_step_func{callee}(&mut __frame.sub, &[])` once — on the
+    /// callee's suspend it saves the mutated locals (`save`), leaves `__frame.pc`
+    /// pinned to this state (so the next resume re-drives the callee), and
+    /// propagates the suspension up; on the callee's return it moves the callee's
+    /// (already `i64`-erased) results into `__frame.ostack` and advances to the
+    /// resume state. Like [`Node::Suspend`], only produced/consumed by the
+    /// continuation flattener; every other `Node` consumer treats it as
+    /// unreachable.
+    Checkpoint { callee: u32, save: String },
 }
 
 /// A finished `try` region: the protected body plus its catch handlers.
@@ -398,10 +409,13 @@ fn render_nodes_into(nodes: Vec<Node>, depth: usize, line_prefix: &str, out: &mu
             }
             Node::Region(region) => render_region_into(region, depth, line_prefix, out),
             Node::Try(try_node) => render_try_into(try_node, depth, line_prefix, out),
-            // A `suspend` only ever reaches the continuation flattener, never the
-            // ordinary nested renderer.
+            // A `suspend`/checkpoint only ever reaches the continuation
+            // flattener, never the ordinary nested renderer.
             Node::Suspend { .. } => {
                 unreachable!("`suspend` node outside the continuation flattener")
+            }
+            Node::Checkpoint { .. } => {
+                unreachable!("checkpoint node outside the continuation flattener")
             }
         }
     }
@@ -839,6 +853,7 @@ fn estimate_body_len(nodes: &[Node]) -> usize {
                     + 160
             }
             Node::Suspend { payload, save, .. } => payload.len() + save.len() + 48,
+            Node::Checkpoint { save, .. } => save.len() + 160,
         })
         .sum()
 }
@@ -1181,6 +1196,39 @@ impl Flattener {
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         state = resume;
                     }
+                    Node::Checkpoint { callee, save } => {
+                        // The callee drive is re-entered on every callee-suspend
+                        // (the next resume re-drives it), so it must occupy its own
+                        // state with nothing before it — otherwise the statements
+                        // accumulated ahead of it in this arm would re-run each time.
+                        // Close the current state with a jump to a fresh `call` state
+                        // that holds only the callee `match`.
+                        let call = self.alloc();
+                        let resume = self.alloc();
+                        stmts.push((0, format!("pc = {call};")));
+                        self.arms.push((state, std::mem::take(&mut stmts)));
+                        // In the `call` state: drive the callee once. On its suspend,
+                        // save this frame's mutated locals and propagate up, leaving
+                        // `__frame.pc` pinned to `call` so the next resume re-drives
+                        // the callee. On its return, move the callee's `i64`-erased
+                        // results into `__frame.ostack` (the code after the call reads
+                        // them back from there) and advance to `resume`.
+                        self.arms.push((
+                            call,
+                            vec![(
+                                0,
+                                format!(
+                                    "match self.cont_step_func{callee}(&mut __frame.sub, &[]) {{ \
+                                     StepResult::Suspend {{ tag: __t, payload: __p }} => {{ \
+                                     {save}__frame.pc = {call}u32; \
+                                     return StepResult::Suspend {{ tag: __t, payload: __p }}; }} \
+                                     StepResult::Return(__cret) => {{ __frame.ostack = __cret; \
+                                     pc = {resume}; }} }}"
+                                ),
+                            )],
+                        ));
+                        state = resume;
+                    }
                 }
             }
             if reachable {
@@ -1262,9 +1310,12 @@ impl Flattener {
                 Node::Region(region) => self.render_structured_region(region, depth, out),
                 Node::Try(_) => unreachable!("is_structurable_loop rejects `try` subtrees"),
                 // The continuation flattener disables structured loops, so a
-                // `suspend` never renders through this structured path.
+                // `suspend`/checkpoint never renders through this structured path.
                 Node::Suspend { .. } => {
                     unreachable!("`suspend` node inside a structured loop")
+                }
+                Node::Checkpoint { .. } => {
+                    unreachable!("checkpoint node inside a structured loop")
                 }
             }
         }
