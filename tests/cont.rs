@@ -487,6 +487,114 @@ fn diverging_tail_after_a_suspend_compiles() {
 }
 
 #[test]
+fn suspend_inside_a_block() {
+    // A `suspend` *inside* a nested region (P5b-2b). `$gen` yields 10 from inside
+    // an (untargeted) `block`, then — after the resume — falls out of the block
+    // and returns 30. Because the suspend crosses the region boundary, the region
+    // can no longer be rendered as a single straight-line arm: the `pc` state
+    // machine must be woven through the block. The driver resumes until the
+    // continuation returns, accumulating 10 + 30 = 40.
+    compile_run(
+        "cont_suspend_in_block",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              (block $b
+                i32.const 10 suspend $yield)
+              i32.const 30)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        // `$gen` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 40);",
+    );
+}
+
+#[test]
+fn suspend_inside_a_loop() {
+    // A `suspend` inside a back-edge `loop` (P5b-2b). `$gen` counts a local `$i`
+    // up, yielding it each iteration, and loops back while `$i < 3`; once `$i`
+    // reaches 3 it falls out of the loop and returns 99. This exercises the `pc`
+    // machine threaded through a loop: the local `$i` survives each suspend (saved
+    // to and reloaded from the frame), and the `br_if` back-edge is a `pc` jump.
+    // The driver resumes until it returns, accumulating 1 + 2 + 3 + 99 = 105.
+    compile_run(
+        "cont_suspend_in_loop",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              (local $i i32)
+              (loop $l
+                local.get $i i32.const 1 i32.add local.set $i
+                local.get $i suspend $yield
+                local.get $i i32.const 3 i32.lt_s br_if $l)
+              i32.const 99)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        // `$gen` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 105);",
+    );
+}
+
+#[test]
+fn suspend_inside_an_if() {
+    // A `suspend` inside an `if` arm that also yields the region's result
+    // (P5b-2b). The condition is 1 (true), so the `then` arm runs: it yields 10,
+    // then — after the resume — produces 20 as the `if`'s result. Adding 5 gives
+    // 25. Because the suspend sits inside the `then` region, the `pc` machine
+    // threads through the `if`, and the region result temp (assigned after the
+    // resume) is read once control rejoins. The driver resumes until it returns,
+    // accumulating 10 + 25 = 35.
+    compile_run(
+        "cont_suspend_in_if",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              i32.const 1
+              (if (result i32)
+                (then i32.const 10 suspend $yield i32.const 20)
+                (else i32.const 30))
+              i32.const 5 i32.add)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        // `$gen` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 35);",
+    );
+}
+
+#[test]
 fn null_cont_local_defaults_to_null() {
     // A local typed `(ref null $ct)` defaults to the null handle, so reading it
     // back and testing `ref.is_null` reports null (1) without any assignment.

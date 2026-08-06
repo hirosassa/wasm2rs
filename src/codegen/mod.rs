@@ -306,6 +306,17 @@ enum Node {
     /// A legacy-exception `try` region, rendered as a `catch_unwind` over the
     /// protected body with a landing pad dispatching on the caught tag.
     Try(TryRegionNode),
+    /// A continuation `suspend` point (cont-flatten path only). Splits the `pc`
+    /// state machine: the arm saves the mutated locals (`save`), advances
+    /// `__frame.pc` to the resume state, and returns `StepResult::Suspend` with
+    /// the encoded `payload`. Only ever produced for a body walked by
+    /// [`FuncGen::emit_cont_step`] and only consumed by the continuation
+    /// flattener; every other `Node` consumer treats it as unreachable.
+    Suspend {
+        tag: u32,
+        payload: String,
+        save: String,
+    },
 }
 
 /// A finished `try` region: the protected body plus its catch handlers.
@@ -387,6 +398,11 @@ fn render_nodes_into(nodes: Vec<Node>, depth: usize, line_prefix: &str, out: &mu
             }
             Node::Region(region) => render_region_into(region, depth, line_prefix, out),
             Node::Try(try_node) => render_try_into(try_node, depth, line_prefix, out),
+            // A `suspend` only ever reaches the continuation flattener, never the
+            // ordinary nested renderer.
+            Node::Suspend { .. } => {
+                unreachable!("`suspend` node outside the continuation flattener")
+            }
         }
     }
 }
@@ -822,6 +838,7 @@ fn estimate_body_len(nodes: &[Node]) -> usize {
                     // The `catch_unwind`/landing-pad scaffolding.
                     + 160
             }
+            Node::Suspend { payload, save, .. } => payload.len() + save.len() + 48,
         })
         .sum()
 }
@@ -927,6 +944,7 @@ fn flatten_body(nodes: Vec<Node>, trailing: Option<String>, returns_value: bool)
         next_state: 0,
         labels: HashMap::new(),
         uses_continue: false,
+        allow_structured_loop: true,
     };
     let start = f.alloc();
     let exit = f.alloc();
@@ -940,6 +958,36 @@ fn flatten_body(nodes: Vec<Node>, trailing: Option<String>, returns_value: bool)
     f.arms.push((exit, vec![(0, exit_stmt)]));
     f.lower(nodes, start, exit);
     f.assemble(start)
+}
+
+/// Lower a continuation body (already walked into a [`Node`] tree, with
+/// `suspend`s marked as [`Node::Suspend`]) to the flat `pc` dispatch of a
+/// resumable step function. Mirrors [`flatten_body`] but the dispatch reads its
+/// initial `pc` from `__frame.pc` (so a resume re-enters the state a prior
+/// suspend saved) and its exit returns `StepResult`, not a plain value.
+///
+/// `exit_stmt` is the fall-off-the-end terminator (`return
+/// StepResult::Return(…)` when the body's end is reachable, else
+/// `unreachable!()`). Structured loops are disabled (see
+/// [`Flattener::allow_structured_loop`]) and pc-edge contraction is skipped, so
+/// every allocated state id is stable — a `suspend` can hard-code the resume
+/// state into `__frame.pc`.
+fn flatten_cont_body(nodes: Vec<Node>, exit_stmt: String) -> Vec<Node> {
+    let mut f = Flattener {
+        arms: Vec::new(),
+        next_state: 0,
+        labels: HashMap::new(),
+        uses_continue: false,
+        allow_structured_loop: false,
+    };
+    let start = f.alloc();
+    let exit = f.alloc();
+    f.arms.push((exit, vec![(0, exit_stmt)]));
+    f.lower(nodes, start, exit);
+    // The initial state is always 0 (the first `alloc`), matching a fresh
+    // frame's `pc == 0`; without contraction the ids never shift.
+    debug_assert_eq!(start, 0);
+    f.assemble_cont()
 }
 
 /// One statement of a dispatch arm: its indent *relative to the arm body* (0 for
@@ -959,6 +1007,12 @@ struct Flattener {
     /// Whether any arm uses `continue 'sm` (emitted for `br_if`), so the
     /// dispatch loop needs its `'sm` label. Without it the label is unused.
     uses_continue: bool,
+    /// Whether a back-edge loop may be emitted as a structured `'lN: loop { … }`
+    /// (the [`is_structurable_loop`] specialisation). The continuation flattener
+    /// disables it: a `suspend` inside a loop must return out of the whole step
+    /// function and re-enter through the `pc` dispatch, which a structured Rust
+    /// loop cannot express, so continuation loops always flatten.
+    allow_structured_loop: bool,
 }
 
 impl Flattener {
@@ -1044,7 +1098,9 @@ impl Flattener {
                         }
                         state = cont;
                     }
-                    Node::Region(region) if is_structurable_loop(&region) => {
+                    Node::Region(region)
+                        if self.allow_structured_loop && is_structurable_loop(&region) =>
+                    {
                         // A back-edge loop shallow enough to structure: emit a real
                         // `'lN: loop { … }` (its nested `if`/`block`/`loop` also
                         // structured) in one arm, so the hot back-edge is a direct
@@ -1103,6 +1159,27 @@ impl Flattener {
                         stmts.push((0, line));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         reachable = false;
+                    }
+                    Node::Suspend { tag, payload, save } => {
+                        // Split the state machine at the suspend: save the mutated
+                        // locals, park the resume state in `__frame.pc`, and hand
+                        // the suspension up. The code after the suspend continues in
+                        // `resume`, entered on the next step call (whose `__args`
+                        // are the values the resumer injected).
+                        let resume = self.alloc();
+                        stmts.push((
+                            0,
+                            format!(
+                                "{save}__frame.pc = {resume}u32; return StepResult::Suspend {{ \
+                                 tag: {tag}u32, payload: vec![{payload}] }};"
+                            ),
+                        ));
+                        // The suspend `return`s out of the whole step function (the
+                        // dispatch runs inside a `loop`, so an arm value would be
+                        // discarded), ending the arm like a `Node::Term`; the
+                        // flattener resumes filling the `resume` state's arm.
+                        self.arms.push((state, std::mem::take(&mut stmts)));
+                        state = resume;
                     }
                 }
             }
@@ -1184,6 +1261,11 @@ impl Flattener {
                 }
                 Node::Region(region) => self.render_structured_region(region, depth, out),
                 Node::Try(_) => unreachable!("is_structurable_loop rejects `try` subtrees"),
+                // The continuation flattener disables structured loops, so a
+                // `suspend` never renders through this structured path.
+                Node::Suspend { .. } => {
+                    unreachable!("`suspend` node inside a structured loop")
+                }
             }
         }
     }
@@ -1264,6 +1346,21 @@ impl Flattener {
     /// its original program point — stays in the arm.
     fn assemble(mut self, start: usize) -> Vec<Node> {
         let start = contract_pc_edges(&mut self.arms, start);
+        self.render_dispatch(format!("let mut pc: usize = {start};"))
+    }
+
+    /// Assemble the dispatch loop of a continuation step function. Unlike
+    /// [`Self::assemble`], the initial `pc` is read from the frame (so a resume
+    /// re-enters the state a prior suspend parked there) and pc-edge contraction
+    /// is skipped, keeping every state id exactly as allocated.
+    fn assemble_cont(self) -> Vec<Node> {
+        self.render_dispatch("let mut pc: usize = __frame.pc as usize;".to_string())
+    }
+
+    /// Shared back end of [`Self::assemble`]/[`Self::assemble_cont`]: sort the
+    /// arms, hoist their typed `let`s above the loop, and render `<pc_init>;
+    /// <decls>; loop { match pc { … } }`.
+    fn render_dispatch(mut self, pc_init: String) -> Vec<Node> {
         self.arms.sort_by_key(|(state, _)| *state);
 
         let mut decls: Vec<String> = Vec::new();
@@ -1289,7 +1386,7 @@ impl Flattener {
         let mut push = |depth: usize, text: String| {
             out.push(Node::Line(format!("{}{text}", "    ".repeat(depth))));
         };
-        push(0, format!("let mut pc: usize = {start};"));
+        push(0, pc_init);
         for decl in decls {
             push(0, decl);
         }

@@ -24,7 +24,10 @@
 
 use wasmparser::{FunctionBody, Operator, ValType};
 
-use super::super::{ALLOW, CompositeKind, GenMeta, TypeSig, Val, index_u32, render_nodes_into};
+use super::super::{
+    ALLOW, CompositeKind, GenMeta, Node, TypeSig, Val, flatten_cont_body, index_u32,
+    render_body_into, render_nodes_into,
+};
 use crate::TranspileError;
 
 /// Encode a wasm value (given its Rust expression `code` and type) into the
@@ -119,6 +122,14 @@ impl super::FuncGen<'_> {
         line_prefix: &str,
         out: &mut String,
     ) -> Result<GenMeta, TranspileError> {
+        // A body whose `suspend` (or cross-call checkpoint) crosses a nested
+        // region cannot render each region as one straight-line arm; it needs the
+        // `pc` state machine woven through the nesting, which the flat path does
+        // by lowering the whole body through the continuation flattener.
+        if Self::suspends_cross_region(body)? {
+            return self.emit_cont_step_flat(index, params, body, line_prefix, out);
+        }
+
         // Locals now live in the frame (loaded at entry, saved at every suspend),
         // so discard the default-init `let` bindings `FuncGen::new` seeded `cur`
         // with; the entry prologue below reloads them from `__frame` instead.
@@ -150,15 +161,7 @@ impl super::FuncGen<'_> {
                                 .into(),
                         ));
                     }
-                    let payload_tys = self
-                        .ctx
-                        .tags
-                        .get(tag_index as usize)
-                        .ok_or_else(|| {
-                            TranspileError::Unsupported("suspend: unknown tag index".into())
-                        })?
-                        .clone();
-                    let payload = self.encode_stack_tail(&payload_tys)?;
+                    let payload = self.encode_suspend_payload(tag_index)?;
                     // Statements (e.g. `local.set`) computed since the last
                     // boundary run first; then the mutated locals are saved into
                     // the frame so the next resume reloads them, and the state
@@ -175,22 +178,7 @@ impl super::FuncGen<'_> {
                     // values the resuming side injects, delivered as the next
                     // step's `__args`. Push them as the resumed state's initial
                     // operands so the code after the suspend consumes them.
-                    let result_tys = self
-                        .ctx
-                        .tag_results
-                        .get(tag_index as usize)
-                        .ok_or_else(|| {
-                            TranspileError::Unsupported("suspend: unknown tag index".into())
-                        })?
-                        .clone();
-                    for (i, ty) in result_tys.iter().enumerate() {
-                        let code = decode_from_i64(&format!("__args[{i}]"), *ty)?;
-                        self.push(Val {
-                            code,
-                            ty: *ty,
-                            stable: true,
-                        });
-                    }
+                    self.push_suspend_results(tag_index)?;
                 }
                 Operator::Call { function_index }
                     if self.ctx.step_set.binary_search(&function_index).is_ok() =>
@@ -280,6 +268,204 @@ impl super::FuncGen<'_> {
         }
 
         let mut src = String::new();
+        self.write_cont_step_header(index, params, line_prefix, &mut src)?;
+        src.push_str(line_prefix);
+        src.push_str("    match __frame.pc {\n");
+        for (state, arm) in arms.iter().enumerate() {
+            src.push_str(line_prefix);
+            src.push_str(&format!("        {state}u32 => {{ {arm} }}\n"));
+        }
+        src.push_str(line_prefix);
+        src.push_str("        _ => unreachable!(),\n");
+        src.push_str(line_prefix);
+        src.push_str("    }\n");
+        src.push_str(line_prefix);
+        src.push_str("}\n");
+        out.push_str(&src);
+
+        Ok(GenMeta {
+            helpers: self.used_helpers,
+            rt: self.used_rt,
+            simd: self.used_simd,
+            dispatch_sigs: self.dispatch_sigs,
+            uses_eh: self.uses_eh,
+        })
+    }
+
+    /// Whether any `suspend` in `body` occurs inside a nested region (control
+    /// depth > 0). Such a body cannot render each region as a single straight-line
+    /// arm — the `pc` machine must thread through the nesting — so it takes the
+    /// flat path ([`Self::emit_cont_step_flat`]). A body whose suspends are all at
+    /// the top level keeps the simpler arm-splitting lowering.
+    fn suspends_cross_region(body: &FunctionBody<'_>) -> Result<bool, TranspileError> {
+        let mut depth: usize = 0;
+        for op in body.get_operators_reader()? {
+            match op? {
+                Operator::Block { .. }
+                | Operator::Loop { .. }
+                | Operator::If { .. }
+                | Operator::Try { .. }
+                | Operator::TryTable { .. } => depth += 1,
+                Operator::End => depth = depth.saturating_sub(1),
+                Operator::Suspend { .. } if depth > 0 => return Ok(true),
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+
+    /// Emit this function as a resumable step function via the flat continuation
+    /// dispatch (see the module docs and [`flatten_cont_body`]). Unlike
+    /// [`Self::emit_cont_step`], the whole body is first walked into a [`Node`]
+    /// tree (with each `suspend` recorded as a [`Node::Suspend`]), then lowered to
+    /// a `pc` state machine that can be re-entered at a suspend inside a region.
+    fn emit_cont_step_flat(
+        mut self,
+        index: usize,
+        params: &[ValType],
+        body: &FunctionBody<'_>,
+        line_prefix: &str,
+        out: &mut String,
+    ) -> Result<GenMeta, TranspileError> {
+        // Locals live in the frame (see `emit_cont_step`); drop the default-init
+        // bindings and reload from `__frame` in the entry prologue instead.
+        self.cur.clear();
+
+        // Fall-off-the-end results, captured when the outermost `end` is reached
+        // and the program point is still reachable (a diverging body never falls
+        // through, so its exit stays unreachable).
+        let mut return_payload: Option<String> = None;
+        for op in body.get_operators_reader()? {
+            match op? {
+                Operator::Suspend { tag_index } => self.emit_suspend_node(tag_index)?,
+                Operator::Call { function_index }
+                    if self.ctx.step_set.binary_search(&function_index).is_ok() =>
+                {
+                    return Err(TranspileError::Unsupported(
+                        "cross-call checkpoint combined with a suspend inside nested control flow \
+                         in a continuation body (phase 5b-2b)"
+                            .into(),
+                    ));
+                }
+                Operator::ReturnCall { function_index }
+                    if self.ctx.step_set.binary_search(&function_index).is_ok() =>
+                {
+                    return Err(TranspileError::Unsupported(
+                        "return_call across a continuation (phase 5)".into(),
+                    ));
+                }
+                // A nested region's `end` closes it into a `Node::Region` in
+                // `self.cur` via the ordinary lowering.
+                Operator::End if !self.frames.is_empty() => self.emit_op(Operator::End)?,
+                // The outermost `end`: the remaining operands are the function's
+                // results. Capture them as the fall-through return; the body tree
+                // stays in `self.cur` for the flattener below.
+                Operator::End => {
+                    if self.reachable {
+                        let results = self.results.clone();
+                        return_payload = Some(self.encode_stack_tail(&results)?);
+                    }
+                }
+                other @ (Operator::Try { .. }
+                | Operator::TryTable { .. }
+                | Operator::Return
+                | Operator::Resume { .. }) => {
+                    return Err(TranspileError::Unsupported(format!(
+                        "operator {other:?} in a continuation body (phase 5b-2b)"
+                    )));
+                }
+                other => self.emit_op(other)?,
+            }
+        }
+
+        let exit_stmt = match return_payload {
+            Some(payload) => format!("return StepResult::Return(vec![{payload}]);"),
+            // A diverging body never falls off its end, so its exit is unreachable.
+            None => "unreachable!();".to_string(),
+        };
+        let nodes = std::mem::take(&mut self.cur);
+        let flat = flatten_cont_body(nodes, exit_stmt);
+
+        let mut src = String::new();
+        self.write_cont_step_header(index, params, line_prefix, &mut src)?;
+        render_body_into(flat, line_prefix, &mut src);
+        src.push_str(line_prefix);
+        src.push_str("}\n");
+        out.push_str(&src);
+
+        Ok(GenMeta {
+            helpers: self.used_helpers,
+            rt: self.used_rt,
+            simd: self.used_simd,
+            dispatch_sigs: self.dispatch_sigs,
+            uses_eh: self.uses_eh,
+        })
+    }
+
+    /// Record a `suspend` as a [`Node::Suspend`] in the current scope: pop and
+    /// encode its payload, snapshot the mutated locals, and push the values the
+    /// resumer will inject (`__args`) as the resumed state's initial operands.
+    /// Shared shape with the top-level suspend handling in [`Self::emit_cont_step`],
+    /// but deferred into the node tree so a suspend inside a region survives to the
+    /// flattener.
+    fn emit_suspend_node(&mut self, tag_index: u32) -> Result<(), TranspileError> {
+        let payload = self.encode_suspend_payload(tag_index)?;
+        let save = self.save_mutated_locals()?;
+        self.cur.push(Node::Suspend {
+            tag: tag_index,
+            payload,
+            save,
+        });
+        self.push_suspend_results(tag_index)
+    }
+
+    /// Pop and `i64`-encode a `suspend $tag`'s payload (the operand-stack tail
+    /// matching the tag's parameter types) into the comma-joined form a
+    /// `StepResult::Suspend` carries. Shared by both cont lowerings.
+    fn encode_suspend_payload(&mut self, tag_index: u32) -> Result<String, TranspileError> {
+        let payload_tys = self
+            .ctx
+            .tags
+            .get(tag_index as usize)
+            .ok_or_else(|| TranspileError::Unsupported("suspend: unknown tag index".into()))?
+            .clone();
+        self.encode_stack_tail(&payload_tys)
+    }
+
+    /// Push a `suspend $tag`'s result values — the ones the resumer injects,
+    /// delivered as the next step's `__args` — as the resumed state's initial
+    /// operands, so the code after the suspend consumes them. Shared by both cont
+    /// lowerings.
+    fn push_suspend_results(&mut self, tag_index: u32) -> Result<(), TranspileError> {
+        let result_tys = self
+            .ctx
+            .tag_results
+            .get(tag_index as usize)
+            .ok_or_else(|| TranspileError::Unsupported("suspend: unknown tag index".into()))?
+            .clone();
+        for (i, ty) in result_tys.iter().enumerate() {
+            let code = decode_from_i64(&format!("__args[{i}]"), *ty)?;
+            self.push(Val {
+                code,
+                ty: *ty,
+                stable: true,
+            });
+        }
+        Ok(())
+    }
+
+    /// Write the step function's opening: the `#[allow]` line, the `pub fn
+    /// cont_step_func{index}` signature, the first-step parameter decode (at
+    /// `pc == 0`), and the entry reload of every local from `__frame`. Both cont
+    /// lowerings share this prologue; they differ only in the dispatch body that
+    /// follows.
+    fn write_cont_step_header(
+        &self,
+        index: usize,
+        params: &[ValType],
+        line_prefix: &str,
+        src: &mut String,
+    ) -> Result<(), TranspileError> {
         // Locals live in `__frame`; a body may declare more than it reads, so the
         // same allowances the ordinary `func{N}`s carry keep the reload prologue
         // and per-suspend saves warning-free.
@@ -320,27 +506,7 @@ impl super::FuncGen<'_> {
             src.push_str(line_prefix);
             src.push_str(&format!("    {keyword} l{i} = __frame.l{i};\n"));
         }
-        src.push_str(line_prefix);
-        src.push_str("    match __frame.pc {\n");
-        for (state, arm) in arms.iter().enumerate() {
-            src.push_str(line_prefix);
-            src.push_str(&format!("        {state}u32 => {{ {arm} }}\n"));
-        }
-        src.push_str(line_prefix);
-        src.push_str("        _ => unreachable!(),\n");
-        src.push_str(line_prefix);
-        src.push_str("    }\n");
-        src.push_str(line_prefix);
-        src.push_str("}\n");
-        out.push_str(&src);
-
-        Ok(GenMeta {
-            helpers: self.used_helpers,
-            rt: self.used_rt,
-            simd: self.used_simd,
-            dispatch_sigs: self.dispatch_sigs,
-            uses_eh: self.uses_eh,
-        })
+        Ok(())
     }
 
     /// Begin a tail cross-call checkpoint: a `call` to another step function
