@@ -731,6 +731,15 @@ impl<'a> FuncGen<'a> {
                 type_index,
                 table_index,
             } => self.return_call_indirect(type_index, table_index)?,
+            // Typed function references (heap-free slice): the funcref is a `u32`
+            // function index on the operand stack, dispatched like `call_indirect`
+            // but taken straight off the stack.
+            Operator::CallRef { type_index } => self.call_ref(type_index)?,
+            Operator::ReturnCallRef { type_index } => self.return_call_ref(type_index)?,
+            // `i31` reference ops: the payload rides as a plain `i32`.
+            Operator::RefI31 => self.ref_i31()?,
+            Operator::I31GetS => self.i31_get_s()?,
+            Operator::I31GetU => self.i31_get_u()?,
             Operator::Return => self.emit_return()?,
             // Legacy exception handling: a `try` region protects its body and
             // dispatches thrown exceptions to matching `catch`/`catch_all`

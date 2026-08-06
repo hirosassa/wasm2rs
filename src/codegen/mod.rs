@@ -22,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use wasmparser::{FunctionBody, MemArg, Operator, ValType};
+use wasmparser::{AbstractHeapType, FunctionBody, HeapType, MemArg, Operator, ValType};
 
 use crate::TranspileError;
 
@@ -1640,7 +1640,13 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         || table.is_some_and(|t| t.imported);
     // Imports must be held by an instance, so a module that has them (or any
     // other mutable state) becomes a `struct Instance` with method functions.
-    let stateful = has_memory || has_table || has_imports || !globals.is_empty();
+    // `call_ref`/`return_call_ref` also require the enclosing instance: they
+    // dispatch through the `self.call_ref_t{ti}` method, which only exists on a
+    // `struct Instance`, so a body that uses either forces statefulness even
+    // when the module carries no other state. (`ref.func` alone does not — it
+    // just pushes a `u32`.)
+    let stateful =
+        has_memory || has_table || has_imports || !globals.is_empty() || uses_call_ref(funcs)?;
 
     let ctx = ModuleCtx {
         imports,
@@ -1898,6 +1904,25 @@ fn indent(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Whether any function body uses `call_ref`/`return_call_ref`.
+///
+/// The scan reads a fresh operator reader per body (`get_operators_reader`
+/// yields an independent reader, so this does not disturb the real codegen walk
+/// later), short-circuiting on the first match.
+fn uses_call_ref(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
+    for input in funcs {
+        for op in input.body.get_operators_reader()? {
+            if matches!(
+                op?,
+                Operator::CallRef { .. } | Operator::ReturnCallRef { .. }
+            ) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Collect the indices of locals written by `local.set`/`local.tee`.
 fn collect_mutated_locals(body: &FunctionBody<'_>) -> Result<HashSet<u32>, TranspileError> {
     let mut mutated = HashSet::new();
@@ -1939,6 +1964,23 @@ fn rust_type(ty: ValType) -> Result<&'static str, TranspileError> {
         // handle; both are represented as a `u32` (`u32::MAX` is null), matching
         // the table's element representation.
         ValType::Ref(rt) if rt.is_func_ref() || rt.is_extern_ref() => Ok("u32"),
+        // An `i31ref` holds a 31-bit payload in an `i32` (no managed heap).
+        ValType::Ref(rt)
+            if matches!(
+                rt.heap_type(),
+                HeapType::Abstract {
+                    ty: AbstractHeapType::I31,
+                    ..
+                }
+            ) =>
+        {
+            Ok("i32")
+        }
+        // A concrete typed reference `(ref $t)` / `(ref null $t)`. In phase 4a the
+        // only concrete refs that reach here name a *function* type (struct/array
+        // refs are rejected earlier at the type section), so every concrete ref is
+        // a funcref and lowers to `u32` like the abstract `funcref`.
+        ValType::Ref(rt) if matches!(rt.heap_type(), HeapType::Concrete(_)) => Ok("u32"),
         // A v128 is a 128-bit value; it is held as a `u128` and lane operations
         // reinterpret its bits (little-endian) into the relevant lane type.
         ValType::V128 => Ok("u128"),
@@ -1965,8 +2007,15 @@ fn unsigned_type(ty: ValType) -> Result<&'static str, TranspileError> {
 fn default_value(ty: ValType) -> &'static str {
     match ty {
         ValType::F32 | ValType::F64 => "0.0",
-        // A default `funcref`/`externref` is null.
-        ValType::Ref(rt) if rt.is_func_ref() || rt.is_extern_ref() => "u32::MAX",
+        // A default `funcref`/`externref` (and any concrete typed funcref) is
+        // null. An `i31ref` defaults to a zero payload, so it falls to `"0"`.
+        ValType::Ref(rt)
+            if rt.is_func_ref()
+                || rt.is_extern_ref()
+                || matches!(rt.heap_type(), HeapType::Concrete(_)) =>
+        {
+            "u32::MAX"
+        }
         _ => "0",
     }
 }

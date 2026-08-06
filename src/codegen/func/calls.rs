@@ -183,6 +183,74 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    pub(super) fn call_ref(&mut self, type_index: u32) -> Result<(), TranspileError> {
+        self.emit_call_ref(type_index, false)
+    }
+
+    /// `return_call_ref`: the tail-call form of `call_ref`. See
+    /// [`Self::return_call`] for the tail-call semantics and their (absent)
+    /// constant-stack guarantee.
+    pub(super) fn return_call_ref(&mut self, type_index: u32) -> Result<(), TranspileError> {
+        self.emit_call_ref(type_index, true)
+    }
+
+    /// Shared lowering for `call_ref` and `return_call_ref`. The funcref sits on
+    /// top of the operand stack with the arguments below it (`[args.., funcref]`),
+    /// so this mirrors [`Self::emit_indirect_call`] but takes the funcref straight
+    /// off the stack instead of a table slot. A null or wrong-type funcref traps
+    /// inside the generated `call_ref_t{ti}` dispatch method.
+    fn emit_call_ref(&mut self, type_index: u32, tail: bool) -> Result<(), TranspileError> {
+        let sig = self
+            .ctx
+            .types
+            .get(type_index as usize)
+            .ok_or_else(|| TranspileError::Unsupported("call_ref: unknown type".into()))?;
+        let results = sig.results.clone();
+        let param_count = sig.params.len();
+
+        // The funcref (top of stack) is consumed into the `entry` binding below,
+        // emitted *before* the dispatch call — so only it may inline. The
+        // arguments must stay spilled to temporaries so they are evaluated in
+        // wasm order (arguments before the funcref) and pinned against the
+        // callee's side effects (spill-before-mutation). A tail call discards the
+        // survivors below the arguments, and its operands are pure reads, so
+        // nothing needs freezing.
+        if !tail {
+            self.freeze_survivors(1)?;
+        }
+        let funcref = self.pop()?;
+        let mut args = Vec::with_capacity(param_count);
+        for _ in 0..param_count {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+        let arg_list = args
+            .into_iter()
+            .map(|a| a.code)
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // Bind the funcref to a local first for borrow-safety: passing the
+        // expression straight into the `&mut self` dispatch call could keep an
+        // earlier borrow live across it. Copying out the `u32` releases it.
+        let entry = self.fresh_temp();
+        self.line(format!("let {entry} = ({}) as u32;", funcref.code));
+
+        // Dispatch through the shared `call_ref_t{ti}` method (see
+        // `dispatch_method_lines`): it holds the `match` on the funcref.
+        self.dispatch_sigs.insert(type_index);
+        let (prefix, temps) = self.result_binding(&results)?;
+        let sep = if arg_list.is_empty() { "" } else { ", " };
+        self.line(format!(
+            "{prefix}self.call_ref_t{type_index}({entry}{sep}{arg_list});"
+        ));
+        self.push_temps(temps);
+        if tail {
+            self.emit_return()?;
+        }
+        Ok(())
+    }
+
     /// Build the `let …: … = ` binding prefix for a value producing `results`,
     /// allocating a fresh temporary per result. Returns the prefix (empty for
     /// zero results, so the value is emitted as a bare statement) and the

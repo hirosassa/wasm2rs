@@ -236,4 +236,40 @@ impl<'a> super::FuncGen<'a> {
             r.stable,
         )
     }
+
+    /// `ref.i31`: narrow an `i32` to a 31-bit `i31ref` payload by masking off the
+    /// top bit. The payload rides on the operand stack as a plain `i32` (no
+    /// managed heap). Pure in its operand, so it keeps the operand's stability.
+    pub(super) fn ref_i31(&mut self) -> Result<(), TranspileError> {
+        let v = self.pop()?;
+        self.push_combined(
+            format!("(({}) & 0x7FFF_FFFFi32)", v.code),
+            ValType::I32,
+            v.stable,
+        )
+    }
+
+    /// `i31.get_u`: read an `i31ref` payload zero-extended. The payload already
+    /// has its top bit clear, so masking is harmless and keeps the value well
+    /// defined even for an operand that bypassed `ref.i31`.
+    pub(super) fn i31_get_u(&mut self) -> Result<(), TranspileError> {
+        let r = self.pop()?;
+        self.push_combined(
+            format!("(({}) & 0x7FFF_FFFFi32)", r.code),
+            ValType::I32,
+            r.stable,
+        )
+    }
+
+    /// `i31.get_s`: read an `i31ref` payload sign-extended from bit 30. Shifting
+    /// left by one lands bit 30 in the sign position, then an arithmetic right
+    /// shift replicates it back down.
+    pub(super) fn i31_get_s(&mut self) -> Result<(), TranspileError> {
+        let r = self.pop()?;
+        self.push_combined(
+            format!("((({}) << 1) >> 1)", r.code),
+            ValType::I32,
+            r.stable,
+        )
+    }
 }
