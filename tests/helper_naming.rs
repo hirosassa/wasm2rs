@@ -6,6 +6,22 @@
 //! helpers take `addr: i32` and cast internally, so a call passes the address
 //! expression directly instead of wrapping it as `(expr) as u32`.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp,
+    clippy::lossy_float_literal,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::unwrap_in_result,
+    reason = "test code"
+)]
+
 mod common;
 
 use common::{compile_run, expect_trap};

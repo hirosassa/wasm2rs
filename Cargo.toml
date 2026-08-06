@@ -10,6 +10,41 @@ mimalloc = "0.1"
 [dev-dependencies]
 wat = "1.255.0"
 
+# Hardening gates (rust-hardening skill). This crate is a code generator, so a
+# chunk of the restriction lints below fire on *intentional* index/offset
+# arithmetic and casts in the lowering; those are enabled incrementally. The
+# lints denied here have zero findings in production (`src/`) today, so they are
+# real gates now; `#[cfg(test)]`/`tests/` code relaxes the panic-prone subset
+# with a scoped `#[allow(..., reason = "test code")]`, the sanctioned exception.
+[lints.rust]
+warnings = "deny"
+unsafe_code = "deny"          # no `unsafe` in src today; keep it an opt-in exception
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+# Panic-prone constructs with zero production findings — denied outright.
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_in_result = "deny"
+# Float and lossy-cast foot-guns, none present in production.
+float_cmp = "deny"
+lossy_float_literal = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+# Suppression hygiene: every `#[allow]`/`#[expect]` must carry a `reason`.
+allow_attributes_without_reason = "deny"
+#
+# Deferred — these still fire in production `src/` (the code generator's
+# intentional lowering); left at clippy's default so the build stays green while
+# a follow-up hardens them per item (checked_*/.get()/TryFrom/#[expect]). Counts
+# at adoption time (worklist for that review):
+#   arithmetic_side_effects 85, indexing_slicing 30, as_conversions 21,
+#   string_slice 9, cast_lossless 2, unwrap_used 2, expect_used 1,
+#   unreachable 1 (a proven-defensive Try arm in the flattener),
+#   let_underscore_must_use 1 (`let _ = write!(String, …)`, infallible).
+
 # Keep file:line info for panics/test failures but drop full variable/type
 # debug info. Shrinks the 54 test binaries and cuts link time on macOS.
 [profile.dev]

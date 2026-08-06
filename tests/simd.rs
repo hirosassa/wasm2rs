@@ -5,6 +5,22 @@
 //! and reading a lane back (extract_lane) as an i32/i64/f32/f64 the test asserts
 //! on. All modules are stateless unless they declare a memory.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp,
+    clippy::lossy_float_literal,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::unwrap_in_result,
+    reason = "test code"
+)]
+
 use std::process::Command;
 
 fn compile(test: &str, wat: &str, main_body: &str) -> std::path::PathBuf {

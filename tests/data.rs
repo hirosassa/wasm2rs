@@ -3,6 +3,22 @@
 //! into `memory` before any function runs. Each test compiles the generated
 //! Rust with `rustc -D warnings` and reads the bytes back.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp,
+    clippy::lossy_float_literal,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::unwrap_in_result,
+    reason = "test code"
+)]
+
 use std::process::Command;
 
 fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {

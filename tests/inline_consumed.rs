@@ -9,6 +9,22 @@
 //! `l1 = l0;`, not `let v0 = l0; l1 = v0;`. Behaviour must stay identical, so
 //! each shape assertion is paired with a `compile_run` that checks the value.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp,
+    clippy::lossy_float_literal,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::unwrap_in_result,
+    reason = "test code"
+)]
+
 mod common;
 
 use common::compile_run;

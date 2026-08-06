@@ -7,6 +7,22 @@
 //! condition that is *not* a comparison (a raw i32 value) must keep `!= 0`.
 //! Behaviour must stay identical, so each shape check is paired with a run.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp,
+    clippy::lossy_float_literal,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::unwrap_in_result,
+    reason = "test code"
+)]
+
 mod common;
 
 use common::compile_run;
