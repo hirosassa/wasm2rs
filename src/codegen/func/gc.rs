@@ -614,7 +614,8 @@ impl super::FuncGen<'_> {
             let hit = match kind {
                 CompositeKind::Struct(_) => want_struct,
                 CompositeKind::Array(_) => !want_struct,
-                CompositeKind::Func => false,
+                // Function and continuation types are never `GcRef::Obj`.
+                CompositeKind::Func | CompositeKind::Cont(_) => false,
             };
             if hit {
                 arms.push(format!("{}u32", super::super::index_u32(i)?));

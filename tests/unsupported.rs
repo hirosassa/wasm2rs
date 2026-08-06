@@ -244,13 +244,19 @@ fn set_of_an_immutable_global_is_rejected() {
 }
 
 #[test]
-fn unsupported_composite_type_is_rejected() {
-    // GC `struct`/`array` composite types are now lowered (see tests/gc_heap.rs),
-    // but a `continuation` type (stack-switching proposal) still parses without a
-    // lowering, so it is rejected by name rather than mistranslated.
+fn unsupported_cont_operator_is_rejected() {
+    // A `continuation` type now parses and lowers its reference to a `u32`
+    // handle (see tests/cont.rs), but the stack-switching *operators* are not
+    // yet implemented, so `cont.new` is rejected by name rather than
+    // mistranslated.
     assert_unsupported(
-        r#"(module (type $ft (func)) (type (cont $ft)))"#,
-        "unsupported composite type",
+        r#"(module
+            (type $ft (func))
+            (type $ct (cont $ft))
+            (func $f)
+            (func (export "g") (result (ref $ct))
+              ref.func $f cont.new $ct))"#,
+        "operator ContNew",
     );
 }
 

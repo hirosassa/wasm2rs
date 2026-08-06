@@ -223,10 +223,23 @@ where
                                     },
                                 ));
                             }
-                            _ => {
-                                return Err(TranspileError::Unsupported(
-                                    "unsupported composite type".into(),
-                                ));
+                            CompositeInnerType::Cont(cont_ty) => {
+                                // A continuation type `(cont $ft)` occupies a
+                                // type index too; record the underlying function
+                                // type index and keep `signatures` aligned with
+                                // an empty placeholder (never read as a function
+                                // signature). A `contref` lowers to a `u32`
+                                // handle like a funcref.
+                                signatures.push(Signature {
+                                    params: Vec::new(),
+                                    results: Vec::new(),
+                                });
+                                let func_index = cont_ty.0.as_module_index().ok_or_else(|| {
+                                    TranspileError::Unsupported(
+                                        "continuation over a non-module type index".into(),
+                                    )
+                                })?;
+                                type_kinds.push(codegen::CompositeKind::Cont(func_index));
                             }
                         }
                     }

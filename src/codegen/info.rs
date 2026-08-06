@@ -84,6 +84,14 @@ pub(crate) enum CompositeKind {
     Func,
     Struct(Vec<FieldInfo>),
     Array(FieldInfo),
+    /// A continuation type `(cont $ft)` (stack-switching proposal). The payload
+    /// is the module type index of the underlying function type `$ft`, whose
+    /// signature drives `cont.new`/`resume`/`suspend`. A continuation reference
+    /// lowers to a `u32` handle (`u32::MAX` is null), like a `funcref`.
+    // The underlying function type index is read once `cont.new` resolves the
+    // continuation's signature (a later phase); until then it is recorded only.
+    #[expect(dead_code, reason = "read by cont.new in a later phase")]
+    Cont(u32),
 }
 
 /// An imported function: its signature. Imported functions occupy the low end

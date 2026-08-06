@@ -1,4 +1,4 @@
-use wasmparser::{AbstractHeapType, HeapType, RefType, ValType};
+use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, ValType};
 
 use super::super::helpers::mem_accessor;
 use super::super::{Helper, Val};
@@ -217,7 +217,10 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
-    /// `ref.null t` for a `funcref`/`externref`: push the `u32::MAX` sentinel.
+    /// `ref.null t` for a `u32`-backed reference: push the `u32::MAX` sentinel.
+    /// Covers the abstract `funcref`/`externref` and a concrete `(ref null $t)`
+    /// whose type index names a function or continuation type (both lower to a
+    /// `u32` handle).
     pub(super) fn ref_null(&mut self, hty: HeapType) -> Result<(), TranspileError> {
         let ty = match hty {
             HeapType::Abstract {
@@ -228,6 +231,19 @@ impl<'a> super::FuncGen<'a> {
                 ty: AbstractHeapType::Extern,
                 ..
             } => ValType::EXTERNREF,
+            // A concrete funcref/contref type index: form the nullable concrete
+            // ref type and carry the `u32::MAX` handle. (Struct/array indices are
+            // handled earlier by `ref_null_gc`, so anything reaching here is a
+            // `u32`-backed reference.)
+            HeapType::Concrete(idx) => {
+                let module_idx = idx.as_module_index().ok_or_else(|| {
+                    TranspileError::Unsupported("ref.null: non-module type index".into())
+                })?;
+                let packed = PackedIndex::from_module_index(module_idx).ok_or_else(|| {
+                    TranspileError::Unsupported("ref.null: type index too large".into())
+                })?;
+                ValType::Ref(RefType::concrete(true, packed))
+            }
             _ => {
                 return Err(TranspileError::Unsupported(format!(
                     "ref.null of unsupported type {hty:?}"
