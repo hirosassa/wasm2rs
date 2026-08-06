@@ -1021,6 +1021,84 @@ fn switch_round_trips_between_two_continuations() {
 }
 
 #[test]
+fn switch_inside_a_region_transfers_control() {
+    // `switch` nested inside a `block` (P8-2): a switch that crosses a region
+    // takes the flat lowering (the `pc` state machine threaded through the
+    // nesting, as a region-crossing suspend already does) instead of the
+    // arm-splitting path. `$a` switches to `$b` from inside a block; `$b` returns
+    // 11 + 2 = 13 and `$a` stays parked at its switch.
+    compile_run(
+        "cont_switch_in_block",
+        r#"(module
+            (type $ht (func (result i32)))
+            (tag $t (type $ht))
+            (type $fa (func (result i32)))
+            (type $ca (cont $fa))
+            (type $fa_s (func (result i32)))
+            (type $ca_s (cont $fa_s))
+            (type $fb (func (param i32) (param (ref $ca_s)) (result i32)))
+            (type $cb (cont $fb))
+            (func $a (type $fa)
+              (block
+                i32.const 11
+                ref.func $b cont.new $cb
+                switch $cb $t)
+              i32.const 999)
+            (func $b (type $fb)
+              local.get 0 i32.const 2 i32.add)
+            (func (export "run") (type $fa)
+              ref.func $a cont.new $ca
+              resume $ca (on $t switch)))"#,
+        // `$a` is func0 and `$b` is func1 (both step functions); the exported
+        // `run` is func2.
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 13);",
+    );
+}
+
+#[test]
+fn switch_in_a_region_resumes_mid_region_on_switch_back() {
+    // A round trip where `$a`'s switch is inside a `block` and code follows the
+    // switch *within* the block (P8-2). On switch-back, `$a` must resume at the
+    // `pc` state inside the region — the flat lowering's re-entry point — run the
+    // rest of the block (`drop`, `+1`), and only then leave it. `$a` sends 10;
+    // `$b` returns 10 + 2 = 12 and switches it back; `$a` resumes inside the
+    // block, drops the reference, computes 12 + 1 = 13 as the block result, then
+    // 13 + 100 = 113. The mutually-recursive continuation types live in a `rec`.
+    compile_run(
+        "cont_switch_in_region_round_trip",
+        r#"(module
+            (type $ht (func (result i32)))
+            (tag $t (type $ht))
+            (type $fa (func (result i32)))
+            (type $ca (cont $fa))
+            (rec
+              (type $fb (func (param i32) (param (ref $ca2)) (result i32)))
+              (type $cb (cont $fb))
+              (type $fa2 (func (param i32) (param (ref $cb)) (result i32)))
+              (type $ca2 (cont $fa2)))
+            (func $a (type $fa)
+              (block (result i32)
+                i32.const 10
+                ref.func $b cont.new $cb
+                switch $cb $t
+                drop
+                i32.const 1 i32.add)
+              i32.const 100 i32.add)
+            (func $b (type $fb)
+              local.get 0 i32.const 2 i32.add
+              local.get 1
+              switch $ca2 $t
+              drop)
+            (func (export "run") (type $fa)
+              ref.func $a cont.new $ca
+              resume $ca (on $t switch)))"#,
+        // `$a` is func0 and `$b` is func1 (both step functions); the exported
+        // `run` is func2.
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 113);",
+    );
+}
+
+#[test]
 fn null_cont_local_defaults_to_null() {
     // A local typed `(ref null $ct)` defaults to the null handle, so reading it
     // back and testing `ref.is_null` reports null (1) without any assignment.

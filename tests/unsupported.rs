@@ -290,38 +290,6 @@ fn resume_throw_with_suspend_handlers_is_rejected() {
 }
 
 #[test]
-fn switch_inside_a_region_is_rejected() {
-    // `switch` is implemented at the top level of a continuation body (see
-    // tests/cont.rs), where each state is a straight-line arm. A switch nested
-    // inside a `block`/`loop`/`if` would need the `pc` state machine threaded
-    // through the region (the flat lowering, as suspend already does) — phase
-    // 8-2 — so for now it is rejected rather than mistranslated.
-    assert_unsupported(
-        r#"(module
-            (type $ht (func (result i32)))
-            (tag $t (type $ht))
-            (type $fa (func (result i32)))
-            (type $ca (cont $fa))
-            (type $fa_s (func (result i32)))
-            (type $ca_s (cont $fa_s))
-            (type $fb (func (param i32) (param (ref $ca_s)) (result i32)))
-            (type $cb (cont $fb))
-            (func $a (type $fa)
-              (block
-                i32.const 11
-                ref.func $b cont.new $cb
-                switch $cb $t)
-              i32.const 999)
-            (func $b (type $fb)
-              local.get 0 i32.const 2 i32.add)
-            (func (export "run") (type $fa)
-              ref.func $a cont.new $ca
-              resume $ca (on $t switch)))"#,
-        "switch inside nested control flow",
-    );
-}
-
-#[test]
 fn resume_mixing_switch_and_label_handlers_is_rejected() {
     // A single `resume` can carry an `(on $tag switch)` handler (the switch
     // trampoline, see tests/cont.rs) or `(on $tag $label)` suspend handlers, but

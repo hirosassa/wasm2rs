@@ -328,6 +328,20 @@ enum Node {
     /// continuation flattener; every other `Node` consumer treats it as
     /// unreachable.
     Checkpoint { callee: u32, save: String },
+    /// A continuation `switch` point (cont-flatten path only). Like
+    /// [`Node::Suspend`] it splits the `pc` state machine — saving the mutated
+    /// locals (`save`), advancing `__frame.pc` to the switched-back-to state, and
+    /// returning out of the step function — but it returns `StepResult::Switch`,
+    /// transferring control directly to `target` with the encoded `payload`. The
+    /// switched-back-to state receives the self-continuation's parameters as the
+    /// next step's `__args`. Only produced/consumed by the continuation
+    /// flattener; every other `Node` consumer treats it as unreachable.
+    Switch {
+        tag: u32,
+        target: String,
+        payload: String,
+        save: String,
+    },
 }
 
 /// A finished `try` region: the protected body plus its catch handlers.
@@ -416,6 +430,9 @@ fn render_nodes_into(nodes: Vec<Node>, depth: usize, line_prefix: &str, out: &mu
             }
             Node::Checkpoint { .. } => {
                 unreachable!("checkpoint node outside the continuation flattener")
+            }
+            Node::Switch { .. } => {
+                unreachable!("`switch` node outside the continuation flattener")
             }
         }
     }
@@ -854,6 +871,12 @@ fn estimate_body_len(nodes: &[Node]) -> usize {
             }
             Node::Suspend { payload, save, .. } => payload.len() + save.len() + 48,
             Node::Checkpoint { save, .. } => save.len() + 160,
+            Node::Switch {
+                target,
+                payload,
+                save,
+                ..
+            } => target.len() + payload.len() + save.len() + 64,
         })
         .sum()
 }
@@ -1196,6 +1219,30 @@ impl Flattener {
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         state = resume;
                     }
+                    Node::Switch {
+                        tag,
+                        target,
+                        payload,
+                        save,
+                    } => {
+                        // Like `Node::Suspend`, but transfers control to `target`
+                        // rather than parking with a payload: save the mutated
+                        // locals, record the switched-back-to state in `__frame.pc`,
+                        // and hand a `Switch` up (the driving `resume` follows it).
+                        // The code after the switch continues in `resume`, whose
+                        // `__args` are the self-continuation parameters injected when
+                        // control switches back.
+                        let resume = self.alloc();
+                        stmts.push((
+                            0,
+                            format!(
+                                "{save}__frame.pc = {resume}u32; return StepResult::Switch {{ \
+                                 tag: {tag}u32, target: {target}, args: vec![{payload}] }};"
+                            ),
+                        ));
+                        self.arms.push((state, std::mem::take(&mut stmts)));
+                        state = resume;
+                    }
                     Node::Checkpoint { callee, save } => {
                         // The callee drive is re-entered on every callee-suspend
                         // (the next resume re-drives it), so it must occupy its own
@@ -1320,6 +1367,9 @@ impl Flattener {
                 }
                 Node::Checkpoint { .. } => {
                     unreachable!("checkpoint node inside a structured loop")
+                }
+                Node::Switch { .. } => {
+                    unreachable!("`switch` node inside a structured loop")
                 }
             }
         }

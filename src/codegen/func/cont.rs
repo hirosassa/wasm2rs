@@ -153,11 +153,11 @@ impl super::FuncGen<'_> {
         line_prefix: &str,
         out: &mut String,
     ) -> Result<GenMeta, TranspileError> {
-        // A body whose `suspend` (or cross-call checkpoint) crosses a nested
-        // region cannot render each region as one straight-line arm; it needs the
-        // `pc` state machine woven through the nesting, which the flat path does
-        // by lowering the whole body through the continuation flattener.
-        if Self::suspends_cross_region(body)? {
+        // A body whose `suspend` or `switch` crosses a nested region cannot render
+        // each region as one straight-line arm; it needs the `pc` state machine
+        // woven through the nesting, which the flat path does by lowering the whole
+        // body through the continuation flattener.
+        if Self::transfer_crosses_region(body)? {
             return self.emit_cont_step_flat(index, params, body, line_prefix, out);
         }
 
@@ -365,12 +365,13 @@ impl super::FuncGen<'_> {
         })
     }
 
-    /// Whether any `suspend` in `body` occurs inside a nested region (control
-    /// depth > 0). Such a body cannot render each region as a single straight-line
-    /// arm — the `pc` machine must thread through the nesting — so it takes the
-    /// flat path ([`Self::emit_cont_step_flat`]). A body whose suspends are all at
-    /// the top level keeps the simpler arm-splitting lowering.
-    fn suspends_cross_region(body: &FunctionBody<'_>) -> Result<bool, TranspileError> {
+    /// Whether any control-transfer point (`suspend` or `switch`) in `body` occurs
+    /// inside a nested region (control depth > 0). Such a body cannot render each
+    /// region as a single straight-line arm — the `pc` machine must thread through
+    /// the nesting — so it takes the flat path ([`Self::emit_cont_step_flat`]). A
+    /// body whose transfers are all at the top level keeps the simpler
+    /// arm-splitting lowering.
+    fn transfer_crosses_region(body: &FunctionBody<'_>) -> Result<bool, TranspileError> {
         let mut depth: usize = 0;
         for op in body.get_operators_reader()? {
             match op? {
@@ -380,7 +381,9 @@ impl super::FuncGen<'_> {
                 | Operator::Try { .. }
                 | Operator::TryTable { .. } => depth += 1,
                 Operator::End => depth = depth.saturating_sub(1),
-                Operator::Suspend { .. } if depth > 0 => return Ok(true),
+                Operator::Suspend { .. } | Operator::Switch { .. } if depth > 0 => {
+                    return Ok(true);
+                }
                 _ => {}
             }
         }
@@ -414,6 +417,10 @@ impl super::FuncGen<'_> {
         for op in body.get_operators_reader()? {
             match op? {
                 Operator::Suspend { tag_index } => self.emit_suspend_node(tag_index)?,
+                Operator::Switch {
+                    cont_type_index,
+                    tag_index,
+                } => self.emit_switch_node(cont_type_index, tag_index)?,
                 Operator::Call { function_index }
                     if self.ctx.step_set.binary_search(&function_index).is_ok() =>
                 {
@@ -497,6 +504,33 @@ impl super::FuncGen<'_> {
             save,
         });
         self.push_suspend_results(tag_index)
+    }
+
+    /// Record a `switch` as a [`Node::Switch`] in the current scope (flat lowering):
+    /// pop the target continuation handle and encode the payload `t1*`, snapshot
+    /// the operands surviving below (as [`Self::emit_suspend_node`] does), save the
+    /// mutated locals, and push the self-continuation parameters `t2*` — delivered
+    /// as the next step's `__args` when control switches back — as the resumed
+    /// state's initial operands. The flat-path counterpart of the top-level switch
+    /// handling in [`Self::emit_cont_step`].
+    fn emit_switch_node(
+        &mut self,
+        cont_type_index: u32,
+        tag_index: u32,
+    ) -> Result<(), TranspileError> {
+        let (payload_tys, injected_tys) = self.switch_transfer_types(cont_type_index)?;
+        // The target continuation handle is on top; the payload `t1*` sits below it.
+        let target = self.pop()?;
+        let payload = self.pop_encode_tail(&payload_tys)?;
+        let save_ostack = self.save_surviving_operands()?;
+        let save = format!("{save_ostack}{}", self.save_mutated_locals()?);
+        self.cur.push(Node::Switch {
+            tag: tag_index,
+            target: target.code,
+            payload,
+            save,
+        });
+        self.push_injected(&injected_tys)
     }
 
     /// Snapshot the operands surviving a suspend (everything left on the stack
