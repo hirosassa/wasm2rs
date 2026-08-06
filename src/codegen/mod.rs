@@ -1730,8 +1730,12 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
     // `struct Instance`, so a body that uses either forces statefulness even
     // when the module carries no other state. (`ref.func` alone does not — it
     // just pushes a `u32`.)
-    let stateful =
-        has_memory || has_table || has_imports || !globals.is_empty() || uses_call_ref(funcs)?;
+    let stateful = has_memory
+        || has_table
+        || has_imports
+        || !globals.is_empty()
+        || uses_call_ref(funcs)?
+        || uses_array_segment_ops(funcs)?;
 
     let ctx = ModuleCtx {
         imports,
@@ -2045,6 +2049,30 @@ fn uses_call_ref(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
             if matches!(
                 op?,
                 Operator::CallRef { .. } | Operator::ReturnCallRef { .. }
+            ) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Whether any function body uses an array segment operator
+/// (`array.new_data`/`array.init_data`/`array.new_elem`/`array.init_elem`).
+///
+/// These read the retained passive segments (`self.data{d}`/`self.elem{e}`),
+/// which only exist on a `struct Instance`, so a body using any of them forces
+/// statefulness even when the module carries no other state (mirrors how
+/// `call_ref` forces it).
+fn uses_array_segment_ops(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
+    for input in funcs {
+        for op in input.body.get_operators_reader()? {
+            if matches!(
+                op?,
+                Operator::ArrayNewData { .. }
+                    | Operator::ArrayInitData { .. }
+                    | Operator::ArrayNewElem { .. }
+                    | Operator::ArrayInitElem { .. }
             ) {
                 return Ok(true);
             }

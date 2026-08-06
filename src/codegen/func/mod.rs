@@ -785,6 +785,25 @@ impl<'a> FuncGen<'a> {
                 array_type_index_dst,
                 array_type_index_src: _,
             } => self.array_copy(array_type_index_dst)?,
+            // Build/initialise an array from a passive data segment (numeric
+            // elements) or element segment (funcrefs). Using any forces the module
+            // stateful (see `uses_array_segment_ops`).
+            Operator::ArrayNewData {
+                array_type_index,
+                array_data_index,
+            } => self.array_new_data(array_type_index, array_data_index)?,
+            Operator::ArrayInitData {
+                array_type_index,
+                array_data_index,
+            } => self.array_init_data(array_type_index, array_data_index)?,
+            Operator::ArrayNewElem {
+                array_type_index,
+                array_elem_index,
+            } => self.array_new_elem(array_type_index, array_elem_index)?,
+            Operator::ArrayInitElem {
+                array_type_index,
+                array_elem_index,
+            } => self.array_init_elem(array_type_index, array_elem_index)?,
             // Runtime downcasts (phase 4c-1): each object carries its concrete
             // type id, and a target's compile-time descendant set decides the
             // check. The `NonNull` variants target `(ref $t)` (null fails); the

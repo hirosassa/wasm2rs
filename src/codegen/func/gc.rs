@@ -100,6 +100,57 @@ impl SlotShape {
         })
     }
 
+    /// For `array.new_data`/`array.init_data`: the element's byte width and the
+    /// `GcSlot` expression reading one little-endian element from slice `seg` at
+    /// byte index `base`. A reference element type has no in-memory byte encoding,
+    /// so it is rejected (that is what `*.new_elem`/`*.init_elem` are for).
+    fn read_le_bytes(&self, seg: &str, base: &str) -> Result<(usize, String), TranspileError> {
+        let le = |n: usize| {
+            (0..n)
+                .map(|k| format!("{seg}[{base} + {k}]"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        Ok(match self {
+            SlotShape::Packed { mask: 0xFF, .. } => {
+                (1, format!("GcSlot::I32(({seg}[{base}] as i32) & 0xFF)"))
+            }
+            SlotShape::Packed { mask: 0xFFFF, .. } => (
+                2,
+                format!(
+                    "GcSlot::I32((u16::from_le_bytes([{}]) as i32) & 0xFFFF)",
+                    le(2)
+                ),
+            ),
+            SlotShape::Packed { .. } => {
+                return Err(TranspileError::Unsupported(
+                    "array.new_data with an unexpected packed element".into(),
+                ));
+            }
+            SlotShape::Val(ValType::I32) => {
+                (4, format!("GcSlot::I32(i32::from_le_bytes([{}]))", le(4)))
+            }
+            SlotShape::Val(ValType::I64) => {
+                (8, format!("GcSlot::I64(i64::from_le_bytes([{}]))", le(8)))
+            }
+            SlotShape::Val(ValType::F32) => {
+                (4, format!("GcSlot::F32(f32::from_le_bytes([{}]))", le(4)))
+            }
+            SlotShape::Val(ValType::F64) => {
+                (8, format!("GcSlot::F64(f64::from_le_bytes([{}]))", le(8)))
+            }
+            SlotShape::Val(ValType::V128) => (
+                16,
+                format!("GcSlot::V128(u128::from_le_bytes([{}]))", le(16)),
+            ),
+            SlotShape::Func(_) | SlotShape::Val(ValType::Ref(_)) => {
+                return Err(TranspileError::Unsupported(
+                    "array.new_data/init_data with a reference element type".into(),
+                ));
+            }
+        })
+    }
+
     /// The value type the plain (`.get`, no packed extension) read yields.
     fn result_ty(&self) -> ValType {
         match self {
@@ -411,6 +462,125 @@ impl super::FuncGen<'_> {
             srcref.code, src_offset.code, size.code, destref.code, dest_offset.code
         ));
         Ok(())
+    }
+
+    /// `array.new_data $t $d`: operand stack `[offset, size]` (`size` on top).
+    /// Read `size` little-endian numeric elements from passive data segment `$d`,
+    /// starting at byte `offset`, into a fresh array. An out-of-range read of the
+    /// (retained, so drop-aware) segment traps.
+    pub(super) fn array_new_data(
+        &mut self,
+        type_index: u32,
+        data_index: u32,
+    ) -> Result<(), TranspileError> {
+        self.require_passive(&self.ctx.data_passive, data_index, "data")?;
+        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
+        let (esize, slot) = shape.read_le_bytes("__seg", "__base")?;
+        self.freeze_survivors(2)?;
+        let size = self.pop()?;
+        let offset = self.pop()?;
+        let code = format!(
+            "{{ let __seg = self.data{data_index}; \
+             let __off = ({}) as usize; let __n = ({}) as usize; \
+             let mut __v: Vec<GcSlot> = Vec::with_capacity(__n); \
+             for __k in 0..__n {{ let __base = __off + __k * {esize}; __v.push({slot}); }} \
+             GcRef::Obj {{ ty: {type_index}u32, \
+             slots: std::rc::Rc::new(std::cell::RefCell::new(__v)) }} }}",
+            offset.code, size.code
+        );
+        self.materialize(code, Self::concrete_ref_ty(type_index)?)
+    }
+
+    /// `array.init_data $t $d`: operand stack `[arrayref, dest, src, size]`
+    /// (`size` on top). Copy `size` elements from passive data segment `$d` (from
+    /// byte `src`) into the array starting at element `dest`. Out-of-range
+    /// indexing on either side traps.
+    pub(super) fn array_init_data(
+        &mut self,
+        type_index: u32,
+        data_index: u32,
+    ) -> Result<(), TranspileError> {
+        self.require_passive(&self.ctx.data_passive, data_index, "data")?;
+        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
+        let (esize, slot) = shape.read_le_bytes("__seg", "__base")?;
+        self.freeze_survivors(4)?;
+        let size = self.pop()?;
+        let src = self.pop()?;
+        let dest = self.pop()?;
+        let r = self.pop()?;
+        self.line(format!(
+            "{{ let __o = ({}).obj(); let mut __b = __o.borrow_mut(); \
+             let __seg = self.data{data_index}; \
+             let __d = ({}) as usize; let __s = ({}) as usize; let __n = ({}) as usize; \
+             for __k in 0..__n {{ let __base = __s + __k * {esize}; __b[__d + __k] = {slot}; }} }}",
+            r.code, dest.code, src.code, size.code
+        ));
+        Ok(())
+    }
+
+    /// `array.new_elem $t $e`: operand stack `[offset, size]` (`size` on top).
+    /// Read `size` funcrefs from passive element segment `$e`, starting at index
+    /// `offset`, into a fresh array. The array element type must be a funcref
+    /// (`GcSlot::Func`). An out-of-range read traps.
+    pub(super) fn array_new_elem(
+        &mut self,
+        type_index: u32,
+        elem_index: u32,
+    ) -> Result<(), TranspileError> {
+        self.require_passive(&self.ctx.elem_passive, elem_index, "elem")?;
+        self.require_func_element(type_index, "array.new_elem")?;
+        self.freeze_survivors(2)?;
+        let size = self.pop()?;
+        let offset = self.pop()?;
+        let code = format!(
+            "{{ let __seg = self.elem{elem_index}; \
+             let __off = ({}) as usize; let __n = ({}) as usize; \
+             let mut __v: Vec<GcSlot> = Vec::with_capacity(__n); \
+             for __k in 0..__n {{ __v.push(GcSlot::Func(__seg[__off + __k])); }} \
+             GcRef::Obj {{ ty: {type_index}u32, \
+             slots: std::rc::Rc::new(std::cell::RefCell::new(__v)) }} }}",
+            offset.code, size.code
+        );
+        self.materialize(code, Self::concrete_ref_ty(type_index)?)
+    }
+
+    /// `array.init_elem $t $e`: operand stack `[arrayref, dest, src, size]`
+    /// (`size` on top). Copy `size` funcrefs from passive element segment `$e`
+    /// (from index `src`) into the array starting at element `dest`. The array
+    /// element type must be a funcref. Out-of-range indexing traps.
+    pub(super) fn array_init_elem(
+        &mut self,
+        type_index: u32,
+        elem_index: u32,
+    ) -> Result<(), TranspileError> {
+        self.require_passive(&self.ctx.elem_passive, elem_index, "elem")?;
+        self.require_func_element(type_index, "array.init_elem")?;
+        self.freeze_survivors(4)?;
+        let size = self.pop()?;
+        let src = self.pop()?;
+        let dest = self.pop()?;
+        let r = self.pop()?;
+        self.line(format!(
+            "{{ let __o = ({}).obj(); let mut __b = __o.borrow_mut(); \
+             let __seg = self.elem{elem_index}; \
+             let __d = ({}) as usize; let __s = ({}) as usize; let __n = ({}) as usize; \
+             for __k in 0..__n {{ __b[__d + __k] = GcSlot::Func(__seg[__s + __k]); }} }}",
+            r.code, dest.code, src.code, size.code
+        ));
+        Ok(())
+    }
+
+    /// Require array type `type_index`'s element to be a funcref/externref
+    /// (`GcSlot::Func`-backed), the only element an element segment can fill.
+    fn require_func_element(&self, type_index: u32, op: &str) -> Result<(), TranspileError> {
+        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
+        if matches!(shape, SlotShape::Func(_)) {
+            Ok(())
+        } else {
+            Err(TranspileError::Unsupported(format!(
+                "{op} needs a funcref array element type"
+            )))
+        }
     }
 
     /// The `matches!(<ty_expr>, d0 | d1 | ...)` membership test deciding whether
