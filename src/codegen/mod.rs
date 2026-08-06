@@ -1581,7 +1581,17 @@ struct ModuleCtx<'a> {
     /// `ref.func` fed into `cont.new`), sorted and deduplicated. These are
     /// emitted as resumable `cont_step_func{N}` state machines rather than
     /// ordinary `func{N}`s, and drive the `ContObj`/`ContFrame` runtime types.
+    /// These are the resumable *entry points* (handles created by `cont.new`).
     cont_bodies: Vec<u32>,
+    /// Every function emitted as a `cont_step_func{N}`: the continuation bodies
+    /// plus every function reachable from one through a suspend-crossing `call`.
+    /// A superset of `cont_bodies`, sorted. Each gets a `ContFrame{N}`, but only
+    /// `cont_bodies` get a `ContObj` variant and a `conts`-table handle.
+    step_set: Vec<u32>,
+    /// Per step function, the callee of its tail cross-call checkpoint (a `call`
+    /// to another step function). The callee's frame nests inside the caller's
+    /// `ContFrame` as its `sub` field.
+    checkpoint_callee: HashMap<u32, u32>,
 }
 
 impl ModuleCtx<'_> {
@@ -1743,7 +1753,21 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
     // Continuations carry per-instance state (the `conts` handle table), so any
     // module that creates one is stateful even without other mutable state.
     let cont_bodies = continuation_bodies(funcs)?;
-    reject_dual_use_continuations(funcs, elements, &cont_bodies)?;
+    let n_imports = imports.len();
+    let can_suspend = can_suspend_functions(funcs, n_imports)?;
+    let (step_set, checkpoint_callee) =
+        step_functions(funcs, n_imports, &cont_bodies, &can_suspend)?;
+    // A function that can suspend but is not a step function would be emitted as
+    // an ordinary `func{N}` and choke on its `suspend`; it is either dead or a
+    // misuse (suspending outside any continuation). Surface it cleanly.
+    for f in &can_suspend {
+        if step_set.binary_search(f).is_err() {
+            return Err(TranspileError::Unsupported(
+                "function can suspend but is not reachable as a continuation (phase 5)".into(),
+            ));
+        }
+    }
+    reject_dual_use_continuations(funcs, elements, &step_set, n_imports)?;
     let stateful = has_memory
         || has_table
         || has_imports
@@ -1776,6 +1800,8 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         uses_extern_box,
         tags: parts.tags.iter().map(|t| t.params.clone()).collect(),
         cont_bodies,
+        step_set,
+        checkpoint_callee,
     };
     Ok((ctx, stateful))
 }
@@ -1982,9 +2008,10 @@ fn generate_function_into(
     out: &mut String,
 ) -> Result<GenMeta, TranspileError> {
     let mut func = FuncGen::new(input.params, input.results, input.body, ctx)?;
-    // A continuation body is emitted as a resumable `cont_step_func{N}` state
-    // machine instead of an ordinary `func{N}`.
-    if ctx.cont_bodies.contains(&index_u32(index)?) {
+    // A step function (a continuation body, or a function reached from one
+    // through a suspend-crossing call) is emitted as a resumable
+    // `cont_step_func{N}` state machine instead of an ordinary `func{N}`.
+    if ctx.step_set.binary_search(&index_u32(index)?).is_ok() {
         return func.emit_cont_step(index, input.params, input.body, line_prefix, out);
     }
     func.run(input.body)?;
@@ -2147,42 +2174,164 @@ fn continuation_bodies(funcs: &[FuncInput<'_>]) -> Result<Vec<u32>, TranspileErr
     Ok(bodies)
 }
 
-/// Reject phase-4-unsupported uses of a continuation-bodied function. Such a
-/// function is emitted only as a resumable `cont_step_func{N}`, never as an
-/// ordinary `func{N}`, so any path that would reach `func{N}` — a direct
-/// `call`/`return_call`, a `ref.func` used for anything other than the
-/// immediately-following `cont.new`, or an element-segment entry feeding
-/// `call_indirect` — would reference a method that is never emitted. Surface a
-/// clean `Unsupported` rather than emitting Rust that fails to compile.
+/// The functions that can transitively reach a `suspend`: either directly in
+/// their own body, or through a `call`/`return_call` to another function that
+/// can. Computed as a fixpoint over the direct-call graph (full index space).
+///
+/// Indirect edges (`call_indirect`/`call_ref`) are deliberately ignored: a step
+/// function may not cross them (they are rejected), and a continuation step
+/// function is barred from appearing in an element segment, so no indirect edge
+/// can reach one. Imported functions never suspend (they have no body).
+fn can_suspend_functions(
+    funcs: &[FuncInput<'_>],
+    n_imports: usize,
+) -> Result<HashSet<u32>, TranspileError> {
+    let mut suspends = vec![false; funcs.len()];
+    let mut calls: Vec<Vec<u32>> = vec![Vec::new(); funcs.len()];
+    for (i, input) in funcs.iter().enumerate() {
+        for op in input.body.get_operators_reader()? {
+            match op? {
+                Operator::Suspend { .. } => suspends[i] = true,
+                Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
+                    calls[i].push(function_index);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut can: HashSet<u32> = HashSet::new();
+    for (i, &s) in suspends.iter().enumerate() {
+        if s {
+            can.insert(index_u32(n_imports + i)?);
+        }
+    }
+    loop {
+        let mut changed = false;
+        for (i, callees) in calls.iter().enumerate() {
+            let fidx = index_u32(n_imports + i)?;
+            if !can.contains(&fidx) && callees.iter().any(|g| can.contains(g)) {
+                can.insert(fidx);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(can)
+}
+
+/// The functions emitted as resumable `cont_step_func{N}` state machines: every
+/// continuation body, plus every function transitively reachable from one
+/// through a suspend-crossing `call` (a call to a function that can suspend).
+///
+/// Also returns, per step function, the callee of its single tail cross-call
+/// checkpoint (the last `call` to another step function), used to nest that
+/// callee's frame inside the caller's. A recursive checkpoint chain would give
+/// an infinitely-nested frame, so it is rejected here.
+fn step_functions(
+    funcs: &[FuncInput<'_>],
+    n_imports: usize,
+    cont_bodies: &[u32],
+    can_suspend: &HashSet<u32>,
+) -> Result<(Vec<u32>, HashMap<u32, u32>), TranspileError> {
+    let mut calls: Vec<Vec<u32>> = vec![Vec::new(); funcs.len()];
+    for (i, input) in funcs.iter().enumerate() {
+        for op in input.body.get_operators_reader()? {
+            if let Operator::Call { function_index } | Operator::ReturnCall { function_index } = op?
+            {
+                calls[i].push(function_index);
+            }
+        }
+    }
+    let defined_index = |f: u32| (f as usize).checked_sub(n_imports);
+
+    let mut step: std::collections::BTreeSet<u32> = cont_bodies.iter().copied().collect();
+    loop {
+        let mut changed = false;
+        for f in step.iter().copied().collect::<Vec<_>>() {
+            let Some(di) = defined_index(f) else { continue };
+            for &g in &calls[di] {
+                if can_suspend.contains(&g) && step.insert(g) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // The tail checkpoint is the *first* call to another step function, matching
+    // `begin_checkpoint`, which accepts the first and rejects any later one (only
+    // one cross-call checkpoint is allowed per body in phase 5).
+    let mut checkpoint: HashMap<u32, u32> = HashMap::new();
+    for &f in &step {
+        let Some(di) = defined_index(f) else { continue };
+        if let Some(&g) = calls[di].iter().find(|g| step.contains(g)) {
+            checkpoint.insert(f, g);
+        }
+    }
+    // A checkpoint chain that loops back would nest frames without bound.
+    for &start in checkpoint.keys() {
+        let mut cur = start;
+        for _ in 0..=step.len() {
+            match checkpoint.get(&cur) {
+                Some(&next) => cur = next,
+                None => break,
+            }
+        }
+        if checkpoint.contains_key(&cur) {
+            return Err(TranspileError::Unsupported(
+                "recursive continuation call chain (phase 5)".into(),
+            ));
+        }
+    }
+
+    Ok((step.into_iter().collect(), checkpoint))
+}
+
+/// Reject uses of a continuation step function that would need an ordinary
+/// `func{N}` method. A step function is emitted only as a resumable
+/// `cont_step_func{N}`, so a direct `call`/`return_call` from a *non-step*
+/// function, a `ref.func` used for anything but the immediately-following
+/// `cont.new`, or an element-segment entry (which feeds `call_indirect`) would
+/// all reference a method that is never emitted. A `call` from *within* another
+/// step function is the legitimate cross-call checkpoint and is allowed.
 fn reject_dual_use_continuations(
     funcs: &[FuncInput<'_>],
     elements: &[ElemSegment],
-    cont_bodies: &[u32],
+    step_set: &[u32],
+    n_imports: usize,
 ) -> Result<(), TranspileError> {
-    if cont_bodies.is_empty() {
+    if step_set.is_empty() {
         return Ok(());
     }
-    for input in funcs {
+    let is_step = |f: u32| step_set.binary_search(&f).is_ok();
+    for (i, input) in funcs.iter().enumerate() {
+        let container_is_step = is_step(index_u32(n_imports + i)?);
         // A `ref.func` awaiting its consumer; legitimate only when the very next
         // operator is the `cont.new` that turns it into a continuation handle.
         let mut pending_ref_func: Option<u32> = None;
         for op in input.body.get_operators_reader()? {
             let op = op?;
             if let Some(f) = pending_ref_func.take()
-                && cont_bodies.binary_search(&f).is_ok()
+                && is_step(f)
                 && !matches!(op, Operator::ContNew { .. })
             {
                 return Err(TranspileError::Unsupported(
-                    "continuation-body function used as a plain funcref (phase 4)".into(),
+                    "continuation step function used as a plain funcref (phase 5)".into(),
                 ));
             }
             match op {
                 Operator::RefFunc { function_index } => pending_ref_func = Some(function_index),
                 Operator::Call { function_index } | Operator::ReturnCall { function_index }
-                    if cont_bodies.binary_search(&function_index).is_ok() =>
+                    if is_step(function_index) && !container_is_step =>
                 {
                     return Err(TranspileError::Unsupported(
-                        "continuation-body function is also called directly (phase 4)".into(),
+                        "continuation step function is called directly outside a continuation \
+                         (phase 5)"
+                            .into(),
                     ));
                 }
                 _ => {}
@@ -2190,13 +2339,9 @@ fn reject_dual_use_continuations(
         }
     }
     for seg in elements {
-        if seg
-            .funcs
-            .iter()
-            .any(|f| cont_bodies.binary_search(f).is_ok())
-        {
+        if seg.funcs.iter().any(|f| is_step(*f)) {
             return Err(TranspileError::Unsupported(
-                "continuation-body function appears in an element segment (phase 4)".into(),
+                "continuation step function appears in an element segment (phase 5)".into(),
             ));
         }
     }

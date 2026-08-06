@@ -154,6 +154,77 @@ fn generator_split_across_files() {
 }
 
 #[test]
+fn suspend_propagates_across_a_call() {
+    // Cross-call suspend propagation (P5). The continuation body `$f` suspends
+    // once itself (yielding 1), then `call`s `$g`, which suspends once (yielding
+    // 7) before returning 100. `$g`'s suspend must unwind through `$f` up to the
+    // top-level resumer, and resuming must re-enter `$f` at the call checkpoint
+    // and drive `$g` to completion. The driver accumulates 1 + 7 + 100 = 108.
+    compile_run(
+        "cont_call_propagate",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $f (result i32)
+              i32.const 1 suspend $yield
+              call $g)
+            (func $g (result i32)
+              i32.const 7 suspend $yield
+              i32.const 100)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $f cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        // `$f` is func0 (a step function), `$g` func1 (also a step function),
+        // the exported `run` is func2.
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 108);",
+    );
+}
+
+#[test]
+fn checkpoint_result_may_be_discarded() {
+    // The continuation body `$f` `call`s `$g` (which suspends once, yielding 7,
+    // then returns 100) but `drop`s `$g`'s result and returns its own constant
+    // (7) instead. This exercises the checkpoint arm's `_`-bound return path (the
+    // callee's `StepResult::Return` payload is not read), while still driving
+    // `$g` to completion across its suspend. The driver accumulates 7 + 7 = 14.
+    compile_run(
+        "cont_call_discard",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $f (result i32)
+              call $g
+              drop
+              i32.const 7)
+            (func $g (result i32)
+              i32.const 7 suspend $yield
+              i32.const 100)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $f cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 14);",
+    );
+}
+
+#[test]
 fn null_cont_local_defaults_to_null() {
     // A local typed `(ref null $ct)` defaults to the null handle, so reading it
     // back and testing `ref.is_null` reports null (1) without any assignment.

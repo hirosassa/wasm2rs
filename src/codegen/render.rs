@@ -544,9 +544,16 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "}".to_string(),
         String::new(),
     ];
-    for n in &ctx.cont_bodies {
+    for n in &ctx.step_set {
         lines.push("#[allow(dead_code)]".to_string());
-        lines.push(format!("pub struct ContFrame{n} {{ pc: u32 }}"));
+        // A step function that ends in a cross-call checkpoint nests its
+        // callee's frame as `sub`, so the resumable callee survives suspends.
+        match ctx.checkpoint_callee.get(n) {
+            Some(g) => lines.push(format!(
+                "pub struct ContFrame{n} {{ pc: u32, sub: ContFrame{g} }}"
+            )),
+            None => lines.push(format!("pub struct ContFrame{n} {{ pc: u32 }}")),
+        }
     }
     lines.push(String::new());
     lines.push("#[allow(dead_code)]".to_string());
@@ -556,6 +563,20 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
     }
     lines.push("}".to_string());
     lines
+}
+
+/// The start-state literal for a step function's frame: `pc` 0 and, when the
+/// function ends in a cross-call checkpoint, a freshly-started callee frame in
+/// `sub` (recursively). The checkpoint graph is acyclic (a recursive chain is
+/// rejected during context building), so this recursion terminates.
+fn frame_start_literal(ctx: &ModuleCtx<'_>, n: u32) -> String {
+    match ctx.checkpoint_callee.get(&n) {
+        Some(g) => format!(
+            "ContFrame{n} {{ pc: 0u32, sub: {} }}",
+            frame_start_literal(ctx, *g)
+        ),
+        None => format!("ContFrame{n} {{ pc: 0u32 }}"),
+    }
 }
 
 /// The `cont_new`/`cont_step` methods on `Instance`. `cont_new` allocates a
@@ -570,7 +591,8 @@ fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
     ];
     for n in &ctx.cont_bodies {
         lines.push(format!(
-            "        {n}u32 => ContObj::C{n}(ContFrame{n} {{ pc: 0u32 }}),"
+            "        {n}u32 => ContObj::C{n}({}),",
+            frame_start_literal(ctx, *n)
         ));
     }
     lines.extend([

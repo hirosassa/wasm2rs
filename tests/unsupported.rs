@@ -244,17 +244,18 @@ fn set_of_an_immutable_global_is_rejected() {
 }
 
 #[test]
-fn unsupported_cont_operator_is_rejected() {
-    // A `continuation` type now parses and lowers its reference to a `u32`
-    // handle, and `cont.new` produces a live handle (see tests/cont.rs), but the
-    // resuming/suspending *operators* are not yet implemented, so `suspend` is
-    // rejected by name rather than mistranslated.
+fn suspend_outside_a_continuation_is_rejected() {
+    // `suspend`/`resume` are now implemented for continuations (see
+    // tests/cont.rs), including propagation across calls. But `suspend` only
+    // makes sense inside a function reachable as a continuation body: a bare
+    // `suspend` in a function that is never turned into a continuation would
+    // suspend with no handler, so it is rejected rather than mistranslated.
     assert_unsupported(
         r#"(module
             (type $ft (func))
             (tag $t)
             (func $f suspend $t))"#,
-        "operator Suspend",
+        "not reachable as a continuation",
     );
 }
 

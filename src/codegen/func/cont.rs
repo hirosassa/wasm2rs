@@ -18,7 +18,7 @@
 
 use wasmparser::{FunctionBody, Operator, ValType};
 
-use super::super::{CompositeKind, GenMeta, TypeSig};
+use super::super::{CompositeKind, GenMeta, TypeSig, Val};
 use crate::TranspileError;
 
 /// Encode a wasm value (given its Rust expression `code` and type) into the
@@ -106,9 +106,21 @@ impl super::FuncGen<'_> {
         // Each element is one `pc` state's arm expression (a `StepResult`).
         let mut arms: Vec<String> = Vec::new();
         let mut pc: u32 = 0;
+        // A pending tail cross-call checkpoint: a `call` to another step
+        // function whose result becomes (part of) this function's result. The
+        // arm it produces wraps its callee's `StepResult`, so it is only closed
+        // out at `End`.
+        let mut checkpoint: Option<u32> = None;
         for op in body.get_operators_reader()? {
             match op? {
                 Operator::Suspend { tag_index } => {
+                    if checkpoint.is_some() {
+                        return Err(TranspileError::Unsupported(
+                            "suspend after a cross-call checkpoint (phase 5: a checkpoint must be \
+                             in tail position)"
+                                .into(),
+                        ));
+                    }
                     let payload_tys = self
                         .ctx
                         .tags
@@ -125,12 +137,46 @@ impl super::FuncGen<'_> {
                     ));
                     pc = next;
                 }
+                Operator::Call { function_index }
+                    if self.ctx.step_set.binary_search(&function_index).is_ok() =>
+                {
+                    self.begin_checkpoint(function_index, &mut checkpoint)?;
+                }
+                Operator::ReturnCall { function_index }
+                    if self.ctx.step_set.binary_search(&function_index).is_ok() =>
+                {
+                    return Err(TranspileError::Unsupported(
+                        "return_call across a continuation (phase 5)".into(),
+                    ));
+                }
                 Operator::End => {
                     // No nested control flow is allowed, so this is the function
                     // end: the remaining stack is the function's results.
                     let results = self.results.clone();
                     let payload = self.encode_stack_tail(&results)?;
-                    arms.push(format!("StepResult::Return(vec![{payload}])"));
+                    let arm = match checkpoint {
+                        // The tail checkpoint resumes its callee once: on the
+                        // callee's suspend, propagate it up unchanged (this
+                        // frame's `pc` is untouched, so the next resume re-enters
+                        // here and drives the callee on); on the callee's return,
+                        // its results (already on the operand stack as `__cret`
+                        // reads) become this function's results.
+                        Some(g) => {
+                            let bind = if payload.contains("__cret") {
+                                "__cret"
+                            } else {
+                                "_"
+                            };
+                            format!(
+                                "match self.cont_step_func{g}(&mut __frame.sub) {{ \
+                                 StepResult::Suspend {{ tag: __t, payload: __p }} => \
+                                 StepResult::Suspend {{ tag: __t, payload: __p }}, \
+                                 StepResult::Return({bind}) => StepResult::Return(vec![{payload}]) }}"
+                            )
+                        }
+                        None => format!("StepResult::Return(vec![{payload}])"),
+                    };
+                    arms.push(arm);
                     break;
                 }
                 other @ (Operator::Block { .. }
@@ -182,6 +228,49 @@ impl super::FuncGen<'_> {
             dispatch_sigs: self.dispatch_sigs,
             uses_eh: self.uses_eh,
         })
+    }
+
+    /// Begin a tail cross-call checkpoint: a `call` to another step function
+    /// `callee`. Like a suspend point, this requires a clean boundary — an empty
+    /// operand stack (the callee takes no arguments in phase 5) and no pending
+    /// statements — so that re-entering the arm on each callee-suspend re-runs
+    /// nothing side-effecting before the resumed call. The callee's results are
+    /// pushed as operands reading the `__cret` binding the arm introduces at
+    /// `End`; only one such checkpoint is allowed per body.
+    fn begin_checkpoint(
+        &mut self,
+        callee: u32,
+        checkpoint: &mut Option<u32>,
+    ) -> Result<(), TranspileError> {
+        if checkpoint.is_some() {
+            return Err(TranspileError::Unsupported(
+                "more than one cross-call checkpoint in a continuation body (phase 5)".into(),
+            ));
+        }
+        let (params, results) = self.ctx.full_sig(callee as usize).ok_or_else(|| {
+            TranspileError::Unsupported("checkpoint call to unknown function".into())
+        })?;
+        if !params.is_empty() {
+            return Err(TranspileError::Unsupported(
+                "cross-call checkpoint to a continuation with parameters (phase 5)".into(),
+            ));
+        }
+        let results = results.to_vec();
+        if !self.stack.is_empty() || !self.cur.is_empty() {
+            return Err(TranspileError::Unsupported(
+                "non-empty operand stack before a cross-call checkpoint (phase 5)".into(),
+            ));
+        }
+        for (i, ty) in results.iter().enumerate() {
+            let code = decode_from_i64(&format!("__cret[{i}]"), *ty)?;
+            self.push(Val {
+                code,
+                ty: *ty,
+                stable: true,
+            });
+        }
+        *checkpoint = Some(callee);
+        Ok(())
     }
 
     /// Pop the top `tys.len()` operands (the tail matching `tys`, deepest first)
