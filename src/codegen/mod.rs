@@ -588,14 +588,14 @@ struct Wasm2RsException {
 const GCREF_DEF: &str = "\
 #[derive(Clone)]
 #[allow(dead_code)]
-enum GcRef {
+pub enum GcRef {
     Null,
-    Obj(std::rc::Rc<std::cell::RefCell<Vec<GcSlot>>>),
+    Obj { ty: u32, slots: std::rc::Rc<std::cell::RefCell<Vec<GcSlot>>> },
 }
 
 #[derive(Clone)]
 #[allow(dead_code)]
-enum GcSlot {
+pub enum GcSlot {
     I32(i32),
     I64(i64),
     F32(f32),
@@ -608,7 +608,7 @@ enum GcSlot {
 impl GcRef {
     fn obj(&self) -> std::rc::Rc<std::cell::RefCell<Vec<GcSlot>>> {
         match self {
-            GcRef::Obj(o) => o.clone(),
+            GcRef::Obj { slots, .. } => slots.clone(),
             GcRef::Null => panic!(\"null reference\"),
         }
     }
@@ -1534,6 +1534,11 @@ struct ModuleCtx<'a> {
     /// reference and the struct/array operators can resolve field/element
     /// storage and pick the right value lowering.
     type_kinds: &'a [CompositeKind],
+    /// The declared direct supertype of every type index (`None` when a type
+    /// declares no supertype), parallel to `type_kinds`. A runtime downcast
+    /// check (`ref.test`/`ref.cast`/`br_on_cast`) walks this chain to compute
+    /// the set of concrete subtypes of a static target.
+    supers: &'a [Option<u32>],
     /// Per-imported-global `(type, mutable)`, occupying the low global indices.
     imported_globals: Vec<(ValType, bool)>,
     /// Per-defined-global `(type, mutable)`, indexed after the imported globals.
@@ -1569,6 +1574,38 @@ struct ModuleCtx<'a> {
 }
 
 impl ModuleCtx<'_> {
+    /// Every concrete struct/array type index whose declared supertype chain
+    /// reaches `target` (including `target` itself when it is a struct/array).
+    ///
+    /// The whole type hierarchy is known statically, so a runtime downcast to a
+    /// static `target` reduces to membership in this set of concrete type ids.
+    /// The chain is walked per candidate; a cycle (which a validated module
+    /// cannot contain) is guarded by a hop budget so the walk always terminates.
+    fn concrete_descendants(&self, target: u32) -> Vec<u32> {
+        let n = self.type_kinds.len();
+        self.type_kinds
+            .iter()
+            .enumerate()
+            // A candidate must be a concrete struct/array type with a
+            // representable index (a valid module never overflows `u32`).
+            .filter(|(_, kind)| matches!(kind, CompositeKind::Struct(_) | CompositeKind::Array(_)))
+            .filter_map(|(i, _)| index_u32(i).ok())
+            .filter(|&t| {
+                // Walk `t`'s super chain, bounded by the type count, looking for
+                // `target` (a type is trivially a subtype of itself).
+                let mut cur = Some(t);
+                for _ in 0..=n {
+                    match cur {
+                        Some(c) if c == target => return true,
+                        Some(c) => cur = self.supers.get(c as usize).copied().flatten(),
+                        None => return false,
+                    }
+                }
+                false
+            })
+            .collect()
+    }
+
     /// The number of functions in the shared index space (imports then defined),
     /// i.e. the range of valid full indices.
     fn func_count(&self) -> usize {
@@ -1620,6 +1657,9 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) funcs: &'a [FuncInput<'a>],
     pub(crate) types: &'a [TypeSig],
     pub(crate) type_kinds: &'a [CompositeKind],
+    /// The declared direct supertype of every type index (`None` when none),
+    /// parallel to `type_kinds`. Drives the runtime subtype checks.
+    pub(crate) supers: &'a [Option<u32>],
     pub(crate) globals: &'a [GlobalInfo],
     /// Every linear memory, in index order (imported memories first, then
     /// defined). Empty when the module declares none.
@@ -1644,6 +1684,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         funcs,
         types,
         type_kinds,
+        supers,
         globals,
         memories,
         data,
@@ -1695,6 +1736,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         funcs,
         types,
         type_kinds,
+        supers,
         imported_globals: imported_globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,

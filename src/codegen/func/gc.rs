@@ -152,7 +152,8 @@ impl super::FuncGen<'_> {
             slots[i] = shape.wrap(&v.code)?;
         }
         let obj = format!(
-            "GcRef::Obj(std::rc::Rc::new(std::cell::RefCell::new(vec![{}])))",
+            "GcRef::Obj {{ ty: {type_index}u32, \
+             slots: std::rc::Rc::new(std::cell::RefCell::new(vec![{}])) }}",
             slots.join(", ")
         );
         // An allocation is not re-evaluatable, so bind it to a stable temp.
@@ -220,7 +221,8 @@ impl super::FuncGen<'_> {
         let slot = shape.wrap(&init.code)?;
         let code = format!(
             "{{ let __n = ({}) as usize; \
-             GcRef::Obj(std::rc::Rc::new(std::cell::RefCell::new(vec![{slot}; __n]))) }}",
+             GcRef::Obj {{ ty: {type_index}u32, \
+             slots: std::rc::Rc::new(std::cell::RefCell::new(vec![{slot}; __n])) }} }}",
             size.code
         );
         self.materialize(code, Self::concrete_ref_ty(type_index)?)
@@ -268,6 +270,121 @@ impl super::FuncGen<'_> {
             format!("(({}).obj().borrow().len() as i32)", r.code),
             ValType::I32,
             false,
+        )
+    }
+
+    /// The `matches!(<ty_expr>, d0 | d1 | ...)` membership test deciding whether
+    /// a runtime concrete type id (`ty_expr`) is a subtype of the static target
+    /// `T` — i.e. is in `T`'s descendant set. An empty set yields `false` (no
+    /// concrete type can match), avoiding an empty `matches!` pattern.
+    fn subtype_member(&self, ty_expr: &str, target: u32) -> String {
+        let desc = self.ctx.concrete_descendants(target);
+        if desc.is_empty() {
+            return "false".to_string();
+        }
+        let arms = desc
+            .iter()
+            .map(|d| format!("{d}u32"))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        format!("matches!({ty_expr}, {arms})")
+    }
+
+    /// A `match &<ref_expr> { ... }` yielding a Rust `bool`: whether the ref's
+    /// runtime type is a subtype of the static target `T`. `null_matches` picks
+    /// how the null handle is classified (a nullable target matches null).
+    fn cast_test_bool(&self, ref_expr: &str, target: u32, null_matches: bool) -> String {
+        let member = self.subtype_member("*ty", target);
+        format!(
+            "match &({ref_expr}) {{ GcRef::Null => {null_matches}, \
+             GcRef::Obj {{ ty, .. }} => {member} }}"
+        )
+    }
+
+    /// `ref.test`: pop the ref and push an `i32` (`1`/`0`) reporting whether its
+    /// runtime type is a subtype of the target heap type. `null_matches` is set
+    /// for the nullable variant (`ref.test (ref null $t)`) and clear for the
+    /// non-null variant, which the surrounding operator dispatch selects.
+    pub(super) fn ref_test(
+        &mut self,
+        hty: wasmparser::HeapType,
+        null_matches: bool,
+    ) -> Result<(), TranspileError> {
+        let target = self.gc_type_index(hty).ok_or_else(|| {
+            TranspileError::Unsupported("ref.test on a non-struct/array target".into())
+        })?;
+        let r = self.pop()?;
+        let test = self.cast_test_bool(&r.code, target, null_matches);
+        self.materialize(format!("i32::from({test})"), ValType::I32)
+    }
+
+    /// `ref.cast`: pop the ref, trap if its runtime type is not a subtype of the
+    /// target, and push the same handle typed as the target reference. The
+    /// nullability of the target (`null_matches`) decides whether null passes.
+    pub(super) fn ref_cast(
+        &mut self,
+        hty: wasmparser::HeapType,
+        null_matches: bool,
+    ) -> Result<(), TranspileError> {
+        let target = self.gc_type_index(hty).ok_or_else(|| {
+            TranspileError::Unsupported("ref.cast on a non-struct/array target".into())
+        })?;
+        let r = self.pop()?;
+        let test = self.cast_test_bool("__r", target, null_matches);
+        let code = format!(
+            "{{ let __r = ({}); if {test} {{ __r }} else {{ panic!(\"ref.cast failed\") }} }}",
+            r.code
+        );
+        self.materialize(code, Self::concrete_ref_ty(target)?)
+    }
+
+    /// `br_on_cast`/`br_on_cast_fail`: branch to `depth` on (respectively) a
+    /// successful/failed downcast of the stack-top ref to `to_ref_type`, leaving
+    /// it on the stack for the fall-through path. Both `from`/`to` ref types
+    /// lower to `GcRef`, so only the stack `Val.ty` differs between the paths.
+    pub(super) fn br_on_cast(
+        &mut self,
+        depth: u32,
+        from_ref_type: wasmparser::RefType,
+        to_ref_type: wasmparser::RefType,
+        on_success: bool,
+    ) -> Result<(), TranspileError> {
+        let target = self.gc_type_index(to_ref_type.heap_type()).ok_or_else(|| {
+            TranspileError::Unsupported("br_on_cast to a non-struct/array target".into())
+        })?;
+        // Pin the ref into a stable temp so the branch carries it on the taken
+        // path and leaves the same value on the stack for fall-through, without
+        // re-evaluating (and so re-allocating) the operand.
+        let r = self.pop()?;
+        let temp = self.fresh_temp();
+        self.line(format!("let {temp}: GcRef = {};", r.code));
+        // The condition tests the runtime type against `to_ref_type` (whose
+        // nullability decides how null is treated). `br_on_cast` branches on a
+        // match; `br_on_cast_fail` branches on the complement.
+        let matches = self.cast_test_bool(&temp, target, to_ref_type.is_nullable());
+        let cond = if on_success {
+            format!("i32::from({matches})")
+        } else {
+            format!("i32::from(!({matches}))")
+        };
+        // The fall-through type is the one *not* carried on the branch.
+        let fallthrough_ty = if on_success {
+            ValType::Ref(from_ref_type)
+        } else {
+            ValType::Ref(to_ref_type)
+        };
+        self.push(Val {
+            code: temp,
+            ty: fallthrough_ty,
+            stable: true,
+        });
+        self.branch(
+            depth,
+            Some(Val {
+                code: cond,
+                ty: ValType::I32,
+                stable: true,
+            }),
         )
     }
 

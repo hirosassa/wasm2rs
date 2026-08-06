@@ -160,6 +160,10 @@ where
     // lowering. A non-function type still occupies a `signatures` slot (an empty
     // placeholder) to keep the shared index space aligned for func lookups.
     let mut type_kinds: Vec<codegen::CompositeKind> = Vec::new();
+    // The declared direct supertype of every type index (`None` when a type
+    // declares no supertype), parallel to `type_kinds`. Drives the runtime
+    // subtype checks emitted for `ref.test`/`ref.cast`/`br_on_cast`.
+    let mut supers: Vec<Option<u32>> = Vec::new();
     let mut func_type_indices: Vec<u32> = Vec::new();
     let mut bodies: Vec<wasmparser::FunctionBody> = Vec::new();
     let mut globals: Vec<codegen::GlobalInfo> = Vec::new();
@@ -181,6 +185,10 @@ where
             Payload::TypeSection(reader) => {
                 for group in reader {
                     for sub in group?.types() {
+                        // Record the direct supertype (if any) before matching
+                        // the kind, keeping `supers` aligned with the type index
+                        // space so a subtype chain can be walked at codegen time.
+                        supers.push(sub.supertype_idx.and_then(|p| p.as_module_index()));
                         match &sub.composite_type.inner {
                             CompositeInnerType::Func(func_ty) => {
                                 signatures.push(signature_from(func_ty));
@@ -446,6 +454,7 @@ where
         funcs: &funcs,
         types: &types,
         type_kinds: &type_kinds,
+        supers: &supers,
         globals: &globals,
         memories: &memories,
         data: &data,

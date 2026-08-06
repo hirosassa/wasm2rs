@@ -770,6 +770,24 @@ impl<'a> FuncGen<'a> {
             }
             Operator::ArraySet { array_type_index } => self.array_set(array_type_index)?,
             Operator::ArrayLen => self.array_len()?,
+            // Runtime downcasts (phase 4c-1): each object carries its concrete
+            // type id, and a target's compile-time descendant set decides the
+            // check. The `NonNull` variants target `(ref $t)` (null fails); the
+            // `Nullable` variants target `(ref null $t)` (null matches).
+            Operator::RefTestNonNull { hty } => self.ref_test(hty, false)?,
+            Operator::RefTestNullable { hty } => self.ref_test(hty, true)?,
+            Operator::RefCastNonNull { hty } => self.ref_cast(hty, false)?,
+            Operator::RefCastNullable { hty } => self.ref_cast(hty, true)?,
+            Operator::BrOnCast {
+                relative_depth,
+                from_ref_type,
+                to_ref_type,
+            } => self.br_on_cast(relative_depth, from_ref_type, to_ref_type, true)?,
+            Operator::BrOnCastFail {
+                relative_depth,
+                from_ref_type,
+                to_ref_type,
+            } => self.br_on_cast(relative_depth, from_ref_type, to_ref_type, false)?,
             Operator::Return => self.emit_return()?,
             // Legacy exception handling: a `try` region protects its body and
             // dispatches thrown exceptions to matching `catch`/`catch_all`
