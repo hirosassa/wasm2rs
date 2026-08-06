@@ -153,16 +153,18 @@ fn multi_value_import_result_is_rejected() {
 
 #[test]
 fn unsupported_operator_is_rejected_with_the_operator_named() {
-    // A not-yet-implemented operator (here a tail call from the tail-call
-    // proposal) is rejected with the operator named, so the gap is diagnosable
-    // rather than a generic failure. The whole SIMD/v128 proposal, including
-    // relaxed SIMD, is now implemented (see tests/simd.rs), so this points at a
-    // non-SIMD feature instead.
+    // A not-yet-implemented operator (here `try_table` from the newer
+    // exception-handling proposal) is rejected with the operator named, so the
+    // gap is diagnosable rather than a generic failure. The SIMD/v128 and
+    // tail-call proposals are now implemented (see tests/simd.rs and
+    // tests/tail_call.rs), so this points at a still-unsupported feature.
     assert_unsupported(
         r#"(module
-            (func $f (result i32) (i32.const 1))
-            (func (result i32) (return_call $f)))"#,
-        "ReturnCall",
+            (func (result i32)
+              (block $h (result i32)
+                (try_table (result i32) (catch_all $h)
+                  (i32.const 1)))))"#,
+        "TryTable",
     );
 }
 

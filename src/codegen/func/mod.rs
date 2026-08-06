@@ -700,6 +700,11 @@ impl<'a> FuncGen<'a> {
                 type_index,
                 table_index,
             } => self.call_indirect(type_index, table_index)?,
+            Operator::ReturnCall { function_index } => self.return_call(function_index)?,
+            Operator::ReturnCallIndirect {
+                type_index,
+                table_index,
+            } => self.return_call_indirect(type_index, table_index)?,
             Operator::Return => self.emit_return()?,
             // Legacy exception handling: a `try` region protects its body and
             // dispatches thrown exceptions to matching `catch`/`catch_all`

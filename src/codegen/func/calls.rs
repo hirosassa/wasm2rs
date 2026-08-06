@@ -10,6 +10,25 @@ use crate::TranspileError;
 impl<'a> super::FuncGen<'a> {
     // ----- calls -----------------------------------------------------------
     pub(super) fn call(&mut self, function_index: u32) -> Result<(), TranspileError> {
+        self.emit_direct_call(function_index, false)
+    }
+
+    /// `return_call`: a tail call. The callee is invoked in tail position and
+    /// its result(s) become this function's result, so — unlike a plain `call`
+    /// — the operand stack below the arguments is discarded (control does not
+    /// return here) and the call is emitted as a `return`. This lowers to an
+    /// ordinary Rust call in tail position: exact in semantics, but without a
+    /// constant-stack guarantee (Rust has no guaranteed TCO), matching wasm2c's
+    /// default lowering.
+    pub(super) fn return_call(&mut self, function_index: u32) -> Result<(), TranspileError> {
+        self.emit_direct_call(function_index, true)?;
+        self.emit_return()
+    }
+
+    /// Shared lowering for `call` and `return_call`. Consumes the arguments,
+    /// binds the call result(s) to stable temporaries, and pushes them; the
+    /// tail form leaves the caller to turn those temporaries into a `return`.
+    fn emit_direct_call(&mut self, function_index: u32, tail: bool) -> Result<(), TranspileError> {
         let (params, results) = self
             .ctx
             .full_sig(function_index as usize)
@@ -20,8 +39,12 @@ impl<'a> super::FuncGen<'a> {
         // A call may read and write memory and globals. The arguments are
         // consumed here (evaluated in push order at the call site), so inline
         // them; freeze only the survivors below, pinning any earlier value that
-        // must not observe the call's side effects (spill-before-mutation).
-        self.freeze_survivors(param_count)?;
+        // must not observe the call's side effects (spill-before-mutation). A
+        // tail call discards those survivors (it returns immediately), so they
+        // need no freezing.
+        if !tail {
+            self.freeze_survivors(param_count)?;
+        }
 
         let mut args = Vec::with_capacity(param_count);
         for _ in 0..param_count {
@@ -36,7 +59,9 @@ impl<'a> super::FuncGen<'a> {
 
         // A call is not re-evaluatable, so bind its result(s) to a temporary at
         // exactly this point (mirroring `memory_grow`) and push the stable
-        // temporaries. A multi-value result is destructured from a tuple.
+        // temporaries. A multi-value result is destructured from a tuple. For a
+        // tail call, `emit_return` then turns those temporaries straight into
+        // the function's `return`.
         let call_expr = self.ctx.call_expr(function_index as usize, &arg_list);
         let (prefix, temps) = self.result_binding(&results)?;
         self.line(format!("{prefix}{call_expr};"));
@@ -48,6 +73,26 @@ impl<'a> super::FuncGen<'a> {
         &mut self,
         type_index: u32,
         table_index: u32,
+    ) -> Result<(), TranspileError> {
+        self.emit_indirect_call(type_index, table_index, false)
+    }
+
+    /// `return_call_indirect`: the tail-call form of `call_indirect`. See
+    /// [`Self::return_call`] for the tail-call semantics and their (absent)
+    /// constant-stack guarantee.
+    pub(super) fn return_call_indirect(
+        &mut self,
+        type_index: u32,
+        table_index: u32,
+    ) -> Result<(), TranspileError> {
+        self.emit_indirect_call(type_index, table_index, true)
+    }
+
+    fn emit_indirect_call(
+        &mut self,
+        type_index: u32,
+        table_index: u32,
+        tail: bool,
     ) -> Result<(), TranspileError> {
         if !self.ctx.has_table {
             return Err(TranspileError::Unsupported(
@@ -79,8 +124,13 @@ impl<'a> super::FuncGen<'a> {
         // may inline. The arguments must stay spilled to temporaries so they are
         // evaluated in wasm order (arguments before the index) rather than being
         // pulled after the `entry` computation. Spilling also pins any earlier
-        // value against the callee's side effects (spill-before-mutation).
-        self.freeze_survivors(1)?;
+        // value against the callee's side effects (spill-before-mutation). A
+        // tail call discards the survivors below the arguments, and its operands
+        // are pure reads with nothing mutating between them (the only work in
+        // between is the pure table read for `entry`), so nothing needs freezing.
+        if !tail {
+            self.freeze_survivors(1)?;
+        }
         let index = self.pop()?;
         let mut args = Vec::with_capacity(sig.params.len());
         for _ in 0..sig.params.len() {
@@ -127,6 +177,9 @@ impl<'a> super::FuncGen<'a> {
             "{prefix}self.call_ref_t{type_index}({entry}{sep}{arg_list});"
         ));
         self.push_temps(temps);
+        if tail {
+            self.emit_return()?;
+        }
         Ok(())
     }
 
