@@ -8,7 +8,7 @@
 //! fields store their masked low bits in a `GcSlot::I32` and sign/zero-extend on
 //! `*.get_s`/`*.get_u`.
 
-use wasmparser::{PackedIndex, StorageType, ValType};
+use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, StorageType, ValType};
 
 use super::super::{CompositeKind, FieldInfo, Val};
 use crate::TranspileError;
@@ -415,15 +415,91 @@ impl super::FuncGen<'_> {
         format!("matches!({ty_expr}, {arms})")
     }
 
+    /// A `matches!(*ty, ...)` over the runtime type id of a `GcRef::Obj`, true
+    /// when that id names a struct type (`want_struct`) or an array type. Backs
+    /// the abstract `struct`/`array` heap-type checks. An empty set yields
+    /// `"false"` to avoid an empty pattern.
+    fn abstract_obj_member(&self, want_struct: bool) -> Result<String, TranspileError> {
+        let mut arms = Vec::new();
+        for (i, kind) in self.ctx.type_kinds.iter().enumerate() {
+            let hit = match kind {
+                CompositeKind::Struct(_) => want_struct,
+                CompositeKind::Array(_) => !want_struct,
+                CompositeKind::Func => false,
+            };
+            if hit {
+                arms.push(format!("{}u32", super::super::index_u32(i)?));
+            }
+        }
+        if arms.is_empty() {
+            return Ok("false".to_string());
+        }
+        Ok(format!("matches!(*ty, {})", arms.join(" | ")))
+    }
+
     /// A `match &<ref_expr> { ... }` yielding a Rust `bool`: whether the ref's
-    /// runtime type is a subtype of the static target `T`. `null_matches` picks
-    /// how the null handle is classified (a nullable target matches null).
-    fn cast_test_bool(&self, ref_expr: &str, target: u32, null_matches: bool) -> String {
-        let member = self.subtype_member("*ty", target);
-        format!(
+    /// runtime type is a subtype of the target heap type `hty`. Handles both a
+    /// concrete struct/array target and the abstract GC heap types
+    /// (`any`/`eq`/`i31`/`struct`/`array`/`none`); the `i31`, `struct` and
+    /// `array` cases separate the `GcRef::I31` and `GcRef::Obj` variants.
+    /// `null_matches` picks how the null handle is classified (a nullable target
+    /// matches null). A `func`/`extern` target is unsupported here.
+    fn gc_heap_test(
+        &self,
+        ref_expr: &str,
+        hty: HeapType,
+        null_matches: bool,
+    ) -> Result<String, TranspileError> {
+        // `(i31_arm, obj_arm)`: how a `GcRef::I31` payload and a `GcRef::Obj`
+        // (whose runtime type id is bound as `ty`) each answer the test.
+        let (i31_arm, obj_arm) = match hty {
+            HeapType::Abstract {
+                ty: AbstractHeapType::Any | AbstractHeapType::Eq,
+                ..
+            } => ("true".to_string(), "true".to_string()),
+            HeapType::Abstract {
+                ty: AbstractHeapType::I31,
+                ..
+            } => ("true".to_string(), "false".to_string()),
+            HeapType::Abstract {
+                ty: AbstractHeapType::Struct,
+                ..
+            } => ("false".to_string(), self.abstract_obj_member(true)?),
+            HeapType::Abstract {
+                ty: AbstractHeapType::Array,
+                ..
+            } => ("false".to_string(), self.abstract_obj_member(false)?),
+            HeapType::Abstract {
+                ty: AbstractHeapType::None,
+                ..
+            } => ("false".to_string(), "false".to_string()),
+            HeapType::Concrete(_) => {
+                let target = self.gc_type_index(hty).ok_or_else(|| {
+                    TranspileError::Unsupported(
+                        "ref cast/test to a non-struct/array concrete type".into(),
+                    )
+                })?;
+                ("false".to_string(), self.subtype_member("*ty", target))
+            }
+            _ => {
+                return Err(TranspileError::Unsupported(
+                    "ref cast/test on a func/extern heap type".into(),
+                ));
+            }
+        };
+        Ok(format!(
             "match &({ref_expr}) {{ GcRef::Null => {null_matches}, \
-             GcRef::Obj {{ ty, .. }} => {member} }}"
-        )
+             GcRef::I31(_) => {i31_arm}, GcRef::Obj {{ ty, .. }} => {obj_arm} }}"
+        ))
+    }
+
+    /// The value type of a `ref.cast` result: the target heap type at the cast's
+    /// nullability, held as a `GcRef`.
+    fn cast_result_ty(hty: HeapType, nullable: bool) -> Result<ValType, TranspileError> {
+        let rt = RefType::new(nullable, hty).ok_or_else(|| {
+            TranspileError::Unsupported("cannot form cast result ref type".into())
+        })?;
+        Ok(ValType::Ref(rt))
     }
 
     /// `ref.test`: pop the ref and push an `i32` (`1`/`0`) reporting whether its
@@ -435,11 +511,8 @@ impl super::FuncGen<'_> {
         hty: wasmparser::HeapType,
         null_matches: bool,
     ) -> Result<(), TranspileError> {
-        let target = self.gc_type_index(hty).ok_or_else(|| {
-            TranspileError::Unsupported("ref.test on a non-struct/array target".into())
-        })?;
         let r = self.pop()?;
-        let test = self.cast_test_bool(&r.code, target, null_matches);
+        let test = self.gc_heap_test(&r.code, hty, null_matches)?;
         self.materialize(format!("i32::from({test})"), ValType::I32)
     }
 
@@ -451,16 +524,13 @@ impl super::FuncGen<'_> {
         hty: wasmparser::HeapType,
         null_matches: bool,
     ) -> Result<(), TranspileError> {
-        let target = self.gc_type_index(hty).ok_or_else(|| {
-            TranspileError::Unsupported("ref.cast on a non-struct/array target".into())
-        })?;
         let r = self.pop()?;
-        let test = self.cast_test_bool("__r", target, null_matches);
+        let test = self.gc_heap_test("__r", hty, null_matches)?;
         let code = format!(
             "{{ let __r = ({}); if {test} {{ __r }} else {{ panic!(\"ref.cast failed\") }} }}",
             r.code
         );
-        self.materialize(code, Self::concrete_ref_ty(target)?)
+        self.materialize(code, Self::cast_result_ty(hty, null_matches)?)
     }
 
     /// `br_on_cast`/`br_on_cast_fail`: branch to `depth` on (respectively) a
@@ -474,9 +544,6 @@ impl super::FuncGen<'_> {
         to_ref_type: wasmparser::RefType,
         on_success: bool,
     ) -> Result<(), TranspileError> {
-        let target = self.gc_type_index(to_ref_type.heap_type()).ok_or_else(|| {
-            TranspileError::Unsupported("br_on_cast to a non-struct/array target".into())
-        })?;
         // Pin the ref into a stable temp so the branch carries it on the taken
         // path and leaves the same value on the stack for fall-through, without
         // re-evaluating (and so re-allocating) the operand.
@@ -486,7 +553,8 @@ impl super::FuncGen<'_> {
         // The condition tests the runtime type against `to_ref_type` (whose
         // nullability decides how null is treated). `br_on_cast` branches on a
         // match; `br_on_cast_fail` branches on the complement.
-        let matches = self.cast_test_bool(&temp, target, to_ref_type.is_nullable());
+        let matches =
+            self.gc_heap_test(&temp, to_ref_type.heap_type(), to_ref_type.is_nullable())?;
         let cond = if on_success {
             format!("i32::from({matches})")
         } else {
@@ -526,13 +594,15 @@ impl super::FuncGen<'_> {
 
     /// `ref.eq`: pop two `eqref` handles and push `1`/`0` for identity equality.
     /// Two nulls are equal; two objects compare by `Rc` pointer identity on their
-    /// shared slots; a null and an object are unequal.
+    /// shared slots; two `i31` handles compare by payload; any other mix (null vs
+    /// object, i31 vs object, …) is unequal.
     pub(super) fn ref_eq(&mut self) -> Result<(), TranspileError> {
         let b = self.pop()?;
         let a = self.pop()?;
         let code = format!(
             "(match (&({}), &({})) {{ \
              (GcRef::Null, GcRef::Null) => 1i32, \
+             (GcRef::I31(__x), GcRef::I31(__y)) => i32::from(__x == __y), \
              (GcRef::Obj {{ slots: __x, .. }}, GcRef::Obj {{ slots: __y, .. }}) => \
              i32::from(std::rc::Rc::ptr_eq(__x, __y)), \
              _ => 0i32 }})",

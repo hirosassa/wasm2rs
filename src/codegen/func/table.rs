@@ -1,4 +1,4 @@
-use wasmparser::{AbstractHeapType, HeapType, ValType};
+use wasmparser::{AbstractHeapType, HeapType, RefType, ValType};
 
 use super::super::helpers::mem_accessor;
 use super::super::{Helper, Val};
@@ -265,25 +265,44 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(code, ValType::I32, r.stable)
     }
 
-    /// `ref.i31`: narrow an `i32` to a 31-bit `i31ref` payload by masking off the
-    /// top bit. The payload rides on the operand stack as a plain `i32` (no
-    /// managed heap). Pure in its operand, so it keeps the operand's stability.
+    /// The non-null `(ref i31)` value type carried by an `i31ref` on the operand
+    /// stack. The payload lives in the `GcRef::I31` variant so an i31 unifies with
+    /// the managed `any`/`eq` hierarchy.
+    fn i31_ref_ty() -> Result<ValType, TranspileError> {
+        let rt = RefType::new(
+            false,
+            HeapType::Abstract {
+                shared: false,
+                ty: AbstractHeapType::I31,
+            },
+        )
+        .ok_or_else(|| TranspileError::Unsupported("cannot form i31 ref type".into()))?;
+        Ok(ValType::Ref(rt))
+    }
+
+    /// `ref.i31`: narrow an `i32` to a 31-bit payload by masking off the top bit
+    /// and box it as a `GcRef::I31` handle, so it can be stored in an `anyref`.
+    /// Pure in its operand, so it keeps the operand's stability.
     pub(super) fn ref_i31(&mut self) -> Result<(), TranspileError> {
         let v = self.pop()?;
+        let stable = v.stable;
         self.push_combined(
-            format!("(({}) & 0x7FFF_FFFFi32)", v.code),
-            ValType::I32,
-            v.stable,
+            format!("GcRef::I31(({}) & 0x7FFF_FFFFi32)", v.code),
+            Self::i31_ref_ty()?,
+            stable,
         )
     }
 
     /// `i31.get_u`: read an `i31ref` payload zero-extended. The payload already
-    /// has its top bit clear, so masking is harmless and keeps the value well
-    /// defined even for an operand that bypassed `ref.i31`.
+    /// has its top bit clear, so masking is harmless. A null handle traps.
     pub(super) fn i31_get_u(&mut self) -> Result<(), TranspileError> {
         let r = self.pop()?;
         self.push_combined(
-            format!("(({}) & 0x7FFF_FFFFi32)", r.code),
+            format!(
+                "(match ({}) {{ GcRef::I31(__v) => (__v) & 0x7FFF_FFFFi32, \
+                 _ => panic!(\"i31.get on null\") }})",
+                r.code
+            ),
             ValType::I32,
             r.stable,
         )
@@ -291,11 +310,15 @@ impl<'a> super::FuncGen<'a> {
 
     /// `i31.get_s`: read an `i31ref` payload sign-extended from bit 30. Shifting
     /// left by one lands bit 30 in the sign position, then an arithmetic right
-    /// shift replicates it back down.
+    /// shift replicates it back down. A null handle traps.
     pub(super) fn i31_get_s(&mut self) -> Result<(), TranspileError> {
         let r = self.pop()?;
         self.push_combined(
-            format!("((({}) << 1) >> 1)", r.code),
+            format!(
+                "(match ({}) {{ GcRef::I31(__v) => ((__v) << 1) >> 1, \
+                 _ => panic!(\"i31.get on null\") }})",
+                r.code
+            ),
             ValType::I32,
             r.stable,
         )
