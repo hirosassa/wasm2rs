@@ -547,9 +547,11 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Result<Vec<String>, Transp
     ];
     for n in &ctx.step_set {
         // A `ContFrame` holds the resumable `pc`, one field per local (so locals
-        // survive suspends), and — when the function ends in a cross-call
+        // survive suspends), an operand-survivor stack (`ostack`, holding the
+        // `i64`-erased operands that outlive a suspend inside a region — see
+        // `emit_cont_step_flat`), and — when the function ends in a cross-call
         // checkpoint — the callee's frame nested as `sub`.
-        let mut fields = vec!["pc: u32".to_string()];
+        let mut fields = vec!["pc: u32".to_string(), "ostack: Vec<i64>".to_string()];
         if let Some(g) = ctx.checkpoint_callee.get(n) {
             fields.push(format!("sub: ContFrame{g}"));
         }
@@ -580,7 +582,7 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Result<Vec<String>, Transp
 /// acyclic (a recursive chain is rejected during context building), so this
 /// recursion terminates.
 fn frame_start_literal(ctx: &ModuleCtx<'_>, n: u32) -> String {
-    let mut fields = vec!["pc: 0u32".to_string()];
+    let mut fields = vec!["pc: 0u32".to_string(), "ostack: Vec::new()".to_string()];
     if let Some(g) = ctx.checkpoint_callee.get(&n) {
         fields.push(format!("sub: {}", frame_start_literal(ctx, *g)));
     }

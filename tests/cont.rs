@@ -595,6 +595,116 @@ fn suspend_inside_an_if() {
 }
 
 #[test]
+fn block_param_survives_suspend() {
+    // A block *parameter* (P5b-2b remainder). The operand `100` is consumed as the
+    // block's entry parameter, so it sits on the operand stack *below* the suspend
+    // payload and must survive the suspend inside the region: the `pc` machine
+    // saves it into the frame's `ostack` and the resumed state reads it back to
+    // compute `100 + 5 = 105`. `$gen` yields 10 then returns 105; the driver
+    // accumulates 10 + 105 = 115.
+    compile_run(
+        "cont_block_param",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              i32.const 100
+              (block $b (param i32) (result i32)
+                i32.const 10 suspend $yield
+                i32.const 5 i32.add))
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 115);",
+    );
+}
+
+#[test]
+fn two_block_params_survive_suspend_in_order() {
+    // Two block parameters survive one suspend, pinning the deepest-first `ostack`
+    // ordering (P5b-2b remainder). The block takes `(param i32 i32)` = [100, 7], so
+    // `100` is the deeper survivor (`ostack[0]`) and `7` the shallower (`ostack[1]`).
+    // After the resume the region computes `i32.sub` = 100 - 7 = 93 — an
+    // order-sensitive op, so a swapped save/restore would yield -93 instead. `$gen`
+    // yields 10 then returns 93; the driver accumulates 10 + 93 = 103.
+    compile_run(
+        "cont_two_block_params",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              i32.const 100
+              i32.const 7
+              (block $b (param i32 i32) (result i32)
+                i32.const 10 suspend $yield
+                i32.sub))
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 103);",
+    );
+}
+
+#[test]
+fn loop_param_survives_suspend() {
+    // A loop-carried *parameter* that survives a suspend each iteration (P5b-2b
+    // remainder). The `loop (param i32) (result i32)` carries an accumulator on the
+    // operand stack: each turn it bumps a local `$i`, folds `$i` into the
+    // accumulator, then yields `$i` — leaving the accumulator on the stack *below*
+    // the yield payload, so it must survive the suspend. While `$i < 3` a `br_if`
+    // back-edge carries the updated accumulator as the loop parameter; otherwise it
+    // falls through as the loop (and function) result. The accumulator survivor is
+    // a non-stable expression, so it exercises the freeze-to-hoisted-temp path.
+    // acc: 0->1 (yield 1), ->3 (yield 2), ->6 (yield 3), returns 6. The driver
+    // accumulates the three yields plus the return: 1 + 2 + 3 + 6 = 12.
+    compile_run(
+        "cont_loop_param",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              (local $i i32)
+              i32.const 0
+              (loop $l (param i32) (result i32)
+                local.get $i i32.const 1 i32.add local.set $i
+                local.get $i i32.add
+                local.get $i suspend $yield
+                local.get $i i32.const 3 i32.lt_s br_if $l))
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 12);",
+    );
+}
+
+#[test]
 fn null_cont_local_defaults_to_null() {
     // A local typed `(ref null $ct)` defaults to the null handle, so reading it
     // back and testing `ref.is_null` reports null (1) without any assignment.

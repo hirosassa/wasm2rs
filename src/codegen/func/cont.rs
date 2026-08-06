@@ -409,8 +409,16 @@ impl super::FuncGen<'_> {
     /// but deferred into the node tree so a suspend inside a region survives to the
     /// flattener.
     fn emit_suspend_node(&mut self, tag_index: u32) -> Result<(), TranspileError> {
-        let payload = self.encode_suspend_payload(tag_index)?;
-        let save = self.save_mutated_locals()?;
+        let payload_tys = self.suspend_payload_tys(tag_index)?;
+        let payload = self.pop_encode_tail(&payload_tys)?;
+        // Operands still on the stack below the payload (e.g. a region's entry
+        // parameters) outlive the suspend. A suspend returns from the step
+        // function, so anything kept only in a local `let` would be lost on the
+        // next resume; save these survivors into the frame's `ostack` and rewrite
+        // each to read back from there, so the resumed state (a later invocation)
+        // sees the value that was live at the suspend.
+        let save_ostack = self.save_surviving_operands()?;
+        let save = format!("{save_ostack}{}", self.save_mutated_locals()?);
         self.cur.push(Node::Suspend {
             tag: tag_index,
             payload,
@@ -419,16 +427,34 @@ impl super::FuncGen<'_> {
         self.push_suspend_results(tag_index)
     }
 
+    /// Snapshot the operands surviving a suspend (everything left on the stack
+    /// after the payload was popped) into the frame's `ostack`, deepest-first, and
+    /// rewrite each surviving operand to read back its `i64`-erased slot. Returns
+    /// the assignment statement to emit before the suspend returns (empty when
+    /// nothing survives). Reference-typed survivors are unsupported (the erasure
+    /// only covers the numeric types), matching the suspend payload's own limits.
+    fn save_surviving_operands(&mut self) -> Result<String, TranspileError> {
+        if self.stack.is_empty() {
+            return Ok(String::new());
+        }
+        let mut encoded = Vec::with_capacity(self.stack.len());
+        for val in &self.stack {
+            encoded.push(encode_to_i64(&val.code, val.ty)?);
+        }
+        // Rewrite each survivor to read its slot; `__frame` is in scope in every
+        // arm, so this stays valid across the suspend/resume boundary.
+        for (i, val) in self.stack.iter_mut().enumerate() {
+            val.code = decode_from_i64(&format!("__frame.ostack[{i}]"), val.ty)?;
+            val.stable = true;
+        }
+        Ok(format!("__frame.ostack = vec![{}]; ", encoded.join(", ")))
+    }
+
     /// Pop and `i64`-encode a `suspend $tag`'s payload (the operand-stack tail
     /// matching the tag's parameter types) into the comma-joined form a
     /// `StepResult::Suspend` carries. Shared by both cont lowerings.
     fn encode_suspend_payload(&mut self, tag_index: u32) -> Result<String, TranspileError> {
-        let payload_tys = self
-            .ctx
-            .tags
-            .get(tag_index as usize)
-            .ok_or_else(|| TranspileError::Unsupported("suspend: unknown tag index".into()))?
-            .clone();
+        let payload_tys = self.suspend_payload_tys(tag_index)?;
         self.encode_stack_tail(&payload_tys)
     }
 
@@ -560,26 +586,45 @@ impl super::FuncGen<'_> {
     }
 
     /// Pop the top `tys.len()` operands (the tail matching `tys`, deepest first)
-    /// and return them comma-joined as `i64`-encoded expressions. Requires the
-    /// operand stack to be otherwise empty — a suspend/return point consumes the
-    /// whole stack as its payload, so nothing survives the boundary. Pending
-    /// statements (e.g. `local.set`) are flushed separately by the caller.
-    fn encode_stack_tail(&mut self, tys: &[ValType]) -> Result<String, TranspileError> {
+    /// and return them comma-joined as `i64`-encoded expressions. Operands below
+    /// the tail (if any) are left on the stack for the caller to handle.
+    fn pop_encode_tail(&mut self, tys: &[ValType]) -> Result<String, TranspileError> {
         let mut vals = Vec::with_capacity(tys.len());
         for _ in tys {
             vals.push(self.pop()?);
         }
         vals.reverse();
-        if !self.stack.is_empty() {
-            return Err(TranspileError::Unsupported(
-                "non-empty operand stack at a continuation suspend/return (phase 5b)".into(),
-            ));
-        }
         let mut encoded = Vec::with_capacity(tys.len());
         for (val, ty) in vals.iter().zip(tys) {
             encoded.push(encode_to_i64(&val.code, *ty)?);
         }
         Ok(encoded.join(", "))
+    }
+
+    /// Like [`Self::pop_encode_tail`], but require the operand stack to be exactly
+    /// the tail — nothing may survive the boundary. Used where cross-state
+    /// operand survival is not modelled: a function/continuation `return` (its
+    /// results are the whole stack) and a top-level suspend in the arm-splitting
+    /// lowering (a later arm cannot see an earlier arm's temporaries). The flat
+    /// lowering instead saves survivors into the frame's `ostack` (see
+    /// [`Self::save_surviving_operands`]).
+    fn encode_stack_tail(&mut self, tys: &[ValType]) -> Result<String, TranspileError> {
+        if self.stack.len() != tys.len() {
+            return Err(TranspileError::Unsupported(
+                "non-empty operand stack at a continuation suspend/return (phase 5b)".into(),
+            ));
+        }
+        self.pop_encode_tail(tys)
+    }
+
+    /// The parameter types a `suspend $tag` consumes (the tag's parameters).
+    fn suspend_payload_tys(&self, tag_index: u32) -> Result<Vec<ValType>, TranspileError> {
+        Ok(self
+            .ctx
+            .tags
+            .get(tag_index as usize)
+            .ok_or_else(|| TranspileError::Unsupported("suspend: unknown tag index".into()))?
+            .clone())
     }
 
     /// Drain the nodes queued for the current `pc` state (from `local.set`,
