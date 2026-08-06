@@ -1,5 +1,28 @@
 use super::Helper;
 
+/// The accessor pair `(mem(), mem_mut())` naming linear memory `mem`: memory 0
+/// keeps the historic `mem`/`mem_mut` names (so index-0 code and WASI are
+/// byte-for-byte unchanged), while memory `i > 0` uses `mem{i}`/`mem{i}_mut`.
+pub(super) fn mem_accessor(mem: u32) -> (String, String) {
+    if mem == 0 {
+        ("mem".to_string(), "mem_mut".to_string())
+    } else {
+        (format!("mem{mem}"), format!("mem{mem}_mut"))
+    }
+}
+
+/// The instance method name of `helper` for linear memory `mem`: memory 0 keeps
+/// the historic name (`r32`, `memory_grow`, …); memory `i > 0` appends `_m{i}`
+/// so each memory owns a distinct set of helper methods (`r32_m1`, …).
+pub(super) fn helper_method_name(helper: Helper, mem: u32) -> String {
+    let base = helper_name(helper);
+    if mem == 0 {
+        base.to_string()
+    } else {
+        format!("{base}_m{mem}")
+    }
+}
+
 pub(super) fn helper_name(helper: Helper) -> &'static str {
     match helper {
         // The scalar load/store helpers are the hottest methods in generated
@@ -113,9 +136,37 @@ pub(super) const HELPER_ORDER: [Helper; 50] = [
     Helper::TableFill,
 ];
 
-/// The source lines of one memory helper method (bounds-checked via indexing,
-/// so an out-of-range access panics — mirroring a wasm trap).
-pub(super) fn helper_lines(helper: Helper) -> Vec<String> {
+/// The source lines of one memory helper method for linear memory `mem`
+/// (bounds-checked via indexing, so an out-of-range access panics — mirroring a
+/// wasm trap).
+///
+/// For memory 0 the emitted text is byte-for-byte the historic single-memory
+/// form (method name and `self.mem()`/`self.mem_mut()` body). For memory
+/// `i > 0` the method name gains an `_m{i}` suffix and the body borrows
+/// `self.mem{i}()`/`self.mem{i}_mut()`, so each memory owns an independent
+/// helper set.
+pub(super) fn helper_lines(helper: Helper, mem: u32) -> Vec<String> {
+    let base = base_helper_lines(helper);
+    if mem == 0 {
+        return base;
+    }
+    // Specialise the memory-0 template to memory `i`: rename the method (the
+    // helper name appears once, right after `fn `, in the signature line) and
+    // retarget every memory accessor to the `mem{i}` variants. `table_*` helpers
+    // touch no memory, so they are never emitted for `i > 0`.
+    let name = helper_name(helper);
+    let (get, get_mut) = mem_accessor(mem);
+    base.into_iter()
+        .map(|line| {
+            line.replacen(&format!("fn {name}("), &format!("fn {name}_m{mem}("), 1)
+                .replace("self.mem_mut()", &format!("self.{get_mut}()"))
+                .replace("self.mem()", &format!("self.{get}()"))
+        })
+        .collect()
+}
+
+/// The memory-0 template lines of one memory helper method.
+fn base_helper_lines(helper: Helper) -> Vec<String> {
     let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     match helper {
         Helper::LoadI32 => owned(&[

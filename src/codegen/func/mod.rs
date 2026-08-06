@@ -118,8 +118,10 @@ pub(super) struct FuncGen<'a> {
     dead_nesting: usize,
     /// The tail expression returned by the function, if any.
     trailing: Option<String>,
-    /// Memory-access helpers this function relies on.
-    used_helpers: HashSet<Helper>,
+    /// Memory-access helpers this function relies on, each paired with the
+    /// linear memory index it acts on (0 for the historic single-memory
+    /// helpers, `i` for the `_m{i}` variants).
+    used_helpers: HashSet<(Helper, u32)>,
     /// Free-function runtime helpers this function relies on.
     used_rt: HashSet<Rt>,
     /// Lane-wise SIMD free-function helpers this function relies on, by name.
@@ -649,8 +651,8 @@ impl<'a> FuncGen<'a> {
             Operator::MemoryAtomicNotify { .. } => self.atomic_notify()?,
             Operator::MemoryAtomicWait32 { memarg } => self.atomic_wait(Helper::LoadI32, memarg)?,
             Operator::MemoryAtomicWait64 { memarg } => self.atomic_wait(Helper::LoadI64, memarg)?,
-            Operator::MemorySize { .. } => self.memory_size()?,
-            Operator::MemoryGrow { .. } => self.memory_grow()?,
+            Operator::MemorySize { mem } => self.memory_size(mem)?,
+            Operator::MemoryGrow { mem } => self.memory_grow(mem)?,
             // Bulk-memory ops consume three i32s (dest, src/value, len) and
             // produce nothing (`table.fill`, whose value is a funcref, is with
             // the other table instructions below).

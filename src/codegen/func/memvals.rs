@@ -1,6 +1,7 @@
 use wasmparser::{MemArg, ValType};
 
-use super::super::{Helper, Val, helper_name, memarg_offset};
+use super::super::helpers::{helper_method_name, mem_accessor};
+use super::super::{Helper, Val, memarg_offset};
 use crate::TranspileError;
 
 impl<'a> super::FuncGen<'a> {
@@ -114,8 +115,9 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
-    /// Require that a bulk-memory/table operand references memory/table 0, the
-    /// only one supported until multi-memory/multi-table lands.
+    /// Require that a bulk-table operand references table 0, the only one
+    /// supported until multi-table lands. (Memory operands are validated by
+    /// [`Self::require_memory_index`] instead, since multi-memory is supported.)
     pub(super) fn require_zero_index(&self, index: u32, what: &str) -> Result<(), TranspileError> {
         if index == 0 {
             Ok(())
@@ -126,6 +128,19 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
+    /// Require that `mem` names a declared linear memory, returning it so a
+    /// caller can select the memory-specific accessor/helper. Rejects an
+    /// out-of-range index (a validation failure the emitted code cannot express).
+    pub(super) fn require_memory_index(&self, mem: u32) -> Result<u32, TranspileError> {
+        if (mem as usize) < self.ctx.n_memories {
+            Ok(mem)
+        } else {
+            Err(TranspileError::Unsupported(
+                "memory instruction with an out-of-range memory index".into(),
+            ))
+        }
+    }
+
     pub(super) fn load(
         &mut self,
         helper: Helper,
@@ -133,13 +148,18 @@ impl<'a> super::FuncGen<'a> {
         memarg: MemArg,
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
+        let mem = self.require_memory_index(memarg.memory)?;
         let offset = memarg_offset(memarg)?;
         let addr = self.pop()?;
-        self.used_helpers.insert(helper);
+        self.used_helpers.insert((helper, mem));
         // The result depends on memory contents, which a store can change, so
         // it is never stable.
         self.push_combined(
-            format!("self.{}({}, {offset}u32)", helper_name(helper), addr.code),
+            format!(
+                "self.{}({}, {offset}u32)",
+                helper_method_name(helper, mem),
+                addr.code
+            ),
             ty,
             false,
         )
@@ -147,6 +167,7 @@ impl<'a> super::FuncGen<'a> {
 
     pub(super) fn store(&mut self, helper: Helper, memarg: MemArg) -> Result<(), TranspileError> {
         self.require_memory()?;
+        let mem = self.require_memory_index(memarg.memory)?;
         let offset = memarg_offset(memarg)?;
         // Memory is about to change; fix any operand that reads from it. The
         // address and value are consumed here, so inline them and freeze only
@@ -154,10 +175,10 @@ impl<'a> super::FuncGen<'a> {
         self.freeze_survivors(2)?;
         let value = self.pop()?;
         let addr = self.pop()?;
-        self.used_helpers.insert(helper);
+        self.used_helpers.insert((helper, mem));
         self.line(format!(
             "self.{}({}, {offset}u32, {});",
-            helper_name(helper),
+            helper_method_name(helper, mem),
             addr.code,
             value.code
         ));
@@ -174,15 +195,16 @@ impl<'a> super::FuncGen<'a> {
         lane: u8,
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
+        let mem = self.require_memory_index(memarg.memory)?;
         let offset = memarg_offset(memarg)?;
         let value = self.pop()?;
         let addr = self.pop()?;
-        self.used_helpers.insert(helper);
+        self.used_helpers.insert((helper, mem));
         // The result reads memory, which a store can change, so it is never stable.
         self.push_combined(
             format!(
                 "self.{}({}, {offset}u32, {}, {lane})",
-                helper_name(helper),
+                helper_method_name(helper, mem),
                 addr.code,
                 value.code
             ),
@@ -200,6 +222,7 @@ impl<'a> super::FuncGen<'a> {
         lane: u8,
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
+        let mem = self.require_memory_index(memarg.memory)?;
         let offset = memarg_offset(memarg)?;
         // Memory is about to change; fix any operand that reads from it. The
         // address and value are consumed here, so inline them and freeze only
@@ -207,10 +230,10 @@ impl<'a> super::FuncGen<'a> {
         self.freeze_survivors(2)?;
         let value = self.pop()?;
         let addr = self.pop()?;
-        self.used_helpers.insert(helper);
+        self.used_helpers.insert((helper, mem));
         self.line(format!(
             "self.{}({}, {offset}u32, {}, {lane});",
-            helper_name(helper),
+            helper_method_name(helper, mem),
             addr.code,
             value.code
         ));
@@ -228,26 +251,27 @@ impl<'a> super::FuncGen<'a> {
         memarg: MemArg,
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
+        let mem = self.require_memory_index(memarg.memory)?;
         let (load, store, ty, _mask) = width.parts();
         let offset = memarg_offset(memarg)?;
         // Memory is about to change; fix any operand that reads from it.
         self.spill_nonstable()?;
         let value = self.pop()?;
         let addr = self.pop()?;
-        self.used_helpers.insert(load);
-        self.used_helpers.insert(store);
+        self.used_helpers.insert((load, mem));
+        self.used_helpers.insert((store, mem));
         // `addr` feeds both the load and the store, so bind it once.
         let addr_tmp = self.fresh_temp();
         self.line(format!("let {addr_tmp}: i32 = {};", addr.code));
         let old = self.fresh_temp();
         self.line(format!(
             "let {old} = self.{}({addr_tmp}, {offset}u32);",
-            helper_name(load)
+            helper_method_name(load, mem)
         ));
         let new = op.combine(&old, &value.code);
         self.line(format!(
             "self.{}({addr_tmp}, {offset}u32, {new});",
-            helper_name(store)
+            helper_method_name(store, mem)
         ));
         // `old` is a snapshot, so it never changes once bound.
         self.push(Val {
@@ -269,6 +293,7 @@ impl<'a> super::FuncGen<'a> {
         memarg: MemArg,
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
+        let mem = self.require_memory_index(memarg.memory)?;
         let (load, store, ty, mask) = width.parts();
         let offset = memarg_offset(memarg)?;
         // Memory may change; fix any operand that reads from it.
@@ -276,14 +301,14 @@ impl<'a> super::FuncGen<'a> {
         let replacement = self.pop()?;
         let expected = self.pop()?;
         let addr = self.pop()?;
-        self.used_helpers.insert(load);
-        self.used_helpers.insert(store);
+        self.used_helpers.insert((load, mem));
+        self.used_helpers.insert((store, mem));
         let addr_tmp = self.fresh_temp();
         self.line(format!("let {addr_tmp}: i32 = {};", addr.code));
         let old = self.fresh_temp();
         self.line(format!(
             "let {old} = self.{}({addr_tmp}, {offset}u32);",
-            helper_name(load)
+            helper_method_name(load, mem)
         ));
         let cmp = match mask {
             Some(mask) => format!("{old} == (({}) & {mask})", expected.code),
@@ -291,7 +316,7 @@ impl<'a> super::FuncGen<'a> {
         };
         self.line(format!(
             "if {cmp} {{ self.{}({addr_tmp}, {offset}u32, {}); }}",
-            helper_name(store),
+            helper_method_name(store, mem),
             replacement.code
         ));
         // `old` is a snapshot, so it never changes once bound.
@@ -327,16 +352,17 @@ impl<'a> super::FuncGen<'a> {
         memarg: MemArg,
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
+        let mem = self.require_memory_index(memarg.memory)?;
         let offset = memarg_offset(memarg)?;
         self.pop()?; // timeout
         let expected = self.pop()?;
         let addr = self.pop()?;
-        self.used_helpers.insert(load);
+        self.used_helpers.insert((load, mem));
         let name = self.fresh_temp();
         self.line(format!(
             "let {name}: i32 = if self.{}({}, {offset}u32) != ({}) {{ 1 }} \
              else {{ panic!(\"atomic.wait on a single-threaded instance would block forever\") }};",
-            helper_name(load),
+            helper_method_name(load, mem),
             addr.code,
             expected.code
         ));
@@ -348,15 +374,17 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
-    pub(super) fn memory_size(&mut self) -> Result<(), TranspileError> {
+    pub(super) fn memory_size(&mut self, mem: u32) -> Result<(), TranspileError> {
         self.require_memory()?;
+        let mem = self.require_memory_index(mem)?;
+        let (get, _) = mem_accessor(mem);
         // Materialise into a temp: `self.mem()` borrows the instance, so leaving
         // it inline could clash with another `self.mem()`/method call in the same
         // enclosing expression (e.g. imported memory, where `mem()` routes
         // through the host).
         let name = self.fresh_temp();
         self.line(format!(
-            "let {name}: i32 = (self.mem().len() / 65536) as i32;"
+            "let {name}: i32 = (self.{get}().len() / 65536) as i32;"
         ));
         self.push(Val {
             code: name,
@@ -366,14 +394,16 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
-    pub(super) fn memory_grow(&mut self) -> Result<(), TranspileError> {
+    pub(super) fn memory_grow(&mut self, mem: u32) -> Result<(), TranspileError> {
         self.require_memory()?;
+        let mem = self.require_memory_index(mem)?;
         self.spill_nonstable()?;
         let delta = self.pop()?;
-        self.used_helpers.insert(Helper::Grow);
+        self.used_helpers.insert((Helper::Grow, mem));
         let name = self.fresh_temp();
         self.line(format!(
-            "let {name}: i32 = self.memory_grow({});",
+            "let {name}: i32 = self.{}({});",
+            helper_method_name(Helper::Grow, mem),
             delta.code
         ));
         self.push(Val {
@@ -397,26 +427,53 @@ impl<'a> super::FuncGen<'a> {
 
     pub(super) fn memory_fill(&mut self, mem: u32) -> Result<(), TranspileError> {
         self.require_memory()?;
-        self.require_zero_index(mem, "memory.fill")?;
+        let mem = self.require_memory_index(mem)?;
         let (dest, val, len) = self.pop_bulk_operands()?;
-        self.used_helpers.insert(Helper::MemoryFill);
+        self.used_helpers.insert((Helper::MemoryFill, mem));
         self.line(format!(
-            "self.memory_fill(({}) as u32, {}, ({}) as u32);",
-            dest.code, val.code, len.code
+            "self.{}(({}) as u32, {}, ({}) as u32);",
+            helper_method_name(Helper::MemoryFill, mem),
+            dest.code,
+            val.code,
+            len.code
         ));
         Ok(())
     }
 
     pub(super) fn memory_copy(&mut self, dst_mem: u32, src_mem: u32) -> Result<(), TranspileError> {
         self.require_memory()?;
-        self.require_zero_index(dst_mem, "memory.copy")?;
-        self.require_zero_index(src_mem, "memory.copy")?;
+        let dst_mem = self.require_memory_index(dst_mem)?;
+        let src_mem = self.require_memory_index(src_mem)?;
         let (dest, src, len) = self.pop_bulk_operands()?;
-        self.used_helpers.insert(Helper::MemoryCopy);
-        self.line(format!(
-            "self.memory_copy(({}) as u32, ({}) as u32, ({}) as u32);",
-            dest.code, src.code, len.code
-        ));
+        if dst_mem == src_mem {
+            // Same-memory copy: the `memory_copy` helper is a `copy_within`
+            // memmove, so overlapping ranges copy correctly. Memory 0 keeps the
+            // historic `memory_copy` name and body.
+            self.used_helpers.insert((Helper::MemoryCopy, dst_mem));
+            self.line(format!(
+                "self.{}(({}) as u32, ({}) as u32, ({}) as u32);",
+                helper_method_name(Helper::MemoryCopy, dst_mem),
+                dest.code,
+                src.code,
+                len.code
+            ));
+        } else {
+            // Cross-memory copy: the source and destination are distinct fields,
+            // so `mem_mut()` (which borrows all of `self`) cannot be held while
+            // also reading `mem()`. Read the source range into a temporary
+            // `Vec`, then write it into the destination; both slice accesses are
+            // bounds-checked, so an out-of-range range panics (a wasm trap). The
+            // destination is copied only after the read completes, so a bad
+            // source range traps before any write. No helper method is needed.
+            let (src_get, _) = mem_accessor(src_mem);
+            let (_, dst_get_mut) = mem_accessor(dst_mem);
+            self.line(format!(
+                "{{ let s = ({}) as usize; let d = ({}) as usize; let n = ({}) as usize; \
+                 let seg = self.{src_get}()[s..s + n].to_vec(); \
+                 self.{dst_get_mut}()[d..d + n].copy_from_slice(&seg); }}",
+                src.code, dest.code, len.code
+            ));
+        }
         Ok(())
     }
 }

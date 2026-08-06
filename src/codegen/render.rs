@@ -4,7 +4,7 @@ use super::helpers::{HELPER_ORDER, helper_lines};
 use super::runtime::render_rt_helpers;
 use super::{
     ALLOW, DataSegment, ElemSegment, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
-    ModuleParts, WasiFn, byte_array_literal, indent, rust_type, rust_types,
+    ModuleParts, WasiFn, byte_array_literal, indent, index_u32, rust_type, rust_types,
 };
 use crate::TranspileError;
 
@@ -15,14 +15,14 @@ pub(super) fn render_module(
     parts: &ModuleParts<'_>,
     ctx: &ModuleCtx<'_>,
     sources: &[String],
-    used: &HashSet<Helper>,
+    used: &HashSet<(Helper, u32)>,
     dispatch_sigs: &HashSet<u32>,
 ) -> Result<String, TranspileError> {
     let ModuleParts {
         imports,
         imported_globals,
         globals,
-        memory,
+        memories,
         data,
         table,
         elements,
@@ -35,7 +35,9 @@ pub(super) fn render_module(
 
     let mut lines: Vec<String> = Vec::new();
 
-    let mem_imported = memory.is_some_and(|m| m.imported);
+    // Only memory 0 may be imported (an imported non-zero memory is rejected
+    // during parsing); `mem_imported` therefore governs just memory 0's storage.
+    let mem_imported = memories.first().is_some_and(|m| m.imported);
     let table_imported = table.is_some_and(|t| t.imported);
     let has_imports = needs_host_trait(parts);
     // A module that imports any preopen/`path_open` function gains a real
@@ -95,9 +97,19 @@ pub(super) fn render_module(
     if has_imports {
         lines.push("    imports: H,".to_string());
     }
-    // Imported memory lives in the host, so the instance owns no buffer.
-    if memory.is_some() && !mem_imported {
-        lines.push("    memory: Vec<u8>,".to_string());
+    // Each defined memory is an owned buffer: memory 0 keeps the field name
+    // `memory`, memory `i > 0` is `memory{i}`. An imported memory (only ever
+    // memory 0) lives in the host, so the instance owns no buffer for it.
+    for (i, _) in memories.iter().enumerate() {
+        if i == 0 && mem_imported {
+            continue;
+        }
+        let field = if i == 0 {
+            "memory".to_string()
+        } else {
+            format!("memory{i}")
+        };
+        lines.push(format!("    {field}: Vec<u8>,"));
     }
     // Imported tables live in the host, so the instance owns no storage.
     if table.is_some() && !table_imported {
@@ -137,14 +149,19 @@ pub(super) fn render_module(
     let mut inner: Vec<String> = Vec::new();
     let new_param = if has_imports { "imports: H" } else { "" };
     // Only active segments are copied at instantiation; passive ones are
-    // retained (see the `data{d}` fields) for `memory.init`.
+    // retained (see the `data{d}` fields) for `memory.init`. Each active data
+    // segment names the memory it initialises.
     let active: Vec<&DataSegment> = data.iter().filter(|d| d.offset.is_some()).collect();
     let active_elem: Vec<&ElemSegment> = elements.iter().filter(|e| e.offset.is_some()).collect();
+    // The active data segments that target a given memory index, in order.
+    let active_for =
+        |mem: u32| -> Vec<&&DataSegment> { active.iter().filter(|d| d.mem_index == mem).collect() };
     // Imported memory/table are host-owned, so their active data/elements cannot
     // be written into a `memory`/`table` field literal; instead the instance is
     // bound and the segments are copied into the host storage through
-    // `mem_mut()`/`table_mut()` after construction.
-    let post_init_data = mem_imported && !active.is_empty();
+    // `mem_mut()`/`table_mut()` after construction. Only memory 0 can be
+    // imported, so only its segments need post-construction copying.
+    let post_init_data = mem_imported && !active_for(0).is_empty();
     let post_init_elem = table_imported && !active_elem.is_empty();
     let post_init = post_init_data || post_init_elem;
     let (open, close) = if post_init {
@@ -154,10 +171,11 @@ pub(super) fn render_module(
     };
 
     // Emit `<target>[off..end].copy_from_slice(&[bytes]);` for each active data
-    // segment; `target` is a defined buffer (`m`) or the host buffer accessor
-    // (`instance.mem_mut()`), and `indent` matches the surrounding block.
-    let copy_active_data = |lines: &mut Vec<String>, target: &str, indent: &str| {
-        for seg in &active {
+    // segment targeting memory `mem`; `target` is a defined buffer (`m`) or the
+    // host buffer accessor (`instance.mem_mut()`), and `indent` matches the
+    // surrounding block.
+    let copy_active_data = |lines: &mut Vec<String>, mem: u32, target: &str, indent: &str| {
+        for seg in active_for(mem) {
             let off = seg.offset.unwrap_or(0) as usize;
             let end = off + seg.bytes.len();
             let bytes_lit = byte_array_literal(&seg.bytes);
@@ -184,20 +202,32 @@ pub(super) fn render_module(
     if has_imports {
         inner.push("        imports,".to_string());
     }
-    if let Some(m) = memory.filter(|_| !mem_imported) {
+    // Each defined memory's field literal: zero-filled, then each active data
+    // segment for that memory copied in. Memory 0 keeps the `memory` field name
+    // and the exact single-memory rendering; memory `i > 0` is `memory{i}`.
+    for (i, m) in memories.iter().enumerate() {
+        if i == 0 && mem_imported {
+            continue;
+        }
+        let field = if i == 0 {
+            "memory".to_string()
+        } else {
+            format!("memory{i}")
+        };
+        let mem_index = index_u32(i)?;
         let bytes = m
             .min_pages
             .checked_mul(65536)
             .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
-        if active.is_empty() {
-            inner.push(format!("        memory: vec![0u8; {bytes}],"));
+        if active_for(mem_index).is_empty() {
+            inner.push(format!("        {field}: vec![0u8; {bytes}],"));
         } else {
             // Zero the memory, then copy each active data segment into place.
-            inner.push("        memory: {".to_string());
+            inner.push(format!("        {field}: {{"));
             inner.push(format!(
                 "            let mut m: Vec<u8> = vec![0u8; {bytes}];"
             ));
-            copy_active_data(&mut inner, "m", "            ");
+            copy_active_data(&mut inner, mem_index, "m", "            ");
             inner.push("            m".to_string());
             inner.push("        },".to_string());
         }
@@ -243,7 +273,7 @@ pub(super) fn render_module(
         // order. An out-of-bounds write panics here, faithfully reproducing a
         // wasm instantiation trap when a segment does not fit the host storage.
         if post_init_data {
-            copy_active_data(&mut inner, "instance.mem_mut()", "    ");
+            copy_active_data(&mut inner, 0, "instance.mem_mut()", "    ");
         }
         if post_init_elem {
             copy_active_elems(&mut inner, "instance.table_mut()", "    ");
@@ -254,24 +284,47 @@ pub(super) fn render_module(
 
     // Uniform memory accessors so the load/store/bulk helpers are identical for
     // defined and imported memory: a defined buffer is a field, an imported one
-    // is lent by the host through the `Imports` trait.
-    if let Some(m) = memory {
-        let (borrow, borrow_mut) = if m.imported {
-            ("self.imports.memory()", "self.imports.memory_mut()")
+    // (only ever memory 0) is lent by the host through the `Imports` trait.
+    // Memory 0 keeps the historic `mem`/`mem_mut`/`memory` names; memory `i > 0`
+    // is `mem{i}`/`mem{i}_mut`/`memory{i}`, each backed by its own field.
+    for (i, m) in memories.iter().enumerate() {
+        let (get, get_mut, pub_get) = if i == 0 {
+            (
+                "mem".to_string(),
+                "mem_mut".to_string(),
+                "memory".to_string(),
+            )
         } else {
-            ("&self.memory", "&mut self.memory")
+            (
+                format!("mem{i}"),
+                format!("mem{i}_mut"),
+                format!("memory{i}"),
+            )
+        };
+        let (borrow, borrow_mut) = if i == 0 && m.imported {
+            (
+                "self.imports.memory()".to_string(),
+                "self.imports.memory_mut()".to_string(),
+            )
+        } else {
+            let field = if i == 0 {
+                "memory".to_string()
+            } else {
+                format!("memory{i}")
+            };
+            (format!("&self.{field}"), format!("&mut self.{field}"))
         };
         inner.push(String::new());
-        inner.push(format!("fn mem(&self) -> &[u8] {{ {borrow} }}"));
+        inner.push(format!("fn {get}(&self) -> &[u8] {{ {borrow} }}"));
         inner.push(format!(
-            "fn mem_mut(&mut self) -> &mut Vec<u8> {{ {borrow_mut} }}"
+            "fn {get_mut}(&mut self) -> &mut Vec<u8> {{ {borrow_mut} }}"
         ));
         // Public accessor so a host embedding this `Instance` can marshal bytes
         // into and out of linear memory (e.g. write an RPC request buffer and
         // read the response). `&mut` covers both reads and writes since a host
         // driving the module already holds it mutably.
         inner.push(format!(
-            "pub fn memory(&mut self) -> &mut Vec<u8> {{ {borrow_mut} }}"
+            "pub fn {pub_get}(&mut self) -> &mut Vec<u8> {{ {borrow_mut} }}"
         ));
     }
 
@@ -303,10 +356,18 @@ pub(super) fn render_module(
         }
     }
 
-    for helper in HELPER_ORDER {
-        if used.contains(&helper) {
-            inner.push(String::new());
-            inner.extend(helper_lines(helper));
+    // Emit each used helper method, grouped by memory index (0 first, so the
+    // historic single-memory helpers keep their position) then in the canonical
+    // HELPER_ORDER within each memory.
+    let mut mem_indices: Vec<u32> = used.iter().map(|(_, mem)| *mem).collect();
+    mem_indices.sort_unstable();
+    mem_indices.dedup();
+    for mem in mem_indices {
+        for helper in HELPER_ORDER {
+            if used.contains(&(helper, mem)) {
+                inner.push(String::new());
+                inner.extend(helper_lines(helper, mem));
+            }
         }
     }
 
@@ -350,7 +411,7 @@ pub(super) fn render_module(
 fn needs_host_trait(parts: &ModuleParts<'_>) -> bool {
     parts.imports.iter().any(|im| im.wasi.is_none())
         || !parts.imported_globals.is_empty()
-        || parts.memory.is_some_and(|m| m.imported)
+        || parts.memories.iter().any(|m| m.imported)
         || parts.table.is_some_and(|t| t.imported)
 }
 
@@ -406,7 +467,7 @@ pub(super) fn chunk_prelude(parts: &ModuleParts<'_>, stateful: bool) -> String {
 /// only to render the crate root. Grouped so the root renderer takes one set
 /// reference instead of four separate arguments.
 pub(super) struct RootDeps<'a> {
-    pub(super) helpers: &'a HashSet<Helper>,
+    pub(super) helpers: &'a HashSet<(Helper, u32)>,
     pub(super) rt: &'a HashSet<super::Rt>,
     pub(super) simd: &'a HashSet<&'static str>,
     pub(super) dispatch_sigs: &'a HashSet<u32>,

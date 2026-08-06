@@ -158,7 +158,10 @@ where
     let mut func_type_indices: Vec<u32> = Vec::new();
     let mut bodies: Vec<wasmparser::FunctionBody> = Vec::new();
     let mut globals: Vec<codegen::GlobalInfo> = Vec::new();
-    let mut memory: Option<codegen::MemInfo> = None;
+    // Every linear memory, in index order: imported memories occupy the low
+    // indices (like globals/functions), then defined ones. The multi-memory
+    // proposal allows more than one.
+    let mut memories: Vec<codegen::MemInfo> = Vec::new();
     let mut table: Option<codegen::TableInfo> = None;
     let mut elements: Vec<codegen::ElemSegment> = Vec::new();
     let mut data: Vec<codegen::DataSegment> = Vec::new();
@@ -197,7 +200,7 @@ where
                 let mut sink = ImportSink {
                     imports: &mut imports,
                     imported_globals: &mut imported_globals,
-                    memory: &mut memory,
+                    memories: &mut memories,
                     table: &mut table,
                     tags: &mut tags,
                 };
@@ -251,10 +254,7 @@ where
                     if mem.memory64 {
                         return Err(TranspileError::Unsupported("64-bit memory".into()));
                     }
-                    if memory.is_some() {
-                        return Err(TranspileError::Unsupported("multiple memories".into()));
-                    }
-                    memory = Some(codegen::MemInfo {
+                    memories.push(codegen::MemInfo {
                         min_pages: mem.initial,
                         imported: false,
                     });
@@ -355,22 +355,16 @@ where
             Payload::DataSection(reader) => {
                 for segment in reader {
                     let segment = segment?;
-                    let offset = match &segment.kind {
+                    let (offset, mem_index) = match &segment.kind {
                         DataKind::Active {
                             memory_index,
                             offset_expr,
-                        } => {
-                            if *memory_index != 0 {
-                                return Err(TranspileError::Unsupported(
-                                    "data segment for a non-zero memory".into(),
-                                ));
-                            }
-                            Some(codegen::const_expr_u32(offset_expr)?)
-                        }
-                        DataKind::Passive => None,
+                        } => (Some(codegen::const_expr_u32(offset_expr)?), *memory_index),
+                        DataKind::Passive => (None, 0),
                     };
                     data.push(codegen::DataSegment {
                         offset,
+                        mem_index,
                         bytes: segment.data.to_vec(),
                     });
                 }
@@ -415,7 +409,7 @@ where
         funcs: &funcs,
         types: &types,
         globals: &globals,
-        memory: memory.as_ref(),
+        memories: &memories,
         data: &data,
         table: table.as_ref(),
         elements: &elements,
@@ -447,7 +441,7 @@ fn tag_info(
 struct ImportSink<'a> {
     imports: &'a mut Vec<codegen::ImportInfo>,
     imported_globals: &'a mut Vec<codegen::ImportedGlobalInfo>,
-    memory: &'a mut Option<codegen::MemInfo>,
+    memories: &'a mut Vec<codegen::MemInfo>,
     table: &'a mut Option<codegen::TableInfo>,
     tags: &'a mut Vec<codegen::TagInfo>,
 }
@@ -489,10 +483,16 @@ fn classify_import(
             if mem_ty.memory64 {
                 return Err(TranspileError::Unsupported("64-bit memory".into()));
             }
-            if sink.memory.is_some() {
-                return Err(TranspileError::Unsupported("multiple memories".into()));
+            // A host-lent buffer is only wired up for memory 0 (`Imports::memory`);
+            // an imported memory at a higher index (rare, out of scope) is
+            // rejected. Imports precede defined memories, so this is the first
+            // memory when the list is still empty.
+            if !sink.memories.is_empty() {
+                return Err(TranspileError::Unsupported(
+                    "imported non-zero memory".into(),
+                ));
             }
-            *sink.memory = Some(codegen::MemInfo {
+            sink.memories.push(codegen::MemInfo {
                 min_pages: mem_ty.initial,
                 imported: true,
             });

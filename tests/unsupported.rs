@@ -42,8 +42,14 @@ fn assert_unsupported(wat: &str, needle: &str) {
 }
 
 #[test]
-fn multiple_defined_memories_are_rejected() {
-    assert_unsupported(r#"(module (memory 1) (memory 1))"#, "multiple memories");
+fn imported_non_zero_memory_is_rejected() {
+    // Multiple *defined* memories are now supported (see tests/multi_memory.rs),
+    // but a host-lent buffer is only wired up for memory 0, so an *imported*
+    // memory at a higher index remains unsupported.
+    assert_unsupported(
+        r#"(module (import "e" "m0" (memory 1)) (import "e" "m1" (memory 1)))"#,
+        "imported non-zero memory",
+    );
 }
 
 #[test]

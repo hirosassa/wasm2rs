@@ -46,9 +46,12 @@ pub(crate) struct ElemSegment {
 
 /// One data segment: raw bytes for linear memory. `offset` is `Some` for an
 /// active segment (written at that constant offset during instantiation) and
-/// `None` for a passive one (retained for `memory.init`).
+/// `None` for a passive one (retained for `memory.init`). `mem_index` is the
+/// linear memory the (active) segment initialises; it is 0 for a passive
+/// segment (which names no memory until a `memory.init` selects one).
 pub(crate) struct DataSegment {
     pub offset: Option<u32>,
+    pub mem_index: u32,
     pub bytes: Vec<u8>,
 }
 

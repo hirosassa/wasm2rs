@@ -36,7 +36,6 @@ mod simd_rt;
 mod wasi;
 
 use self::func::FuncGen;
-use self::helpers::helper_name;
 use self::render::{chunk_prelude, render_lib_root, render_module};
 use self::runtime::{render_rt_helpers, rt_name};
 use self::simd_rt::render_simd_helpers;
@@ -137,8 +136,9 @@ enum Rt {
 /// body is never held twice; only these aggregated sets — needed to render the
 /// module/root once every function has been seen — are returned.
 struct GenMeta {
-    /// Instance-method memory helpers.
-    helpers: HashSet<Helper>,
+    /// Instance-method memory helpers, each tagged with the linear memory index
+    /// it acts on (0 for the historic single-memory helpers, `i` for `_m{i}`).
+    helpers: HashSet<(Helper, u32)>,
     /// Module-scope free-function runtime helpers.
     rt: HashSet<Rt>,
     /// Module-scope lane-wise SIMD helpers, tracked by function name.
@@ -1500,6 +1500,9 @@ struct ModuleCtx<'a> {
     globals: Vec<(ValType, bool)>,
     /// Whether the module declares linear memory (so `self.mem()` exists).
     has_memory: bool,
+    /// The number of linear memories (imported first, then defined). Memory
+    /// operations carry a static index that must be below this.
+    n_memories: usize,
     /// Whether the module declares a table (so `self.table()` exists).
     has_table: bool,
     /// Whether the module has an injected host (`self.imports`), so an external
@@ -1573,7 +1576,9 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) funcs: &'a [FuncInput<'a>],
     pub(crate) types: &'a [TypeSig],
     pub(crate) globals: &'a [GlobalInfo],
-    pub(crate) memory: Option<&'a MemInfo>,
+    /// Every linear memory, in index order (imported memories first, then
+    /// defined). Empty when the module declares none.
+    pub(crate) memories: &'a [MemInfo],
     pub(crate) data: &'a [DataSegment],
     pub(crate) table: Option<&'a TableInfo>,
     pub(crate) elements: &'a [ElemSegment],
@@ -1594,14 +1599,14 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         funcs,
         types,
         globals,
-        memory,
+        memories,
         data,
         table,
         elements,
         ..
     } = *parts;
 
-    let has_memory = memory.is_some();
+    let has_memory = !memories.is_empty();
     let has_table = table.is_some();
     // A native WASI function that reads/writes linear memory (e.g. `fd_write`)
     // is emitted with `self.mem()`, which only exists when the module has a
@@ -1619,7 +1624,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
     // functions, or host-owned memory/table).
     let has_imports = !imports.is_empty()
         || !imported_globals.is_empty()
-        || memory.is_some_and(|m| m.imported)
+        || memories.iter().any(|m| m.imported)
         || table.is_some_and(|t| t.imported);
     // Imports must be held by an instance, so a module that has them (or any
     // other mutable state) becomes a `struct Instance` with method functions.
@@ -1632,6 +1637,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         imported_globals: imported_globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,
+        n_memories: memories.len(),
         has_table,
         has_imports,
         table_element: table.map(|t| t.element),
@@ -1656,7 +1662,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     let (ctx, stateful) = build_ctx(parts)?;
 
     let mut sources = Vec::with_capacity(parts.funcs.len());
-    let mut used: HashSet<Helper> = HashSet::new();
+    let mut used: HashSet<(Helper, u32)> = HashSet::new();
     let mut used_rt: HashSet<Rt> = HashSet::new();
     let mut used_simd: HashSet<&'static str> = HashSet::new();
     let mut dispatch_sigs: HashSet<u32> = HashSet::new();
@@ -1750,7 +1756,7 @@ pub(crate) fn generate_module_split(
     // Aggregated across every function: needed only to render the `lib.rs` root
     // (helper methods, dispatch methods and runtime helpers). Each chunk file is
     // otherwise self-contained, so it can be emitted and dropped immediately.
-    let mut used: HashSet<Helper> = HashSet::new();
+    let mut used: HashSet<(Helper, u32)> = HashSet::new();
     let mut used_rt: HashSet<Rt> = HashSet::new();
     let mut used_simd: HashSet<&'static str> = HashSet::new();
     let mut dispatch_sigs: HashSet<u32> = HashSet::new();

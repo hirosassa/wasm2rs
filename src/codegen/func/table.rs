@@ -1,5 +1,6 @@
 use wasmparser::{AbstractHeapType, HeapType, ValType};
 
+use super::super::helpers::mem_accessor;
 use super::super::{Helper, Val};
 use crate::TranspileError;
 
@@ -13,7 +14,7 @@ impl<'a> super::FuncGen<'a> {
         self.require_zero_index(dst_table, "table.copy")?;
         self.require_zero_index(src_table, "table.copy")?;
         let (dest, src, len) = self.pop_bulk_operands()?;
-        self.used_helpers.insert(Helper::TableCopy);
+        self.used_helpers.insert((Helper::TableCopy, 0));
         self.line(format!(
             "self.table_copy(({}) as u32, ({}) as u32, ({}) as u32);",
             dest.code, src.code, len.code
@@ -98,7 +99,7 @@ impl<'a> super::FuncGen<'a> {
         self.require_table()?;
         self.require_zero_index(table, "table.fill")?;
         let (dest, val, len) = self.pop_bulk_operands()?;
-        self.used_helpers.insert(Helper::TableFill);
+        self.used_helpers.insert((Helper::TableFill, 0));
         self.line(format!(
             "self.table_fill(({}) as u32, ({}) as u32, ({}) as u32);",
             dest.code, val.code, len.code
@@ -148,11 +149,14 @@ impl<'a> super::FuncGen<'a> {
 
     pub(super) fn memory_init(&mut self, data_index: u32, mem: u32) -> Result<(), TranspileError> {
         self.require_memory()?;
-        self.require_zero_index(mem, "memory.init")?;
+        let mem = self.require_memory_index(mem)?;
         self.require_passive(&self.ctx.data_passive, data_index, "data")?;
         let (dest, src, len) = self.pop_bulk_operands()?;
+        // `memory.init` copies into the memory named by `mem`; memory 0 keeps the
+        // `mem_mut()` accessor, higher memories use their `mem{i}_mut()`.
+        let (_, dst_get_mut) = mem_accessor(mem);
         self.emit_bulk_init(
-            "self.mem_mut()",
+            &format!("self.{dst_get_mut}()"),
             &format!("self.data{data_index}"),
             &dest,
             &src,
