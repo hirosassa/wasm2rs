@@ -1503,6 +1503,10 @@ struct ModuleCtx<'a> {
     /// The number of linear memories (imported first, then defined). Memory
     /// operations carry a static index that must be below this.
     n_memories: usize,
+    /// True iff the module has exactly one memory and it is `shared`. When set,
+    /// linear memory is backed by a thread-shareable `SharedMemory` (Mutex) and
+    /// the atomic RMW/cmpxchg/wait/notify ops lower to genuine atomics.
+    memory_shared: bool,
     /// Whether the module declares a table (so `self.table()` exists).
     has_table: bool,
     /// Whether the module has an injected host (`self.imports`), so an external
@@ -1608,6 +1612,14 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
 
     let has_memory = !memories.is_empty();
     let has_table = table.is_some();
+    // The thread-shareable backend supports only a single defined shared memory
+    // (index 0). More than one memory where any is shared is out of scope.
+    if memories.len() > 1 && memories.iter().any(|m| m.shared) {
+        return Err(TranspileError::Unsupported(
+            "shared memory with multiple memories".into(),
+        ));
+    }
+    let memory_shared = memories.len() == 1 && memories.iter().any(|m| m.shared);
     // A native WASI function that reads/writes linear memory (e.g. `fd_write`)
     // is emitted with `self.mem()`, which only exists when the module has a
     // memory; reject a module that imports one but declares none.
@@ -1638,6 +1650,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,
         n_memories: memories.len(),
+        memory_shared,
         has_table,
         has_imports,
         table_element: table.map(|t| t.element),

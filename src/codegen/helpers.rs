@@ -150,6 +150,12 @@ pub(super) fn helper_lines(helper: Helper, mem: u32) -> Vec<String> {
     if mem == 0 {
         return base;
     }
+    specialise_helper_lines(helper, mem, base)
+}
+
+/// Specialise the memory-0 template to memory `i > 0`: rename the method and
+/// retarget each `self.mem()`/`self.mem_mut()` to the `mem{i}` accessors.
+fn specialise_helper_lines(helper: Helper, mem: u32, base: Vec<String>) -> Vec<String> {
     // Specialise the memory-0 template to memory `i`: rename the method (the
     // helper name appears once, right after `fn `, in the signature line) and
     // retarget every memory accessor to the `mem{i}` variants. `table_*` helpers
@@ -163,6 +169,42 @@ pub(super) fn helper_lines(helper: Helper, mem: u32) -> Vec<String> {
                 .replace("self.mem()", &format!("self.{get}()"))
         })
         .collect()
+}
+
+/// The lines of one memory helper method for a `shared` module (single defined
+/// memory 0 backed by a `SharedMemory`). The historic body references
+/// `self.mem()` / `self.mem_mut()`; here the whole body must lock the shared
+/// bytes exactly once (a per-access re-lock would deadlock the non-reentrant
+/// `Mutex`), so we bind one guard right after the signature and replace every
+/// `self.mem()` / `self.mem_mut()` with it. A body that writes (`mem_mut()`
+/// appears) binds a `mut` guard; a read-only body binds an immutable one. The
+/// method name and signature are unchanged (`fn r32(&self, ...)`, …); a store
+/// helper keeps its `&mut self` even though `bytes()` needs only `&self`.
+/// `table_*` helpers touch no memory, so they are emitted verbatim.
+pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
+    let base = base_helper_lines(helper);
+    if matches!(helper, Helper::TableCopy | Helper::TableFill) {
+        return base;
+    }
+    let writes = base.iter().any(|line| line.contains("self.mem_mut()"));
+    let guard = if writes {
+        "    let mut __m = self.memory.bytes();"
+    } else {
+        "    let __m = self.memory.bytes();"
+    };
+    let mut out = Vec::with_capacity(base.len() + 1);
+    for (i, line) in base.into_iter().enumerate() {
+        // The signature line is first; the guard is bound immediately after it,
+        // before any memory access, so the lock is held for the whole body.
+        let line = line
+            .replace("self.mem_mut()", "__m")
+            .replace("self.mem()", "__m");
+        out.push(line);
+        if i == 0 {
+            out.push(guard.to_string());
+        }
+    }
+    out
 }
 
 /// The memory-0 template lines of one memory helper method.

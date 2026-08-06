@@ -153,15 +153,15 @@ impl<'a> super::FuncGen<'a> {
         self.require_passive(&self.ctx.data_passive, data_index, "data")?;
         let (dest, src, len) = self.pop_bulk_operands()?;
         // `memory.init` copies into the memory named by `mem`; memory 0 keeps the
-        // `mem_mut()` accessor, higher memories use their `mem{i}_mut()`.
-        let (_, dst_get_mut) = mem_accessor(mem);
-        self.emit_bulk_init(
-            &format!("self.{dst_get_mut}()"),
-            &format!("self.data{data_index}"),
-            &dest,
-            &src,
-            &len,
-        );
+        // `mem_mut()` accessor, higher memories use their `mem{i}_mut()`. A shared
+        // memory has no accessor — it locks its bytes for the whole copy instead.
+        let dst = if self.ctx.memory_shared {
+            "self.memory.bytes()".to_string()
+        } else {
+            let (_, dst_get_mut) = mem_accessor(mem);
+            format!("self.{dst_get_mut}()")
+        };
+        self.emit_bulk_init(&dst, &format!("self.data{data_index}"), &dest, &src, &len);
         Ok(())
     }
 

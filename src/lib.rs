@@ -248,15 +248,17 @@ where
             Payload::MemorySection(reader) => {
                 for mem in reader {
                     let mem = mem?;
-                    // `shared` memory (threads proposal) is accepted: one instance
-                    // owns it exclusively, so its atomics are trivially safe (see
-                    // codegen atomic ops). 64-bit memory is still unsupported.
+                    // `shared` memory (threads proposal) is backed by a
+                    // thread-shareable `SharedMemory` when it is the module's
+                    // single defined memory (see codegen atomic ops). 64-bit
+                    // memory is still unsupported.
                     if mem.memory64 {
                         return Err(TranspileError::Unsupported("64-bit memory".into()));
                     }
                     memories.push(codegen::MemInfo {
                         min_pages: mem.initial,
                         imported: false,
+                        shared: mem.shared,
                     });
                 }
             }
@@ -479,9 +481,14 @@ fn classify_import(
             Ok(())
         }
         TypeRef::Memory(mem_ty) => {
-            // See the defined-memory case: `shared` is accepted, 64-bit is not.
+            // See the defined-memory case: 64-bit is not supported. An imported
+            // shared memory is out of scope — the thread-shareable backend is
+            // only wired up for a single *defined* shared memory.
             if mem_ty.memory64 {
                 return Err(TranspileError::Unsupported("64-bit memory".into()));
+            }
+            if mem_ty.shared {
+                return Err(TranspileError::Unsupported("imported shared memory".into()));
             }
             // A host-lent buffer is only wired up for memory 0 (`Imports::memory`);
             // an imported memory at a higher index (rare, out of scope) is
@@ -495,6 +502,7 @@ fn classify_import(
             sink.memories.push(codegen::MemInfo {
                 min_pages: mem_ty.initial,
                 imported: true,
+                shared: false,
             });
             Ok(())
         }

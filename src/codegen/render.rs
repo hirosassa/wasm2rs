@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::helpers::{HELPER_ORDER, helper_lines};
+use super::helpers::{HELPER_ORDER, helper_lines, shared_helper_lines};
 use super::runtime::render_rt_helpers;
 use super::{
     ALLOW, DataSegment, ElemSegment, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
@@ -65,6 +65,12 @@ pub(super) fn render_module(
         )?);
         lines.push(String::new());
     }
+    // A shared module emits the thread-shareable `SharedMemory` runtime once,
+    // at module scope, ahead of the `Instance` type that stores it.
+    if ctx.memory_shared {
+        lines.extend(shared_memory_runtime_lines());
+        lines.push(String::new());
+    }
     let (decl_generics, type_generics) = host_generics(parts);
 
     // Module-scope statics backing the retained passive segments.
@@ -97,19 +103,26 @@ pub(super) fn render_module(
     if has_imports {
         lines.push("    imports: H,".to_string());
     }
-    // Each defined memory is an owned buffer: memory 0 keeps the field name
-    // `memory`, memory `i > 0` is `memory{i}`. An imported memory (only ever
-    // memory 0) lives in the host, so the instance owns no buffer for it.
-    for (i, _) in memories.iter().enumerate() {
-        if i == 0 && mem_imported {
-            continue;
+    // A single defined `shared` memory is a thread-shareable handle (cheap Arc
+    // clone) rather than an owned `Vec<u8>`, so sibling instances on other
+    // threads share the same linear memory.
+    if ctx.memory_shared {
+        lines.push("    memory: SharedMemory,".to_string());
+    } else {
+        // Each defined memory is an owned buffer: memory 0 keeps the field name
+        // `memory`, memory `i > 0` is `memory{i}`. An imported memory (only ever
+        // memory 0) lives in the host, so the instance owns no buffer for it.
+        for (i, _) in memories.iter().enumerate() {
+            if i == 0 && mem_imported {
+                continue;
+            }
+            let field = if i == 0 {
+                "memory".to_string()
+            } else {
+                format!("memory{i}")
+            };
+            lines.push(format!("    {field}: Vec<u8>,"));
         }
-        let field = if i == 0 {
-            "memory".to_string()
-        } else {
-            format!("memory{i}")
-        };
-        lines.push(format!("    {field}: Vec<u8>,"));
     }
     // Imported tables live in the host, so the instance owns no storage.
     if table.is_some() && !table_imported {
@@ -197,97 +210,164 @@ pub(super) fn render_module(
         }
     };
 
-    inner.push(format!("pub fn new({new_param}) -> Self {{"));
-    inner.push(open.to_string());
-    if has_imports {
-        inner.push("        imports,".to_string());
-    }
-    // Each defined memory's field literal: zero-filled, then each active data
-    // segment for that memory copied in. Memory 0 keeps the `memory` field name
-    // and the exact single-memory rendering; memory `i > 0` is `memory{i}`.
-    for (i, m) in memories.iter().enumerate() {
-        if i == 0 && mem_imported {
-            continue;
+    // The non-memory field initialisers (imports, table, globals, wasi_fds, and
+    // the retained passive segments), pushed identically by both `Instance::new`
+    // and — for a shared module — `with_memory`. Only the memory field differs
+    // between the two, so factoring the rest keeps them in lock-step.
+    let push_common_fields = |inner: &mut Vec<String>| -> Result<(), TranspileError> {
+        // An imported table is host-owned (see the post-construction elem copy);
+        // only a defined table gets a `table` field.
+        if let Some(t) = table.filter(|_| !table_imported) {
+            if active_elem.is_empty() {
+                inner.push(format!("        table: vec![u32::MAX; {}],", t.min));
+            } else {
+                // Start every slot null, then apply each active element segment.
+                inner.push("        table: {".to_string());
+                inner.push(format!(
+                    "            let mut t: Vec<u32> = vec![u32::MAX; {}];",
+                    t.min
+                ));
+                copy_active_elems(inner, "t", "            ");
+                inner.push("            t".to_string());
+                inner.push("        },".to_string());
+            }
         }
-        let field = if i == 0 {
-            "memory".to_string()
-        } else {
-            format!("memory{i}")
-        };
-        let mem_index = index_u32(i)?;
-        let bytes = m
+        for (i, g) in globals.iter().enumerate() {
+            inner.push(format!("        g{}: {},", global_base + i, g.init));
+        }
+        if wasi_files {
+            inner.push("        wasi_fds: Vec::new(),".to_string());
+        }
+        // Passive segments are retained as `&'static` slices of the module-scope
+        // statics, so `memory.init`/`table.init` can copy from them on demand.
+        for (d, seg) in data.iter().enumerate() {
+            if seg.offset.is_none() {
+                inner.push(format!("        data{d}: &DATA{d},"));
+            }
+        }
+        for (e, seg) in elements.iter().enumerate() {
+            if seg.offset.is_none() && !seg.declared {
+                inner.push(format!("        elem{e}: &ELEM{e},"));
+            }
+        }
+        Ok(())
+    };
+
+    if ctx.memory_shared {
+        // A single defined shared memory. `new` creates a fresh `SharedMemory`,
+        // applies this module's active data segments into it *once*, and inits
+        // globals/tables; `with_memory` joins an existing handle (sibling
+        // instance on another thread), inits its own globals/tables, and does
+        // NOT re-apply data — the memory is already initialised.
+        let mem0 = memories
+            .first()
+            .ok_or_else(|| TranspileError::Unsupported("shared memory missing".into()))?;
+        let bytes = mem0
             .min_pages
             .checked_mul(65536)
             .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
-        if active_for(mem_index).is_empty() {
-            inner.push(format!("        {field}: vec![0u8; {bytes}],"));
+
+        inner.push(format!("pub fn new({new_param}) -> Self {{"));
+        inner.push(format!("    let memory = SharedMemory::new({bytes});"));
+        if !active_for(0).is_empty() {
+            inner.push("    {".to_string());
+            inner.push("        let mut __m = memory.bytes();".to_string());
+            copy_active_data(&mut inner, 0, "__m", "        ");
+            inner.push("    }".to_string());
+        }
+        inner.push("    Self {".to_string());
+        if has_imports {
+            inner.push("        imports,".to_string());
+        }
+        inner.push("        memory,".to_string());
+        push_common_fields(&mut inner)?;
+        inner.push("    }".to_string());
+        inner.push("}".to_string());
+
+        let with_param = if has_imports {
+            "mem: SharedMemory, imports: H"
         } else {
-            // Zero the memory, then copy each active data segment into place.
-            inner.push(format!("        {field}: {{"));
-            inner.push(format!(
-                "            let mut m: Vec<u8> = vec![0u8; {bytes}];"
-            ));
-            copy_active_data(&mut inner, mem_index, "m", "            ");
-            inner.push("            m".to_string());
-            inner.push("        },".to_string());
+            "mem: SharedMemory"
+        };
+        inner.push(String::new());
+        inner.push(format!("pub fn with_memory({with_param}) -> Self {{"));
+        inner.push("    Self {".to_string());
+        if has_imports {
+            inner.push("        imports,".to_string());
         }
-    }
-    // An imported table is host-owned (see the post-construction elem copy);
-    // only a defined table gets a `table` field.
-    if let Some(t) = table.filter(|_| !table_imported) {
-        if active_elem.is_empty() {
-            inner.push(format!("        table: vec![u32::MAX; {}],", t.min));
-        } else {
-            // Start every slot null, then apply each active element segment.
-            inner.push("        table: {".to_string());
-            inner.push(format!(
-                "            let mut t: Vec<u32> = vec![u32::MAX; {}];",
-                t.min
-            ));
-            copy_active_elems(&mut inner, "t", "            ");
-            inner.push("            t".to_string());
-            inner.push("        },".to_string());
+        inner.push("        memory: mem,".to_string());
+        push_common_fields(&mut inner)?;
+        inner.push("    }".to_string());
+        inner.push("}".to_string());
+
+        inner.push(String::new());
+        inner.push(
+            "pub fn shared_memory(&self) -> SharedMemory { self.memory.clone() }".to_string(),
+        );
+    } else {
+        inner.push(format!("pub fn new({new_param}) -> Self {{"));
+        inner.push(open.to_string());
+        if has_imports {
+            inner.push("        imports,".to_string());
         }
-    }
-    for (i, g) in globals.iter().enumerate() {
-        inner.push(format!("        g{}: {},", global_base + i, g.init));
-    }
-    if wasi_files {
-        inner.push("        wasi_fds: Vec::new(),".to_string());
-    }
-    // Passive segments are retained as `&'static` slices of the module-scope
-    // statics, so `memory.init`/`table.init` can copy from them on demand.
-    for (d, seg) in data.iter().enumerate() {
-        if seg.offset.is_none() {
-            inner.push(format!("        data{d}: &DATA{d},"));
+        // Each defined memory's field literal: zero-filled, then each active data
+        // segment for that memory copied in. Memory 0 keeps the `memory` field name
+        // and the exact single-memory rendering; memory `i > 0` is `memory{i}`.
+        for (i, m) in memories.iter().enumerate() {
+            if i == 0 && mem_imported {
+                continue;
+            }
+            let field = if i == 0 {
+                "memory".to_string()
+            } else {
+                format!("memory{i}")
+            };
+            let mem_index = index_u32(i)?;
+            let bytes = m
+                .min_pages
+                .checked_mul(65536)
+                .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
+            if active_for(mem_index).is_empty() {
+                inner.push(format!("        {field}: vec![0u8; {bytes}],"));
+            } else {
+                // Zero the memory, then copy each active data segment into place.
+                inner.push(format!("        {field}: {{"));
+                inner.push(format!(
+                    "            let mut m: Vec<u8> = vec![0u8; {bytes}];"
+                ));
+                copy_active_data(&mut inner, mem_index, "m", "            ");
+                inner.push("            m".to_string());
+                inner.push("        },".to_string());
+            }
         }
-    }
-    for (e, seg) in elements.iter().enumerate() {
-        if seg.offset.is_none() && !seg.declared {
-            inner.push(format!("        elem{e}: &ELEM{e},"));
+        push_common_fields(&mut inner)?;
+        inner.push(close.to_string());
+        if post_init {
+            // Copy each active data/element segment into the host-owned storage in
+            // order. An out-of-bounds write panics here, faithfully reproducing a
+            // wasm instantiation trap when a segment does not fit the host storage.
+            if post_init_data {
+                copy_active_data(&mut inner, 0, "instance.mem_mut()", "    ");
+            }
+            if post_init_elem {
+                copy_active_elems(&mut inner, "instance.table_mut()", "    ");
+            }
+            inner.push("    instance".to_string());
         }
+        inner.push("}".to_string());
     }
-    inner.push(close.to_string());
-    if post_init {
-        // Copy each active data/element segment into the host-owned storage in
-        // order. An out-of-bounds write panics here, faithfully reproducing a
-        // wasm instantiation trap when a segment does not fit the host storage.
-        if post_init_data {
-            copy_active_data(&mut inner, 0, "instance.mem_mut()", "    ");
-        }
-        if post_init_elem {
-            copy_active_elems(&mut inner, "instance.table_mut()", "    ");
-        }
-        inner.push("    instance".to_string());
-    }
-    inner.push("}".to_string());
 
     // Uniform memory accessors so the load/store/bulk helpers are identical for
     // defined and imported memory: a defined buffer is a field, an imported one
     // (only ever memory 0) is lent by the host through the `Imports` trait.
     // Memory 0 keeps the historic `mem`/`mem_mut`/`memory` names; memory `i > 0`
     // is `mem{i}`/`mem{i}_mut`/`memory{i}`, each backed by its own field.
-    for (i, m) in memories.iter().enumerate() {
+    //
+    // A shared module emits none of these: `mem()`/`mem_mut()` hand out plain
+    // borrows that cannot span a `Mutex` lock, and the transformed helpers lock
+    // `self.memory.bytes()` directly instead. `shared_memory()` (emitted with
+    // `new`) is the public handle accessor.
+    for (i, m) in memories.iter().enumerate().filter(|_| !ctx.memory_shared) {
         let (get, get_mut, pub_get) = if i == 0 {
             (
                 "mem".to_string(),
@@ -366,7 +446,13 @@ pub(super) fn render_module(
         for helper in HELPER_ORDER {
             if used.contains(&(helper, mem)) {
                 inner.push(String::new());
-                inner.extend(helper_lines(helper, mem));
+                // A shared module (single memory 0) emits helpers that lock
+                // `self.memory.bytes()` once instead of borrowing `self.mem()`.
+                if ctx.memory_shared {
+                    inner.extend(shared_helper_lines(helper));
+                } else {
+                    inner.extend(helper_lines(helper, mem));
+                }
             }
         }
     }
@@ -402,6 +488,169 @@ pub(super) fn render_module(
     let mut out = lines.join("\n");
     out.push('\n');
     Ok(out)
+}
+
+/// The module-scope runtime for a `shared` memory: the thread-shareable
+/// `SharedMemory` handle (a `#[derive(Clone)]` `Arc` of a `Mutex`-bearing inner,
+/// so it is `Send + Sync`), the little-endian read/write/combine helpers, and
+/// the atomic RMW/cmpxchg/wait/notify methods. Emitted verbatim (warning-clean
+/// under `-D warnings`) and used only when the module has a single defined
+/// shared memory.
+fn shared_memory_runtime_lines() -> Vec<String> {
+    const RUNTIME: &str = r#"#[derive(Clone)]
+pub struct SharedMemory(std::sync::Arc<SharedMemInner>);
+
+struct SharedMemInner {
+    bytes: std::sync::Mutex<Vec<u8>>,
+    park: std::sync::Mutex<SharedPark>,
+    cvar: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct SharedPark {
+    // addr -> number of parked waiters
+    waiters: std::collections::HashMap<u32, u32>,
+    // addr -> notification generation; a waiter wakes when its address's
+    // generation advances past the value captured on entry.
+    gen: std::collections::HashMap<u32, u64>,
+}
+
+fn shared_width_mask(width: usize) -> u64 {
+    if width >= 8 { u64::MAX } else { (1u64 << (width * 8)) - 1 }
+}
+
+fn shared_read_le(b: &[u8], addr: usize, width: usize) -> u64 {
+    let mut v: u64 = 0;
+    let mut i = 0;
+    while i < width {
+        v |= (b[addr + i] as u64) << (8 * i);
+        i += 1;
+    }
+    v
+}
+
+fn shared_write_le(b: &mut [u8], addr: usize, width: usize, val: u64) {
+    let mut i = 0;
+    while i < width {
+        b[addr + i] = (val >> (8 * i)) as u8;
+        i += 1;
+    }
+}
+
+// RMW op codes: 0=add 1=sub 2=and 3=or 4=xor 5=xchg
+fn shared_combine(op: u8, old: u64, val: u64, width: usize) -> u64 {
+    let m = shared_width_mask(width);
+    let r = match op {
+        0 => old.wrapping_add(val),
+        1 => old.wrapping_sub(val),
+        2 => old & val,
+        3 => old | val,
+        4 => old ^ val,
+        _ => val, // xchg
+    };
+    r & m
+}
+
+#[allow(dead_code)]
+impl SharedMemory {
+    fn new(min_bytes: usize) -> Self {
+        SharedMemory(std::sync::Arc::new(SharedMemInner {
+            bytes: std::sync::Mutex::new(vec![0u8; min_bytes]),
+            park: std::sync::Mutex::new(SharedPark::default()),
+            cvar: std::sync::Condvar::new(),
+        }))
+    }
+
+    fn bytes(&self) -> std::sync::MutexGuard<'_, Vec<u8>> {
+        self.0.bytes.lock().unwrap()
+    }
+
+    // One critical section, so the whole read-modify-write is atomic across
+    // threads. Returns the (zero-extended) old value.
+    fn atomic_rmw(&self, addr: usize, width: usize, op: u8, val: u64) -> u64 {
+        let mut b = self.0.bytes.lock().unwrap();
+        let old = shared_read_le(&b, addr, width);
+        let new = shared_combine(op, old, val & shared_width_mask(width), width);
+        shared_write_le(&mut b, addr, width, new);
+        old
+    }
+
+    // Stores `replacement` only if the (masked) current value equals `expected`.
+    // Returns the (zero-extended) old value either way.
+    fn atomic_cmpxchg(&self, addr: usize, width: usize, expected: u64, replacement: u64) -> u64 {
+        let mut b = self.0.bytes.lock().unwrap();
+        let old = shared_read_le(&b, addr, width);
+        if old == (expected & shared_width_mask(width)) {
+            shared_write_le(&mut b, addr, width, replacement & shared_width_mask(width));
+        }
+        old
+    }
+
+    fn notify(&self, addr: u32, count: u32) -> u32 {
+        let mut park = self.0.park.lock().unwrap();
+        let waiting = park.waiters.get(&addr).copied().unwrap_or(0);
+        let n = waiting.min(count);
+        if n > 0 {
+            let g = park.gen.get(&addr).copied().unwrap_or(0).wrapping_add(1);
+            park.gen.insert(addr, g);
+            drop(park);
+            self.0.cvar.notify_all();
+        }
+        n
+    }
+
+    // Returns 0 (woken), 1 (value mismatch - did not block), or 2 (timed out).
+    // `timeout_ns < 0` means wait forever. `width` is 4 (wait32) or 8 (wait64).
+    fn wait(&self, addr: u32, expected: u64, width: usize, timeout_ns: i64) -> i32 {
+        // Hold `park` across the value check so a concurrent `notify` (which also
+        // takes `park`) cannot slip between the check and our registration -
+        // closing the lost-wakeup window. Lock order is always park-then-bytes.
+        let mut park = self.0.park.lock().unwrap();
+        {
+            let b = self.0.bytes.lock().unwrap();
+            if shared_read_le(&b, addr as usize, width) != (expected & shared_width_mask(width)) {
+                return 1;
+            }
+        }
+        let start = park.gen.get(&addr).copied().unwrap_or(0);
+        *park.waiters.entry(addr).or_insert(0) += 1;
+        let result;
+        if timeout_ns < 0 {
+            loop {
+                if park.gen.get(&addr).copied().unwrap_or(0) != start {
+                    result = 0;
+                    break;
+                }
+                park = self.0.cvar.wait(park).unwrap();
+            }
+        } else {
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_nanos(timeout_ns as u64);
+            loop {
+                if park.gen.get(&addr).copied().unwrap_or(0) != start {
+                    result = 0;
+                    break;
+                }
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    result = 2;
+                    break;
+                }
+                let (g, to) = self.0.cvar.wait_timeout(park, deadline - now).unwrap();
+                park = g;
+                if to.timed_out() && park.gen.get(&addr).copied().unwrap_or(0) == start {
+                    result = 2;
+                    break;
+                }
+            }
+        }
+        if let Some(c) = park.waiters.get_mut(&addr) {
+            *c = c.saturating_sub(1);
+        }
+        result
+    }
+}"#;
+    RUNTIME.lines().map(|l| l.to_string()).collect()
 }
 
 /// Whether the module needs the injected `Imports` host trait — i.e. it has a

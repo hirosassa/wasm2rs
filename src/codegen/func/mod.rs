@@ -41,6 +41,19 @@ impl RmwOp {
             RmwOp::Xchg => value.to_string(),
         }
     }
+
+    /// The op code the shared-memory backend's `atomic_rmw` dispatches on:
+    /// 0=add 1=sub 2=and 3=or 4=xor 5=xchg.
+    pub(super) fn op_code(self) -> u8 {
+        match self {
+            RmwOp::Add => 0,
+            RmwOp::Sub => 1,
+            RmwOp::And => 2,
+            RmwOp::Or => 3,
+            RmwOp::Xor => 4,
+            RmwOp::Xchg => 5,
+        }
+    }
 }
 
 /// The value type and access width of an atomic RMW/cmpxchg, the single choice
@@ -91,6 +104,17 @@ impl AtomicWidth {
                 ValType::I64,
                 Some("0xFFFF_FFFF"),
             ),
+        }
+    }
+
+    /// The access width in bytes (1/2/4/8), which the shared-memory backend
+    /// uses to read/write and mask exactly the accessed cell.
+    pub(super) fn byte_width(self) -> usize {
+        match self {
+            AtomicWidth::I32As8 | AtomicWidth::I64As8 => 1,
+            AtomicWidth::I32As16 | AtomicWidth::I64As16 => 2,
+            AtomicWidth::I32 | AtomicWidth::I64As32 => 4,
+            AtomicWidth::I64 => 8,
         }
     }
 }
@@ -648,7 +672,7 @@ impl<'a> FuncGen<'a> {
             // Fence and wait/notify. A fence is a no-op on a single instance;
             // `notify` wakes nobody; `wait` traps (would block) or returns 1.
             Operator::AtomicFence => {}
-            Operator::MemoryAtomicNotify { .. } => self.atomic_notify()?,
+            Operator::MemoryAtomicNotify { memarg } => self.atomic_notify(memarg)?,
             Operator::MemoryAtomicWait32 { memarg } => self.atomic_wait(Helper::LoadI32, memarg)?,
             Operator::MemoryAtomicWait64 { memarg } => self.atomic_wait(Helper::LoadI64, memarg)?,
             Operator::MemorySize { mem } => self.memory_size(mem)?,

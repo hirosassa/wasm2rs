@@ -4,6 +4,16 @@ use super::super::helpers::{helper_method_name, mem_accessor};
 use super::super::{Helper, Val, memarg_offset};
 use crate::TranspileError;
 
+/// The Rust integer type an atomic RMW/cmpxchg result is cast to on the shared
+/// path. An atomic access is always over an i32- or i64-typed cell; any other
+/// type is unreachable here (validation rejects it), so it falls back to `i64`.
+fn shared_result_ty(ty: ValType) -> &'static str {
+    match ty {
+        ValType::I32 => "i32",
+        _ => "i64",
+    }
+}
+
 impl<'a> super::FuncGen<'a> {
     // ----- locals ----------------------------------------------------------
     pub(super) fn local_store(
@@ -258,6 +268,26 @@ impl<'a> super::FuncGen<'a> {
         self.spill_nonstable()?;
         let value = self.pop()?;
         let addr = self.pop()?;
+        if self.ctx.memory_shared {
+            // A shared memory does the whole read-modify-write in one critical
+            // section (`SharedMemory::atomic_rmw`), so it is atomic across
+            // threads; the runtime masks the operand and zero-extends the old
+            // value. No load/store helper is used on this path.
+            let byte = width.byte_width();
+            let code = op.op_code();
+            let rust_ty = shared_result_ty(ty);
+            let old = self.fresh_temp();
+            self.line(format!(
+                "let {old} = self.memory.atomic_rmw(({}) as u32 as usize + {offset}usize, {byte}, {code}, ({}) as u64) as {rust_ty};",
+                addr.code, value.code
+            ));
+            self.push(Val {
+                code: old,
+                ty,
+                stable: true,
+            });
+            return Ok(());
+        }
         self.used_helpers.insert((load, mem));
         self.used_helpers.insert((store, mem));
         // `addr` feeds both the load and the store, so bind it once.
@@ -301,6 +331,24 @@ impl<'a> super::FuncGen<'a> {
         let replacement = self.pop()?;
         let expected = self.pop()?;
         let addr = self.pop()?;
+        if self.ctx.memory_shared {
+            // One critical section compares at the access width (the runtime
+            // masks `expected`) and stores `replacement` only on a match,
+            // returning the zero-extended old value either way.
+            let byte = width.byte_width();
+            let rust_ty = shared_result_ty(ty);
+            let old = self.fresh_temp();
+            self.line(format!(
+                "let {old} = self.memory.atomic_cmpxchg(({}) as u32 as usize + {offset}usize, {byte}, ({}) as u64, ({}) as u64) as {rust_ty};",
+                addr.code, expected.code, replacement.code
+            ));
+            self.push(Val {
+                code: old,
+                ty,
+                stable: true,
+            });
+            return Ok(());
+        }
         self.used_helpers.insert((load, mem));
         self.used_helpers.insert((store, mem));
         let addr_tmp = self.fresh_temp();
@@ -330,8 +378,30 @@ impl<'a> super::FuncGen<'a> {
 
     /// Lower `memory.atomic.notify`. It pops (addr, count) and pushes the number
     /// of woken waiters — always 0 on a single instance, which has no waiters.
-    pub(super) fn atomic_notify(&mut self) -> Result<(), TranspileError> {
+    pub(super) fn atomic_notify(&mut self, memarg: MemArg) -> Result<(), TranspileError> {
         self.require_memory()?;
+        self.require_memory_index(memarg.memory)?;
+        let offset = memarg_offset(memarg)?;
+        if self.ctx.memory_shared {
+            // Wake up to `count` waiters parked on the effective byte address
+            // (base + static memarg offset), matching the address a waiter
+            // registers under. The count/addr are consumed, so freeze only
+            // survivors.
+            self.spill_nonstable()?;
+            let count = self.pop()?;
+            let addr = self.pop()?;
+            let name = self.fresh_temp();
+            self.line(format!(
+                "let {name}: i32 = self.memory.notify(({}) as u32 + {offset}u32, ({}) as u32) as i32;",
+                addr.code, count.code
+            ));
+            self.push(Val {
+                code: name,
+                ty: ValType::I32,
+                stable: true,
+            });
+            return Ok(());
+        }
         self.pop()?; // count
         self.pop()?; // addr
         self.push(Val {
@@ -354,6 +424,32 @@ impl<'a> super::FuncGen<'a> {
         self.require_memory()?;
         let mem = self.require_memory_index(memarg.memory)?;
         let offset = memarg_offset(memarg)?;
+        if self.ctx.memory_shared {
+            // A real blocking wait: park until notified or the timeout elapses.
+            // `wait32` compares a 4-byte cell, `wait64` an 8-byte one. Returns 0
+            // (woken), 1 (value mismatch — did not block), or 2 (timed out). The
+            // three operands are consumed, so freeze only survivors.
+            let byte = if matches!(load, Helper::LoadI64) {
+                8
+            } else {
+                4
+            };
+            self.spill_nonstable()?;
+            let timeout = self.pop()?;
+            let expected = self.pop()?;
+            let addr = self.pop()?;
+            let name = self.fresh_temp();
+            self.line(format!(
+                "let {name}: i32 = self.memory.wait(({}) as u32 + {offset}u32, ({}) as u64, {byte}, ({}) as i64);",
+                addr.code, expected.code, timeout.code
+            ));
+            self.push(Val {
+                code: name,
+                ty: ValType::I32,
+                stable: true,
+            });
+            return Ok(());
+        }
         self.pop()?; // timeout
         let expected = self.pop()?;
         let addr = self.pop()?;
@@ -377,15 +473,22 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn memory_size(&mut self, mem: u32) -> Result<(), TranspileError> {
         self.require_memory()?;
         let mem = self.require_memory_index(mem)?;
-        let (get, _) = mem_accessor(mem);
         // Materialise into a temp: `self.mem()` borrows the instance, so leaving
         // it inline could clash with another `self.mem()`/method call in the same
         // enclosing expression (e.g. imported memory, where `mem()` routes
         // through the host).
         let name = self.fresh_temp();
-        self.line(format!(
-            "let {name}: i32 = (self.{get}().len() / 65536) as i32;"
-        ));
+        if self.ctx.memory_shared {
+            // A shared memory has no `mem()` accessor; measure the locked bytes.
+            self.line(format!(
+                "let {name}: i32 = (self.memory.bytes().len() / 65536) as i32;"
+            ));
+        } else {
+            let (get, _) = mem_accessor(mem);
+            self.line(format!(
+                "let {name}: i32 = (self.{get}().len() / 65536) as i32;"
+            ));
+        }
         self.push(Val {
             code: name,
             ty: ValType::I32,

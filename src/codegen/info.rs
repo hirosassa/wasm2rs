@@ -17,6 +17,10 @@ pub(crate) struct GlobalInfo {
 pub(crate) struct MemInfo {
     pub min_pages: u64,
     pub imported: bool,
+    /// Whether the memory is declared `shared` (threads proposal). A single
+    /// defined shared memory is backed by a thread-shareable `SharedMemory`
+    /// (Mutex-based) so its atomics are genuinely atomic across OS threads.
+    pub shared: bool,
 }
 
 /// Metadata about the module's function table (a single `funcref` table). The
