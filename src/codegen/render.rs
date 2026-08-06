@@ -615,7 +615,10 @@ fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "    (self.conts.len() - 1) as u32".to_string(),
         "}".to_string(),
         String::new(),
-        "pub fn cont_step(&mut self, __h: u32) -> StepResult {".to_string(),
+        // `__args` carries the values injected by this resume: at a fresh
+        // continuation's first step they are the body's parameters; a
+        // parameter-less body simply ignores the (empty) slice.
+        "pub fn cont_step(&mut self, __h: u32, __args: &[i64]) -> StepResult {".to_string(),
         "    let mut __obj = self.conts[__h as usize]".to_string(),
         "        .take()".to_string(),
         "        .expect(\"resume of a consumed continuation\");".to_string(),
@@ -623,7 +626,7 @@ fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
     ]);
     for n in &ctx.cont_bodies {
         lines.push(format!(
-            "        ContObj::C{n}(__f) => self.cont_step_func{n}(__f),"
+            "        ContObj::C{n}(__f) => self.cont_step_func{n}(__f, __args),"
         ));
     }
     lines.extend([

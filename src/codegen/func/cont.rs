@@ -11,10 +11,11 @@
 //! carried as `Vec<i64>` (the same width-erased encoding the exception path
 //! uses), decoded back to their wasm types by the resumer.
 //!
-//! Phase 4 (the first observable generator) is deliberately narrow: a
-//! continuation body must have no parameters, no locals and no nested control
-//! flow, and its operand stack must be empty at every suspend point. Anything
-//! else is rejected as `Unsupported` and revisited in a later phase.
+//! A continuation body may have locals (kept in the frame across suspends) and
+//! numeric parameters (injected by the first `resume` and decoded into their
+//! parameter locals at `pc == 0`). It must still have no nested control flow,
+//! and its operand stack must be empty at every suspend point. Anything else is
+//! rejected as `Unsupported` and revisited in a later phase.
 
 use wasmparser::{FunctionBody, Operator, ValType};
 
@@ -61,6 +62,30 @@ pub(super) fn cont_result_types(
     types: &[TypeSig],
     cont_type_index: u32,
 ) -> Result<Vec<ValType>, TranspileError> {
+    Ok(cont_underlying_sig(type_kinds, types, cont_type_index)?
+        .results
+        .clone())
+}
+
+/// The parameter types of the function type underlying a continuation type
+/// index — the values a `resume` of that continuation injects (the body's
+/// parameters at the first step; empty for a parameter-less body).
+pub(super) fn cont_param_types(
+    type_kinds: &[CompositeKind],
+    types: &[TypeSig],
+    cont_type_index: u32,
+) -> Result<Vec<ValType>, TranspileError> {
+    Ok(cont_underlying_sig(type_kinds, types, cont_type_index)?
+        .params
+        .clone())
+}
+
+/// The function signature underlying a continuation type index.
+fn cont_underlying_sig<'a>(
+    type_kinds: &[CompositeKind],
+    types: &'a [TypeSig],
+    cont_type_index: u32,
+) -> Result<&'a TypeSig, TranspileError> {
     let idx = usize::try_from(cont_type_index)
         .map_err(|_| TranspileError::Unsupported("continuation type index too large".into()))?;
     let CompositeKind::Cont(func_ty) = type_kinds.get(idx).ok_or_else(|| {
@@ -71,10 +96,9 @@ pub(super) fn cont_result_types(
             "type index {cont_type_index} is not a continuation type"
         )));
     };
-    let sig = types.get(*func_ty as usize).ok_or_else(|| {
+    types.get(*func_ty as usize).ok_or_else(|| {
         TranspileError::Unsupported("continuation underlying function type out of range".into())
-    })?;
-    Ok(sig.results.clone())
+    })
 }
 
 impl super::FuncGen<'_> {
@@ -90,11 +114,6 @@ impl super::FuncGen<'_> {
         line_prefix: &str,
         out: &mut String,
     ) -> Result<GenMeta, TranspileError> {
-        if !params.is_empty() {
-            return Err(TranspileError::Unsupported(
-                "continuation body with parameters (phase 5b)".into(),
-            ));
-        }
         // Locals now live in the frame (loaded at entry, saved at every suspend),
         // so discard the default-init `let` bindings `FuncGen::new` seeded `cur`
         // with; the entry prologue below reloads them from `__frame` instead.
@@ -179,8 +198,12 @@ impl super::FuncGen<'_> {
                             } else {
                                 "_"
                             };
+                            // The checkpoint callee takes no parameters in this
+                            // phase, so it is driven with an empty injection —
+                            // the outer body's own `__args` were already consumed
+                            // into its parameter slots at `pc == 0`.
                             format!(
-                                "match self.cont_step_func{g}(&mut __frame.sub) {{ \
+                                "match self.cont_step_func{g}(&mut __frame.sub, &[]) {{ \
                                  StepResult::Suspend {{ tag: __t, payload: __p }} => {{ \
                                  {save}StepResult::Suspend {{ tag: __t, payload: __p }} }}, \
                                  StepResult::Return({bind}) => StepResult::Return(vec![{payload}]) }}"
@@ -225,9 +248,25 @@ impl super::FuncGen<'_> {
         // `pub` so the root impl's `cont_step` can reach it when this body is
         // emitted into a separate chunk module (like the ordinary `func{N}`s).
         src.push_str(&format!(
-            "pub fn cont_step_func{index}(&mut self, __frame: &mut ContFrame{index}) \
-             -> StepResult {{\n"
+            "pub fn cont_step_func{index}(&mut self, __frame: &mut ContFrame{index}, \
+             __args: &[i64]) -> StepResult {{\n"
         ));
+        // On the first step (`pc == 0`) the resume's injected `__args` are the
+        // body's parameters (locals `0..params.len()`); decode them into their
+        // frame slots before the reload below picks them up. A parameter-less
+        // body has nothing to inject, so no prologue is emitted (and `__args`
+        // stays unused, covered by the ALLOW attribute).
+        if !params.is_empty() {
+            src.push_str(line_prefix);
+            src.push_str("    if __frame.pc == 0u32 {\n");
+            for (i, ty) in params.iter().enumerate() {
+                let decoded = decode_from_i64(&format!("__args[{i}]"), *ty)?;
+                src.push_str(line_prefix);
+                src.push_str(&format!("        __frame.l{i} = {decoded};\n"));
+            }
+            src.push_str(line_prefix);
+            src.push_str("    }\n");
+        }
         // Reload every local from the frame at entry; arm bodies reference `lN`
         // bare (unchanged from the ordinary lowering).
         for i in 0..self.local_types.len() {

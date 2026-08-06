@@ -296,6 +296,66 @@ fn local_survives_a_cross_call_suspend() {
 }
 
 #[test]
+fn continuation_body_parameter_is_delivered_at_first_resume() {
+    // A continuation body with a parameter (P5b). `$gen` takes `$n` and returns
+    // `$n + 100`. `cont.new` builds the continuation and the *first* `resume`
+    // supplies the argument (5), which the body must load into its parameter
+    // local. The body never suspends, so `resume` (no handlers) returns
+    // immediately with 5 + 100 = 105. If the argument were dropped, the
+    // parameter would read as its zero default and the result would be 100.
+    compile_run(
+        "cont_param_first_resume",
+        r#"(module
+            (type $ft (func (param i32) (result i32)))
+            (type $ct (cont $ft))
+            (func $gen (param $n i32) (result i32)
+              local.get $n i32.const 100 i32.add)
+            (func (export "run") (result i32)
+              i32.const 5
+              ref.func $gen cont.new $ct
+              resume $ct))"#,
+        // `$gen` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 105);",
+    );
+}
+
+#[test]
+fn continuation_parameter_survives_a_suspend() {
+    // The parameter must persist across a suspend like any other local (P5b).
+    // `$gen($n)` yields `$n` (5), then — after the resume — returns `$n + 100`
+    // (105). The driver resumes with the argument 5, accumulates the yielded 5,
+    // then resumes the (now parameter-less) reused continuation to its return
+    // (105), summing 5 + 105 = 110.
+    compile_run(
+        "cont_param_suspend",
+        r#"(module
+            (type $ft (func (param i32) (result i32)))
+            (type $ct (cont $ft))
+            (type $ft0 (func (result i32)))
+            (type $ct0 (cont $ft0))
+            (tag $yield (param i32))
+            (func $gen (param $n i32) (result i32)
+              local.get $n suspend $yield
+              local.get $n i32.const 100 i32.add)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct0))
+              (block $on_yield (result i32 (ref $ct0))
+                i32.const 5 ref.func $gen cont.new $ct
+                resume $ct (on $yield $on_yield)
+                return)
+              local.set $k
+              local.get $acc i32.add local.set $acc
+              (block $on_yield2 (result i32 (ref $ct0))
+                local.get $k
+                resume $ct0 (on $yield $on_yield2)
+                local.get $acc i32.add return)
+              unreachable))"#,
+        // `$gen` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 110);",
+    );
+}
+
+#[test]
 fn null_cont_local_defaults_to_null() {
     // A local typed `(ref null $ct)` defaults to the null handle, so reading it
     // back and testing `ref.is_null` reports null (1) without any assignment.

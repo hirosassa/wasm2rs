@@ -419,11 +419,33 @@ impl<'a> super::FuncGen<'a> {
         resume_table: &wasmparser::ResumeTable,
     ) -> Result<(), TranspileError> {
         // The handle is referenced twice (the step call and, on suspension, the
-        // reused continuation), so materialise it into a stable temporary; then
-        // freeze the rest of the stack so it survives the `match` unchanged.
+        // reused continuation), so materialise it into a stable temporary. Below
+        // it on the stack sit the continuation's parameters, which this resume
+        // injects: the body's parameters at its first step (empty for a
+        // parameter-less continuation). Pop them (deepest-first order restored)
+        // and materialise them into an `i64`-encoded slice before freezing the
+        // rest of the stack so it survives the `match` unchanged.
         let handle = self.pop()?;
         let handle_var = self.fresh_temp();
         self.line(format!("let {handle_var}: u32 = {};", handle.code));
+
+        let param_tys =
+            super::cont::cont_param_types(self.ctx.type_kinds, self.ctx.types, cont_type_index)?;
+        let mut args = Vec::with_capacity(param_tys.len());
+        for _ in &param_tys {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+        let mut encoded = Vec::with_capacity(param_tys.len());
+        for (arg, ty) in args.iter().zip(&param_tys) {
+            encoded.push(super::cont::encode_to_i64(&arg.code, *ty)?);
+        }
+        let args_var = self.fresh_temp();
+        self.line(format!(
+            "let {args_var}: [i64; {}] = [{}];",
+            param_tys.len(),
+            encoded.join(", ")
+        ));
         self.spill_nonstable()?;
 
         // The Return path pushes the continuation's result values; hold them in
@@ -441,7 +463,9 @@ impl<'a> super::FuncGen<'a> {
             result_holders.push(name);
         }
 
-        self.line(format!("match self.cont_step({handle_var}) {{"));
+        self.line(format!(
+            "match self.cont_step({handle_var}, &{args_var}) {{"
+        ));
         let return_pat = if results.is_empty() { "_" } else { "__vals" };
         self.line(format!("StepResult::Return({return_pat}) => {{"));
         self.assign_decoded(&result_holders, &results, "__vals")?;
