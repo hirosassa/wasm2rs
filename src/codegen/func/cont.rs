@@ -18,7 +18,7 @@
 
 use wasmparser::{FunctionBody, Operator, ValType};
 
-use super::super::{CompositeKind, GenMeta, TypeSig, Val};
+use super::super::{ALLOW, CompositeKind, GenMeta, Node, TypeSig, Val, index_u32};
 use crate::TranspileError;
 
 /// Encode a wasm value (given its Rust expression `code` and type) into the
@@ -92,18 +92,16 @@ impl super::FuncGen<'_> {
     ) -> Result<GenMeta, TranspileError> {
         if !params.is_empty() {
             return Err(TranspileError::Unsupported(
-                "continuation body with parameters (phase 4)".into(),
+                "continuation body with parameters (phase 5b)".into(),
             ));
         }
-        // `FuncGen::new` seeds `cur` with local declarations; a body with locals
-        // would need them in the frame, which phase 4 does not model.
-        if !self.local_types.is_empty() || !self.cur.is_empty() {
-            return Err(TranspileError::Unsupported(
-                "continuation body with locals (phase 4)".into(),
-            ));
-        }
+        // Locals now live in the frame (loaded at entry, saved at every suspend),
+        // so discard the default-init `let` bindings `FuncGen::new` seeded `cur`
+        // with; the entry prologue below reloads them from `__frame` instead.
+        self.cur.clear();
 
-        // Each element is one `pc` state's arm expression (a `StepResult`).
+        // Each element is one `pc` state's arm body: the state's statements
+        // followed by a terminal `StepResult` expression.
         let mut arms: Vec<String> = Vec::new();
         let mut pc: u32 = 0;
         // A pending tail cross-call checkpoint: a `call` to another step
@@ -130,10 +128,16 @@ impl super::FuncGen<'_> {
                         })?
                         .clone();
                     let payload = self.encode_stack_tail(&payload_tys)?;
+                    // Statements (e.g. `local.set`) computed since the last
+                    // boundary run first; then the mutated locals are saved into
+                    // the frame so the next resume reloads them, and the state
+                    // advances before returning the suspension up.
+                    let stmts = self.take_arm_statements()?;
+                    let save = self.save_mutated_locals()?;
                     let next = pc + 1;
                     arms.push(format!(
-                        "__frame.pc = {next}u32; StepResult::Suspend {{ tag: {tag_index}u32, \
-                         payload: vec![{payload}] }}"
+                        "{stmts}{save}__frame.pc = {next}u32; StepResult::Suspend {{ \
+                         tag: {tag_index}u32, payload: vec![{payload}] }}"
                     ));
                     pc = next;
                 }
@@ -156,12 +160,20 @@ impl super::FuncGen<'_> {
                     let payload = self.encode_stack_tail(&results)?;
                     let arm = match checkpoint {
                         // The tail checkpoint resumes its callee once: on the
-                        // callee's suspend, propagate it up unchanged (this
-                        // frame's `pc` is untouched, so the next resume re-enters
-                        // here and drives the callee on); on the callee's return,
-                        // its results (already on the operand stack as `__cret`
-                        // reads) become this function's results.
+                        // callee's suspend, save this frame's locals and propagate
+                        // the suspension up unchanged (this frame's `pc` is
+                        // untouched, so the next resume re-enters here and drives
+                        // the callee on); on the callee's return, its results
+                        // (already on the operand stack as `__cret` reads) become
+                        // this function's results. A checkpoint sits at a clean
+                        // boundary, so no statements bracket it.
                         Some(g) => {
+                            if !self.cur.is_empty() {
+                                return Err(TranspileError::Unsupported(
+                                    "statements after a cross-call checkpoint (phase 5b)".into(),
+                                ));
+                            }
+                            let save = self.save_mutated_locals()?;
                             let bind = if payload.contains("__cret") {
                                 "__cret"
                             } else {
@@ -169,12 +181,15 @@ impl super::FuncGen<'_> {
                             };
                             format!(
                                 "match self.cont_step_func{g}(&mut __frame.sub) {{ \
-                                 StepResult::Suspend {{ tag: __t, payload: __p }} => \
-                                 StepResult::Suspend {{ tag: __t, payload: __p }}, \
+                                 StepResult::Suspend {{ tag: __t, payload: __p }} => {{ \
+                                 {save}StepResult::Suspend {{ tag: __t, payload: __p }} }}, \
                                  StepResult::Return({bind}) => StepResult::Return(vec![{payload}]) }}"
                             )
                         }
-                        None => format!("StepResult::Return(vec![{payload}])"),
+                        None => {
+                            let stmts = self.take_arm_statements()?;
+                            format!("{stmts}StepResult::Return(vec![{payload}])")
+                        }
                     };
                     arms.push(arm);
                     break;
@@ -200,6 +215,12 @@ impl super::FuncGen<'_> {
         }
 
         let mut src = String::new();
+        // Locals live in `__frame`; a body may declare more than it reads, so the
+        // same allowances the ordinary `func{N}`s carry keep the reload prologue
+        // and per-suspend saves warning-free.
+        src.push_str(line_prefix);
+        src.push_str(ALLOW);
+        src.push('\n');
         src.push_str(line_prefix);
         // `pub` so the root impl's `cont_step` can reach it when this body is
         // emitted into a separate chunk module (like the ordinary `func{N}`s).
@@ -207,6 +228,17 @@ impl super::FuncGen<'_> {
             "pub fn cont_step_func{index}(&mut self, __frame: &mut ContFrame{index}) \
              -> StepResult {{\n"
         ));
+        // Reload every local from the frame at entry; arm bodies reference `lN`
+        // bare (unchanged from the ordinary lowering).
+        for i in 0..self.local_types.len() {
+            let keyword = if self.mutable_locals.contains(&index_u32(i)?) {
+                "let mut"
+            } else {
+                "let"
+            };
+            src.push_str(line_prefix);
+            src.push_str(&format!("    {keyword} l{i} = __frame.l{i};\n"));
+        }
         src.push_str(line_prefix);
         src.push_str("    match __frame.pc {\n");
         for (state, arm) in arms.iter().enumerate() {
@@ -275,8 +307,9 @@ impl super::FuncGen<'_> {
 
     /// Pop the top `tys.len()` operands (the tail matching `tys`, deepest first)
     /// and return them comma-joined as `i64`-encoded expressions. Requires the
-    /// operand stack to be otherwise empty and no pending statements — phase 4
-    /// only handles suspend/return points with a clean stack.
+    /// operand stack to be otherwise empty — a suspend/return point consumes the
+    /// whole stack as its payload, so nothing survives the boundary. Pending
+    /// statements (e.g. `local.set`) are flushed separately by the caller.
     fn encode_stack_tail(&mut self, tys: &[ValType]) -> Result<String, TranspileError> {
         let mut vals = Vec::with_capacity(tys.len());
         for _ in tys {
@@ -285,12 +318,7 @@ impl super::FuncGen<'_> {
         vals.reverse();
         if !self.stack.is_empty() {
             return Err(TranspileError::Unsupported(
-                "non-empty operand stack at a continuation suspend/return (phase 4)".into(),
-            ));
-        }
-        if !self.cur.is_empty() {
-            return Err(TranspileError::Unsupported(
-                "statements before a continuation suspend/return (phase 4)".into(),
+                "non-empty operand stack at a continuation suspend/return (phase 5b)".into(),
             ));
         }
         let mut encoded = Vec::with_capacity(tys.len());
@@ -298,5 +326,39 @@ impl super::FuncGen<'_> {
             encoded.push(encode_to_i64(&val.code, *ty)?);
         }
         Ok(encoded.join(", "))
+    }
+
+    /// Drain the statements queued for the current `pc` state (from `local.set`,
+    /// operand spills, and the like) as an inline, space-separated string. Phase
+    /// 5b has no nested control flow in a continuation body, so every queued node
+    /// is a straight-line statement; anything else is rejected.
+    fn take_arm_statements(&mut self) -> Result<String, TranspileError> {
+        let mut out = String::new();
+        for node in std::mem::take(&mut self.cur) {
+            // Only straight-line statements reach here in phase 5b; a
+            // control-flow node (from a nested region or a `return`/branch) is
+            // already rejected upstream, so this is a defensive guard.
+            let Node::Line(text) = node else {
+                return Err(TranspileError::Unsupported(
+                    "unsupported control flow in a continuation body (phase 5b)".into(),
+                ));
+            };
+            out.push_str(&text);
+            out.push(' ');
+        }
+        Ok(out)
+    }
+
+    /// Save the mutated locals back into the frame, so the next resume reloads
+    /// their current values. Unmutated locals never change from their frame
+    /// default, so they need no write-back.
+    fn save_mutated_locals(&self) -> Result<String, TranspileError> {
+        let mut out = String::new();
+        for i in 0..self.local_types.len() {
+            if self.mutable_locals.contains(&index_u32(i)?) {
+                out.push_str(&format!("__frame.l{i} = l{i}; "));
+            }
+        }
+        Ok(out)
     }
 }

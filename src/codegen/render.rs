@@ -4,7 +4,8 @@ use super::helpers::{HELPER_ORDER, helper_lines, shared_helper_lines};
 use super::runtime::render_rt_helpers;
 use super::{
     ALLOW, DataSegment, ElemSegment, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
-    ModuleParts, WasiFn, byte_array_literal, indent, index_u32, rust_type, rust_types,
+    ModuleParts, WasiFn, byte_array_literal, default_value, indent, index_u32, rust_type,
+    rust_types,
 };
 use crate::TranspileError;
 
@@ -101,7 +102,7 @@ pub(super) fn render_module(
     // Typed-continuations runtime: the step result, the per-continuation frame
     // structs and the tagged object stored in the instance's `conts` table.
     if !ctx.cont_bodies.is_empty() {
-        lines.extend(continuation_runtime_lines(ctx));
+        lines.extend(continuation_runtime_lines(ctx)?);
         lines.push(String::new());
     }
 
@@ -529,7 +530,7 @@ pub(super) fn render_module(
 /// (holding its resumable program counter), and the `ContObj` union the handle
 /// table stores. Phase 4 continuation bodies have no parameters or locals, so a
 /// frame is just its `pc`.
-fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
+fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Result<Vec<String>, TranspileError> {
     // A program may create a continuation without resuming it (or vice versa),
     // leaving some fields/variants unexercised, so the generated types carry the
     // same dead-code allowance as the `Instance` struct.
@@ -545,15 +546,23 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         String::new(),
     ];
     for n in &ctx.step_set {
-        lines.push("#[allow(dead_code)]".to_string());
-        // A step function that ends in a cross-call checkpoint nests its
-        // callee's frame as `sub`, so the resumable callee survives suspends.
-        match ctx.checkpoint_callee.get(n) {
-            Some(g) => lines.push(format!(
-                "pub struct ContFrame{n} {{ pc: u32, sub: ContFrame{g} }}"
-            )),
-            None => lines.push(format!("pub struct ContFrame{n} {{ pc: u32 }}")),
+        // A `ContFrame` holds the resumable `pc`, one field per local (so locals
+        // survive suspends), and — when the function ends in a cross-call
+        // checkpoint — the callee's frame nested as `sub`.
+        let mut fields = vec!["pc: u32".to_string()];
+        if let Some(g) = ctx.checkpoint_callee.get(n) {
+            fields.push(format!("sub: ContFrame{g}"));
         }
+        if let Some(locals) = ctx.step_locals.get(n) {
+            for (i, ty) in locals.iter().enumerate() {
+                fields.push(format!("l{i}: {}", rust_type(*ty, ctx.type_kinds)?));
+            }
+        }
+        lines.push("#[allow(dead_code)]".to_string());
+        lines.push(format!(
+            "pub struct ContFrame{n} {{ {} }}",
+            fields.join(", ")
+        ));
     }
     lines.push(String::new());
     lines.push("#[allow(dead_code)]".to_string());
@@ -562,21 +571,25 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         lines.push(format!("    C{n}(ContFrame{n}),"));
     }
     lines.push("}".to_string());
-    lines
+    Ok(lines)
 }
 
-/// The start-state literal for a step function's frame: `pc` 0 and, when the
-/// function ends in a cross-call checkpoint, a freshly-started callee frame in
-/// `sub` (recursively). The checkpoint graph is acyclic (a recursive chain is
-/// rejected during context building), so this recursion terminates.
+/// The start-state literal for a step function's frame: `pc` 0, each local at
+/// its default, and — when the function ends in a cross-call checkpoint — a
+/// freshly-started callee frame in `sub` (recursively). The checkpoint graph is
+/// acyclic (a recursive chain is rejected during context building), so this
+/// recursion terminates.
 fn frame_start_literal(ctx: &ModuleCtx<'_>, n: u32) -> String {
-    match ctx.checkpoint_callee.get(&n) {
-        Some(g) => format!(
-            "ContFrame{n} {{ pc: 0u32, sub: {} }}",
-            frame_start_literal(ctx, *g)
-        ),
-        None => format!("ContFrame{n} {{ pc: 0u32 }}"),
+    let mut fields = vec!["pc: 0u32".to_string()];
+    if let Some(g) = ctx.checkpoint_callee.get(&n) {
+        fields.push(format!("sub: {}", frame_start_literal(ctx, *g)));
     }
+    if let Some(locals) = ctx.step_locals.get(&n) {
+        for (i, ty) in locals.iter().enumerate() {
+            fields.push(format!("l{i}: {}", default_value(*ty, ctx.type_kinds)));
+        }
+    }
+    format!("ContFrame{n} {{ {} }}", fields.join(", "))
 }
 
 /// The `cont_new`/`cont_step` methods on `Instance`. `cont_new` allocates a

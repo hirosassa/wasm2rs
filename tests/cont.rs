@@ -225,6 +225,77 @@ fn checkpoint_result_may_be_discarded() {
 }
 
 #[test]
+fn local_survives_a_suspend() {
+    // A generator that keeps state in a local across a suspend (P5b). `$gen`
+    // stores 10 in `$c`, yields `$c` (10), then — after the resume — reads `$c`
+    // back (still 10), adds 5, and returns it (15). For the local to read back
+    // as 10 after the suspend, it must be saved into the frame and reloaded on
+    // resume rather than living only in a stack variable. The driver accumulates
+    // 10 + 15 = 25.
+    compile_run(
+        "cont_local_state",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32) (local $c i32)
+              i32.const 10 local.set $c
+              local.get $c suspend $yield
+              local.get $c i32.const 5 i32.add local.set $c
+              local.get $c)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 25);",
+    );
+}
+
+#[test]
+fn local_survives_a_cross_call_suspend() {
+    // A local held across both the body's own suspend and a cross-call
+    // checkpoint (P5b + P5a together). `$f` stores 3 in `$c`, yields it (3),
+    // then `call`s `$g` (which yields 7 and returns 100) and finally returns
+    // `$g`'s result plus `$c` (100 + 3 = 103). For that to hold, `$c` must be
+    // saved into the frame not only at `$f`'s own suspend but also each time
+    // `$g` suspends up through the checkpoint. The driver sums 3 + 7 + 103 = 113.
+    compile_run(
+        "cont_local_cross_call",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $f (result i32) (local $c i32)
+              i32.const 3 local.set $c
+              local.get $c suspend $yield
+              call $g
+              local.get $c i32.add)
+            (func $g (result i32)
+              i32.const 7 suspend $yield
+              i32.const 100)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $f cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 113);",
+    );
+}
+
+#[test]
 fn null_cont_local_defaults_to_null() {
     // A local typed `(ref null $ct)` defaults to the null handle, so reading it
     // back and testing `ref.is_null` reports null (1) without any assignment.

@@ -1592,6 +1592,10 @@ struct ModuleCtx<'a> {
     /// to another step function). The callee's frame nests inside the caller's
     /// `ContFrame` as its `sub` field.
     checkpoint_callee: HashMap<u32, u32>,
+    /// Per step function, its local types by index (`l{i}`). Each becomes a
+    /// `ContFrame` field so the local survives suspends. Step functions have no
+    /// parameters (rejected), so these are exactly the declared locals.
+    step_locals: HashMap<u32, Vec<ValType>>,
 }
 
 impl ModuleCtx<'_> {
@@ -1768,6 +1772,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         }
     }
     reject_dual_use_continuations(funcs, elements, &step_set, n_imports)?;
+    let step_locals = step_function_locals(funcs, n_imports, &step_set)?;
     let stateful = has_memory
         || has_table
         || has_imports
@@ -1802,6 +1807,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         cont_bodies,
         step_set,
         checkpoint_callee,
+        step_locals,
     };
     Ok((ctx, stateful))
 }
@@ -2289,6 +2295,32 @@ fn step_functions(
     }
 
     Ok((step.into_iter().collect(), checkpoint))
+}
+
+/// The local types (by index) of each step function, so `render` can give each
+/// `ContFrame` a field per local. Step functions have no parameters (rejected
+/// at emit time), so these are the declared locals starting at index 0.
+fn step_function_locals(
+    funcs: &[FuncInput<'_>],
+    n_imports: usize,
+    step_set: &[u32],
+) -> Result<HashMap<u32, Vec<ValType>>, TranspileError> {
+    let mut map = HashMap::new();
+    for &f in step_set {
+        let Some(di) = (f as usize).checked_sub(n_imports) else {
+            continue;
+        };
+        let Some(input) = funcs.get(di) else { continue };
+        let mut locals = input.params.to_vec();
+        for local in input.body.get_locals_reader()? {
+            let (count, ty) = local?;
+            for _ in 0..count {
+                locals.push(ty);
+            }
+        }
+        map.insert(f, locals);
+    }
+    Ok(map)
 }
 
 /// Reject uses of a continuation step function that would need an ordinary
