@@ -55,8 +55,68 @@ fn cont_new_produces_non_null_handle() {
             (func $gen (result i32) i32.const 42)
             (func (export "f") (result i32)
               ref.func $gen cont.new $ct ref.is_null))"#,
-        // `$gen` is func0; the exported `f` is func1.
-        "assert_eq!(func1(), 0);",
+        // `$gen` is func0; the exported `f` is func1. Creating a continuation
+        // makes the module stateful, so the functions are `Instance` methods.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 0);",
+    );
+}
+
+#[test]
+fn generator_single_suspend() {
+    // A one-shot generator that yields once (10) then returns (30). The driver
+    // resumes it in a loop: the first resume suspends with 10, the second
+    // returns 30. It accumulates 10 + 30 = 40.
+    compile_run(
+        "cont_gen_single",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              i32.const 10 suspend $yield
+              i32.const 30)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        // `$gen` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 40);",
+    );
+}
+
+#[test]
+fn generator_two_suspends() {
+    // The canonical generator: yields 10, then 20, then returns 30. The driver
+    // resumes until the continuation returns, accumulating 10 + 20 + 30 = 60.
+    compile_run(
+        "cont_gen_two",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              i32.const 10 suspend $yield
+              i32.const 20 suspend $yield
+              i32.const 30)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 60);",
     );
 }
 

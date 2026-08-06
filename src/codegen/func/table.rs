@@ -268,11 +268,11 @@ impl<'a> super::FuncGen<'a> {
     }
 
     /// `cont.new $ct`: consume a `funcref` and produce a live continuation
-    /// handle of type `(ref $ct)`. In this phase the handle carries the same
-    /// `u32` function index the `funcref` held (a non-null pass-through, since
-    /// `u32::MAX` is the null sentinel), so `ref.is_null` reports it as
-    /// non-null; the per-continuation resumable state arrives with
-    /// `resume`/`suspend` in a later phase.
+    /// handle of type `(ref $ct)`. The handle is an index into the instance's
+    /// `conts` table, allocated by the generated `cont_new` method, which builds
+    /// the initial resumable frame for the referenced function. `u32::MAX`
+    /// remains the null sentinel, so `ref.is_null` reports a fresh handle as
+    /// non-null.
     pub(super) fn cont_new(&mut self, cont_type_index: u32) -> Result<(), TranspileError> {
         let idx = usize::try_from(cont_type_index)
             .map_err(|_| TranspileError::Unsupported("cont.new: type index too large".into()))?;
@@ -287,8 +287,13 @@ impl<'a> super::FuncGen<'a> {
         let func = self.pop()?;
         let packed = PackedIndex::from_module_index(cont_type_index)
             .ok_or_else(|| TranspileError::Unsupported("cont.new: type index too large".into()))?;
+        let tmp = self.fresh_temp();
+        self.line(format!(
+            "let {tmp}: u32 = self.cont_new(({}) as u32);",
+            func.code
+        ));
         self.push(Val {
-            code: func.code,
+            code: tmp,
             ty: ValType::Ref(RefType::concrete(false, packed)),
             stable: true,
         });

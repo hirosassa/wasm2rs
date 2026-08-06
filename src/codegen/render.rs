@@ -98,6 +98,13 @@ pub(super) fn render_module(
         }
     }
 
+    // Typed-continuations runtime: the step result, the per-continuation frame
+    // structs and the tagged object stored in the instance's `conts` table.
+    if !ctx.cont_bodies.is_empty() {
+        lines.extend(continuation_runtime_lines(ctx));
+        lines.push(String::new());
+    }
+
     lines.push("#[allow(dead_code)]".to_string());
     lines.push(format!("pub struct Instance{decl_generics} {{"));
     if has_imports {
@@ -160,6 +167,12 @@ pub(super) fn render_module(
     // handle here and returns its index as the `u32` externref.
     if ctx.uses_extern_box {
         lines.push("    extern_box: Vec<GcRef>,".to_string());
+    }
+    // The continuation handle table: a `cont.new` pushes a fresh resumable
+    // object here and returns its index; `None` marks a slot whose continuation
+    // has run to completion (a one-shot continuation, consumed on return).
+    if !ctx.cont_bodies.is_empty() {
+        lines.push("    conts: Vec<Option<ContObj>>,".to_string());
     }
     lines.push("}".to_string());
     lines.push(String::new());
@@ -261,6 +274,9 @@ pub(super) fn render_module(
         }
         if ctx.uses_extern_box {
             inner.push("        extern_box: Vec::new(),".to_string());
+        }
+        if !ctx.cont_bodies.is_empty() {
+            inner.push("        conts: Vec::new(),".to_string());
         }
         Ok(())
     };
@@ -479,6 +495,12 @@ pub(super) fn render_module(
         inner.extend(dispatch_method_lines(ctx, ti, has_imports)?);
     }
 
+    // The continuation allocator (`cont.new`) and stepper (`resume`).
+    if !ctx.cont_bodies.is_empty() {
+        inner.push(String::new());
+        inner.extend(continuation_method_lines(ctx));
+    }
+
     for src in sources {
         inner.push(String::new());
         for line in src.lines() {
@@ -500,6 +522,81 @@ pub(super) fn render_module(
     let mut out = lines.join("\n");
     out.push('\n');
     Ok(out)
+}
+
+/// The module-scope typed-continuations runtime: the `StepResult` a step
+/// function returns, one `ContFrame{N}` per continuation-bodied function
+/// (holding its resumable program counter), and the `ContObj` union the handle
+/// table stores. Phase 4 continuation bodies have no parameters or locals, so a
+/// frame is just its `pc`.
+fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
+    // A program may create a continuation without resuming it (or vice versa),
+    // leaving some fields/variants unexercised, so the generated types carry the
+    // same dead-code allowance as the `Instance` struct.
+    let mut lines = vec![
+        "#[allow(dead_code)]".to_string(),
+        "enum StepResult {".to_string(),
+        "    Return(Vec<i64>),".to_string(),
+        "    Suspend { tag: u32, payload: Vec<i64> },".to_string(),
+        "}".to_string(),
+        String::new(),
+    ];
+    for n in &ctx.cont_bodies {
+        lines.push("#[allow(dead_code)]".to_string());
+        lines.push(format!("struct ContFrame{n} {{ pc: u32 }}"));
+    }
+    lines.push(String::new());
+    lines.push("#[allow(dead_code)]".to_string());
+    lines.push("enum ContObj {".to_string());
+    for n in &ctx.cont_bodies {
+        lines.push(format!("    C{n}(ContFrame{n}),"));
+    }
+    lines.push("}".to_string());
+    lines
+}
+
+/// The `cont_new`/`cont_step` methods on `Instance`. `cont_new` allocates a
+/// fresh resumable frame for the referenced function and returns its handle
+/// (an index into `conts`); `cont_step` resumes the handle once, dispatching to
+/// the right step function and — since a continuation is one-shot — keeping the
+/// (advanced) object only while it is still suspended, dropping it on return.
+fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
+    let mut lines = vec![
+        "fn cont_new(&mut self, __funcidx: u32) -> u32 {".to_string(),
+        "    let __obj = match __funcidx {".to_string(),
+    ];
+    for n in &ctx.cont_bodies {
+        lines.push(format!(
+            "        {n}u32 => ContObj::C{n}(ContFrame{n} {{ pc: 0u32 }}),"
+        ));
+    }
+    lines.extend([
+        "        _ => panic!(\"cont.new: not a continuation function\"),".to_string(),
+        "    };".to_string(),
+        "    self.conts.push(Some(__obj));".to_string(),
+        "    (self.conts.len() - 1) as u32".to_string(),
+        "}".to_string(),
+        String::new(),
+        "fn cont_step(&mut self, __h: u32) -> StepResult {".to_string(),
+        "    let mut __obj = self.conts[__h as usize]".to_string(),
+        "        .take()".to_string(),
+        "        .expect(\"resume of a consumed continuation\");".to_string(),
+        "    let __r = match &mut __obj {".to_string(),
+    ]);
+    for n in &ctx.cont_bodies {
+        lines.push(format!(
+            "        ContObj::C{n}(__f) => self.cont_step_func{n}(__f),"
+        ));
+    }
+    lines.extend([
+        "    };".to_string(),
+        "    if let StepResult::Suspend { .. } = __r {".to_string(),
+        "        self.conts[__h as usize] = Some(__obj);".to_string(),
+        "    }".to_string(),
+        "    __r".to_string(),
+        "}".to_string(),
+    ]);
+    lines
 }
 
 /// The module-scope runtime for a `shared` memory: the thread-shareable

@@ -259,6 +259,24 @@ fn unsupported_cont_operator_is_rejected() {
 }
 
 #[test]
+fn continuation_body_also_called_directly_is_rejected() {
+    // A function used as a continuation body is emitted only as a resumable
+    // step function, never as an ordinary `func{N}`, so also calling it
+    // directly would reference a method that does not exist. Reject it cleanly
+    // rather than emitting code that fails to compile.
+    assert_unsupported(
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (func $gen (result i32) i32.const 1)
+            (func (export "run") (result i32)
+              ref.func $gen cont.new $ct drop
+              call $gen))"#,
+        "called directly",
+    );
+}
+
+#[test]
 fn ref_null_of_a_non_reference_heaptype_is_rejected() {
     // `funcref`/`externref` nulls lower to the `u32::MAX` sentinel and the
     // abstract GC heaptypes (`any`/`eq`/`struct`/`array`/`none`) lower to the

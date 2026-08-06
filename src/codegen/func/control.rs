@@ -383,6 +383,131 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    /// Emit `target = <decoded>;` for each target, decoding the i-th `i64` slot
+    /// of the runtime array named `src_array` back to its wasm type. `tys`
+    /// governs the count (the Return arm decodes every result; a Suspend arm
+    /// decodes only the payload prefix of the handler's result vars, leaving the
+    /// trailing continuation var to the caller).
+    fn assign_decoded(
+        &mut self,
+        targets: &[String],
+        tys: &[ValType],
+        src_array: &str,
+    ) -> Result<(), TranspileError> {
+        for (i, (target, ty)) in targets.iter().zip(tys).enumerate() {
+            let decoded = super::cont::decode_from_i64(&format!("{src_array}[{i}]"), *ty)?;
+            self.line(format!("{target} = {decoded};"));
+        }
+        Ok(())
+    }
+
+    /// `resume $ct (on $tag $lbl)...`: step the continuation handle on top of the
+    /// stack once. On a normal return the decoded results are left on the stack
+    /// (control falls through). On a suspension whose tag matches an on-clause,
+    /// the tag payload plus the (reused, one-shot) continuation handle are
+    /// carried into that clause's block and control branches there. An
+    /// unmatched tag panics — propagating an unhandled suspension to a resuming
+    /// caller is a later phase.
+    ///
+    /// The `match` is emitted as raw statements: its suspend arm branches out of
+    /// an enclosing block, which the generic `Node` model has no single node
+    /// for, so `resolve_target` is used only to mark the target reachable and
+    /// name its label/result variables.
+    pub(super) fn resume(
+        &mut self,
+        cont_type_index: u32,
+        resume_table: &wasmparser::ResumeTable,
+    ) -> Result<(), TranspileError> {
+        // The handle is referenced twice (the step call and, on suspension, the
+        // reused continuation), so materialise it into a stable temporary; then
+        // freeze the rest of the stack so it survives the `match` unchanged.
+        let handle = self.pop()?;
+        let handle_var = self.fresh_temp();
+        self.line(format!("let {handle_var}: u32 = {};", handle.code));
+        self.spill_nonstable()?;
+
+        // The Return path pushes the continuation's result values; hold them in
+        // per-result temporaries assigned only on that arm (the suspend arm
+        // diverges via its branch, so definite assignment holds).
+        let results =
+            super::cont::cont_result_types(self.ctx.type_kinds, self.ctx.types, cont_type_index)?;
+        let mut result_holders = Vec::with_capacity(results.len());
+        for ty in &results {
+            let name = self.fresh_temp();
+            self.line(format!(
+                "let {name}: {};",
+                rust_type(*ty, self.ctx.type_kinds)?
+            ));
+            result_holders.push(name);
+        }
+
+        self.line(format!("match self.cont_step({handle_var}) {{"));
+        let return_pat = if results.is_empty() { "_" } else { "__vals" };
+        self.line(format!("StepResult::Return({return_pat}) => {{"));
+        self.assign_decoded(&result_holders, &results, "__vals")?;
+        self.line("}");
+
+        for handler in &resume_table.handlers {
+            let (tag, label_depth) = match *handler {
+                wasmparser::Handle::OnLabel { tag, label } => (tag, label),
+                wasmparser::Handle::OnSwitch { .. } => {
+                    return Err(TranspileError::Unsupported(
+                        "resume (on $tag switch) handler (phase 8)".into(),
+                    ));
+                }
+            };
+            let payload_tys = self
+                .ctx
+                .tags
+                .get(tag as usize)
+                .ok_or_else(|| TranspileError::Unsupported("resume: unknown tag index".into()))?
+                .clone();
+            let (is_loop, label, vars) = match self.resolve_target(label_depth)? {
+                BranchTarget::Direct {
+                    is_loop,
+                    label,
+                    vars,
+                } => (is_loop, label, vars),
+                BranchTarget::Escape { .. } => {
+                    return Err(TranspileError::Unsupported(
+                        "resume handler crossing a try body (phase 5)".into(),
+                    ));
+                }
+            };
+            // The handler block receives the tag payload followed by the
+            // continuation reference, so it must yield exactly that arity.
+            if vars.len() != payload_tys.len() + 1 {
+                return Err(TranspileError::Unsupported(
+                    "resume handler block does not yield (payload.., contref)".into(),
+                ));
+            }
+            let payload_pat = if payload_tys.is_empty() { "_" } else { "__pl" };
+            self.line(format!(
+                "StepResult::Suspend {{ tag: __t, payload: {payload_pat} }} if __t == {tag}u32 => {{"
+            ));
+            // The handler block yields the payload followed by the continuation,
+            // so decode the payload into the leading vars and set the trailing
+            // var to the (advanced, one-shot) handle reused in place.
+            self.assign_decoded(&vars, &payload_tys, "__pl")?;
+            let cont_var = vars.last().ok_or(TranspileError::StackUnderflow)?;
+            self.line(format!("{cont_var} = {handle_var};"));
+            let keyword = if is_loop { "continue" } else { "break" };
+            self.line(format!("{keyword} 'l{label};"));
+            self.line("}");
+        }
+        self.line("_ => panic!(\"resume: unhandled continuation suspend tag\"),");
+        self.line("}");
+
+        for (name, ty) in result_holders.into_iter().zip(&results) {
+            self.push(Val {
+                code: name,
+                ty: *ty,
+                stable: true,
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn branch_table(
         &mut self,
         targets: wasmparser::BrTable<'_>,

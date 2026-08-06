@@ -1577,6 +1577,11 @@ struct ModuleCtx<'a> {
     /// Per-tag exception payload types, indexed by tag index (imported tags
     /// first, then defined). `throw`/`catch` resolve their tag index here.
     tags: Vec<Vec<ValType>>,
+    /// Function indices reachable as continuation bodies (the target of a
+    /// `ref.func` fed into `cont.new`), sorted and deduplicated. These are
+    /// emitted as resumable `cont_step_func{N}` state machines rather than
+    /// ordinary `func{N}`s, and drive the `ContObj`/`ContFrame` runtime types.
+    cont_bodies: Vec<u32>,
 }
 
 impl ModuleCtx<'_> {
@@ -1735,13 +1740,18 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
     // when the module carries no other state. (`ref.func` alone does not — it
     // just pushes a `u32`.)
     let uses_extern_box = uses_extern_convert(funcs)?;
+    // Continuations carry per-instance state (the `conts` handle table), so any
+    // module that creates one is stateful even without other mutable state.
+    let cont_bodies = continuation_bodies(funcs)?;
+    reject_dual_use_continuations(funcs, elements, &cont_bodies)?;
     let stateful = has_memory
         || has_table
         || has_imports
         || !globals.is_empty()
         || uses_call_ref(funcs)?
         || uses_array_segment_ops(funcs)?
-        || uses_extern_box;
+        || uses_extern_box
+        || !cont_bodies.is_empty();
 
     let ctx = ModuleCtx {
         imports,
@@ -1765,6 +1775,7 @@ fn build_ctx<'a>(parts: &ModuleParts<'a>) -> Result<(ModuleCtx<'a>, bool), Trans
         is_method: stateful,
         uses_extern_box,
         tags: parts.tags.iter().map(|t| t.params.clone()).collect(),
+        cont_bodies,
     };
     Ok((ctx, stateful))
 }
@@ -1971,6 +1982,11 @@ fn generate_function_into(
     out: &mut String,
 ) -> Result<GenMeta, TranspileError> {
     let mut func = FuncGen::new(input.params, input.results, input.body, ctx)?;
+    // A continuation body is emitted as a resumable `cont_step_func{N}` state
+    // machine instead of an ordinary `func{N}`.
+    if ctx.cont_bodies.contains(&index_u32(index)?) {
+        return func.emit_cont_step(index, input.params, input.body, line_prefix, out);
+    }
     func.run(input.body)?;
     func.finish(index, input.params, input.results, line_prefix, out)
 }
@@ -2102,6 +2118,89 @@ fn uses_extern_convert(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> 
     any_body_op(funcs, |op| {
         matches!(op, Operator::AnyConvertExtern | Operator::ExternConvertAny)
     })
+}
+
+/// Collect the function indices that are used as continuation bodies: the
+/// target of a `ref.func` immediately followed by `cont.new`. The result is
+/// sorted and deduplicated. This is the phase-4 pattern (`cont.new` created
+/// directly from a `ref.func`); a continuation built through other dataflow is
+/// not yet recognised.
+fn continuation_bodies(funcs: &[FuncInput<'_>]) -> Result<Vec<u32>, TranspileError> {
+    let mut bodies = Vec::new();
+    for input in funcs {
+        let mut last_ref_func: Option<u32> = None;
+        for op in input.body.get_operators_reader()? {
+            match op? {
+                Operator::RefFunc { function_index } => last_ref_func = Some(function_index),
+                Operator::ContNew { .. } => {
+                    if let Some(f) = last_ref_func {
+                        bodies.push(f);
+                    }
+                    last_ref_func = None;
+                }
+                _ => last_ref_func = None,
+            }
+        }
+    }
+    bodies.sort_unstable();
+    bodies.dedup();
+    Ok(bodies)
+}
+
+/// Reject phase-4-unsupported uses of a continuation-bodied function. Such a
+/// function is emitted only as a resumable `cont_step_func{N}`, never as an
+/// ordinary `func{N}`, so any path that would reach `func{N}` — a direct
+/// `call`/`return_call`, a `ref.func` used for anything other than the
+/// immediately-following `cont.new`, or an element-segment entry feeding
+/// `call_indirect` — would reference a method that is never emitted. Surface a
+/// clean `Unsupported` rather than emitting Rust that fails to compile.
+fn reject_dual_use_continuations(
+    funcs: &[FuncInput<'_>],
+    elements: &[ElemSegment],
+    cont_bodies: &[u32],
+) -> Result<(), TranspileError> {
+    if cont_bodies.is_empty() {
+        return Ok(());
+    }
+    for input in funcs {
+        // A `ref.func` awaiting its consumer; legitimate only when the very next
+        // operator is the `cont.new` that turns it into a continuation handle.
+        let mut pending_ref_func: Option<u32> = None;
+        for op in input.body.get_operators_reader()? {
+            let op = op?;
+            if let Some(f) = pending_ref_func.take()
+                && cont_bodies.binary_search(&f).is_ok()
+                && !matches!(op, Operator::ContNew { .. })
+            {
+                return Err(TranspileError::Unsupported(
+                    "continuation-body function used as a plain funcref (phase 4)".into(),
+                ));
+            }
+            match op {
+                Operator::RefFunc { function_index } => pending_ref_func = Some(function_index),
+                Operator::Call { function_index } | Operator::ReturnCall { function_index }
+                    if cont_bodies.binary_search(&function_index).is_ok() =>
+                {
+                    return Err(TranspileError::Unsupported(
+                        "continuation-body function is also called directly (phase 4)".into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    for seg in elements {
+        if seg
+            .funcs
+            .iter()
+            .any(|f| cont_bodies.binary_search(f).is_ok())
+        {
+            return Err(TranspileError::Unsupported(
+                "continuation-body function appears in an element segment (phase 4)".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Collect the indices of locals written by `local.set`/`local.tee`.
