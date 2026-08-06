@@ -300,6 +300,64 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    /// `cont.bind $before $after`: partially apply a continuation's leading
+    /// parameters. The `(ref $before)` continuation on top of the stack sits above
+    /// the arguments to bind (`$before`'s leading parameters, the ones `$after`
+    /// drops); pop them, `i64`-encode them, append them to the continuation's
+    /// `bound` prefix, and push the same handle typed as `(ref $after)`. The next
+    /// `resume` delivers the prefix ahead of its own arguments.
+    pub(super) fn cont_bind(
+        &mut self,
+        before_index: u32,
+        after_index: u32,
+    ) -> Result<(), TranspileError> {
+        let before =
+            super::cont::cont_param_types(self.ctx.type_kinds, self.ctx.types, before_index)?;
+        let after =
+            super::cont::cont_param_types(self.ctx.type_kinds, self.ctx.types, after_index)?;
+        // `$after` keeps a suffix of `$before`'s parameters; the bound arguments
+        // are the leading ones it drops.
+        let bound = before.len().checked_sub(after.len()).ok_or_else(|| {
+            TranspileError::Unsupported(
+                "cont.bind: result continuation has more parameters than the source".into(),
+            )
+        })?;
+        if before[bound..] != after[..] {
+            return Err(TranspileError::Unsupported(
+                "cont.bind: result parameters are not a suffix of the source parameters".into(),
+            ));
+        }
+        let after_packed = PackedIndex::from_module_index(after_index)
+            .ok_or_else(|| TranspileError::Unsupported("cont.bind: type index too large".into()))?;
+
+        let handle = self.pop()?;
+        let handle_var = self.fresh_temp();
+        self.line(format!("let {handle_var}: u32 = {};", handle.code));
+
+        let bound_tys = &before[..bound];
+        let mut args = Vec::with_capacity(bound);
+        for _ in bound_tys {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+        let mut encoded = Vec::with_capacity(bound);
+        for (arg, ty) in args.iter().zip(bound_tys) {
+            encoded.push(super::cont::encode_to_i64(&arg.code, *ty)?);
+        }
+
+        let result = self.fresh_temp();
+        self.line(format!(
+            "let {result}: u32 = self.cont_bind({handle_var}, &[{}]);",
+            encoded.join(", ")
+        ));
+        self.push(Val {
+            code: result,
+            ty: ValType::Ref(RefType::concrete(false, after_packed)),
+            stable: true,
+        });
+        Ok(())
+    }
+
     /// `ref.is_null`: pop a reference and push 1 if it is null, else 0. A managed
     /// `GcRef` compares against `GcRef::Null`; a `u32` funcref/externref compares
     /// against the `u32::MAX` sentinel.

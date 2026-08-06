@@ -549,9 +549,15 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Result<Vec<String>, Transp
         // A `ContFrame` holds the resumable `pc`, one field per local (so locals
         // survive suspends), an operand-survivor stack (`ostack`, holding the
         // `i64`-erased operands that outlive a suspend inside a region — see
-        // `emit_cont_step_flat`), and — when the function ends in a cross-call
-        // checkpoint — the callee's frame nested as `sub`.
-        let mut fields = vec!["pc: u32".to_string(), "ostack: Vec<i64>".to_string()];
+        // `emit_cont_step_flat`), a `bound` prefix of `i64`-erased arguments
+        // supplied ahead of time by `cont.bind` (prepended to the next resume's
+        // `__args` — see `cont_step`/`cont_bind`), and — when the function ends in
+        // a cross-call checkpoint — the callee's frame nested as `sub`.
+        let mut fields = vec![
+            "pc: u32".to_string(),
+            "ostack: Vec<i64>".to_string(),
+            "bound: Vec<i64>".to_string(),
+        ];
         if let Some(g) = ctx.checkpoint_callee.get(n) {
             fields.push(format!("sub: ContFrame{g}"));
         }
@@ -582,7 +588,11 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Result<Vec<String>, Transp
 /// acyclic (a recursive chain is rejected during context building), so this
 /// recursion terminates.
 fn frame_start_literal(ctx: &ModuleCtx<'_>, n: u32) -> String {
-    let mut fields = vec!["pc: 0u32".to_string(), "ostack: Vec::new()".to_string()];
+    let mut fields = vec![
+        "pc: 0u32".to_string(),
+        "ostack: Vec::new()".to_string(),
+        "bound: Vec::new()".to_string(),
+    ];
     if let Some(g) = ctx.checkpoint_callee.get(&n) {
         fields.push(format!("sub: {}", frame_start_literal(ctx, *g)));
     }
@@ -627,9 +637,21 @@ fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "    let __r = match &mut __obj {".to_string(),
     ]);
     for n in &ctx.cont_bodies {
+        // A continuation carrying `cont.bind`-supplied arguments delivers them
+        // ahead of this resume's own `__args`; `bound` is non-empty only until the
+        // step that consumes it (it is taken here), so an unbound continuation
+        // takes the borrow-free path.
+        lines.push(format!("        ContObj::C{n}(__f) => {{"));
+        lines.push("            if __f.bound.is_empty() {".to_string());
         lines.push(format!(
-            "        ContObj::C{n}(__f) => self.cont_step_func{n}(__f, __args),"
+            "                self.cont_step_func{n}(__f, __args)"
         ));
+        lines.push("            } else {".to_string());
+        lines.push("                let mut __a = std::mem::take(&mut __f.bound);".to_string());
+        lines.push("                __a.extend_from_slice(__args);".to_string());
+        lines.push(format!("                self.cont_step_func{n}(__f, &__a)"));
+        lines.push("            }".to_string());
+        lines.push("        }".to_string());
     }
     lines.extend([
         "    };".to_string(),
@@ -638,7 +660,24 @@ fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "    }".to_string(),
         "    __r".to_string(),
         "}".to_string(),
+        String::new(),
+        // `cont.bind` appends its already-`i64`-erased leading arguments to the
+        // continuation's `bound` prefix and hands the (same, in this backend)
+        // handle back typed as the partially-applied continuation. The next
+        // resume prepends the prefix to its own arguments (see `cont_step`).
+        "#[allow(dead_code)]".to_string(),
+        "pub fn cont_bind(&mut self, __h: u32, __prefix: &[i64]) -> u32 {".to_string(),
+        "    match self.conts[__h as usize]".to_string(),
+        "        .as_mut()".to_string(),
+        "        .expect(\"cont.bind of a consumed continuation\")".to_string(),
+        "    {".to_string(),
     ]);
+    for n in &ctx.cont_bodies {
+        lines.push(format!(
+            "        ContObj::C{n}(__f) => __f.bound.extend_from_slice(__prefix),"
+        ));
+    }
+    lines.extend(["    };".to_string(), "    __h".to_string(), "}".to_string()]);
     lines
 }
 

@@ -474,6 +474,80 @@ fn continuation_parameter_survives_a_suspend() {
 }
 
 #[test]
+fn cont_bind_supplies_a_leading_parameter() {
+    // `cont.bind` partially applies a continuation's leading parameters (P6).
+    // `$add` takes two i32 parameters; `cont.bind $ct $ct1` binds the first (10),
+    // producing a one-parameter continuation `(ref $ct1)`. Resuming it supplies the
+    // remaining parameter (20), so the body receives (10, 20) at its first step and
+    // returns 30. The bound argument must be delivered ahead of the resume-supplied
+    // one; if it were dropped, `$a` would read as 0 and the result would be 20.
+    compile_run(
+        "cont_bind_leading_param",
+        r#"(module
+            (type $ft (func (param i32 i32) (result i32)))
+            (type $ct (cont $ft))
+            (type $ft1 (func (param i32) (result i32)))
+            (type $ct1 (cont $ft1))
+            (func $add (param $a i32) (param $b i32) (result i32)
+              local.get $a local.get $b i32.add)
+            (func (export "run") (result i32)
+              (local $k (ref null $ct1))
+              i32.const 10
+              ref.func $add cont.new $ct
+              cont.bind $ct $ct1
+              local.set $k
+              i32.const 20
+              local.get $k
+              resume $ct1))"#,
+        // `$add` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 30);",
+    );
+}
+
+#[test]
+fn cont_bind_argument_survives_a_suspend() {
+    // A bound argument must reach the body across a suspend, delivered together
+    // with the resume-supplied parameter at the first step (P6). `$gen(a, b)`
+    // yields `a` (10, the bound value), then — after the resume — returns `a + b`
+    // (10 + 20 = 30). `cont.bind` binds `a = 10`, the first `resume` supplies
+    // `b = 20`, and the driver accumulates the yielded 10 plus the final 30 = 40.
+    compile_run(
+        "cont_bind_suspend",
+        r#"(module
+            (type $ft (func (param i32 i32) (result i32)))
+            (type $ct (cont $ft))
+            (type $ft1 (func (param i32) (result i32)))
+            (type $ct1 (cont $ft1))
+            (type $ft0 (func (result i32)))
+            (type $ct0 (cont $ft0))
+            (tag $yield (param i32))
+            (func $gen (param $a i32) (param $b i32) (result i32)
+              local.get $a suspend $yield
+              local.get $a local.get $b i32.add)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k0 (ref null $ct0)) (local $k1 (ref null $ct1))
+              i32.const 10
+              ref.func $gen cont.new $ct
+              cont.bind $ct $ct1
+              local.set $k1
+              (block $on_yield (result i32 (ref $ct0))
+                i32.const 20
+                local.get $k1
+                resume $ct1 (on $yield $on_yield)
+                return)
+              local.set $k0
+              local.get $acc i32.add local.set $acc
+              (block $on_yield2 (result i32 (ref $ct0))
+                local.get $k0
+                resume $ct0 (on $yield $on_yield2)
+                local.get $acc i32.add return)
+              unreachable))"#,
+        // `$gen` is func0 (a step function); the exported `run` is func1.
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 40);",
+    );
+}
+
+#[test]
 fn resume_sends_a_value_back_into_a_suspend() {
     // A bidirectional generator (P5b): the tag `$ch` carries a parameter (the
     // value yielded up) *and* a result (the value sent back down on resume).

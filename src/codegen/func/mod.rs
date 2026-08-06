@@ -705,6 +705,10 @@ impl<'a> FuncGen<'a> {
                 cont_type_index,
                 resume_table,
             } => self.resume(cont_type_index, &resume_table)?,
+            Operator::ContBind {
+                argument_index,
+                result_index,
+            } => self.cont_bind(argument_index, result_index)?,
             // Table instructions. A table entry and a `funcref` operand are both
             // `u32` function indices (`u32::MAX` is null).
             Operator::TableGet { table } => self.table_get(table)?,
