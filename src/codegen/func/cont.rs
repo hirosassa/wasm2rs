@@ -155,8 +155,11 @@ impl super::FuncGen<'_> {
 
         let mut src = String::new();
         src.push_str(line_prefix);
+        // `pub` so the root impl's `cont_step` can reach it when this body is
+        // emitted into a separate chunk module (like the ordinary `func{N}`s).
         src.push_str(&format!(
-            "fn cont_step_func{index}(&mut self, __frame: &mut ContFrame{index}) -> StepResult {{\n"
+            "pub fn cont_step_func{index}(&mut self, __frame: &mut ContFrame{index}) \
+             -> StepResult {{\n"
         ));
         src.push_str(line_prefix);
         src.push_str("    match __frame.pc {\n");

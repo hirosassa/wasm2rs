@@ -24,7 +24,7 @@
 
 mod common;
 
-use common::compile_run;
+use common::{compile_run, compile_run_split};
 
 #[test]
 fn cont_type_is_accepted_and_null_ref_is_null() {
@@ -116,6 +116,39 @@ fn generator_two_suspends() {
                 local.get $acc i32.add local.set $acc
                 br $again)
               unreachable))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 60);",
+    );
+}
+
+#[test]
+fn generator_split_across_files() {
+    // The same two-suspend generator, but split one function per file, so the
+    // continuation step function lands in a different chunk from its resumer.
+    // Both chunks share the same `impl Instance`, so `cont_step` still reaches
+    // `cont_step_func0`. Verifies the multi-file path emits the continuation
+    // runtime (via the reused module header) correctly.
+    compile_run_split(
+        "cont_gen_split",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              i32.const 10 suspend $yield
+              i32.const 20 suspend $yield
+              i32.const 30)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        1,
         "let mut inst = Instance::new(); assert_eq!(inst.func1(), 60);",
     );
 }

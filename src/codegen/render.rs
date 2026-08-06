@@ -533,9 +533,12 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
     // A program may create a continuation without resuming it (or vice versa),
     // leaving some fields/variants unexercised, so the generated types carry the
     // same dead-code allowance as the `Instance` struct.
+    // The types are `pub` because the `pub` `cont_new`/`cont_step`/`cont_step_func`
+    // methods (public so the root impl can reach a chunk's step function) mention
+    // them in their signatures.
     let mut lines = vec![
         "#[allow(dead_code)]".to_string(),
-        "enum StepResult {".to_string(),
+        "pub enum StepResult {".to_string(),
         "    Return(Vec<i64>),".to_string(),
         "    Suspend { tag: u32, payload: Vec<i64> },".to_string(),
         "}".to_string(),
@@ -543,11 +546,11 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
     ];
     for n in &ctx.cont_bodies {
         lines.push("#[allow(dead_code)]".to_string());
-        lines.push(format!("struct ContFrame{n} {{ pc: u32 }}"));
+        lines.push(format!("pub struct ContFrame{n} {{ pc: u32 }}"));
     }
     lines.push(String::new());
     lines.push("#[allow(dead_code)]".to_string());
-    lines.push("enum ContObj {".to_string());
+    lines.push("pub enum ContObj {".to_string());
     for n in &ctx.cont_bodies {
         lines.push(format!("    C{n}(ContFrame{n}),"));
     }
@@ -562,7 +565,7 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
 /// (advanced) object only while it is still suspended, dropping it on return.
 fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
     let mut lines = vec![
-        "fn cont_new(&mut self, __funcidx: u32) -> u32 {".to_string(),
+        "pub fn cont_new(&mut self, __funcidx: u32) -> u32 {".to_string(),
         "    let __obj = match __funcidx {".to_string(),
     ];
     for n in &ctx.cont_bodies {
@@ -577,7 +580,7 @@ fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "    (self.conts.len() - 1) as u32".to_string(),
         "}".to_string(),
         String::new(),
-        "fn cont_step(&mut self, __h: u32) -> StepResult {".to_string(),
+        "pub fn cont_step(&mut self, __h: u32) -> StepResult {".to_string(),
         "    let mut __obj = self.conts[__h as usize]".to_string(),
         "        .take()".to_string(),
         "        .expect(\"resume of a consumed continuation\");".to_string(),
