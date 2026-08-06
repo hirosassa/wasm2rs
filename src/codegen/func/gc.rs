@@ -18,12 +18,15 @@ enum SlotShape {
     /// A packed field (`i8`/`i16`): stored masked in a `GcSlot::I32`. Carries the
     /// low-bit mask and the extension shift amount for signed reads.
     Packed { mask: u32, shift: u32 },
+    /// A `funcref`/`externref` field (represented as a `u32`), stored in a
+    /// `GcSlot::Func`. Carries the field's ref value type so a read yields it.
+    Func(ValType),
     /// A full value type stored in its matching slot variant.
     Val(ValType),
 }
 
 impl SlotShape {
-    fn of(storage: StorageType) -> Result<Self, TranspileError> {
+    fn of(storage: StorageType, kinds: &[CompositeKind]) -> Result<Self, TranspileError> {
         Ok(match storage {
             StorageType::I8 => SlotShape::Packed {
                 mask: 0xFF,
@@ -33,6 +36,14 @@ impl SlotShape {
                 mask: 0xFFFF,
                 shift: 16,
             },
+            // A funcref/externref (abstract or a concrete function-type index)
+            // lowers to a `u32`, so it needs the `GcSlot::Func` slot rather than
+            // the `GcSlot::Ref` (`GcRef`) one used by managed struct/array refs.
+            StorageType::Val(ty @ ValType::Ref(_))
+                if super::super::rust_type(ty, kinds)? == "u32" =>
+            {
+                SlotShape::Func(ty)
+            }
             StorageType::Val(ty) => SlotShape::Val(ty),
         })
     }
@@ -53,6 +64,7 @@ impl SlotShape {
     fn wrap(&self, value: &str) -> Result<String, TranspileError> {
         Ok(match self {
             SlotShape::Packed { mask, .. } => format!("GcSlot::I32(({value}) & {mask:#X})"),
+            SlotShape::Func(_) => format!("GcSlot::Func({value})"),
             SlotShape::Val(ValType::Ref(_)) => format!("GcSlot::Ref({value})"),
             SlotShape::Val(ty) => format!("GcSlot::{}({value})", Self::val_variant(*ty)),
         })
@@ -66,6 +78,10 @@ impl SlotShape {
             SlotShape::Packed { .. } => (
                 format!("match {slot} {{ GcSlot::I32(v) => *v, _ => unreachable!() }}"),
                 ValType::I32,
+            ),
+            SlotShape::Func(ty) => (
+                format!("match {slot} {{ GcSlot::Func(v) => *v, _ => unreachable!() }}"),
+                *ty,
             ),
             SlotShape::Val(ValType::Ref(_)) => {
                 let ty = self.result_ty();
@@ -88,28 +104,23 @@ impl SlotShape {
     fn result_ty(&self) -> ValType {
         match self {
             SlotShape::Packed { .. } => ValType::I32,
-            SlotShape::Val(ty) => *ty,
+            SlotShape::Func(ty) | SlotShape::Val(ty) => *ty,
         }
     }
 
     /// The Rust expression for the default `GcSlot` of this storage type: the
-    /// zero of a numeric (packed fields default to `GcSlot::I32(0)`) and a null
-    /// handle for a GC reference. A funcref/externref field would need a `u32`
-    /// slot, which `GcSlot` cannot hold (a pre-existing 4b limitation), so its
-    /// default is rejected.
+    /// zero of a numeric (packed fields default to `GcSlot::I32(0)`), the null
+    /// (`u32::MAX`) funcref/externref for a `Func` slot, and the managed null
+    /// handle for a GC reference.
     fn default_slot(&self) -> Result<&'static str, TranspileError> {
         Ok(match self {
             SlotShape::Packed { .. } => "GcSlot::I32(0)",
+            SlotShape::Func(_) => "GcSlot::Func(u32::MAX)",
             SlotShape::Val(ValType::I32) => "GcSlot::I32(0)",
             SlotShape::Val(ValType::I64) => "GcSlot::I64(0)",
             SlotShape::Val(ValType::F32) => "GcSlot::F32(0.0)",
             SlotShape::Val(ValType::F64) => "GcSlot::F64(0.0)",
             SlotShape::Val(ValType::V128) => "GcSlot::V128(0)",
-            SlotShape::Val(ValType::Ref(rty)) if rty.is_extern_ref() || rty.is_func_ref() => {
-                return Err(TranspileError::Unsupported(
-                    "default of a funcref field".into(),
-                ));
-            }
             SlotShape::Val(ValType::Ref(_)) => "GcSlot::Ref(GcRef::Null)",
         })
     }
@@ -164,7 +175,7 @@ impl super::FuncGen<'_> {
         let shapes = self
             .struct_fields(type_index)?
             .iter()
-            .map(|f| SlotShape::of(f.storage))
+            .map(|f| SlotShape::of(f.storage, self.ctx.type_kinds))
             .collect::<Result<Vec<_>, _>>()?;
         // Freeze anything below the fields, then pop the fields (top is last).
         self.freeze_survivors(shapes.len())?;
@@ -196,7 +207,7 @@ impl super::FuncGen<'_> {
             let field = fields.get(field_index as usize).ok_or_else(|| {
                 TranspileError::Unsupported(format!("struct field {field_index} out of range"))
             })?;
-            SlotShape::of(field.storage)?
+            SlotShape::of(field.storage, self.ctx.type_kinds)?
         };
         let r = self.pop()?;
         let (read, ty) = shape.read(&format!("&__b[{field_index}]"))?;
@@ -220,7 +231,7 @@ impl super::FuncGen<'_> {
             let field = fields.get(field_index as usize).ok_or_else(|| {
                 TranspileError::Unsupported(format!("struct field {field_index} out of range"))
             })?;
-            SlotShape::of(field.storage)?
+            SlotShape::of(field.storage, self.ctx.type_kinds)?
         };
         self.freeze_survivors(2)?;
         let value = self.pop()?;
@@ -236,7 +247,7 @@ impl super::FuncGen<'_> {
     /// `array.new $t`: pop `size` (top) then the init value and allocate an array
     /// of `size` copies of the init value.
     pub(super) fn array_new(&mut self, type_index: u32) -> Result<(), TranspileError> {
-        let shape = SlotShape::of(self.array_element(type_index)?.storage)?;
+        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
         self.freeze_survivors(2)?;
         let size = self.pop()?;
         let init = self.pop()?;
@@ -257,7 +268,7 @@ impl super::FuncGen<'_> {
         type_index: u32,
         ext: Option<bool>,
     ) -> Result<(), TranspileError> {
-        let shape = SlotShape::of(self.array_element(type_index)?.storage)?;
+        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
         self.freeze_survivors(2)?;
         let index = self.pop()?;
         let r = self.pop()?;
@@ -272,7 +283,7 @@ impl super::FuncGen<'_> {
 
     /// `array.set $t`: pop `value` (top), then `index`, then the ref.
     pub(super) fn array_set(&mut self, type_index: u32) -> Result<(), TranspileError> {
-        let shape = SlotShape::of(self.array_element(type_index)?.storage)?;
+        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
         self.freeze_survivors(3)?;
         let value = self.pop()?;
         let index = self.pop()?;
@@ -301,7 +312,7 @@ impl super::FuncGen<'_> {
         let defaults = self
             .struct_fields(type_index)?
             .iter()
-            .map(|f| SlotShape::of(f.storage).and_then(|s| s.default_slot()))
+            .map(|f| SlotShape::of(f.storage, self.ctx.type_kinds).and_then(|s| s.default_slot()))
             .collect::<Result<Vec<_>, _>>()?;
         let obj = format!(
             "GcRef::Obj {{ ty: {type_index}u32, \
@@ -315,7 +326,8 @@ impl super::FuncGen<'_> {
     /// `array.new_default $t`: pop `size` (top) and allocate an array of `size`
     /// default (0 / null) elements.
     pub(super) fn array_new_default(&mut self, type_index: u32) -> Result<(), TranspileError> {
-        let default = SlotShape::of(self.array_element(type_index)?.storage)?.default_slot()?;
+        let default = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?
+            .default_slot()?;
         let size = self.pop()?;
         let code = format!(
             "{{ let __n = ({}) as usize; \
@@ -333,7 +345,7 @@ impl super::FuncGen<'_> {
         type_index: u32,
         array_size: u32,
     ) -> Result<(), TranspileError> {
-        let shape = SlotShape::of(self.array_element(type_index)?.storage)?;
+        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
         let n = array_size as usize;
         // Freeze anything below the elements, then pop them (top is last).
         self.freeze_survivors(n)?;
@@ -354,7 +366,7 @@ impl super::FuncGen<'_> {
     /// on top). Write `size` copies of `value` into the array starting at
     /// `offset`. An out-of-range write traps.
     pub(super) fn array_fill(&mut self, type_index: u32) -> Result<(), TranspileError> {
-        let shape = SlotShape::of(self.array_element(type_index)?.storage)?;
+        let shape = SlotShape::of(self.array_element(type_index)?.storage, self.ctx.type_kinds)?;
         self.freeze_survivors(4)?;
         let size = self.pop()?;
         let value = self.pop()?;
@@ -379,7 +391,10 @@ impl super::FuncGen<'_> {
     pub(super) fn array_copy(&mut self, type_index_dst: u32) -> Result<(), TranspileError> {
         // The whole `GcSlot`s are copied, so the destination element shape
         // governs and no per-element rewrap is needed.
-        let _ = SlotShape::of(self.array_element(type_index_dst)?.storage)?;
+        let _ = SlotShape::of(
+            self.array_element(type_index_dst)?.storage,
+            self.ctx.type_kinds,
+        )?;
         self.freeze_survivors(5)?;
         let size = self.pop()?;
         let src_offset = self.pop()?;

@@ -603,6 +603,7 @@ pub enum GcSlot {
     F64(f64),
     V128(u128),
     Ref(GcRef),
+    Func(u32),
 }
 
 #[allow(dead_code)]
