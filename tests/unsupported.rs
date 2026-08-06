@@ -246,17 +246,15 @@ fn set_of_an_immutable_global_is_rejected() {
 #[test]
 fn unsupported_cont_operator_is_rejected() {
     // A `continuation` type now parses and lowers its reference to a `u32`
-    // handle (see tests/cont.rs), but the stack-switching *operators* are not
-    // yet implemented, so `cont.new` is rejected by name rather than
-    // mistranslated.
+    // handle, and `cont.new` produces a live handle (see tests/cont.rs), but the
+    // resuming/suspending *operators* are not yet implemented, so `suspend` is
+    // rejected by name rather than mistranslated.
     assert_unsupported(
         r#"(module
             (type $ft (func))
-            (type $ct (cont $ft))
-            (func $f)
-            (func (export "g") (result (ref $ct))
-              ref.func $f cont.new $ct))"#,
-        "operator ContNew",
+            (tag $t)
+            (func $f suspend $t))"#,
+        "operator Suspend",
     );
 }
 

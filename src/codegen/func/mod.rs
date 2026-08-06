@@ -699,6 +699,7 @@ impl<'a> FuncGen<'a> {
             Operator::RefNull { hty } => self.ref_null_dispatch(hty)?,
             Operator::RefFunc { function_index } => self.ref_func(function_index),
             Operator::RefIsNull => self.ref_is_null()?,
+            Operator::ContNew { cont_type_index } => self.cont_new(cont_type_index)?,
             // Table instructions. A table entry and a `funcref` operand are both
             // `u32` function indices (`u32::MAX` is null).
             Operator::TableGet { table } => self.table_get(table)?,

@@ -1,7 +1,7 @@
 use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, ValType};
 
 use super::super::helpers::mem_accessor;
-use super::super::{Helper, Val};
+use super::super::{CompositeKind, Helper, Val};
 use crate::TranspileError;
 
 impl<'a> super::FuncGen<'a> {
@@ -265,6 +265,34 @@ impl<'a> super::FuncGen<'a> {
             ty: ValType::FUNCREF,
             stable: true,
         });
+    }
+
+    /// `cont.new $ct`: consume a `funcref` and produce a live continuation
+    /// handle of type `(ref $ct)`. In this phase the handle carries the same
+    /// `u32` function index the `funcref` held (a non-null pass-through, since
+    /// `u32::MAX` is the null sentinel), so `ref.is_null` reports it as
+    /// non-null; the per-continuation resumable state arrives with
+    /// `resume`/`suspend` in a later phase.
+    pub(super) fn cont_new(&mut self, cont_type_index: u32) -> Result<(), TranspileError> {
+        let idx = usize::try_from(cont_type_index)
+            .map_err(|_| TranspileError::Unsupported("cont.new: type index too large".into()))?;
+        match self.ctx.type_kinds.get(idx) {
+            Some(CompositeKind::Cont(_)) => {}
+            _ => {
+                return Err(TranspileError::Unsupported(format!(
+                    "cont.new: type index {cont_type_index} is not a continuation type"
+                )));
+            }
+        }
+        let func = self.pop()?;
+        let packed = PackedIndex::from_module_index(cont_type_index)
+            .ok_or_else(|| TranspileError::Unsupported("cont.new: type index too large".into()))?;
+        self.push(Val {
+            code: func.code,
+            ty: ValType::Ref(RefType::concrete(false, packed)),
+            stable: true,
+        });
+        Ok(())
     }
 
     /// `ref.is_null`: pop a reference and push 1 if it is null, else 0. A managed

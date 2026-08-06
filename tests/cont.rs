@@ -1,10 +1,11 @@
 //! End-to-end tests for the typed-continuations (stack-switching) proposal.
 //!
-//! Phase 1 only covers the type section and the null continuation reference: a
+//! Phase 1 covers the type section and the null continuation reference: a
 //! `(cont $ft)` type is accepted (it names an underlying function type), a
 //! continuation reference lowers to a `u32` handle (`u32::MAX` is null, like a
-//! `funcref`), and `ref.null`/`ref.is_null` work on it. Creating, resuming and
-//! suspending continuations arrives in later phases.
+//! `funcref`), and `ref.null`/`ref.is_null` work on it. This phase also adds
+//! `cont.new`, which turns a `funcref` into a live (non-null) continuation
+//! handle. Resuming and suspending continuations arrive in later phases.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -38,6 +39,24 @@ fn cont_type_is_accepted_and_null_ref_is_null() {
             (func (export "f") (result i32)
               ref.null $ct ref.is_null))"#,
         "assert_eq!(func0(), 1);",
+    );
+}
+
+#[test]
+fn cont_new_produces_non_null_handle() {
+    // `cont.new $ct` consumes the `funcref` from `ref.func $gen` and produces a
+    // live continuation handle. `ref.is_null` reports it as non-null (0), in
+    // contrast to a `ref.null $ct` handle (which is null, 1).
+    compile_run(
+        "cont_new_non_null",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (func $gen (result i32) i32.const 42)
+            (func (export "f") (result i32)
+              ref.func $gen cont.new $ct ref.is_null))"#,
+        // `$gen` is func0; the exported `f` is func1.
+        "assert_eq!(func1(), 0);",
     );
 }
 
