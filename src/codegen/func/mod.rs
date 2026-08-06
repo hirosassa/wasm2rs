@@ -744,6 +744,9 @@ impl<'a> FuncGen<'a> {
             // GC heap objects (phase 4b): `struct`/`array` values are managed
             // `GcRef` handles; fields/elements are `GcSlot`s read/written by index.
             Operator::StructNew { struct_type_index } => self.struct_new(struct_type_index)?,
+            Operator::StructNewDefault { struct_type_index } => {
+                self.struct_new_default(struct_type_index)?
+            }
             Operator::StructGet {
                 struct_type_index,
                 field_index,
@@ -761,6 +764,13 @@ impl<'a> FuncGen<'a> {
                 field_index,
             } => self.struct_set(struct_type_index, field_index)?,
             Operator::ArrayNew { array_type_index } => self.array_new(array_type_index)?,
+            Operator::ArrayNewDefault { array_type_index } => {
+                self.array_new_default(array_type_index)?
+            }
+            Operator::ArrayNewFixed {
+                array_type_index,
+                array_size,
+            } => self.array_new_fixed(array_type_index, array_size)?,
             Operator::ArrayGet { array_type_index } => self.array_get(array_type_index, None)?,
             Operator::ArrayGetS { array_type_index } => {
                 self.array_get(array_type_index, Some(true))?
@@ -770,6 +780,11 @@ impl<'a> FuncGen<'a> {
             }
             Operator::ArraySet { array_type_index } => self.array_set(array_type_index)?,
             Operator::ArrayLen => self.array_len()?,
+            Operator::ArrayFill { array_type_index } => self.array_fill(array_type_index)?,
+            Operator::ArrayCopy {
+                array_type_index_dst,
+                array_type_index_src: _,
+            } => self.array_copy(array_type_index_dst)?,
             // Runtime downcasts (phase 4c-1): each object carries its concrete
             // type id, and a target's compile-time descendant set decides the
             // check. The `NonNull` variants target `(ref $t)` (null fails); the

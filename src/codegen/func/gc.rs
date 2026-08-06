@@ -91,6 +91,28 @@ impl SlotShape {
             SlotShape::Val(ty) => *ty,
         }
     }
+
+    /// The Rust expression for the default `GcSlot` of this storage type: the
+    /// zero of a numeric (packed fields default to `GcSlot::I32(0)`) and a null
+    /// handle for a GC reference. A funcref/externref field would need a `u32`
+    /// slot, which `GcSlot` cannot hold (a pre-existing 4b limitation), so its
+    /// default is rejected.
+    fn default_slot(&self) -> Result<&'static str, TranspileError> {
+        Ok(match self {
+            SlotShape::Packed { .. } => "GcSlot::I32(0)",
+            SlotShape::Val(ValType::I32) => "GcSlot::I32(0)",
+            SlotShape::Val(ValType::I64) => "GcSlot::I64(0)",
+            SlotShape::Val(ValType::F32) => "GcSlot::F32(0.0)",
+            SlotShape::Val(ValType::F64) => "GcSlot::F64(0.0)",
+            SlotShape::Val(ValType::V128) => "GcSlot::V128(0)",
+            SlotShape::Val(ValType::Ref(rty)) if rty.is_extern_ref() || rty.is_func_ref() => {
+                return Err(TranspileError::Unsupported(
+                    "default of a funcref field".into(),
+                ));
+            }
+            SlotShape::Val(ValType::Ref(_)) => "GcSlot::Ref(GcRef::Null)",
+        })
+    }
 }
 
 impl super::FuncGen<'_> {
@@ -271,6 +293,109 @@ impl super::FuncGen<'_> {
             ValType::I32,
             false,
         )
+    }
+
+    /// `struct.new_default $t`: allocate an object whose slots are each field's
+    /// default value (0 for numerics, a null handle for a GC-ref field).
+    pub(super) fn struct_new_default(&mut self, type_index: u32) -> Result<(), TranspileError> {
+        let defaults = self
+            .struct_fields(type_index)?
+            .iter()
+            .map(|f| SlotShape::of(f.storage).and_then(|s| s.default_slot()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let obj = format!(
+            "GcRef::Obj {{ ty: {type_index}u32, \
+             slots: std::rc::Rc::new(std::cell::RefCell::new(vec![{}])) }}",
+            defaults.join(", ")
+        );
+        // An allocation is not re-evaluatable, so bind it to a stable temp.
+        self.materialize(obj, Self::concrete_ref_ty(type_index)?)
+    }
+
+    /// `array.new_default $t`: pop `size` (top) and allocate an array of `size`
+    /// default (0 / null) elements.
+    pub(super) fn array_new_default(&mut self, type_index: u32) -> Result<(), TranspileError> {
+        let default = SlotShape::of(self.array_element(type_index)?.storage)?.default_slot()?;
+        let size = self.pop()?;
+        let code = format!(
+            "{{ let __n = ({}) as usize; \
+             GcRef::Obj {{ ty: {type_index}u32, \
+             slots: std::rc::Rc::new(std::cell::RefCell::new(vec![{default}; __n])) }} }}",
+            size.code
+        );
+        self.materialize(code, Self::concrete_ref_ty(type_index)?)
+    }
+
+    /// `array.new_fixed $t N`: pop the `N` elements (last on top) and allocate an
+    /// array holding them in element order.
+    pub(super) fn array_new_fixed(
+        &mut self,
+        type_index: u32,
+        array_size: u32,
+    ) -> Result<(), TranspileError> {
+        let shape = SlotShape::of(self.array_element(type_index)?.storage)?;
+        let n = array_size as usize;
+        // Freeze anything below the elements, then pop them (top is last).
+        self.freeze_survivors(n)?;
+        let mut slots = vec![String::new(); n];
+        for i in (0..n).rev() {
+            let v = self.pop()?;
+            slots[i] = shape.wrap(&v.code)?;
+        }
+        let obj = format!(
+            "GcRef::Obj {{ ty: {type_index}u32, \
+             slots: std::rc::Rc::new(std::cell::RefCell::new(vec![{}])) }}",
+            slots.join(", ")
+        );
+        self.materialize(obj, Self::concrete_ref_ty(type_index)?)
+    }
+
+    /// `array.fill $t`: operand stack `[arrayref, offset, value, size]` (`size`
+    /// on top). Write `size` copies of `value` into the array starting at
+    /// `offset`. An out-of-range write traps.
+    pub(super) fn array_fill(&mut self, type_index: u32) -> Result<(), TranspileError> {
+        let shape = SlotShape::of(self.array_element(type_index)?.storage)?;
+        self.freeze_survivors(4)?;
+        let size = self.pop()?;
+        let value = self.pop()?;
+        let offset = self.pop()?;
+        let r = self.pop()?;
+        let slot = shape.wrap(&value.code)?;
+        self.line(format!(
+            "{{ let __o = ({}).obj(); let mut __b = __o.borrow_mut(); \
+             let __off = ({}) as usize; let __n = ({}) as usize; let __v = {slot}; \
+             for __k in 0..__n {{ __b[__off + __k] = __v.clone(); }} }}",
+            r.code, offset.code, size.code
+        ));
+        Ok(())
+    }
+
+    /// `array.copy $t_dst $t_src`: operand stack
+    /// `[destref, dest_offset, srcref, src_offset, size]` (`size` on top). Copy
+    /// `size` elements from the source range to the destination range. The source
+    /// range is snapshotted before the destination is borrowed mutably so a
+    /// self-copy (both handles backed by the same `Rc`) neither double-borrows nor
+    /// corrupts on overlap. Out-of-range indexing traps.
+    pub(super) fn array_copy(&mut self, type_index_dst: u32) -> Result<(), TranspileError> {
+        // The whole `GcSlot`s are copied, so the destination element shape
+        // governs and no per-element rewrap is needed.
+        let _ = SlotShape::of(self.array_element(type_index_dst)?.storage)?;
+        self.freeze_survivors(5)?;
+        let size = self.pop()?;
+        let src_offset = self.pop()?;
+        let srcref = self.pop()?;
+        let dest_offset = self.pop()?;
+        let destref = self.pop()?;
+        self.line(format!(
+            "{{ let __so = ({}).obj(); let __sb = __so.borrow(); \
+             let __si = ({}) as usize; let __n = ({}) as usize; \
+             let __seg: Vec<GcSlot> = __sb[__si .. __si + __n].to_vec(); drop(__sb); \
+             let __do = ({}).obj(); let mut __db = __do.borrow_mut(); \
+             let __di = ({}) as usize; \
+             for (__k, __e) in __seg.into_iter().enumerate() {{ __db[__di + __k] = __e; }} }}",
+            srcref.code, src_offset.code, size.code, destref.code, dest_offset.code
+        ));
+        Ok(())
     }
 
     /// The `matches!(<ty_expr>, d0 | d1 | ...)` membership test deciding whether
