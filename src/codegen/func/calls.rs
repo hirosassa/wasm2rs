@@ -10,6 +10,29 @@ use crate::TranspileError;
 
 impl<'a> super::FuncGen<'a> {
     // ----- calls -----------------------------------------------------------
+
+    /// Join call arguments into a comma-separated list, cloning any argument
+    /// that lowers to the non-`Copy` `GcRef`.
+    ///
+    /// A `local.get` (or `global.get`) of a GC reference pushes the bare place
+    /// `l{i}` / a global accessor; passing it to a callee moves the handle, so a
+    /// later read of the same local would fail to compile. Cloning the handle
+    /// (a cheap `Rc` bump) matches wasm's copy semantics for `local.get`.
+    /// `funcref`/`externref`/`contref` lower to `Copy` `u32` handles and are
+    /// passed as-is.
+    fn join_call_args(&self, args: Vec<Val>) -> Result<String, TranspileError> {
+        let mut parts = Vec::with_capacity(args.len());
+        for a in args {
+            let is_gc = rust_type(a.ty, self.ctx.type_kinds)? == "GcRef";
+            parts.push(if is_gc {
+                format!("{}.clone()", a.code)
+            } else {
+                a.code
+            });
+        }
+        Ok(parts.join(", "))
+    }
+
     pub(super) fn call(&mut self, function_index: u32) -> Result<(), TranspileError> {
         self.emit_direct_call(function_index, false)
     }
@@ -52,11 +75,7 @@ impl<'a> super::FuncGen<'a> {
             args.push(self.pop()?);
         }
         args.reverse();
-        let arg_list = args
-            .into_iter()
-            .map(|a| a.code)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let arg_list = self.join_call_args(args)?;
 
         // A call is not re-evaluatable, so bind its result(s) to a temporary at
         // exactly this point (mirroring `memory_grow`) and push the stable
@@ -138,11 +157,7 @@ impl<'a> super::FuncGen<'a> {
             args.push(self.pop()?);
         }
         args.reverse();
-        let arg_list = args
-            .into_iter()
-            .map(|a| a.code)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let arg_list = self.join_call_args(args)?;
 
         // No local function has the requested type. Without a host, every entry
         // mismatches, so the call always traps and control cannot continue past
@@ -225,11 +240,7 @@ impl<'a> super::FuncGen<'a> {
             args.push(self.pop()?);
         }
         args.reverse();
-        let arg_list = args
-            .into_iter()
-            .map(|a| a.code)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let arg_list = self.join_call_args(args)?;
 
         // Bind the funcref to a local first for borrow-safety: passing the
         // expression straight into the `&mut self` dispatch call could keep an

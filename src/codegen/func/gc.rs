@@ -61,11 +61,17 @@ impl SlotShape {
     }
 
     /// The Rust expression constructing the slot holding `value`.
+    ///
+    /// A managed reference lowers to the non-`Copy` `GcRef`, so storing it into
+    /// a slot `.clone()`s the handle (a cheap `Rc` bump): the operand may be a
+    /// local place (`l{i}`) that is read again after this store, and moving it
+    /// into the slot would leave that later read use-after-move. Scalars and
+    /// `u32` `Func` handles are `Copy`, so they store as-is.
     fn wrap(&self, value: &str) -> Result<String, TranspileError> {
         Ok(match self {
             SlotShape::Packed { mask, .. } => format!("GcSlot::I32(({value}) & {mask:#X})"),
             SlotShape::Func(_) => format!("GcSlot::Func({value})"),
-            SlotShape::Val(ValType::Ref(_)) => format!("GcSlot::Ref({value})"),
+            SlotShape::Val(ValType::Ref(_)) => format!("GcSlot::Ref(({value}).clone())"),
             SlotShape::Val(ty) => format!("GcSlot::{}({value})", Self::val_variant(*ty)),
         })
     }

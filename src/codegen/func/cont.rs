@@ -775,15 +775,23 @@ impl super::FuncGen<'_> {
             src.push_str("    }\n");
         }
         // Reload every local from the frame at entry; arm bodies reference `lN`
-        // bare (unchanged from the ordinary lowering).
-        for i in 0..self.local_types.len() {
+        // bare (unchanged from the ordinary lowering). A GC reference lowers to
+        // the non-`Copy` `GcRef`, so it must be `.clone()`d out of the frame:
+        // reading `__frame.lN` by value would move out of a field behind `&mut`
+        // and fail to compile. `u32` handles and scalars are `Copy`.
+        for (i, ty) in self.local_types.iter().enumerate() {
             let keyword = if self.mutable_locals.contains(&index_u32(i)?) {
                 "let mut"
             } else {
                 "let"
             };
+            let reload = if rust_type(*ty, self.ctx.type_kinds)? == "GcRef" {
+                format!("__frame.l{i}.clone()")
+            } else {
+                format!("__frame.l{i}")
+            };
             src.push_str(line_prefix);
-            src.push_str(&format!("    {keyword} l{i} = __frame.l{i};\n"));
+            src.push_str(&format!("    {keyword} l{i} = {reload};\n"));
         }
         Ok(())
     }
