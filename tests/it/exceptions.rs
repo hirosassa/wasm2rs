@@ -381,3 +381,30 @@ fn uncaught_throw_traps() {
         "func0();",
     );
 }
+
+#[test]
+fn multi_value_return_escaping_a_try_uses_the_tuple_holder() {
+    // A `try` lowers its body into a closure, so a `return` inside it must escape
+    // the closure and then perform the real function return. For a function with
+    // two results that return goes through the *tuple* return-holder path
+    // (`return (__rv0, __rv1)`), distinct from the single-result path. With a
+    // non-zero argument the `return` fires with (11, 22); with zero the try
+    // completes normally and the function yields (33, 44).
+    compile_run(
+        "eh_multi_return_through_try",
+        r#"(module
+            (func (export "f") (param i32) (result i32 i32)
+              try (result i32 i32)
+                local.get 0
+                if (result i32 i32)
+                  i32.const 11 i32.const 22
+                  return
+                else
+                  i32.const 33 i32.const 44
+                end
+              catch_all
+                i32.const 55 i32.const 66
+              end))"#,
+        "assert_eq!(func0(1), (11, 22)); assert_eq!(func0(0), (33, 44));",
+    );
+}

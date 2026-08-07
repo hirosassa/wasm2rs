@@ -63,6 +63,78 @@ fn array_new_data_reads_packed_i8_elements() {
 }
 
 #[test]
+fn array_new_data_reads_packed_i16_elements() {
+    // A packed `i16` array reads two little-endian bytes per element. `array.get_u`
+    // zero-extends the 16-bit value; `array.get_s` sign-extends it. The three
+    // elements are 10 (`\0a\00`), 300 (`\2c\01`), and 0xFFFF (`\ff\ff`), so a
+    // zero-extended read of 300 stays 300 while a sign-extended read of 0xFFFF
+    // becomes -1 — the byte width and the extension are both distinct from `i8`.
+    compile_run(
+        "gc_array_new_data_i16",
+        r#"(module
+            (type $arr (array (mut i16)))
+            (data $d "\0a\00\2c\01\ff\ff")
+            (func (export "u1") (result i32)
+              i32.const 0 i32.const 3 array.new_data $arr $d
+              i32.const 1 array.get_u $arr)
+            (func (export "s2") (result i32)
+              i32.const 0 i32.const 3 array.new_data $arr $d
+              i32.const 2 array.get_s $arr))"#,
+        "let mut inst = Instance::new(); \
+         assert_eq!(inst.func0(), 300); assert_eq!(inst.func1(), -1);",
+    );
+}
+
+#[test]
+fn array_new_data_reads_i64_elements() {
+    // Each `i64` element decodes eight little-endian bytes. Element 1 is
+    // 0x0102 = 258 (`\02\01` then six zero bytes), distinguishing the 8-byte
+    // read from the 4-byte `i32` path.
+    compile_run(
+        "gc_array_new_data_i64",
+        r#"(module
+            (type $arr (array (mut i64)))
+            (data $d "\07\00\00\00\00\00\00\00\02\01\00\00\00\00\00\00")
+            (func (export "at1") (result i64)
+              i32.const 0 i32.const 2 array.new_data $arr $d
+              i32.const 1 array.get $arr))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func0(), 258);",
+    );
+}
+
+#[test]
+fn array_new_data_reads_f32_elements() {
+    // An `f32` element reinterprets four little-endian bytes as a float. Element 1
+    // is 2.5 (0x4020_0000, little-endian `\00\00\20\40`).
+    compile_run(
+        "gc_array_new_data_f32",
+        r#"(module
+            (type $arr (array (mut f32)))
+            (data $d "\00\00\c0\3f\00\00\20\40")
+            (func (export "at1") (result f32)
+              i32.const 0 i32.const 2 array.new_data $arr $d
+              i32.const 1 array.get $arr))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func0(), 2.5f32);",
+    );
+}
+
+#[test]
+fn array_new_data_reads_f64_elements() {
+    // An `f64` element reinterprets eight little-endian bytes as a double. Element
+    // 1 is 2.5 (0x4004_0000_0000_0000, little-endian trailing `\04\40`).
+    compile_run(
+        "gc_array_new_data_f64",
+        r#"(module
+            (type $arr (array (mut f64)))
+            (data $d "\00\00\00\00\00\00\f8\3f\00\00\00\00\00\00\04\40")
+            (func (export "at1") (result f64)
+              i32.const 0 i32.const 2 array.new_data $arr $d
+              i32.const 1 array.get $arr))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func0(), 2.5f64);",
+    );
+}
+
+#[test]
 fn array_init_data_copies_into_an_existing_array() {
     // `array.init_data` copies `size` elements from the data segment (at a byte
     // offset) into the array starting at a destination index.

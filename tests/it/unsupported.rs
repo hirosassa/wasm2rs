@@ -411,3 +411,82 @@ fn call_indirect_without_a_table_is_rejected() {
         "call_indirect without a table",
     );
 }
+
+#[test]
+fn a_table_of_a_non_funcref_element_type_is_rejected() {
+    // A `funcref`/`externref` table is wired to the dispatch machinery, but the
+    // GC proposal permits a table of any reference type. wasm2rs only supports
+    // the two function/host element types, so a table of a concrete struct
+    // reference is valid wasm that wasm2rs declines rather than mistranslates.
+    assert_unsupported(
+        r#"(module
+             (type $s (struct))
+             (table 1 (ref null $s)))"#,
+        "table of a non-funcref/externref type",
+    );
+}
+
+#[test]
+fn a_sixty_four_bit_table_is_rejected() {
+    // The table64 proposal widens table indices to i64. wasm2rs indexes tables
+    // with u32, so it rejects a 64-bit table rather than silently truncating.
+    assert_unsupported(
+        r#"(module (table i64 1 funcref))"#,
+        "64-bit or shared table",
+    );
+}
+
+#[test]
+fn an_imported_shared_memory_is_rejected() {
+    // A defined shared memory is supported (see tests/atomics.rs), but a *host*
+    // shared memory would need the embedder to hand in an atomically-shared
+    // buffer, which wasm2rs' single-owner memory model cannot express.
+    assert_unsupported(
+        r#"(module (import "e" "m" (memory 1 1 shared)))"#,
+        "imported shared memory",
+    );
+}
+
+#[test]
+fn cont_new_on_a_non_continuation_type_is_rejected() {
+    // `cont.new $t` reifies a function reference into a continuation. When `$t`
+    // names a non-continuation composite type the operator is meaningless;
+    // wasm2rs rejects it by index rather than emitting a bogus handle.
+    assert_unsupported(
+        r#"(module
+             (type $ft (func))
+             (func (param (ref $ft))
+               (cont.new $ft (local.get 0))
+               (drop)))"#,
+        "is not a continuation type",
+    );
+}
+
+#[test]
+fn array_new_data_with_a_reference_element_is_rejected() {
+    // `array.new_data` copies raw bytes from a data segment into an array. A
+    // reference element type has no byte image to decode, so wasm2rs rejects it
+    // rather than fabricating references from data bytes.
+    assert_unsupported(
+        r#"(module
+             (type $a (array (mut funcref)))
+             (data "\00\00\00\00")
+             (func (result (ref $a))
+               (array.new_data $a 0 (i32.const 0) (i32.const 1))))"#,
+        "array.new_data/init_data with a reference element type",
+    );
+}
+
+#[test]
+fn ref_test_on_a_func_heaptype_is_rejected() {
+    // `ref.test` in wasm2rs is implemented for the managed GC hierarchy
+    // (`GcRef`). A test against the `func` heap type operates on the funcref
+    // hierarchy, which wasm2rs represents as opaque `u32` handles with no
+    // runtime type tag, so the operator is rejected rather than mistranslated.
+    assert_unsupported(
+        r#"(module
+             (func (param funcref) (result i32)
+               (ref.test (ref func) (local.get 0))))"#,
+        "func/extern heap type",
+    );
+}

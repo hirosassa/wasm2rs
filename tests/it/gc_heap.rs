@@ -76,6 +76,25 @@ fn packed_struct_fields_sign_and_zero_extend() {
 }
 
 #[test]
+fn packed_i16_struct_field_sign_and_zero_extends() {
+    // A packed `i16` field keeps only the low 16 bits; `struct.get_s` sign-extends
+    // that half-word and `struct.get_u` zero-extends it. This exercises the 16-bit
+    // mask/shift path, which is distinct from the `i8` case above (0xFFFF -> -1
+    // signed, 65535 unsigned; a mid value like 0x1234 survives both reads).
+    compile_run(
+        "gc_struct_packed_i16",
+        r#"(module
+            (type $s (struct (field i16)))
+            (func (export "s16") (param i32) (result i32)
+              local.get 0 struct.new $s struct.get_s $s 0)
+            (func (export "u16") (param i32) (result i32)
+              local.get 0 struct.new $s struct.get_u $s 0))"#,
+        "assert_eq!(func0(0xFFFF), -1); assert_eq!(func1(0xFFFF), 65535); \
+         assert_eq!(func0(0x1234), 0x1234); assert_eq!(func1(0x1234), 0x1234);",
+    );
+}
+
+#[test]
 fn array_new_get_set_and_len() {
     // `array.new` fills `size` elements with an initial value; `array.len`
     // reports the size; `array.set`/`array.get` write and read by index.
