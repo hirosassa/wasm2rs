@@ -329,6 +329,44 @@ fn resume_mixing_switch_and_label_handlers_is_rejected() {
 }
 
 #[test]
+fn entry_checkpoint_in_a_parameterized_continuation_is_rejected() {
+    // A cross-call checkpoint sitting at the very entry (`pc == 0`) of a
+    // continuation body that has parameters (P8 follow-up). The header decodes the
+    // body's parameters from `__args` whenever `pc == 0`, and an entry checkpoint
+    // never advances `pc` past 0, so a switch-back — which re-enters the step with
+    // the injection in `__args` — would re-run that prologue and clobber the
+    // body's own parameter slots with the injected values. Reject the combination
+    // rather than miscompile; a parameter-less body (or one whose checkpoint sits
+    // past `pc == 0` because it suspends first) is unaffected.
+    assert_unsupported(
+        r#"(module
+            (type $ht (func (result i32)))
+            (tag $t (type $ht))
+            (type $fa (func (param i32) (result i32)))
+            (type $ca (cont $fa))
+            (type $fc (func (result i32)))
+            (type $fc_s (func (result i32)))
+            (type $cc_s (cont $fc_s))
+            (type $fb (func (param i32) (param (ref $cc_s)) (result i32)))
+            (type $cb (cont $fb))
+            (func $a (type $fa)
+              call $c)
+            (func $b (type $fb)
+              local.get 0 i32.const 2 i32.add)
+            (func $c (type $fc)
+              i32.const 11
+              ref.func $b cont.new $cb
+              switch $cb $t
+              i32.const 888)
+            (func (export "run") (result i32)
+              i32.const 5
+              ref.func $a cont.new $ca
+              resume $ca (on $t switch)))"#,
+        "cross-call checkpoint at the entry of a continuation body with parameters",
+    );
+}
+
+#[test]
 fn continuation_body_also_called_directly_is_rejected() {
     // A function used as a continuation body is emitted only as a resumable
     // step function, never as an ordinary `func{N}`, so also calling it

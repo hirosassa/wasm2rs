@@ -1254,18 +1254,26 @@ impl Flattener {
                         let resume = self.alloc();
                         stmts.push((0, format!("pc = {call};")));
                         self.arms.push((state, std::mem::take(&mut stmts)));
-                        // In the `call` state: drive the callee once. On its suspend,
-                        // save this frame's mutated locals and propagate up, leaving
-                        // `__frame.pc` pinned to `call` so the next resume re-drives
-                        // the callee. On its return, move the callee's `i64`-erased
-                        // results into `__frame.ostack` (the code after the call reads
-                        // them back from there) and advance to `resume`.
+                        // In the `call` state: drive the callee once, forwarding this
+                        // step's `__args`. On the first drive they are ignored (the
+                        // callee takes no parameters); on a switch-back or
+                        // suspend-resume they carry the injection destined for the
+                        // callee — parked at a transfer point below this frame — and
+                        // must reach it. The `call` state is never `pc == 0`, so the
+                        // header's param prologue does not re-run on re-entry (unlike
+                        // the arm-split path, this path needs no guard). On the
+                        // callee's suspend, save this frame's mutated locals and
+                        // propagate up, leaving `__frame.pc` pinned to `call` so the
+                        // next resume re-drives the callee. On its return, move the
+                        // callee's `i64`-erased results into `__frame.ostack` (the code
+                        // after the call reads them back from there) and advance to
+                        // `resume`.
                         self.arms.push((
                             call,
                             vec![(
                                 0,
                                 format!(
-                                    "match self.cont_step_func{callee}(&mut __frame.sub, &[]) {{ \
+                                    "match self.cont_step_func{callee}(&mut __frame.sub, __args) {{ \
                                      StepResult::Suspend {{ tag: __t, payload: __p }} => {{ \
                                      {save}__frame.pc = {call}u32; \
                                      return StepResult::Suspend {{ tag: __t, payload: __p }}; }} \

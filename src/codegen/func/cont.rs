@@ -260,18 +260,34 @@ impl super::FuncGen<'_> {
                                     "statements after a cross-call checkpoint (phase 5b)".into(),
                                 ));
                             }
+                            // A checkpoint at `pc == 0` re-runs the header's param
+                            // prologue on every re-entry, so a switch-back's
+                            // injection (delivered as `__args`) would clobber this
+                            // body's own parameter slots. Reject that combination
+                            // rather than miscompile; a parameter-less outer (or one
+                            // that suspends before the checkpoint, moving it past
+                            // `pc == 0`) is unaffected.
+                            if pc == 0 && !params.is_empty() {
+                                return Err(TranspileError::Unsupported(
+                                    "cross-call checkpoint at the entry of a continuation body \
+                                     with parameters (phase 8: a switch-back would clobber them)"
+                                        .into(),
+                                ));
+                            }
                             let save = self.save_mutated_locals()?;
                             let bind = if payload.contains("__cret") {
                                 "__cret"
                             } else {
                                 "_"
                             };
-                            // The checkpoint callee takes no parameters in this
-                            // phase, so it is driven with an empty injection —
-                            // the outer body's own `__args` were already consumed
-                            // into its parameter slots at `pc == 0`.
+                            // Forward this step's `__args` to the callee: on the
+                            // first drive they are ignored (the callee takes no
+                            // parameters, so its `pc == 0` reads nothing); on a
+                            // switch-back or suspend-resume the callee — parked at a
+                            // transfer point below this frame — is the one that
+                            // consumes the injected values.
                             format!(
-                                "match self.cont_step_func{g}(&mut __frame.sub, &[]) {{ \
+                                "match self.cont_step_func{g}(&mut __frame.sub, __args) {{ \
                                  StepResult::Suspend {{ tag: __t, payload: __p }} => {{ \
                                  {save}StepResult::Suspend {{ tag: __t, payload: __p }} }}, \
                                  StepResult::Switch {{ tag: __t, target: __tgt, args: __a }} => {{ \

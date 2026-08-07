@@ -1143,6 +1143,57 @@ fn switch_propagates_across_a_cross_call_checkpoint() {
 }
 
 #[test]
+fn switch_round_trips_back_into_a_checkpointed_callee() {
+    // A `switch`-back that delivers values *into* a continuation reached through a
+    // cross-call checkpoint (the P8-3 follow-up). `$a` tail-calls `$c` (a
+    // checkpoint), so `$a` drives `$c` as a nested step frame. `$c` switches to
+    // `$b`, handing it 11 plus the reified *outer* continuation (`$a`'s handle,
+    // since `$c`'s frame nests inside `$a`'s). `$b` computes 11 + 2 = 13 and
+    // switches back to that handle, delivering 13.
+    //
+    // The switch-back re-enters `$a`'s step, which must forward its injected
+    // `__args` (`[13, <reified $b>]`) down to the checkpointed callee `$c` — the
+    // one actually parked at a switch — rather than re-driving it with an empty
+    // injection. `$c` receives 13 (dropping the fresh reference to `$b`) and
+    // returns it; `$a` returns `$c`'s result; the driving `resume` returns 13.
+    //
+    // The mutually-recursive continuation types (`$c`'s reified type names `$b`'s
+    // and vice versa) live in one `rec` group.
+    compile_run(
+        "cont_switch_back_into_checkpoint",
+        r#"(module
+            (type $ht (func (result i32)))
+            (tag $t (type $ht))
+            (type $fa (func (result i32)))
+            (type $ca (cont $fa))
+            (type $fc (func (result i32)))
+            (rec
+              (type $fc_s (func (param i32) (param (ref $cb)) (result i32)))
+              (type $cc_s (cont $fc_s))
+              (type $fb (func (param i32) (param (ref $cc_s)) (result i32)))
+              (type $cb (cont $fb)))
+            (func $a (type $fa)
+              call $c)
+            (func $b (type $fb)
+              local.get 0 i32.const 2 i32.add
+              local.get 1
+              switch $cc_s $t
+              drop)
+            (func $c (type $fc)
+              i32.const 11
+              ref.func $b cont.new $cb
+              switch $cb $t
+              drop)
+            (func (export "run") (type $fa)
+              ref.func $a cont.new $ca
+              resume $ca (on $t switch)))"#,
+        // `$a`/`$b`/`$c` are func0/1/2 (step functions); the exported `run` is
+        // func3.
+        "let mut inst = Instance::new(); assert_eq!(inst.func3(), 13);",
+    );
+}
+
+#[test]
 fn null_cont_local_defaults_to_null() {
     // A local typed `(ref null $ct)` defaults to the null handle, so reading it
     // back and testing `ref.is_null` reports null (1) without any assignment.
