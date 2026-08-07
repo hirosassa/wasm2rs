@@ -12,23 +12,11 @@ impl<'a> super::FuncGen<'a> {
     // ----- calls -----------------------------------------------------------
 
     /// Join call arguments into a comma-separated list, cloning any argument
-    /// that lowers to the non-`Copy` `GcRef`.
-    ///
-    /// A `local.get` (or `global.get`) of a GC reference pushes the bare place
-    /// `l{i}` / a global accessor; passing it to a callee moves the handle, so a
-    /// later read of the same local would fail to compile. Cloning the handle
-    /// (a cheap `Rc` bump) matches wasm's copy semantics for `local.get`.
-    /// `funcref`/`externref`/`contref` lower to `Copy` `u32` handles and are
-    /// passed as-is.
+    /// that lowers to the non-`Copy` `GcRef` (see [`Self::move_val`]).
     fn join_call_args(&self, args: Vec<Val>) -> Result<String, TranspileError> {
         let mut parts = Vec::with_capacity(args.len());
         for a in args {
-            let is_gc = rust_type(a.ty, self.ctx.type_kinds)? == "GcRef";
-            parts.push(if is_gc {
-                format!("{}.clone()", a.code)
-            } else {
-                a.code
-            });
+            parts.push(self.move_val(&a)?);
         }
         Ok(parts.join(", "))
     }
@@ -311,11 +299,11 @@ impl<'a> super::FuncGen<'a> {
             vals.push(self.pop()?);
         }
         vals.reverse();
-        let joined = vals
-            .into_iter()
-            .map(|v| v.code)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut parts = Vec::with_capacity(vals.len());
+        for v in vals {
+            parts.push(self.move_val(&v)?);
+        }
+        let joined = parts.join(", ");
         Ok(Some(if n == 1 {
             joined
         } else {

@@ -307,14 +307,16 @@ impl<'a> super::FuncGen<'a> {
         let cond = self.pop()?;
         let b = self.pop()?;
         let a = self.pop()?;
+        // Each arm consumes its operand by value, so a `GcRef` arm must clone
+        // (see `move_val`): the arms may read the same live local place, and a
+        // moved handle could not be read again afterwards.
+        let (a_code, b_code) = (self.move_val(&a)?, self.move_val(&b)?);
         // Parenthesised so the `if` expression composes safely when this value
         // is later embedded in a larger expression (e.g. as an operator arm).
         self.push_combined(
             format!(
-                "(if {} {{ {} }} else {{ {} }})",
+                "(if {} {{ {a_code} }} else {{ {b_code} }})",
                 condition_code(&cond.code),
-                a.code,
-                b.code
             ),
             a.ty,
             cond.stable && a.stable && b.stable,

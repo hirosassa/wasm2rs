@@ -185,7 +185,7 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn assign_results(&mut self, vars: &[String]) -> Result<(), TranspileError> {
         for var in vars.iter().rev() {
             let value = self.pop()?;
-            self.line(format!("{var} = {};", value.code));
+            self.line(format!("{var} = {};", self.move_val(&value)?));
         }
         Ok(())
     }
@@ -256,11 +256,10 @@ impl<'a> super::FuncGen<'a> {
             FrameKind::If => match then_buffer {
                 Some(then_nodes) => (then_nodes, Some(body)),
                 None if !results.is_empty() => {
-                    let forward = results
-                        .iter()
-                        .zip(&entry_params)
-                        .map(|((var, _), param)| Node::Line(format!("{var} = {};", param.code)))
-                        .collect();
+                    let mut forward = Vec::with_capacity(results.len());
+                    for ((var, _), param) in results.iter().zip(&entry_params) {
+                        forward.push(Node::Line(format!("{var} = {};", self.move_val(param)?)));
+                    }
                     (body, Some(forward))
                 }
                 None => (body, None),
@@ -679,11 +678,11 @@ impl<'a> super::FuncGen<'a> {
             .len()
             .checked_sub(vars.len())
             .ok_or(TranspileError::StackUnderflow)?;
-        Ok(vars
-            .iter()
-            .zip(&self.stack[base..])
-            .map(|(var, value)| (var.clone(), value.code.clone()))
-            .collect())
+        let mut out = Vec::with_capacity(vars.len());
+        for (var, value) in vars.iter().zip(&self.stack[base..]) {
+            out.push((var.clone(), self.move_val(value)?));
+        }
+        Ok(out)
     }
 
     /// Resolve a branch target depth to a [`BranchTarget`] and mark the target

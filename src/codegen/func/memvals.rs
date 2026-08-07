@@ -1,7 +1,7 @@
 use wasmparser::{MemArg, ValType};
 
 use super::super::helpers::{helper_method_name, mem_accessor};
-use super::super::{Helper, Val, WASM_PAGE_SIZE, memarg_offset};
+use super::super::{Helper, Val, WASM_PAGE_SIZE, memarg_offset, rust_type};
 use crate::TranspileError;
 
 /// The Rust integer type an atomic RMW/cmpxchg result is cast to on the shared
@@ -15,6 +15,21 @@ fn shared_result_ty(ty: ValType) -> &'static str {
 }
 
 impl<'a> super::FuncGen<'a> {
+    /// The Rust expression that consumes `v` by value. A managed (`GcRef`)
+    /// reference is not `Copy`, so a value read from a place that stays live
+    /// (a local, a global field, an operand read twice off the stack) must be
+    /// `.clone()`d — a cheap `Rc` bump — rather than moved, or a later read of
+    /// the same place would be a use-after-move that fails to compile. Scalars
+    /// and the `u32` funcref/externref/contref handles are `Copy` and pass
+    /// through unchanged.
+    pub(super) fn move_val(&self, v: &Val) -> Result<String, TranspileError> {
+        Ok(if rust_type(v.ty, self.ctx.type_kinds)? == "GcRef" {
+            format!("({}).clone()", v.code)
+        } else {
+            v.code.clone()
+        })
+    }
+
     // ----- locals ----------------------------------------------------------
 
     /// `local.get`: push the local's expression. A local that is never mutated
@@ -50,7 +65,7 @@ impl<'a> super::FuncGen<'a> {
             self.freeze_survivors(1)?;
             self.pop()?
         };
-        self.line(format!("l{local_index} = {};", value.code));
+        self.line(format!("l{local_index} = {};", self.move_val(&value)?));
         Ok(())
     }
 
@@ -107,13 +122,11 @@ impl<'a> super::FuncGen<'a> {
         // below it against this store's effect on the global.
         self.freeze_survivors(1)?;
         let value = self.pop()?;
+        let code = self.move_val(&value)?;
         if imported {
-            self.line(format!(
-                "self.imports.set_global{global_index}({});",
-                value.code
-            ));
+            self.line(format!("self.imports.set_global{global_index}({code});"));
         } else {
-            self.line(format!("self.g{global_index} = {};", value.code));
+            self.line(format!("self.g{global_index} = {code};"));
         }
         Ok(())
     }
