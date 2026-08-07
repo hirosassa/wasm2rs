@@ -274,7 +274,7 @@ pub(crate) fn build_ctx<'a>(
     for f in &can_suspend {
         if step_set.binary_search(f).is_err() {
             return Err(TranspileError::Unsupported(
-                "function can suspend but is not reachable as a continuation (phase 5)".into(),
+                "function can suspend but is not reachable as a continuation".into(),
             ));
         }
     }

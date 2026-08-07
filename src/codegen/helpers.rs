@@ -1,4 +1,4 @@
-use super::Helper;
+use super::{Helper, WASM_MAX_PAGES, WASM_PAGE_SIZE};
 
 /// The accessor pair `(mem(), mem_mut())` naming linear memory `mem`: memory 0
 /// keeps the historic `mem`/`mem_mut` names (so index-0 code and WASI are
@@ -579,17 +579,17 @@ fn base_helper_lines(helper: Helper) -> Vec<String> {
         // `delta` is an unsigned page count. Growth past the wasm32 limit of
         // 65536 pages (4 GiB) fails, returning -1 as the wasm spec requires;
         // the declared maximum is not tracked, so only that hard cap applies.
-        Helper::Grow => owned(&[
-            "fn memory_grow(&mut self, delta: i32) -> i32 {",
-            "    let old_pages = (self.mem().len() / 65536) as u64;",
-            "    let new_pages = old_pages + (delta as u32 as u64);",
-            "    if new_pages > 65536 {",
-            "        return -1;",
-            "    }",
-            "    self.mem_mut().resize((new_pages as usize) * 65536, 0);",
-            "    old_pages as i32",
-            "}",
-        ]),
+        Helper::Grow => vec![
+            "fn memory_grow(&mut self, delta: i32) -> i32 {".to_string(),
+            format!("    let old_pages = (self.mem().len() / {WASM_PAGE_SIZE}) as u64;"),
+            "    let new_pages = old_pages + (delta as u32 as u64);".to_string(),
+            format!("    if new_pages > {WASM_MAX_PAGES} {{"),
+            "        return -1;".to_string(),
+            "    }".to_string(),
+            format!("    self.mem_mut().resize((new_pages as usize) * {WASM_PAGE_SIZE}, 0);"),
+            "    old_pages as i32".to_string(),
+            "}".to_string(),
+        ],
         // Bulk operations. An out-of-bounds range panics on the slice access or
         // `copy_within` (a wasm trap); `copy_within` is memmove, so overlapping
         // source and destination copy correctly.

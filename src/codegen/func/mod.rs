@@ -121,6 +121,30 @@ impl AtomicWidth {
     }
 }
 
+/// Which phase of a `try` region the current point is being lowered in. A `try`
+/// becomes a `catch_unwind` closure (the body) plus a landing-pad `match` (the
+/// handlers); the handlers run *outside* the body's closure, so the phase
+/// governs which branches escape the closure and thus have no Rust lowering.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CatchPhase {
+    /// Inside the protected body (the `catch_unwind` closure). Only a branch
+    /// strictly out of the `try` escapes.
+    Body,
+    /// Inside a catch handler (the landing pad). Even a branch to the `try`
+    /// itself escapes, since the landing pad is not a breakable region.
+    Handler,
+}
+
+/// One enclosing `try` region on the barrier stack: its frame index and which
+/// [`CatchPhase`] of the `try` the current point sits in.
+#[derive(Clone, Copy)]
+pub(super) struct TryBarrier {
+    /// Frame index of the enclosing `try`.
+    frame_idx: usize,
+    /// Which phase of the `try` the current point is lowering.
+    phase: CatchPhase,
+}
+
 /// State threaded through the translation of a single function body.
 pub(super) struct FuncGen<'a> {
     local_types: Vec<ValType>,
@@ -158,13 +182,10 @@ pub(super) struct FuncGen<'a> {
     /// Whether this function uses legacy exception handling (`try`/`throw`), so
     /// the module needs the exception type emitted.
     uses_eh: bool,
-    /// The enclosing `try` regions, innermost last, as `(frame index, in a catch
-    /// handler)`. A `try` lowers to a `catch_unwind` closure (the body) plus a
-    /// landing-pad `match` (the handlers); a branch or `return` leaving either
-    /// has no Rust lowering. In the body (`false`) only a branch strictly out of
-    /// the try escapes; in a handler (`true`) even a branch to the try itself
-    /// does, since the landing pad is not a breakable region.
-    try_barriers: Vec<(usize, bool)>,
+    /// The enclosing `try` regions, innermost last. A `try` lowers to a
+    /// `catch_unwind` closure (the body) plus a landing-pad `match` (the
+    /// handlers); a branch or `return` leaving either has no Rust lowering.
+    try_barriers: Vec<TryBarrier>,
     /// Whether a `return` escapes some `try` body, so the function declares the
     /// shared return-signal flag (`__returning`) and result holders (`__rv{i}`)
     /// that each enclosing try's dispatch re-issues the function return from.

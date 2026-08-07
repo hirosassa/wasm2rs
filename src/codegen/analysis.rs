@@ -206,7 +206,7 @@ pub(crate) fn step_functions(
 
     // The tail checkpoint is the *first* call to another step function, matching
     // `begin_checkpoint`, which accepts the first and rejects any later one (only
-    // one cross-call checkpoint is allowed per body in phase 5).
+    // one cross-call checkpoint is allowed per body).
     let mut checkpoint: HashMap<u32, u32> = HashMap::new();
     for &f in &step {
         let Some(di) = defined_index(f) else { continue };
@@ -225,7 +225,9 @@ pub(crate) fn step_functions(
         }
         if checkpoint.contains_key(&cur) {
             return Err(TranspileError::Unsupported(
-                "recursive continuation call chain (phase 5)".into(),
+                "recursive continuation call chain: a cross-call checkpoint that \
+                 loops back would nest frames without bound"
+                    .into(),
             ));
         }
     }
@@ -286,7 +288,7 @@ pub(crate) fn reject_dual_use_continuations(
                 && !matches!(op, Operator::ContNew { .. })
             {
                 return Err(TranspileError::Unsupported(
-                    "continuation step function used as a plain funcref (phase 5)".into(),
+                    "continuation step function used as a plain funcref".into(),
                 ));
             }
             match op {
@@ -295,8 +297,7 @@ pub(crate) fn reject_dual_use_continuations(
                     if is_step(function_index) && !container_is_step =>
                 {
                     return Err(TranspileError::Unsupported(
-                        "continuation step function is called directly outside a continuation \
-                         (phase 5)"
+                        "continuation step function is called directly outside a continuation"
                             .into(),
                     ));
                 }
@@ -307,7 +308,7 @@ pub(crate) fn reject_dual_use_continuations(
     for seg in elements {
         if seg.funcs.iter().any(|f| is_step(*f)) {
             return Err(TranspileError::Unsupported(
-                "continuation step function appears in an element segment (phase 5)".into(),
+                "continuation step function appears in an element segment".into(),
             ));
         }
     }

@@ -7,6 +7,7 @@ use super::super::{
     TryRegionNode, TryState, Val, condition_code, decode_exc_value, default_value,
     encode_exc_value, index_u32, reachable_after, rust_type,
 };
+use super::{CatchPhase, TryBarrier};
 use crate::TranspileError;
 
 /// A resolved branch target: either a plain `break`/`continue` to an enclosing
@@ -431,7 +432,7 @@ impl<'a> super::FuncGen<'a> {
         // on-label arms would need to hand a suspending continuation back to the
         // label using the *currently driven* handle, not the originally resumed
         // one — re-dispatching a suspend across the switch chain — which is not
-        // lowered yet. Reject the mix rather than mistranslate it (phase 8).
+        // lowered yet. Reject the mix rather than mistranslate it.
         let has_switch = resume_table
             .handlers
             .iter()
@@ -442,8 +443,7 @@ impl<'a> super::FuncGen<'a> {
             .any(|h| matches!(h, wasmparser::Handle::OnLabel { .. }));
         if has_switch && has_label {
             return Err(TranspileError::Unsupported(
-                "resume combining a switch handler with a suspend-to-label handler (phase 8)"
-                    .into(),
+                "resume combining a switch handler with a suspend-to-label handler".into(),
             ));
         }
 
@@ -591,7 +591,7 @@ impl<'a> super::FuncGen<'a> {
             } => (is_loop, label, vars),
             BranchTarget::Escape { .. } => {
                 return Err(TranspileError::Unsupported(
-                    "resume handler crossing a try body (phase 5)".into(),
+                    "resume handler crossing a try body".into(),
                 ));
             }
         };
@@ -713,7 +713,10 @@ impl<'a> super::FuncGen<'a> {
         // that try's body loop lives inside its `catch_unwind` closure, which the
         // landing pad (where the handler runs) sits outside of. A branch to any
         // other target from a handler is an ordinary break/continue.
-        if let Some(&(try_idx, true)) = self.try_barriers.last()
+        if let Some(&TryBarrier {
+            frame_idx: try_idx,
+            phase: CatchPhase::Handler,
+        }) = self.try_barriers.last()
             && idx == try_idx
         {
             return Err(TranspileError::Unsupported(
@@ -883,8 +886,8 @@ impl<'a> super::FuncGen<'a> {
         self.try_barriers
             .iter()
             .rev()
-            .find(|&&(_, in_catch)| !in_catch)
-            .map(|&(idx, _)| idx)
+            .find(|b| b.phase == CatchPhase::Body)
+            .map(|b| b.frame_idx)
     }
 
     /// Whether a branch to `target_idx` would leave the innermost enclosing `try`
@@ -923,7 +926,10 @@ impl<'a> super::FuncGen<'a> {
         // The barrier starts in the body phase; the first catch flips it so the
         // handler no longer counts as inside this try's closure (only a branch to
         // the try itself from its handler is then rejected).
-        self.try_barriers.push((idx, false));
+        self.try_barriers.push(TryBarrier {
+            frame_idx: idx,
+            phase: CatchPhase::Body,
+        });
         Ok(())
     }
 
@@ -999,7 +1005,7 @@ impl<'a> super::FuncGen<'a> {
         // loop, so flip this try's barrier to the catch phase. Every nested try
         // opened in the body has already ended, so this try's barrier is on top.
         if let Some(barrier) = self.try_barriers.last_mut() {
-            barrier.1 = true;
+            barrier.phase = CatchPhase::Handler;
         }
 
         self.stack.truncate(parent_height);
@@ -1149,7 +1155,7 @@ impl<'a> super::FuncGen<'a> {
         if !resume_table.handlers.is_empty() {
             return Err(TranspileError::Unsupported(
                 "resume_throw with suspend handlers (needs an exception handler inside the \
-                 continuation body, phase 7)"
+                 continuation body)"
                     .into(),
             ));
         }

@@ -44,7 +44,7 @@ use self::simd_rt::render_simd_helpers;
 pub(crate) use self::const_expr::{const_expr_to_rust, const_expr_u32};
 pub(crate) use self::info::{
     CompositeKind, DataSegment, ElemSegment, FieldInfo, FuncInput, GlobalInfo, ImportInfo,
-    ImportedGlobalInfo, MemInfo, TableInfo, TagInfo, TypeSig,
+    ImportedGlobalInfo, MemInfo, TableInfo, TagInfo, TypeSig, WASM_MAX_PAGES, WASM_PAGE_SIZE,
 };
 pub(crate) use self::wasi::WasiFn;
 

@@ -5,6 +5,7 @@ use super::super::{
     estimate_body_len, flatten_body, index_u32, push_body_line, render_body_into, rust_type,
     rust_types,
 };
+use super::CatchPhase;
 use crate::TranspileError;
 
 impl<'a> super::FuncGen<'a> {
@@ -317,7 +318,11 @@ impl<'a> super::FuncGen<'a> {
         // each enclosing try's dispatch re-issues. A handler runs in the landing
         // pad, so a `return` there is a plain return unless it sits in an outer
         // try's body.
-        if self.try_barriers.iter().any(|&(_, in_catch)| !in_catch) {
+        if self
+            .try_barriers
+            .iter()
+            .any(|b| b.phase == CatchPhase::Body)
+        {
             return self.emit_return_escape();
         }
         match self.pop_results(self.results.len())? {

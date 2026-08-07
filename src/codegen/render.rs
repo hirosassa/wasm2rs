@@ -5,9 +5,18 @@ use super::render_cont::{continuation_method_lines, continuation_runtime_lines};
 use super::runtime::render_rt_helpers;
 use super::{
     ALLOW, DataSegment, ElemSegment, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
-    ModuleParts, WasiFn, byte_array_literal, indent, index_u32, rust_type, rust_types,
+    ModuleParts, WASM_PAGE_SIZE, WasiFn, byte_array_literal, indent, index_u32, rust_type,
+    rust_types,
 };
 use crate::TranspileError;
+
+/// High bit tagging a funcref handle as an *external* (host-provided) callback
+/// rather than one of the module's own function indices. Emitted verbatim into
+/// generated code, so it is the underscored literal token, not a `u32`.
+const EXTERNAL_HANDLE_BIT: &str = "0x8000_0000u32";
+/// Complement of [`EXTERNAL_HANDLE_BIT`]: masks a tagged handle back to the raw
+/// external slot before the host resolves it.
+const EXTERNAL_HANDLE_SLOT_MASK: &str = "0x7fff_ffffu32";
 
 /// The layout flags derived once and shared across every `Instance` render
 /// section: whether the module needs an injected host trait, whether memory 0 /
@@ -423,7 +432,7 @@ fn constructor_lines(
             .ok_or_else(|| TranspileError::Unsupported("shared memory missing".into()))?;
         let bytes = mem0
             .min_pages
-            .checked_mul(65536)
+            .checked_mul(WASM_PAGE_SIZE)
             .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
 
         inner.push(format!("pub fn new({new_param}) -> Self {{"));
@@ -484,7 +493,7 @@ fn constructor_lines(
             let mem_index = index_u32(i)?;
             let bytes = m
                 .min_pages
-                .checked_mul(65536)
+                .checked_mul(WASM_PAGE_SIZE)
                 .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
             if active_for(mem_index).is_empty() {
                 inner.push(format!("        {field}: vec![0u8; {bytes}],"));
@@ -979,8 +988,8 @@ fn dispatch_method_lines(
     if has_imports {
         lines.push("        u32::MAX => panic!(\"indirect call type mismatch\"),".to_string());
         lines.push(format!(
-            "        h if (h & 0x8000_0000u32) != 0 => \
-             self.imports.call_ref_t{type_index}(h & 0x7fff_ffffu32{sep}{arg_list}),"
+            "        h if (h & {EXTERNAL_HANDLE_BIT}) != 0 => \
+             self.imports.call_ref_t{type_index}(h & {EXTERNAL_HANDLE_SLOT_MASK}{sep}{arg_list}),"
         ));
     }
     lines.push("        _ => panic!(\"indirect call type mismatch\"),".to_string());
@@ -1040,7 +1049,7 @@ fn extern_registry_lines(
         ));
         lines.push("        let slot = self.fns.len() as u32;".to_string());
         lines.push("        self.fns.push(f);".to_string());
-        lines.push("        0x8000_0000u32 | slot".to_string());
+        lines.push(format!("        {EXTERNAL_HANDLE_BIT} | slot"));
         lines.push("    }".to_string());
         lines.push(format!("    pub fn call({call_params}){ret} {{"));
         lines.push(format!("        (self.fns[slot as usize])({arg_list})"));

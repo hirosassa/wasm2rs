@@ -187,7 +187,7 @@ impl super::FuncGen<'_> {
                     }
                     if checkpoint.is_some() {
                         return Err(TranspileError::Unsupported(
-                            "suspend after a cross-call checkpoint (phase 5: a checkpoint must be \
+                            "suspend after a cross-call checkpoint (a checkpoint must be \
                              in tail position)"
                                 .into(),
                         ));
@@ -230,7 +230,7 @@ impl super::FuncGen<'_> {
                         .is_ok() =>
                 {
                     return Err(TranspileError::Unsupported(
-                        "return_call across a continuation (phase 5)".into(),
+                        "return_call across a continuation".into(),
                     ));
                 }
                 Operator::End if !self.frames.is_empty() => {
@@ -267,7 +267,7 @@ impl super::FuncGen<'_> {
                         Some(g) => {
                             if !self.cur.is_empty() {
                                 return Err(TranspileError::Unsupported(
-                                    "statements after a cross-call checkpoint (phase 5b)".into(),
+                                    "statements after a cross-call checkpoint".into(),
                                 ));
                             }
                             // A checkpoint at `pc == 0` re-runs the header's param
@@ -280,7 +280,7 @@ impl super::FuncGen<'_> {
                             if pc == 0 && !params.is_empty() {
                                 return Err(TranspileError::Unsupported(
                                     "cross-call checkpoint at the entry of a continuation body \
-                                     with parameters (phase 8: a switch-back would clobber them)"
+                                     with parameters (a switch-back would clobber them)"
                                         .into(),
                                 ));
                             }
@@ -327,7 +327,7 @@ impl super::FuncGen<'_> {
                     }
                     if checkpoint.is_some() {
                         return Err(TranspileError::Unsupported(
-                            "switch after a cross-call checkpoint (phase 8)".into(),
+                            "switch after a cross-call checkpoint".into(),
                         ));
                     }
                     let (payload_tys, injected_tys) =
@@ -359,7 +359,7 @@ impl super::FuncGen<'_> {
                 | Operator::Resume { .. }
                 | Operator::Unreachable) => {
                     return Err(TranspileError::Unsupported(format!(
-                        "operator {other:?} in a continuation body (phase 5b-2b)"
+                        "operator {other:?} not yet supported in a continuation body"
                     )));
                 }
                 other => self.emit_op(other)?,
@@ -466,7 +466,7 @@ impl super::FuncGen<'_> {
                         .is_ok() =>
                 {
                     return Err(TranspileError::Unsupported(
-                        "return_call across a continuation (phase 5)".into(),
+                        "return_call across a continuation".into(),
                     ));
                 }
                 // A nested region's `end` closes it into a `Node::Region` in
@@ -486,7 +486,7 @@ impl super::FuncGen<'_> {
                 | Operator::Return
                 | Operator::Resume { .. }) => {
                     return Err(TranspileError::Unsupported(format!(
-                        "operator {other:?} in a continuation body (phase 5b-2b)"
+                        "operator {other:?} not yet supported in a continuation body"
                     )));
                 }
                 other => self.emit_op(other)?,
@@ -638,14 +638,12 @@ impl super::FuncGen<'_> {
     ) -> Result<Vec<ValType>, TranspileError> {
         if checkpoint.is_some() {
             return Err(TranspileError::Unsupported(
-                "more than one cross-call checkpoint in a continuation body (phase 5)".into(),
+                "more than one cross-call checkpoint in a continuation body".into(),
             ));
         }
         if !self.frames.is_empty() {
             return Err(TranspileError::Unsupported(
-                "cross-call checkpoint inside nested control flow in a continuation body (phase \
-                 5b-2b)"
-                    .into(),
+                "cross-call checkpoint inside nested control flow in a continuation body".into(),
             ));
         }
         let (params, results) = self.ctx.full_sig(callee as usize).ok_or_else(|| {
@@ -653,12 +651,12 @@ impl super::FuncGen<'_> {
         })?;
         if !params.is_empty() {
             return Err(TranspileError::Unsupported(
-                "cross-call checkpoint to a continuation with parameters (phase 5)".into(),
+                "cross-call checkpoint to a continuation with parameters".into(),
             ));
         }
         if !self.stack.is_empty() || (require_empty_cur && !self.cur.is_empty()) {
             return Err(TranspileError::Unsupported(
-                "non-empty operand stack before a cross-call checkpoint (phase 5)".into(),
+                "non-empty operand stack before a cross-call checkpoint".into(),
             ));
         }
         Ok(results.to_vec())
@@ -792,7 +790,7 @@ impl super::FuncGen<'_> {
 
     /// Begin a tail cross-call checkpoint: a `call` to another step function
     /// `callee`. Like a suspend point, this requires a clean boundary — an empty
-    /// operand stack (the callee takes no arguments in phase 5) and no pending
+    /// operand stack (the callee takes no arguments) and no pending
     /// statements — so that re-entering the arm on each callee-suspend re-runs
     /// nothing side-effecting before the resumed call. The callee's results are
     /// pushed as operands reading the `__cret` binding the arm introduces at
@@ -841,7 +839,7 @@ impl super::FuncGen<'_> {
     fn encode_stack_tail(&mut self, tys: &[ValType]) -> Result<String, TranspileError> {
         if self.stack.len() != tys.len() {
             return Err(TranspileError::Unsupported(
-                "non-empty operand stack at a continuation suspend/return (phase 5b)".into(),
+                "non-empty operand stack at a continuation suspend/return".into(),
             ));
         }
         self.pop_encode_tail(tys)

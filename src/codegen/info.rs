@@ -2,6 +2,13 @@ use wasmparser::{FunctionBody, StorageType, ValType};
 
 use super::WasiFn;
 
+/// Size in bytes of one WebAssembly linear-memory page (64 KiB).
+pub(crate) const WASM_PAGE_SIZE: u64 = 65536;
+/// The wasm32 hard cap on linear-memory pages (65536 pages × 64 KiB = 4 GiB).
+/// `memory.grow` past this returns -1 as the spec requires. Numerically equal
+/// to [`WASM_PAGE_SIZE`] by coincidence; the two express distinct quantities.
+pub(crate) const WASM_MAX_PAGES: u64 = 65536;
+
 /// Metadata about a module global.
 pub(crate) struct GlobalInfo {
     pub ty: ValType,

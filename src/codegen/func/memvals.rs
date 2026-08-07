@@ -1,7 +1,7 @@
 use wasmparser::{MemArg, ValType};
 
 use super::super::helpers::{helper_method_name, mem_accessor};
-use super::super::{Helper, Val, memarg_offset};
+use super::super::{Helper, Val, WASM_PAGE_SIZE, memarg_offset};
 use crate::TranspileError;
 
 /// The Rust integer type an atomic RMW/cmpxchg result is cast to on the shared
@@ -496,12 +496,12 @@ impl<'a> super::FuncGen<'a> {
         if self.ctx.memory_shared {
             // A shared memory has no `mem()` accessor; measure the locked bytes.
             self.line(format!(
-                "let {name}: i32 = (self.memory.bytes().len() / 65536) as i32;"
+                "let {name}: i32 = (self.memory.bytes().len() / {WASM_PAGE_SIZE}) as i32;"
             ));
         } else {
             let (get, _) = mem_accessor(mem);
             self.line(format!(
-                "let {name}: i32 = (self.{get}().len() / 65536) as i32;"
+                "let {name}: i32 = (self.{get}().len() / {WASM_PAGE_SIZE}) as i32;"
             ));
         }
         self.push(Val {
