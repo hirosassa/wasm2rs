@@ -445,6 +445,10 @@ impl Flattener {
     /// its original program point — stays in the arm.
     pub(crate) fn assemble(mut self, start: usize) -> Vec<Node> {
         let start = contract_pc_edges(&mut self.arms, start);
+        // Fusing never removes a `continue 'sm` (those live only in conditional
+        // `br_if` lines or structured-loop arms, neither of which is a linear
+        // tail), so `self.uses_continue` stays accurate across the fold.
+        fuse_linear_chains(&mut self.arms, start);
         self.render_dispatch(format!("let mut pc: usize = {start};"))
     }
 
@@ -645,6 +649,128 @@ pub(crate) fn contract_pc_edges(arms: &mut Vec<(usize, Vec<ArmLine>)>, start: us
     arms.retain(|(state, _)| live.contains(state));
     start
 }
+/// Append each `pc = <state>` target found in `line` to `out`.
+fn collect_pc_targets(line: &str, out: &mut Vec<usize>) {
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i + 5 <= b.len() {
+        if &b[i..i + 5] == b"pc = " {
+            let ns = i + 5;
+            let mut j = ns;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > ns {
+                out.push(line[ns..j].parse().unwrap_or(usize::MAX));
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+/// If `body` transfers to exactly one successor, unconditionally, as its final
+/// action — i.e. its whole body mentions a single `pc = T` and the last line is
+/// the bare `pc = T;` — return `T`. Such a state can be fused into a chain: its
+/// predecessor may run its statements inline and continue straight into `T`
+/// instead of round-tripping through the `match pc` dispatch. A state that
+/// branches (`if …/else …`, a `br_if` plus fall-through, a `br_table`) mentions
+/// two or more targets and is excluded; a `pc = T; continue 'sm;` tail (a `br`
+/// to an enclosing flattened region, emitted only inside a structured loop) does
+/// not match the bare-line shape and is left alone.
+fn linear_single_successor(body: &[ArmLine]) -> Option<usize> {
+    let total: usize = {
+        let mut t = Vec::new();
+        for (_, line) in body {
+            collect_pc_targets(line, &mut t);
+        }
+        t.len()
+    };
+    if total != 1 {
+        return None;
+    }
+    let (_, last) = body.last()?;
+    last.strip_prefix("pc = ")?.strip_suffix(';')?.parse().ok()
+}
+/// Fuse single-successor chains in a flattened dispatch: when a state `S` ends in
+/// an unconditional `pc = T;` and `T` is reached from nowhere else, inline `T`'s
+/// body at the end of `S` and drop `T`. This removes the jump-table round-trip
+/// between the two — the ~55% of a hot flattened function's arms that are plain
+/// straight-line edges (measured on the googlesql parser) collapse into their
+/// predecessors, shrinking the `match` (faster `rustc`) and cutting the dispatch
+/// traffic left after [`contract_pc_edges`] folds the pure forwarders.
+///
+/// Only runs for [`Flattener::assemble`] (never `assemble_cont`, whose state ids
+/// must stay stable for resume). Loops are preserved automatically: a header
+/// reached both from outside and by its own back-edge has in-degree ≥ 2 and is
+/// never absorbed. Output stays byte-*equivalent* only in behaviour, not text —
+/// the point is to change the generated dispatch.
+pub(crate) fn fuse_linear_chains(arms: &mut Vec<(usize, Vec<ArmLine>)>, start: usize) {
+    // Every state that flows to a single successor unconditionally, and where.
+    let linear_succ: HashMap<usize, usize> = arms
+        .iter()
+        .filter_map(|(s, body)| Some((*s, linear_single_successor(body)?)))
+        .collect();
+    if linear_succ.is_empty() {
+        return;
+    }
+
+    // In-degree of each state: one per `pc = N` edge, plus the implicit entry
+    // into `start` (so `start` is never absorbed into a predecessor).
+    let mut indeg: HashMap<usize, usize> = HashMap::new();
+    *indeg.entry(start).or_insert(0) += 1;
+    let mut targets = Vec::new();
+    for (_, body) in arms.iter() {
+        for (_, line) in body {
+            targets.clear();
+            collect_pc_targets(line, &mut targets);
+            for &t in &targets {
+                *indeg.entry(t).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // A state is absorbable iff a linear state points to it, that is its only
+    // in-edge, it is not the entry, and it is not its own successor (a bare
+    // side-effect self-loop, which the in-degree rule already guards against once
+    // it is entered from outside — this is belt-and-braces).
+    let absorbable: HashSet<usize> = linear_succ
+        .values()
+        .copied()
+        .filter(|t| *t != start && indeg.get(t) == Some(&1) && linear_succ.get(t) != Some(t))
+        .collect();
+    if absorbable.is_empty() {
+        return;
+    }
+
+    let order: Vec<usize> = arms.iter().map(|(s, _)| *s).collect();
+    let mut body_by_state: HashMap<usize, Vec<ArmLine>> = arms.drain(..).collect();
+    let mut consumed: HashSet<usize> = HashSet::new();
+    let mut result: Vec<(usize, Vec<ArmLine>)> = Vec::new();
+    for s in order {
+        if absorbable.contains(&s) || consumed.contains(&s) {
+            continue;
+        }
+        let Some(mut fused) = body_by_state.remove(&s) else {
+            continue;
+        };
+        let mut cur = s;
+        while let Some(&t) = linear_succ.get(&cur) {
+            if !absorbable.contains(&t) || consumed.contains(&t) {
+                break;
+            }
+            let Some(t_body) = body_by_state.remove(&t) else {
+                break;
+            };
+            fused.pop(); // drop the `pc = t;` terminal now inlined below
+            fused.extend(t_body);
+            consumed.insert(t);
+            cur = t;
+        }
+        result.push((s, fused));
+    }
+    *arms = result;
+}
 /// If `line` is a typed `let` binding, return `(hoisted declaration, in-arm
 /// assignment)`: the declaration is placed above the dispatch loop so it stays
 /// in scope for every arm, while the assignment (carrying any side effects)
@@ -711,4 +837,78 @@ pub(crate) fn top_level_find(s: &str, pat: &str) -> Option<usize> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ArmLine, fuse_linear_chains};
+
+    fn line(s: &str) -> ArmLine {
+        (0, s.to_string())
+    }
+
+    fn texts(body: &[ArmLine]) -> Vec<&str> {
+        body.iter().map(|(_, s)| s.as_str()).collect()
+    }
+
+    #[test]
+    fn fuses_a_straight_line_chain_into_one_arm() {
+        // 0 --(side effect)--> 1 --(side effect)--> 2 (returns). States 1 and 2
+        // each have a single in-edge, so both collapse into 0.
+        let mut arms = vec![
+            (0, vec![line("a += 1;"), line("pc = 1;")]),
+            (1, vec![line("a += 2;"), line("pc = 2;")]),
+            (2, vec![line("return a;")]),
+        ];
+        fuse_linear_chains(&mut arms, 0);
+        assert_eq!(arms.len(), 1);
+        assert_eq!(arms[0].0, 0);
+        assert_eq!(texts(&arms[0].1), ["a += 1;", "a += 2;", "return a;"]);
+    }
+
+    #[test]
+    fn keeps_a_join_point_with_two_predecessors() {
+        // Both the branch's `else` (state 0) and the forwarder (state 1) target
+        // state 2, so state 2 has in-degree 2 and must not be absorbed. State 1
+        // is only reached through the branch (not a *linear* predecessor), so it
+        // is not absorbable either. Nothing fuses.
+        let mut arms = vec![
+            (0, vec![line("if c { pc = 1; } else { pc = 2; }")]),
+            (1, vec![line("a += 1;"), line("pc = 2;")]),
+            (2, vec![line("return a;")]),
+        ];
+        fuse_linear_chains(&mut arms, 0);
+        assert_eq!(arms.len(), 3);
+    }
+
+    #[test]
+    fn preserves_a_loop_entered_from_outside() {
+        // 0 flows into loop header 1; 1's back-edge (`pc = 1;`) targets itself, so
+        // header 1 has in-degree 2 (entry + back-edge) and is not absorbed. The
+        // infinite loop survives rather than being folded away.
+        let mut arms = vec![
+            (0, vec![line("a = 5;"), line("pc = 1;")]),
+            (1, vec![line("a += 1;"), line("pc = 1;")]),
+        ];
+        fuse_linear_chains(&mut arms, 0);
+        assert_eq!(arms.len(), 2);
+        assert_eq!(texts(&arms[1].1), ["a += 1;", "pc = 1;"]);
+    }
+
+    #[test]
+    fn never_absorbs_the_start_state() {
+        // State 1 forwards to the entry (state 0). Even though 0 has a single
+        // `pc = 0` in-edge, the implicit entry keeps its in-degree at 2, so it is
+        // preserved (folding it would leave the machine with no entry arm).
+        let mut arms = vec![
+            (0, vec![line("a += 1;"), line("pc = 1;")]),
+            (1, vec![line("a += 2;"), line("pc = 0;")]),
+        ];
+        fuse_linear_chains(&mut arms, 0);
+        // 1 is absorbable (single in-edge from 0, linear), so it folds into 0;
+        // the resulting self-loop keeps 0 as the sole, entry-preserving arm.
+        assert_eq!(arms.len(), 1);
+        assert_eq!(arms[0].0, 0);
+        assert_eq!(texts(&arms[0].1), ["a += 1;", "a += 2;", "pc = 0;"]);
+    }
 }

@@ -286,6 +286,64 @@ fn flattened_dispatch_contracts_trivial_pc_jumps() {
     );
 }
 
+/// A `depth`-deep nest of plain `block`s (no branches), each incrementing a
+/// local by one before entering the next. Every block boundary is a state that
+/// runs its `local.set` then unconditionally falls through to the next — a pure
+/// single-successor chain. Returns the accumulated count, i.e. `depth`.
+fn nested_side_effect_blocks(depth: usize) -> String {
+    let mut body = String::new();
+    for _ in 0..depth {
+        body.push_str("(block (local.set 0 (i32.add (local.get 0) (i32.const 1)))\n");
+    }
+    body.push_str(&")".repeat(depth));
+    format!("(module (func (export \"f\") (result i32) (local i32)\n{body}\n(local.get 0)))")
+}
+
+/// Count `match pc` dispatch arms: lines of the form `<state> => {`.
+fn dispatch_arm_count(source: &str) -> usize {
+    source
+        .lines()
+        .filter(|line| {
+            line.trim()
+                .strip_suffix("=> {")
+                .map(str::trim_end)
+                .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .count()
+}
+
+#[test]
+fn flattened_dispatch_fuses_single_successor_chains() {
+    // A deep nest of side-effecting blocks with no branches lowers to a long
+    // straight-line chain of states: each runs one `local.set` then falls
+    // through to the next. Edge-contraction cannot fold them (they are not pure
+    // forwarders — each has a side effect), but chain fusion inlines each into
+    // its unique predecessor, collapsing the whole chain into a handful of arms.
+    let depth = 60; // > FLATTEN_DEPTH_THRESHOLD (40)
+    let wat = nested_side_effect_blocks(depth);
+    let wasm = wat::parse_str(&wat).expect("valid wat");
+    let source = wasm2rs::transpile(&wasm).expect("transpile ok");
+
+    assert!(
+        source.contains("match pc {"),
+        "expected a flat dispatch loop:\n{source}"
+    );
+    // The chain of `depth` side-effect states fuses down to far fewer arms; a
+    // handful survive (entry plus any join/return). Without fusion there would be
+    // at least one arm per block boundary.
+    let arms = dispatch_arm_count(&source);
+    assert!(
+        arms < depth / 2,
+        "single-successor chain should fuse to few arms, got {arms} for depth {depth}:\n{source}"
+    );
+
+    compile_run(
+        "flatten_fuse_chain",
+        &wat,
+        &format!("assert_eq!(func0(), {depth});"),
+    );
+}
+
 #[test]
 fn deeply_nested_if_else_flattens_and_runs() {
     let depth = 50; // > FLATTEN_DEPTH_THRESHOLD (40)
