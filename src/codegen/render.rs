@@ -502,15 +502,24 @@ pub(super) fn render_module(
         inner.extend(continuation_method_lines(ctx));
     }
 
-    for src in sources {
-        inner.push(String::new());
-        for line in src.lines() {
-            inner.push(line.to_string());
-        }
-    }
-
     for line in indent(&inner) {
         lines.push(line);
+    }
+    // Stream each function's source straight into the (already indented) body,
+    // skipping the intermediate `inner` buffer: a source line goes from `&str`
+    // to its final indented `String` in one allocation instead of being cloned
+    // once into `inner` and again by `indent`. The result is byte-identical —
+    // both paths blank-line-separate the functions and prefix each body line by
+    // four spaces.
+    for src in sources {
+        lines.push(String::new());
+        for line in src.lines() {
+            lines.push(if line.is_empty() {
+                String::new()
+            } else {
+                format!("    {line}")
+            });
+        }
     }
     lines.push("}".to_string());
 
