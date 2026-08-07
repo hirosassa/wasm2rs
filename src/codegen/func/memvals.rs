@@ -16,6 +16,21 @@ fn shared_result_ty(ty: ValType) -> &'static str {
 
 impl<'a> super::FuncGen<'a> {
     // ----- locals ----------------------------------------------------------
+
+    /// `local.get`: push the local's expression. A local that is never mutated
+    /// is stable (re-reading `l{i}` always yields the same value); a mutable one
+    /// is not, so a later mutation forces it to be spilled first.
+    pub(super) fn local_get(&mut self, local_index: u32) -> Result<(), TranspileError> {
+        let ty = self.local_ty(local_index)?;
+        let stable = !self.mutable_locals.contains(&local_index);
+        self.push(Val {
+            code: format!("l{local_index}"),
+            ty,
+            stable,
+        });
+        Ok(())
+    }
+
     pub(super) fn local_store(
         &mut self,
         local_index: u32,

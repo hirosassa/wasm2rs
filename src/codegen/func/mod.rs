@@ -4,7 +4,7 @@ use wasmparser::{FunctionBody, Operator, ValType};
 
 use super::{
     Frame, FrameKind, Helper, ModuleCtx, Node, Rt, Val, collect_mutated_locals, default_value,
-    i32_literal, i64_literal, index_u32, rust_type,
+    index_u32, rust_type,
 };
 use crate::TranspileError;
 
@@ -270,29 +270,11 @@ impl<'a> FuncGen<'a> {
 
         match op {
             Operator::Nop => {}
-            // `unreachable` always traps; code after it is dead, so stop
-            // emitting until the enclosing region ends (as for `return`/`br`).
-            Operator::Unreachable => {
-                self.term("panic!(\"unreachable\");".to_string());
-                self.reachable = false;
-                self.dead_nesting = 0;
-            }
-            Operator::LocalGet { local_index } => {
-                let ty = self.local_ty(local_index)?;
-                let stable = !self.mutable_locals.contains(&local_index);
-                self.push(Val {
-                    code: format!("l{local_index}"),
-                    ty,
-                    stable,
-                });
-            }
+            Operator::Unreachable => self.emit_unreachable(),
+            Operator::LocalGet { local_index } => self.local_get(local_index)?,
             Operator::LocalSet { local_index } => self.local_store(local_index, false)?,
             Operator::LocalTee { local_index } => self.local_store(local_index, true)?,
-            Operator::I32Const { value } => self.push(Val {
-                code: i32_literal(value),
-                ty: ValType::I32,
-                stable: true,
-            }),
+            Operator::I32Const { value } => self.const_i32(value),
             Operator::I32Add => self.binop_method("wrapping_add")?,
             Operator::I32Sub => self.binop_method("wrapping_sub")?,
             Operator::I32Mul => self.binop_method("wrapping_mul")?,
@@ -324,11 +306,7 @@ impl<'a> FuncGen<'a> {
             Operator::I32GtU => self.compare_unsigned(">")?,
             Operator::I32LeU => self.compare_unsigned("<=")?,
             Operator::I32GeU => self.compare_unsigned(">=")?,
-            Operator::I64Const { value } => self.push(Val {
-                code: i64_literal(value),
-                ty: ValType::I64,
-                stable: true,
-            }),
+            Operator::I64Const { value } => self.const_i64(value),
             Operator::I64Add => self.binop_method("wrapping_add")?,
             Operator::I64Sub => self.binop_method("wrapping_sub")?,
             Operator::I64Mul => self.binop_method("wrapping_mul")?,
@@ -358,20 +336,12 @@ impl<'a> FuncGen<'a> {
             Operator::I64GtU => self.compare_unsigned(">")?,
             Operator::I64LeU => self.compare_unsigned("<=")?,
             Operator::I64GeU => self.compare_unsigned(">=")?,
-            // Floats: constants are emitted from their exact bit pattern (so
-            // NaN/inf round-trip); arithmetic and comparisons map to native
+            // Constants round-trip via their exact bit pattern (so NaN/inf
+            // survive); float arithmetic and comparisons then map to native
             // operators (Rust float compare yields false for NaN, as wasm
-            // requires). `min`/`max` are deferred (special NaN semantics).
-            Operator::F32Const { value } => self.push(Val {
-                code: format!("f32::from_bits({}u32)", value.bits()),
-                ty: ValType::F32,
-                stable: true,
-            }),
-            Operator::F64Const { value } => self.push(Val {
-                code: format!("f64::from_bits({}u64)", value.bits()),
-                ty: ValType::F64,
-                stable: true,
-            }),
+            // requires), and `min`/`max` are deferred (special NaN semantics).
+            Operator::F32Const { value } => self.const_f32(value.bits()),
+            Operator::F64Const { value } => self.const_f64(value.bits()),
             Operator::F32Add | Operator::F64Add => self.binop_infix("+")?,
             Operator::F32Sub | Operator::F64Sub => self.binop_infix("-")?,
             Operator::F32Mul | Operator::F64Mul => self.binop_infix("*")?,
@@ -871,65 +841,21 @@ impl<'a> FuncGen<'a> {
             Operator::F64x2Splat => self.call_rt_unop(Rt::SplatF64x2, ValType::V128)?,
             // Extract one lane as a scalar. `_s`/`_u` variants sign- or
             // zero-extend the sub-word lanes into the i32 result.
-            Operator::I8x16ExtractLaneS { lane } => {
-                self.extract_lane(lane, 8, ValType::I32, |s| {
-                    format!("({s} as u8 as i8 as i32)")
-                })?
-            }
-            Operator::I8x16ExtractLaneU { lane } => {
-                self.extract_lane(lane, 8, ValType::I32, |s| format!("({s} as u8 as i32)"))?
-            }
-            Operator::I16x8ExtractLaneS { lane } => {
-                self.extract_lane(lane, 16, ValType::I32, |s| {
-                    format!("({s} as u16 as i16 as i32)")
-                })?
-            }
-            Operator::I16x8ExtractLaneU { lane } => {
-                self.extract_lane(lane, 16, ValType::I32, |s| format!("({s} as u16 as i32)"))?
-            }
-            Operator::I32x4ExtractLane { lane } => {
-                self.extract_lane(lane, 32, ValType::I32, |s| format!("({s} as u32 as i32)"))?
-            }
-            Operator::I64x2ExtractLane { lane } => {
-                self.extract_lane(lane, 64, ValType::I64, |s| format!("({s} as u64 as i64)"))?
-            }
-            Operator::F32x4ExtractLane { lane } => {
-                self.extract_lane(lane, 32, ValType::F32, |s| {
-                    format!("f32::from_bits({s} as u32)")
-                })?
-            }
-            Operator::F64x2ExtractLane { lane } => {
-                self.extract_lane(lane, 64, ValType::F64, |s| {
-                    format!("f64::from_bits({s} as u64)")
-                })?
-            }
+            Operator::I8x16ExtractLaneS { lane } => self.i8x16_extract_lane_s(lane)?,
+            Operator::I8x16ExtractLaneU { lane } => self.i8x16_extract_lane_u(lane)?,
+            Operator::I16x8ExtractLaneS { lane } => self.i16x8_extract_lane_s(lane)?,
+            Operator::I16x8ExtractLaneU { lane } => self.i16x8_extract_lane_u(lane)?,
+            Operator::I32x4ExtractLane { lane } => self.i32x4_extract_lane(lane)?,
+            Operator::I64x2ExtractLane { lane } => self.i64x2_extract_lane(lane)?,
+            Operator::F32x4ExtractLane { lane } => self.f32x4_extract_lane(lane)?,
+            Operator::F64x2ExtractLane { lane } => self.f64x2_extract_lane(lane)?,
             // Replace one lane with a scalar.
-            Operator::I8x16ReplaceLane { lane } => {
-                self.replace_lane(lane, 8, "0xFFu128", |x| format!("{x} as u8 as u128"))?
-            }
-            Operator::I16x8ReplaceLane { lane } => {
-                self.replace_lane(lane, 16, "0xFFFFu128", |x| format!("{x} as u16 as u128"))?
-            }
-            Operator::I32x4ReplaceLane { lane } => {
-                self.replace_lane(lane, 32, "0xFFFFFFFFu128", |x| {
-                    format!("{x} as u32 as u128")
-                })?
-            }
-            Operator::I64x2ReplaceLane { lane } => {
-                self.replace_lane(lane, 64, "0xFFFFFFFFFFFFFFFFu128", |x| {
-                    format!("{x} as u64 as u128")
-                })?
-            }
-            Operator::F32x4ReplaceLane { lane } => {
-                self.replace_lane(lane, 32, "0xFFFFFFFFu128", |x| {
-                    format!("{x}.to_bits() as u128")
-                })?
-            }
-            Operator::F64x2ReplaceLane { lane } => {
-                self.replace_lane(lane, 64, "0xFFFFFFFFFFFFFFFFu128", |x| {
-                    format!("{x}.to_bits() as u128")
-                })?
-            }
+            Operator::I8x16ReplaceLane { lane } => self.i8x16_replace_lane(lane)?,
+            Operator::I16x8ReplaceLane { lane } => self.i16x8_replace_lane(lane)?,
+            Operator::I32x4ReplaceLane { lane } => self.i32x4_replace_lane(lane)?,
+            Operator::I64x2ReplaceLane { lane } => self.i64x2_replace_lane(lane)?,
+            Operator::F32x4ReplaceLane { lane } => self.f32x4_replace_lane(lane)?,
+            Operator::F64x2ReplaceLane { lane } => self.f64x2_replace_lane(lane)?,
             // Whole-register bitwise operations map straight to `u128` operators.
             Operator::V128And => self.binop_infix("&")?,
             Operator::V128Or => self.binop_infix("|")?,
@@ -955,22 +881,13 @@ impl<'a> FuncGen<'a> {
             Operator::I16x8Neg => self.call_simd_unop("i16x8_neg")?,
             Operator::I32x4Neg => self.call_simd_unop("i32x4_neg")?,
             Operator::I64x2Neg => self.call_simd_unop("i64x2_neg")?,
-            // Float lane arithmetic (round 3). neg/abs are exact sign-bit
-            // rewrites on the whole register; the rest are per-lane helpers
-            // (see `simd_rt.rs`). The sign masks tile one lane's sign / magnitude
-            // bit pattern across the 128-bit register.
-            Operator::F32x4Neg => {
-                self.v128_mask_op('^', 0x8000_0000_8000_0000_8000_0000_8000_0000)?
-            }
-            Operator::F64x2Neg => {
-                self.v128_mask_op('^', 0x8000_0000_0000_0000_8000_0000_0000_0000)?
-            }
-            Operator::F32x4Abs => {
-                self.v128_mask_op('&', 0x7fff_ffff_7fff_ffff_7fff_ffff_7fff_ffff)?
-            }
-            Operator::F64x2Abs => {
-                self.v128_mask_op('&', 0x7fff_ffff_ffff_ffff_7fff_ffff_ffff_ffff)?
-            }
+            // Float lane arithmetic (round 3). neg/abs are whole-register
+            // sign-bit rewrites (see the helpers); the rest are per-lane helpers
+            // (see `simd_rt.rs`).
+            Operator::F32x4Neg => self.f32x4_neg()?,
+            Operator::F64x2Neg => self.f64x2_neg()?,
+            Operator::F32x4Abs => self.f32x4_abs()?,
+            Operator::F64x2Abs => self.f64x2_abs()?,
             Operator::F32x4Add => self.call_simd_binop("f32x4_add")?,
             Operator::F64x2Add => self.call_simd_binop("f64x2_add")?,
             Operator::F32x4Sub => self.call_simd_binop("f32x4_sub")?,

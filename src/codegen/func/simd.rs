@@ -47,6 +47,86 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(code, ValType::V128, v.stable && x.stable)
     }
 
+    // Per-variant lane extract/replace: each fixes the lane width, the result
+    // type and how the lane's bits are reinterpreted, delegating the shared
+    // shift/mask machinery to [`extract_lane`](Self::extract_lane) /
+    // [`replace_lane`](Self::replace_lane). The `_s`/`_u` extracts sign- or
+    // zero-extend a sub-word lane into the i32 result.
+    pub(super) fn i8x16_extract_lane_s(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.extract_lane(lane, 8, ValType::I32, |s| {
+            format!("({s} as u8 as i8 as i32)")
+        })
+    }
+    pub(super) fn i8x16_extract_lane_u(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.extract_lane(lane, 8, ValType::I32, |s| format!("({s} as u8 as i32)"))
+    }
+    pub(super) fn i16x8_extract_lane_s(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.extract_lane(lane, 16, ValType::I32, |s| {
+            format!("({s} as u16 as i16 as i32)")
+        })
+    }
+    pub(super) fn i16x8_extract_lane_u(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.extract_lane(lane, 16, ValType::I32, |s| format!("({s} as u16 as i32)"))
+    }
+    pub(super) fn i32x4_extract_lane(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.extract_lane(lane, 32, ValType::I32, |s| format!("({s} as u32 as i32)"))
+    }
+    pub(super) fn i64x2_extract_lane(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.extract_lane(lane, 64, ValType::I64, |s| format!("({s} as u64 as i64)"))
+    }
+    pub(super) fn f32x4_extract_lane(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.extract_lane(lane, 32, ValType::F32, |s| {
+            format!("f32::from_bits({s} as u32)")
+        })
+    }
+    pub(super) fn f64x2_extract_lane(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.extract_lane(lane, 64, ValType::F64, |s| {
+            format!("f64::from_bits({s} as u64)")
+        })
+    }
+    pub(super) fn i8x16_replace_lane(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.replace_lane(lane, 8, "0xFFu128", |x| format!("{x} as u8 as u128"))
+    }
+    pub(super) fn i16x8_replace_lane(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.replace_lane(lane, 16, "0xFFFFu128", |x| format!("{x} as u16 as u128"))
+    }
+    pub(super) fn i32x4_replace_lane(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.replace_lane(lane, 32, "0xFFFFFFFFu128", |x| {
+            format!("{x} as u32 as u128")
+        })
+    }
+    pub(super) fn i64x2_replace_lane(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.replace_lane(lane, 64, "0xFFFFFFFFFFFFFFFFu128", |x| {
+            format!("{x} as u64 as u128")
+        })
+    }
+    pub(super) fn f32x4_replace_lane(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.replace_lane(lane, 32, "0xFFFFFFFFu128", |x| {
+            format!("{x}.to_bits() as u128")
+        })
+    }
+    pub(super) fn f64x2_replace_lane(&mut self, lane: u8) -> Result<(), TranspileError> {
+        self.replace_lane(lane, 64, "0xFFFFFFFFFFFFFFFFu128", |x| {
+            format!("{x}.to_bits() as u128")
+        })
+    }
+
+    // Float neg/abs are exact sign-bit rewrites on the whole register: the mask
+    // tiles one lane's sign / magnitude bit pattern across all 128 bits (`^`
+    // flips the sign for neg, `&` clears it for abs).
+    pub(super) fn f32x4_neg(&mut self) -> Result<(), TranspileError> {
+        self.v128_mask_op('^', 0x8000_0000_8000_0000_8000_0000_8000_0000)
+    }
+    pub(super) fn f64x2_neg(&mut self) -> Result<(), TranspileError> {
+        self.v128_mask_op('^', 0x8000_0000_0000_0000_8000_0000_0000_0000)
+    }
+    pub(super) fn f32x4_abs(&mut self) -> Result<(), TranspileError> {
+        self.v128_mask_op('&', 0x7fff_ffff_7fff_ffff_7fff_ffff_7fff_ffff)
+    }
+    pub(super) fn f64x2_abs(&mut self) -> Result<(), TranspileError> {
+        self.v128_mask_op('&', 0x7fff_ffff_ffff_ffff_7fff_ffff_ffff_ffff)
+    }
+
     /// `v128.not`: bitwise complement of the whole register.
     pub(super) fn v128_not(&mut self) -> Result<(), TranspileError> {
         let v = self.pop()?;

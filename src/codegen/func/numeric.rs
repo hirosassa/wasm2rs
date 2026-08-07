@@ -1,9 +1,51 @@
 use wasmparser::ValType;
 
-use super::super::{Rt, Val, condition_code, rt_name, rust_type, unsigned_type};
+use super::super::{
+    Rt, Val, condition_code, i32_literal, i64_literal, rt_name, rust_type, unsigned_type,
+};
 use crate::TranspileError;
 
 impl<'a> super::FuncGen<'a> {
+    // ----- constants -------------------------------------------------------
+
+    /// Push an `i32.const`: `i32::MIN` needs the associated constant (see
+    /// [`i32_literal`]), every other value is a plain suffixed literal.
+    pub(super) fn const_i32(&mut self, value: i32) {
+        self.push(Val {
+            code: i32_literal(value),
+            ty: ValType::I32,
+            stable: true,
+        });
+    }
+
+    /// Push an `i64.const` (mirrors [`const_i32`](Self::const_i32)).
+    pub(super) fn const_i64(&mut self, value: i64) {
+        self.push(Val {
+            code: i64_literal(value),
+            ty: ValType::I64,
+            stable: true,
+        });
+    }
+
+    /// Push an `f32.const` from its exact bit pattern, so NaN/inf round-trip.
+    pub(super) fn const_f32(&mut self, bits: u32) {
+        self.push(Val {
+            code: format!("f32::from_bits({bits}u32)"),
+            ty: ValType::F32,
+            stable: true,
+        });
+    }
+
+    /// Push an `f64.const` from its exact bit pattern (see
+    /// [`const_f32`](Self::const_f32)).
+    pub(super) fn const_f64(&mut self, bits: u64) {
+        self.push(Val {
+            code: format!("f64::from_bits({bits}u64)"),
+            ty: ValType::F64,
+            stable: true,
+        });
+    }
+
     // ----- numeric operators -----------------------------------------------
     pub(super) fn binop_method(&mut self, method: &str) -> Result<(), TranspileError> {
         let rhs = self.pop()?;
