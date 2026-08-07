@@ -402,7 +402,7 @@ where
             Payload::GlobalSection(reader) => {
                 for global in reader {
                     let global = global?;
-                    let init = codegen::const_expr_to_rust(&global.init_expr)?;
+                    let init = codegen::const_expr_to_rust(&global.init_expr, &type_kinds)?;
                     globals.push(codegen::GlobalInfo {
                         ty: global.ty.content_type,
                         mutable: global.ty.mutable,
