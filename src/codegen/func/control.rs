@@ -571,6 +571,7 @@ impl<'a> super::FuncGen<'a> {
         let payload_tys = self
             .ctx
             .tags
+            .params
             .get(tag as usize)
             .ok_or_else(|| TranspileError::Unsupported("resume: unknown tag index".into()))?
             .clone();
@@ -946,10 +947,13 @@ impl<'a> super::FuncGen<'a> {
         // Build the new handler's payload bindings and the operands it pushes.
         let (new_kind, binds, pushed) = match tag {
             Some(t) => {
-                let params =
-                    self.ctx.tags.get(t as usize).cloned().ok_or_else(|| {
-                        TranspileError::Unsupported("catch of an unknown tag".into())
-                    })?;
+                let params = self
+                    .ctx
+                    .tags
+                    .params
+                    .get(t as usize)
+                    .cloned()
+                    .ok_or_else(|| TranspileError::Unsupported("catch of an unknown tag".into()))?;
                 let mut binds = Vec::with_capacity(params.len());
                 let mut pushed = Vec::with_capacity(params.len());
                 for (i, ty) in params.iter().enumerate() {
@@ -1101,6 +1105,7 @@ impl<'a> super::FuncGen<'a> {
         let params = self
             .ctx
             .tags
+            .params
             .get(tag_index as usize)
             .cloned()
             .ok_or_else(|| TranspileError::Unsupported("throw of an unknown tag".into()))?;

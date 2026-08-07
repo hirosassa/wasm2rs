@@ -212,12 +212,22 @@ impl super::FuncGen<'_> {
                     self.push_suspend_results(tag_index)?;
                 }
                 Operator::Call { function_index }
-                    if self.ctx.step_set.binary_search(&function_index).is_ok() =>
+                    if self
+                        .ctx
+                        .cont
+                        .step_set
+                        .binary_search(&function_index)
+                        .is_ok() =>
                 {
                     self.begin_checkpoint(function_index, &mut checkpoint)?;
                 }
                 Operator::ReturnCall { function_index }
-                    if self.ctx.step_set.binary_search(&function_index).is_ok() =>
+                    if self
+                        .ctx
+                        .cont
+                        .step_set
+                        .binary_search(&function_index)
+                        .is_ok() =>
                 {
                     return Err(TranspileError::Unsupported(
                         "return_call across a continuation (phase 5)".into(),
@@ -438,12 +448,22 @@ impl super::FuncGen<'_> {
                     tag_index,
                 } => self.emit_switch_node(cont_type_index, tag_index)?,
                 Operator::Call { function_index }
-                    if self.ctx.step_set.binary_search(&function_index).is_ok() =>
+                    if self
+                        .ctx
+                        .cont
+                        .step_set
+                        .binary_search(&function_index)
+                        .is_ok() =>
                 {
                     self.emit_checkpoint_node(function_index, &mut checkpoint)?;
                 }
                 Operator::ReturnCall { function_index }
-                    if self.ctx.step_set.binary_search(&function_index).is_ok() =>
+                    if self
+                        .ctx
+                        .cont
+                        .step_set
+                        .binary_search(&function_index)
+                        .is_ok() =>
                 {
                     return Err(TranspileError::Unsupported(
                         "return_call across a continuation (phase 5)".into(),
@@ -659,7 +679,8 @@ impl super::FuncGen<'_> {
     fn push_suspend_results(&mut self, tag_index: u32) -> Result<(), TranspileError> {
         let result_tys = self
             .ctx
-            .tag_results
+            .tags
+            .results
             .get(tag_index as usize)
             .ok_or_else(|| TranspileError::Unsupported("suspend: unknown tag index".into()))?
             .clone();
@@ -831,6 +852,7 @@ impl super::FuncGen<'_> {
         Ok(self
             .ctx
             .tags
+            .params
             .get(tag_index as usize)
             .ok_or_else(|| TranspileError::Unsupported("suspend: unknown tag index".into()))?
             .clone())

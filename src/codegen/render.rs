@@ -9,9 +9,61 @@ use super::{
 };
 use crate::TranspileError;
 
+/// The layout flags derived once and shared across every `Instance` render
+/// section: whether the module needs an injected host trait, whether memory 0 /
+/// the table are host-owned (so the instance stores no field for them), whether
+/// any file-backed WASI import is present (so the `wasi_fds` table exists), and
+/// the global-index base past the imported globals.
+struct Layout {
+    has_imports: bool,
+    mem_imported: bool,
+    table_imported: bool,
+    wasi_files: bool,
+    global_base: usize,
+}
+
+impl Layout {
+    fn of(parts: &ModuleParts<'_>) -> Self {
+        // Only memory 0 may be imported (an imported non-zero memory is rejected
+        // during parsing); `mem_imported` therefore governs just memory 0.
+        let mem_imported = parts.memories.first().is_some_and(|m| m.imported);
+        let table_imported = parts.table.is_some_and(|t| t.imported);
+        // A module that imports any preopen/`path_open` function gains a real
+        // file-descriptor table (`wasi_fds`) and the file-backed fd_* variants.
+        let wasi_files = parts.imports.iter().any(|im| {
+            matches!(
+                im.wasi,
+                Some(
+                    WasiFn::PathOpen
+                        | WasiFn::FdPrestatGet
+                        | WasiFn::FdPrestatDirName
+                        | WasiFn::FdFilestatGet
+                        | WasiFn::FdReaddir
+                )
+            )
+        });
+        Layout {
+            has_imports: needs_host_trait(parts),
+            mem_imported,
+            table_imported,
+            wasi_files,
+            // Defined globals are named by their full index, i.e. after the
+            // imported globals in the shared global index space.
+            global_base: parts.imported_globals.len(),
+        }
+    }
+}
+
 /// Render the `struct Instance` and its `impl` for a stateful module. When the
 /// module imports functions, a `pub trait Imports` is emitted and `Instance`
 /// becomes generic over a host `H: Imports` that it stores and dispatches to.
+///
+/// The body is assembled by combining the per-section renderers below: the
+/// module-scope declarations (host trait, shared-memory runtime, passive
+/// statics, continuation runtime) come first, then the `struct` fields, then the
+/// `impl`'s inherent methods (constructors, memory/table accessors, WASI/helper/
+/// dispatch/continuation methods), and finally each function's own source
+/// streamed in.
 pub(super) fn render_module(
     parts: &ModuleParts<'_>,
     ctx: &ModuleCtx<'_>,
@@ -19,49 +71,18 @@ pub(super) fn render_module(
     used: &HashSet<(Helper, u32)>,
     dispatch_sigs: &HashSet<u32>,
 ) -> Result<String, TranspileError> {
-    let ModuleParts {
-        imports,
-        imported_globals,
-        globals,
-        memories,
-        data,
-        table,
-        elements,
-        ..
-    } = *parts;
-
-    // Defined globals are named by their full index, i.e. after the imported
-    // globals in the shared global index space.
-    let global_base = imported_globals.len();
+    let layout = Layout::of(parts);
 
     let mut lines: Vec<String> = Vec::new();
 
-    // Only memory 0 may be imported (an imported non-zero memory is rejected
-    // during parsing); `mem_imported` therefore governs just memory 0's storage.
-    let mem_imported = memories.first().is_some_and(|m| m.imported);
-    let table_imported = table.is_some_and(|t| t.imported);
-    let has_imports = needs_host_trait(parts);
-    // A module that imports any preopen/`path_open` function gains a real
-    // file-descriptor table (`wasi_fds`) and the file-backed fd_* variants.
-    let wasi_files = imports.iter().any(|im| {
-        matches!(
-            im.wasi,
-            Some(
-                WasiFn::PathOpen
-                    | WasiFn::FdPrestatGet
-                    | WasiFn::FdPrestatDirName
-                    | WasiFn::FdFilestatGet
-                    | WasiFn::FdReaddir
-            )
-        )
-    });
-    if has_imports {
+    // The `pub trait Imports` the instance dispatches host calls through.
+    if layout.has_imports {
         lines.extend(import_trait_lines(
             ctx,
-            imports,
-            imported_globals,
-            mem_imported,
-            table_imported,
+            parts.imports,
+            parts.imported_globals,
+            layout.mem_imported,
+            layout.table_imported,
             dispatch_sigs,
         )?);
         lines.push(String::new());
@@ -72,9 +93,80 @@ pub(super) fn render_module(
         lines.extend(shared_memory_runtime_lines());
         lines.push(String::new());
     }
-    let (decl_generics, type_generics) = host_generics(parts);
-
     // Module-scope statics backing the retained passive segments.
+    lines.extend(passive_segment_statics(parts.data, parts.elements));
+    // Typed-continuations runtime: the step result, the per-continuation frame
+    // structs and the tagged object stored in the instance's `conts` table.
+    if !ctx.cont.bodies.is_empty() {
+        lines.extend(continuation_runtime_lines(ctx)?);
+        lines.push(String::new());
+    }
+
+    // The `Instance` struct itself, then the opening of its inherent `impl`.
+    lines.extend(instance_field_lines(parts, ctx, &layout)?);
+    lines.push(String::new());
+
+    let (decl_generics, type_generics) = host_generics(parts);
+    lines.push(ALLOW.to_string());
+    lines.push(format!("impl{decl_generics} Instance{type_generics} {{"));
+
+    // Everything inside the `impl` is collected unindented, then indented once.
+    // Each section renderer reproduces the blank-line separators it needs, so
+    // this is a straight concatenation.
+    let mut inner: Vec<String> = Vec::new();
+    inner.extend(constructor_lines(parts, ctx, &layout)?);
+    inner.extend(memory_accessor_lines(parts, ctx));
+    inner.extend(table_accessor_lines(parts));
+    inner.extend(wasi_method_lines(parts.imports, layout.wasi_files));
+    inner.extend(helper_method_lines(used, ctx.memory_shared));
+    inner.extend(dispatch_method_block(
+        ctx,
+        dispatch_sigs,
+        layout.has_imports,
+    )?);
+    // The continuation allocator (`cont.new`) and stepper (`resume`).
+    if !ctx.cont.bodies.is_empty() {
+        inner.push(String::new());
+        inner.extend(continuation_method_lines(ctx));
+    }
+
+    for line in indent(&inner) {
+        lines.push(line);
+    }
+    // Stream each function's source straight into the (already indented) body,
+    // skipping the intermediate `inner` buffer: a source line goes from `&str`
+    // to its final indented `String` in one allocation instead of being cloned
+    // once into `inner` and again by `indent`. The result is byte-identical —
+    // both paths blank-line-separate the functions and prefix each body line by
+    // four spaces.
+    for src in sources {
+        lines.push(String::new());
+        for line in src.lines() {
+            lines.push(if line.is_empty() {
+                String::new()
+            } else {
+                format!("    {line}")
+            });
+        }
+    }
+    lines.push("}".to_string());
+
+    // Module-scope external-funcref registries (the Linker helper), one per
+    // `call_indirect` signature, for modules that can receive external handles.
+    if layout.has_imports && !dispatch_sigs.is_empty() {
+        lines.extend(extern_registry_lines(ctx, dispatch_sigs)?);
+    }
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    Ok(out)
+}
+
+/// Module-scope `static`s backing the retained passive segments: each passive
+/// `data`/`elem` segment is kept as a `&'static` slice of one of these, so
+/// `memory.init`/`table.init` can copy from it on demand.
+fn passive_segment_statics(data: &[DataSegment], elements: &[ElemSegment]) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
     for (d, seg) in data.iter().enumerate() {
         if seg.offset.is_none() {
             let bytes_lit = byte_array_literal(&seg.bytes);
@@ -98,17 +190,33 @@ pub(super) fn render_module(
             ));
         }
     }
+    lines
+}
 
-    // Typed-continuations runtime: the step result, the per-continuation frame
-    // structs and the tagged object stored in the instance's `conts` table.
-    if !ctx.cont_bodies.is_empty() {
-        lines.extend(continuation_runtime_lines(ctx)?);
-        lines.push(String::new());
-    }
+/// The `pub struct Instance { … }` declaration: the host handle (when needed),
+/// each defined memory buffer (or the shared handle), the table, the globals,
+/// the WASI fd table, the retained passive-segment slices, the externref box and
+/// the continuation handle table — whichever the module actually needs.
+fn instance_field_lines(
+    parts: &ModuleParts<'_>,
+    ctx: &ModuleCtx<'_>,
+    layout: &Layout,
+) -> Result<Vec<String>, TranspileError> {
+    let ModuleParts {
+        globals,
+        memories,
+        data,
+        table,
+        elements,
+        ..
+    } = *parts;
+    let (decl_generics, _) = host_generics(parts);
 
-    lines.push("#[allow(dead_code)]".to_string());
-    lines.push(format!("pub struct Instance{decl_generics} {{"));
-    if has_imports {
+    let mut lines: Vec<String> = vec![
+        "#[allow(dead_code)]".to_string(),
+        format!("pub struct Instance{decl_generics} {{"),
+    ];
+    if layout.has_imports {
         lines.push("    imports: H,".to_string());
     }
     // A single defined `shared` memory is a thread-shareable handle (cheap Arc
@@ -121,7 +229,7 @@ pub(super) fn render_module(
         // `memory`, memory `i > 0` is `memory{i}`. An imported memory (only ever
         // memory 0) lives in the host, so the instance owns no buffer for it.
         for (i, _) in memories.iter().enumerate() {
-            if i == 0 && mem_imported {
+            if i == 0 && layout.mem_imported {
                 continue;
             }
             let field = if i == 0 {
@@ -133,14 +241,14 @@ pub(super) fn render_module(
         }
     }
     // Imported tables live in the host, so the instance owns no storage.
-    if table.is_some() && !table_imported {
+    if table.is_some() && !layout.table_imported {
         // A table entry is a function index; `u32::MAX` marks a null funcref.
         lines.push("    table: Vec<u32>,".to_string());
     }
     for (i, g) in globals.iter().enumerate() {
         lines.push(format!(
             "    g{}: {},",
-            global_base + i,
+            layout.global_base + i,
             rust_type(g.ty, ctx.type_kinds)?
         ));
     }
@@ -149,7 +257,7 @@ pub(super) fn render_module(
     // keeps the open handle and its containment-checked relative path (the path
     // is what `fd_readdir` re-opens with `read_dir`, since a `File` cannot be
     // enumerated directly with std alone).
-    if wasi_files {
+    if layout.wasi_files {
         lines.push("    wasi_fds: Vec<Option<(std::fs::File, std::path::PathBuf)>>,".to_string());
     }
     // A retained passive segment is a `&'static` slice; `data.drop`/`elem.drop`
@@ -172,16 +280,38 @@ pub(super) fn render_module(
     // The continuation handle table: a `cont.new` pushes a fresh resumable
     // object here and returns its index; `None` marks a slot whose continuation
     // has run to completion (a one-shot continuation, consumed on return).
-    if !ctx.cont_bodies.is_empty() {
+    if !ctx.cont.bodies.is_empty() {
         lines.push("    conts: Vec<Option<ContObj>>,".to_string());
     }
     lines.push("}".to_string());
-    lines.push(String::new());
+    Ok(lines)
+}
 
-    lines.push(ALLOW.to_string());
-    lines.push(format!("impl{decl_generics} Instance{type_generics} {{"));
+/// The `Instance::new` constructor (plus `with_memory`/`shared_memory` for a
+/// shared module): materialise each memory buffer (copying its active data
+/// segments into place), initialise the table (applying active element
+/// segments), the globals, the WASI fd table and the retained passive segments,
+/// and — for host-owned memory/table — copy the active segments into the host
+/// storage after construction. Returns the unindented `impl`-body lines.
+fn constructor_lines(
+    parts: &ModuleParts<'_>,
+    ctx: &ModuleCtx<'_>,
+    layout: &Layout,
+) -> Result<Vec<String>, TranspileError> {
+    let ModuleParts {
+        globals,
+        memories,
+        data,
+        table,
+        elements,
+        ..
+    } = *parts;
+    let has_imports = layout.has_imports;
+    let mem_imported = layout.mem_imported;
+    let table_imported = layout.table_imported;
+    let wasi_files = layout.wasi_files;
+    let global_base = layout.global_base;
 
-    // Everything inside the `impl` is collected unindented, then indented once.
     let mut inner: Vec<String> = Vec::new();
     let new_param = if has_imports { "imports: H" } else { "" };
     // Only active segments are copied at instantiation; passive ones are
@@ -276,7 +406,7 @@ pub(super) fn render_module(
         if ctx.uses_extern_box {
             inner.push("        extern_box: Vec::new(),".to_string());
         }
-        if !ctx.cont_bodies.is_empty() {
+        if !ctx.cont.bodies.is_empty() {
             inner.push("        conts: Vec::new(),".to_string());
         }
         Ok(())
@@ -385,18 +515,22 @@ pub(super) fn render_module(
         }
         inner.push("}".to_string());
     }
+    Ok(inner)
+}
 
-    // Uniform memory accessors so the load/store/bulk helpers are identical for
-    // defined and imported memory: a defined buffer is a field, an imported one
-    // (only ever memory 0) is lent by the host through the `Imports` trait.
-    // Memory 0 keeps the historic `mem`/`mem_mut`/`memory` names; memory `i > 0`
-    // is `mem{i}`/`mem{i}_mut`/`memory{i}`, each backed by its own field.
-    //
-    // A shared module emits none of these: `mem()`/`mem_mut()` hand out plain
-    // borrows that cannot span a `Mutex` lock, and the transformed helpers lock
-    // `self.memory.bytes()` directly instead. `shared_memory()` (emitted with
-    // `new`) is the public handle accessor.
-    for (i, m) in memories.iter().enumerate().filter(|_| !ctx.memory_shared) {
+/// The uniform memory accessors (`mem`/`mem_mut`/`memory` for memory 0, then
+/// `mem{i}`/`mem{i}_mut`/`memory{i}`), so the load/store/bulk helpers read the
+/// same regardless of whether a memory is defined (a field) or imported (lent by
+/// the host). A shared module emits none of these — its helpers lock
+/// `self.memory.bytes()` directly — so the accessor set is empty there.
+fn memory_accessor_lines(parts: &ModuleParts<'_>, ctx: &ModuleCtx<'_>) -> Vec<String> {
+    let mut inner: Vec<String> = Vec::new();
+    for (i, m) in parts
+        .memories
+        .iter()
+        .enumerate()
+        .filter(|_| !ctx.memory_shared)
+    {
         let (get, get_mut, pub_get) = if i == 0 {
             (
                 "mem".to_string(),
@@ -436,10 +570,15 @@ pub(super) fn render_module(
             "pub fn {pub_get}(&mut self) -> &mut Vec<u8> {{ {borrow_mut} }}"
         ));
     }
+    inner
+}
 
-    // Uniform table accessors, mirroring the memory ones: a defined table is a
-    // field, an imported one is lent by the host through the `Imports` trait.
-    if let Some(t) = table {
+/// The uniform table accessors (`table`/`table_mut`), mirroring the memory ones:
+/// a defined table is a field, an imported one is lent by the host through the
+/// `Imports` trait. Empty when the module declares no table.
+fn table_accessor_lines(parts: &ModuleParts<'_>) -> Vec<String> {
+    let mut inner: Vec<String> = Vec::new();
+    if let Some(t) = parts.table {
         let (borrow, borrow_mut) = if t.imported {
             ("self.imports.table()", "self.imports.table_mut()")
         } else {
@@ -451,9 +590,13 @@ pub(super) fn render_module(
             "fn table_mut(&mut self) -> &mut Vec<u32> {{ {borrow_mut} }}"
         ));
     }
+    inner
+}
 
-    // Native WASI functions are inherent methods backed by `self.mem()`; emit
-    // each recognised kind once, in first-import order.
+/// The native WASI functions as inherent methods backed by `self.mem()`, each
+/// recognised kind emitted once in first-import order.
+fn wasi_method_lines(imports: &[ImportInfo], wasi_files: bool) -> Vec<String> {
+    let mut inner: Vec<String> = Vec::new();
     let mut wasi_emitted: Vec<WasiFn> = Vec::new();
     for im in imports {
         if let Some(w) = im.wasi
@@ -464,10 +607,15 @@ pub(super) fn render_module(
             inner.extend(w.lines(wasi_files));
         }
     }
+    inner
+}
 
-    // Emit each used helper method, grouped by memory index (0 first, so the
-    // historic single-memory helpers keep their position) then in the canonical
-    // HELPER_ORDER within each memory.
+/// The used memory-access helper methods, grouped by memory index (0 first, so
+/// the historic single-memory helpers keep their position) then in the canonical
+/// `HELPER_ORDER` within each memory. A shared module (single memory 0) emits
+/// the variants that lock `self.memory.bytes()` instead of borrowing.
+fn helper_method_lines(used: &HashSet<(Helper, u32)>, memory_shared: bool) -> Vec<String> {
+    let mut inner: Vec<String> = Vec::new();
     let mut mem_indices: Vec<u32> = used.iter().map(|(_, mem)| *mem).collect();
     mem_indices.sort_unstable();
     mem_indices.dedup();
@@ -475,9 +623,7 @@ pub(super) fn render_module(
         for helper in HELPER_ORDER {
             if used.contains(&(helper, mem)) {
                 inner.push(String::new());
-                // A shared module (single memory 0) emits helpers that lock
-                // `self.memory.bytes()` once instead of borrowing `self.mem()`.
-                if ctx.memory_shared {
+                if memory_shared {
                     inner.extend(shared_helper_lines(helper));
                 } else {
                     inner.extend(helper_lines(helper, mem));
@@ -485,53 +631,25 @@ pub(super) fn render_module(
             }
         }
     }
+    inner
+}
 
-    // One public `call_ref_t{ti}` dispatch method per `call_indirect` signature.
-    // It is both the target of the module's own `call_indirect` and the entry
-    // point through which the host invokes a funcref the module handed out.
-    let mut dispatch_ordered: Vec<u32> = dispatch_sigs.iter().copied().collect();
-    dispatch_ordered.sort_unstable();
-    for ti in dispatch_ordered {
+/// One public `call_ref_t{ti}` dispatch method per `call_indirect` signature. It
+/// is both the target of the module's own `call_indirect` and the entry point
+/// through which the host invokes a funcref the module handed out.
+fn dispatch_method_block(
+    ctx: &ModuleCtx<'_>,
+    dispatch_sigs: &HashSet<u32>,
+    has_imports: bool,
+) -> Result<Vec<String>, TranspileError> {
+    let mut ordered: Vec<u32> = dispatch_sigs.iter().copied().collect();
+    ordered.sort_unstable();
+    let mut inner: Vec<String> = Vec::new();
+    for ti in ordered {
         inner.push(String::new());
         inner.extend(dispatch_method_lines(ctx, ti, has_imports)?);
     }
-
-    // The continuation allocator (`cont.new`) and stepper (`resume`).
-    if !ctx.cont_bodies.is_empty() {
-        inner.push(String::new());
-        inner.extend(continuation_method_lines(ctx));
-    }
-
-    for line in indent(&inner) {
-        lines.push(line);
-    }
-    // Stream each function's source straight into the (already indented) body,
-    // skipping the intermediate `inner` buffer: a source line goes from `&str`
-    // to its final indented `String` in one allocation instead of being cloned
-    // once into `inner` and again by `indent`. The result is byte-identical —
-    // both paths blank-line-separate the functions and prefix each body line by
-    // four spaces.
-    for src in sources {
-        lines.push(String::new());
-        for line in src.lines() {
-            lines.push(if line.is_empty() {
-                String::new()
-            } else {
-                format!("    {line}")
-            });
-        }
-    }
-    lines.push("}".to_string());
-
-    // Module-scope external-funcref registries (the Linker helper), one per
-    // `call_indirect` signature, for modules that can receive external handles.
-    if has_imports && !dispatch_sigs.is_empty() {
-        lines.extend(extern_registry_lines(ctx, dispatch_sigs)?);
-    }
-
-    let mut out = lines.join("\n");
-    out.push('\n');
-    Ok(out)
+    Ok(inner)
 }
 
 /// The module-scope typed-continuations runtime: the `StepResult` a step
@@ -558,7 +676,7 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Result<Vec<String>, Transp
         "}".to_string(),
         String::new(),
     ];
-    for n in &ctx.step_set {
+    for n in &ctx.cont.step_set {
         // A `ContFrame` holds the resumable `pc`, one field per local (so locals
         // survive suspends), an operand-survivor stack (`ostack`, holding the
         // `i64`-erased operands that outlive a suspend inside a region — see
@@ -571,10 +689,10 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Result<Vec<String>, Transp
             "ostack: Vec<i64>".to_string(),
             "bound: Vec<i64>".to_string(),
         ];
-        if let Some(g) = ctx.checkpoint_callee.get(n) {
+        if let Some(g) = ctx.cont.checkpoint_callee.get(n) {
             fields.push(format!("sub: ContFrame{g}"));
         }
-        if let Some(locals) = ctx.step_locals.get(n) {
+        if let Some(locals) = ctx.cont.step_locals.get(n) {
             for (i, ty) in locals.iter().enumerate() {
                 fields.push(format!("l{i}: {}", rust_type(*ty, ctx.type_kinds)?));
             }
@@ -588,7 +706,7 @@ fn continuation_runtime_lines(ctx: &ModuleCtx<'_>) -> Result<Vec<String>, Transp
     lines.push(String::new());
     lines.push("#[allow(dead_code)]".to_string());
     lines.push("pub enum ContObj {".to_string());
-    for n in &ctx.cont_bodies {
+    for n in &ctx.cont.bodies {
         lines.push(format!("    C{n}(ContFrame{n}),"));
     }
     lines.push("}".to_string());
@@ -606,10 +724,10 @@ fn frame_start_literal(ctx: &ModuleCtx<'_>, n: u32) -> String {
         "ostack: Vec::new()".to_string(),
         "bound: Vec::new()".to_string(),
     ];
-    if let Some(g) = ctx.checkpoint_callee.get(&n) {
+    if let Some(g) = ctx.cont.checkpoint_callee.get(&n) {
         fields.push(format!("sub: {}", frame_start_literal(ctx, *g)));
     }
-    if let Some(locals) = ctx.step_locals.get(&n) {
+    if let Some(locals) = ctx.cont.step_locals.get(&n) {
         for (i, ty) in locals.iter().enumerate() {
             fields.push(format!("l{i}: {}", default_value(*ty, ctx.type_kinds)));
         }
@@ -627,7 +745,7 @@ fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "pub fn cont_new(&mut self, __funcidx: u32) -> u32 {".to_string(),
         "    let __obj = match __funcidx {".to_string(),
     ];
-    for n in &ctx.cont_bodies {
+    for n in &ctx.cont.bodies {
         lines.push(format!(
             "        {n}u32 => ContObj::C{n}({}),",
             frame_start_literal(ctx, *n)
@@ -649,7 +767,7 @@ fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "        .expect(\"resume of a consumed continuation\");".to_string(),
         "    let __r = match &mut __obj {".to_string(),
     ]);
-    for n in &ctx.cont_bodies {
+    for n in &ctx.cont.bodies {
         // A continuation carrying `cont.bind`-supplied arguments delivers them
         // ahead of this resume's own `__args`; `bound` is non-empty only until the
         // step that consumes it (it is taken here), so an unbound continuation
@@ -688,7 +806,7 @@ fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "        .expect(\"cont.bind of a consumed continuation\")".to_string(),
         "    {".to_string(),
     ]);
-    for n in &ctx.cont_bodies {
+    for n in &ctx.cont.bodies {
         lines.push(format!(
             "        ContObj::C{n}(__f) => __f.bound.extend_from_slice(__prefix),"
         ));

@@ -6,6 +6,45 @@ use wasmparser::ValType;
 
 use crate::TranspileError;
 
+/// The typed-continuations analysis for one module, grouped so the four tightly
+/// coupled tables travel together and the call sites read `ctx.cont.bodies` etc.
+/// rather than four flat `ModuleCtx` fields.
+pub(crate) struct ContInfo {
+    /// Function indices reachable as continuation bodies (the target of a
+    /// `ref.func` fed into `cont.new`), sorted and deduplicated. These are
+    /// emitted as resumable `cont_step_func{N}` state machines rather than
+    /// ordinary `func{N}`s, and drive the `ContObj`/`ContFrame` runtime types.
+    /// These are the resumable *entry points* (handles created by `cont.new`).
+    pub(crate) bodies: Vec<u32>,
+    /// Every function emitted as a `cont_step_func{N}`: the continuation bodies
+    /// plus every function reachable from one through a suspend-crossing `call`.
+    /// A superset of [`bodies`](Self::bodies), sorted. Each gets a `ContFrame{N}`,
+    /// but only `bodies` get a `ContObj` variant and a `conts`-table handle.
+    pub(crate) step_set: Vec<u32>,
+    /// Per step function, the callee of its tail cross-call checkpoint (a `call`
+    /// to another step function). The callee's frame nests inside the caller's
+    /// `ContFrame` as its `sub` field.
+    pub(crate) checkpoint_callee: HashMap<u32, u32>,
+    /// Per step function, its local types by index (`l{i}`). Each becomes a
+    /// `ContFrame` field so the local survives suspends. Step functions have no
+    /// parameters (rejected), so these are exactly the declared locals.
+    pub(crate) step_locals: HashMap<u32, Vec<ValType>>,
+}
+
+/// The per-tag payload/result types for one module, grouped so `ctx.tags.params`
+/// and `ctx.tags.results` stay together. Both are indexed by tag index (imported
+/// tags first, then defined); named `TagTypes` to avoid colliding with the
+/// parser's [`TagInfo`].
+pub(crate) struct TagTypes {
+    /// Per-tag payload (parameter) types. `throw`/`catch`/`suspend` resolve their
+    /// tag index here.
+    pub(crate) params: Vec<Vec<ValType>>,
+    /// Per-tag result types. Empty for an exception tag; for a stack-switching
+    /// control tag these are the values a `resume` injects back into the
+    /// continuation it resumes.
+    pub(crate) results: Vec<Vec<ValType>>,
+}
+
 /// Module-wide context shared by every function's code generation.
 pub(crate) struct ModuleCtx<'a> {
     /// Imported functions, occupying function indices `0..imports.len()`.
@@ -57,33 +96,10 @@ pub(crate) struct ModuleCtx<'a> {
     /// internalise `anyref`s through the per-instance `extern_box: Vec<GcRef>`.
     /// Emits (and initialises) that field.
     pub(crate) uses_extern_box: bool,
-    /// Per-tag payload (parameter) types, indexed by tag index (imported tags
-    /// first, then defined). `throw`/`catch`/`suspend` resolve their tag index
-    /// here.
-    pub(crate) tags: Vec<Vec<ValType>>,
-    /// Per-tag result types, indexed like [`tags`](Self::tags). Empty for an
-    /// exception tag; for a stack-switching control tag these are the values a
-    /// `resume` injects back into the continuation it resumes.
-    pub(crate) tag_results: Vec<Vec<ValType>>,
-    /// Function indices reachable as continuation bodies (the target of a
-    /// `ref.func` fed into `cont.new`), sorted and deduplicated. These are
-    /// emitted as resumable `cont_step_func{N}` state machines rather than
-    /// ordinary `func{N}`s, and drive the `ContObj`/`ContFrame` runtime types.
-    /// These are the resumable *entry points* (handles created by `cont.new`).
-    pub(crate) cont_bodies: Vec<u32>,
-    /// Every function emitted as a `cont_step_func{N}`: the continuation bodies
-    /// plus every function reachable from one through a suspend-crossing `call`.
-    /// A superset of `cont_bodies`, sorted. Each gets a `ContFrame{N}`, but only
-    /// `cont_bodies` get a `ContObj` variant and a `conts`-table handle.
-    pub(crate) step_set: Vec<u32>,
-    /// Per step function, the callee of its tail cross-call checkpoint (a `call`
-    /// to another step function). The callee's frame nests inside the caller's
-    /// `ContFrame` as its `sub` field.
-    pub(crate) checkpoint_callee: HashMap<u32, u32>,
-    /// Per step function, its local types by index (`l{i}`). Each becomes a
-    /// `ContFrame` field so the local survives suspends. Step functions have no
-    /// parameters (rejected), so these are exactly the declared locals.
-    pub(crate) step_locals: HashMap<u32, Vec<ValType>>,
+    /// Per-tag payload/result types (`ctx.tags.params` / `ctx.tags.results`).
+    pub(crate) tags: TagTypes,
+    /// The typed-continuations analysis (`ctx.cont.bodies`/`step_set`/…).
+    pub(crate) cont: ContInfo,
 }
 impl ModuleCtx<'_> {
     /// Every concrete struct/array type index whose declared supertype chain
@@ -294,12 +310,16 @@ pub(crate) fn build_ctx<'a>(
             .collect(),
         is_method: stateful,
         uses_extern_box,
-        tags: parts.tags.iter().map(|t| t.params.clone()).collect(),
-        tag_results: parts.tags.iter().map(|t| t.results.clone()).collect(),
-        cont_bodies,
-        step_set,
-        checkpoint_callee,
-        step_locals,
+        tags: TagTypes {
+            params: parts.tags.iter().map(|t| t.params.clone()).collect(),
+            results: parts.tags.iter().map(|t| t.results.clone()).collect(),
+        },
+        cont: ContInfo {
+            bodies: cont_bodies,
+            step_set,
+            checkpoint_callee,
+            step_locals,
+        },
     };
     Ok((ctx, stateful))
 }
@@ -506,7 +526,7 @@ pub(crate) fn generate_function_into(
     // A step function (a continuation body, or a function reached from one
     // through a suspend-crossing call) is emitted as a resumable
     // `cont_step_func{N}` state machine instead of an ordinary `func{N}`.
-    if ctx.step_set.binary_search(&index_u32(index)?).is_ok() {
+    if ctx.cont.step_set.binary_search(&index_u32(index)?).is_ok() {
         return func.emit_cont_step(index, input.params, input.body, line_prefix, out);
     }
     func.run(input.body)?;
