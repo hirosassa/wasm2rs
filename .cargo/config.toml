@@ -1,0 +1,28 @@
+# Cargo configuration for wasm2rs.
+#
+# --- Optional: faster linking with the bundled rust-lld (macOS / dev-test) ---
+#
+# The toolchain ships an `ld64.lld` under `$(rustc --print
+# sysroot)/lib/rustlib/<host>/bin/gcc-ld/`. Pointing clang at it with `-B` +
+# `-fuse-ld=lld` shaves ~35% off a *single* test-binary relink (0.9s -> 0.6s
+# here). It is left DISABLED by default because:
+#
+#   * The aggregate win across the many test binaries is negligible — parallel
+#     links already saturate the cores (measured 4.13s -> 4.09s for the whole
+#     suite), so the per-link saving does not move wall-clock.
+#   * `rustflags` cannot expand `$(rustc --print sysroot)`, so enabling it means
+#     committing a machine-specific absolute path that breaks on rustup updates,
+#     CI, and other contributors' machines.
+#
+# The generated-code build cache (tests/common/mod.rs) is what actually removes
+# the day-to-day pain: a warm re-run skips rustc entirely.
+#
+# To enable lld locally, discover the path and uncomment the block below:
+#
+#   echo "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin/gcc-ld"
+#
+# [target.aarch64-apple-darwin]
+# rustflags = [
+#   "-C", "link-arg=-B/ABSOLUTE/PATH/FROM/THE/COMMAND/ABOVE",
+#   "-C", "link-arg=-fuse-ld=lld",
+# ]

@@ -2,6 +2,16 @@
 name = "wasm2rs"
 version = "0.1.0"
 edition = "2024"
+# Integration tests are consolidated into a single binary (`tests/it/main.rs`)
+# so the suite links once instead of once per file; disable auto-discovery so
+# the sole target below is the only integration-test crate.
+autotests = false
+
+# One integration-test crate that bundles every former `tests/<name>.rs` as a
+# submodule. Run a subset with `cargo test --test it <name>`.
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
 
 [dependencies]
 wasmparser = "0.255.0"
