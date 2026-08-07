@@ -41,6 +41,7 @@ mod gc_fields_funcref;
 mod gc_heap;
 mod gc_i31_unify;
 mod gc_null;
+mod gc_ref_reuse;
 mod gc_refs;
 mod global_init;
 mod helper_naming;
