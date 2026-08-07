@@ -29,6 +29,48 @@ const HIER: &str = r#"
     (type $a (sub (struct (field i32))))
     (type $b (sub $a (struct (field i32) (field i32))))"#;
 
+// A three-level hierarchy: `$c <: $b <: $a`, each level adding a field.
+const HIER3: &str = r#"
+    (type $a (sub (struct (field i32))))
+    (type $b (sub $a (struct (field i32) (field i32))))
+    (type $c (sub $b (struct (field i32) (field i32) (field i32))))"#;
+
+#[test]
+fn ref_cast_narrows_two_levels_down_a_hierarchy() {
+    // A `$c` value seen statically as the top supertype `$a` casts straight down
+    // two levels to `(ref $c)`, letting the deepest field (index 2) be read.
+    compile_run(
+        "gc_cast_deep",
+        &format!(
+            r#"(module {HIER3}
+                (func (export "deep") (result i32)
+                  (local $r (ref $a))
+                  (local.set $r
+                    (struct.new $c (i32.const 10) (i32.const 20) (i32.const 30)))
+                  (struct.get $c 2 (ref.cast (ref $c) (local.get $r)))))"#
+        ),
+        "assert_eq!(func0(), 30);",
+    );
+}
+
+#[test]
+fn ref_test_matches_a_middle_supertype() {
+    // A `$c` value is a subtype of the *middle* type `$b`, so `ref.test (ref $b)`
+    // reports 1 even though the value's runtime type is the deeper `$c`.
+    compile_run(
+        "gc_test_middle",
+        &format!(
+            r#"(module {HIER3}
+                (func (export "mid") (result i32)
+                  (local $r (ref $a))
+                  (local.set $r
+                    (struct.new $c (i32.const 1) (i32.const 2) (i32.const 3)))
+                  (ref.test (ref $b) (local.get $r))))"#
+        ),
+        "assert_eq!(func0(), 1);",
+    );
+}
+
 #[test]
 fn ref_test_respects_subtyping() {
     // `ref.test (ref $b)` is 1 for a value whose runtime type is `$b` (even when

@@ -115,6 +115,30 @@ fn struct_field_holds_a_reference() {
 }
 
 #[test]
+fn cyclic_references_build_and_read_back() {
+    // Two nodes point at each other through a mutable `(ref null $node)` field,
+    // forming a cycle. Building it exercises storing a reference *local* into a
+    // struct field (`struct.new`/`struct.set`) and reading a local again
+    // afterwards. The cycle leaks (no tracing collector, per this phase), which
+    // is acceptable; the point is that it compiles and reads back correctly:
+    // a -> b -> a, so `a.next.next.val` is `a.val` (11).
+    compile_run(
+        "gc_cycle",
+        r#"(module
+            (type $node (struct (field (mut (ref null $node))) (field i32)))
+            (func (export "f") (result i32)
+              (local $a (ref $node)) (local $b (ref $node))
+              (local.set $a (struct.new $node (ref.null $node) (i32.const 11)))
+              (local.set $b (struct.new $node (local.get $a) (i32.const 22)))
+              (struct.set $node 0 (local.get $a) (local.get $b))
+              (struct.get $node 1
+                (struct.get $node 0
+                  (struct.get $node 0 (local.get $a))))))"#,
+        "assert_eq!(func0(), 11);",
+    );
+}
+
+#[test]
 fn get_on_null_reference_traps() {
     // Dereferencing a null reference (`struct.get` on `ref.null`) traps.
     expect_trap(

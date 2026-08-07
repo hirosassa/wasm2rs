@@ -143,6 +143,93 @@ fn bubble_sort_over_linear_memory() {
 }
 
 #[test]
+fn stack_bytecode_interpreter() {
+    // A whole little *program*: a stack-machine bytecode interpreter. The
+    // fetch/decode/dispatch/execute loop combines a `loop`, a `br_table` opcode
+    // switch, six locals (pc, sp, decoded op/arg, two ALU temps), and a value
+    // stack held in linear memory. Each instruction occupies two i32 words
+    // (opcode, operand) at byte `pc*8`; the value stack lives at byte 1024.
+    //
+    // Opcodes: 0 PUSH imm, 1 ADD, 2 MUL, 3 HALT (returns the stack top). The
+    // driver assembles `PUSH 3; PUSH 4; ADD; PUSH 5; MUL; HALT`, i.e.
+    // (3 + 4) * 5 = 35.
+    compile_run(
+        "prog_bytecode_vm",
+        r#"
+        (module
+          (memory 1)
+          (func (export "set_instr") (param $i i32) (param $op i32) (param $arg i32)
+            (i32.store (i32.mul (local.get $i) (i32.const 8)) (local.get $op))
+            (i32.store
+              (i32.add (i32.mul (local.get $i) (i32.const 8)) (i32.const 4))
+              (local.get $arg)))
+          (func (export "run") (result i32)
+            (local $pc i32) (local $sp i32) (local $op i32) (local $arg i32)
+            (local $a i32) (local $b i32)
+            (loop $loop
+              (local.set $op (i32.load (i32.mul (local.get $pc) (i32.const 8))))
+              (local.set $arg
+                (i32.load (i32.add (i32.mul (local.get $pc) (i32.const 8)) (i32.const 4))))
+              (block $default
+                (block $halt
+                  (block $mul
+                    (block $add
+                      (block $push
+                        (br_table $push $add $mul $halt $default (local.get $op)))
+                      ;; PUSH: stack[sp] = arg; sp += 1; pc += 1
+                      (i32.store
+                        (i32.add (i32.const 1024) (i32.mul (local.get $sp) (i32.const 4)))
+                        (local.get $arg))
+                      (local.set $sp (i32.add (local.get $sp) (i32.const 1)))
+                      (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+                      (br $loop))
+                    ;; ADD: b = pop; a = pop; push a + b
+                    (local.set $b (i32.load
+                      (i32.add (i32.const 1024)
+                        (i32.mul (i32.sub (local.get $sp) (i32.const 1)) (i32.const 4)))))
+                    (local.set $a (i32.load
+                      (i32.add (i32.const 1024)
+                        (i32.mul (i32.sub (local.get $sp) (i32.const 2)) (i32.const 4)))))
+                    (i32.store
+                      (i32.add (i32.const 1024)
+                        (i32.mul (i32.sub (local.get $sp) (i32.const 2)) (i32.const 4)))
+                      (i32.add (local.get $a) (local.get $b)))
+                    (local.set $sp (i32.sub (local.get $sp) (i32.const 1)))
+                    (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+                    (br $loop))
+                  ;; MUL: b = pop; a = pop; push a * b
+                  (local.set $b (i32.load
+                    (i32.add (i32.const 1024)
+                      (i32.mul (i32.sub (local.get $sp) (i32.const 1)) (i32.const 4)))))
+                  (local.set $a (i32.load
+                    (i32.add (i32.const 1024)
+                      (i32.mul (i32.sub (local.get $sp) (i32.const 2)) (i32.const 4)))))
+                  (i32.store
+                    (i32.add (i32.const 1024)
+                      (i32.mul (i32.sub (local.get $sp) (i32.const 2)) (i32.const 4)))
+                    (i32.mul (local.get $a) (local.get $b)))
+                  (local.set $sp (i32.sub (local.get $sp) (i32.const 1)))
+                  (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+                  (br $loop))
+                ;; HALT: return the value on top of the stack
+                (return (i32.load
+                  (i32.add (i32.const 1024)
+                    (i32.mul (i32.sub (local.get $sp) (i32.const 1)) (i32.const 4))))))
+              ;; default: an unknown opcode is a malformed program
+              (unreachable))
+            (unreachable)))
+        "#,
+        // func0 = set_instr, func1 = run.
+        "let mut inst = Instance::new();\n    \
+         let prog = [(0, 3), (0, 4), (1, 0), (0, 5), (2, 0), (3, 0)];\n    \
+         for (i, (op, arg)) in prog.iter().enumerate() {\n        \
+             inst.func0(i as i32, *op, *arg);\n    \
+         }\n    \
+         assert_eq!(inst.func1(), 35);",
+    );
+}
+
+#[test]
 fn br_table_dispatched_calculator() {
     // A `br_table` switch selects one of three operations, with a default arm
     // for out-of-range selectors — the canonical structured-switch idiom.

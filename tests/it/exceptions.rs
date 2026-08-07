@@ -350,6 +350,29 @@ fn br_from_catch_handler_to_outer_block() {
 }
 
 #[test]
+fn throw_propagates_across_three_call_frames() {
+    // A deeper unwind than `throw_propagates_across_calls`: the exception is
+    // thrown at the bottom of a three-deep call chain ($a -> $b -> $c) and must
+    // propagate up through every intermediate frame to the caller's `catch`.
+    compile_run(
+        "eh_cross_call_deep",
+        r#"(module
+            (tag $e (param i32))
+            (func $c (param i32) (result i32) (local.get 0) (throw $e))
+            (func $b (param i32) (result i32) (call $c (local.get 0)))
+            (func $a (param i32) (result i32) (call $b (local.get 0)))
+            (func (export "f") (param i32) (result i32)
+              try (result i32)
+                local.get 0
+                call $a
+              catch $e
+              end))"#,
+        // $c=func0, $b=func1, $a=func2, f=func3; stateless -> free functions.
+        "assert_eq!(func3(42), 42); assert_eq!(func3(-5), -5);",
+    );
+}
+
+#[test]
 fn uncaught_throw_traps() {
     // An exception with no enclosing handler aborts the program.
     expect_trap(
