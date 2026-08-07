@@ -323,6 +323,28 @@ pub(crate) fn build_ctx<'a>(
     };
     Ok((ctx, stateful))
 }
+/// The module-wide helper dependencies accumulated while generating every
+/// function, merged the same way by both the single-file and the split driver
+/// (so the two cannot drift). Rendering the module/root consumes these to emit
+/// exactly the helpers, dispatch methods and runtime types the bodies used.
+#[derive(Default)]
+pub(crate) struct ModuleDeps {
+    pub(crate) helpers: HashSet<(Helper, u32)>,
+    pub(crate) rt: HashSet<Rt>,
+    pub(crate) simd: HashSet<&'static str>,
+    pub(crate) dispatch_sigs: HashSet<u32>,
+    pub(crate) uses_eh: bool,
+}
+impl ModuleDeps {
+    /// Fold one function's discovered dependencies into the running totals.
+    fn merge(&mut self, meta: GenMeta) {
+        self.helpers.extend(meta.helpers);
+        self.rt.extend(meta.rt);
+        self.simd.extend(meta.simd);
+        self.dispatch_sigs.extend(meta.dispatch_sigs);
+        self.uses_eh |= meta.uses_eh;
+    }
+}
 /// Translate a whole module into a single Rust source string.
 ///
 /// A module that declares linear memory, a table or globals carries mutable
@@ -333,11 +355,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     let (ctx, stateful) = build_ctx(parts)?;
 
     let mut sources = Vec::with_capacity(parts.funcs.len());
-    let mut used: HashSet<(Helper, u32)> = HashSet::new();
-    let mut used_rt: HashSet<Rt> = HashSet::new();
-    let mut used_simd: HashSet<&'static str> = HashSet::new();
-    let mut dispatch_sigs: HashSet<u32> = HashSet::new();
-    let mut uses_eh = false;
+    let mut deps = ModuleDeps::default();
     for (index, f) in parts.funcs.iter().enumerate() {
         // Defined functions are named by their full function index, i.e. after
         // the imported functions in the shared index space. The single-file
@@ -345,28 +363,24 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         // `String` and the pieces are joined/wrapped exactly as before.
         let mut src = String::new();
         let meta = generate_function_into(parts.imports.len() + index, f, &ctx, "", &mut src)?;
-        used.extend(meta.helpers);
-        used_rt.extend(meta.rt);
-        used_simd.extend(meta.simd);
-        dispatch_sigs.extend(meta.dispatch_sigs);
-        uses_eh |= meta.uses_eh;
+        deps.merge(meta);
         sources.push(src);
     }
 
     // Free-function runtime helpers live at module scope, above the functions
     // (or the `struct Instance`) that call them, in both module shapes.
-    let rt_helpers = render_rt_helpers(&used_rt);
-    let simd_helpers = render_simd_helpers(&used_simd);
+    let rt_helpers = render_rt_helpers(&deps.rt);
+    let simd_helpers = render_simd_helpers(&deps.simd);
 
     let body = if !stateful {
         sources.join("\n")
     } else {
-        render_module(parts, &ctx, &sources, &used, &dispatch_sigs)?
+        render_module(parts, &ctx, &sources, &deps.helpers, &deps.dispatch_sigs)?
     };
 
     // The exception type, then the runtime helpers, precede the module body.
     let mut prelude = String::new();
-    if uses_eh {
+    if deps.uses_eh {
         prelude.push_str(EXC_DEF);
         prelude.push('\n');
     }
@@ -430,11 +444,7 @@ pub(crate) fn generate_module_split(
     // Aggregated across every function: needed only to render the `lib.rs` root
     // (helper methods, dispatch methods and runtime helpers). Each chunk file is
     // otherwise self-contained, so it can be emitted and dropped immediately.
-    let mut used: HashSet<(Helper, u32)> = HashSet::new();
-    let mut used_rt: HashSet<Rt> = HashSet::new();
-    let mut used_simd: HashSet<&'static str> = HashSet::new();
-    let mut dispatch_sigs: HashSet<u32> = HashSet::new();
-    let mut uses_eh = false;
+    let mut deps = ModuleDeps::default();
 
     // A stateful chunk wraps its functions in an `impl Instance` block, so every
     // emitted line is indented one level; a stateless chunk emits free `pub fn`s
@@ -456,11 +466,7 @@ pub(crate) fn generate_module_split(
         // predecessor, matching the single-file rendering.
         chunk.push('\n');
         let meta = generate_function_into(base + index, f, &ctx, line_prefix, &mut chunk)?;
-        used.extend(meta.helpers);
-        used_rt.extend(meta.rt);
-        used_simd.extend(meta.simd);
-        dispatch_sigs.extend(meta.dispatch_sigs);
-        uses_eh |= meta.uses_eh;
+        deps.merge(meta);
         funcs_in_chunk += 1;
 
         // Flush at the function count cap or once the chunk's own bytes reach
@@ -490,13 +496,13 @@ pub(crate) fn generate_module_split(
     let n_chunks = chunk_index;
 
     // The root is emitted last, once the used-helper/dispatch sets are complete.
-    let deps = render::RootDeps {
-        helpers: &used,
-        rt: &used_rt,
-        simd: &used_simd,
-        dispatch_sigs: &dispatch_sigs,
+    let root_deps = render::RootDeps {
+        helpers: &deps.helpers,
+        rt: &deps.rt,
+        simd: &deps.simd,
+        dispatch_sigs: &deps.dispatch_sigs,
     };
-    let root = render_lib_root(parts, &ctx, stateful, &deps, n_chunks)?;
+    let root = render_lib_root(parts, &ctx, stateful, &root_deps, n_chunks)?;
     // The exception type and the managed value model live at the crate root so
     // every chunk's `use super::*` sees them, ahead of everything else in
     // `lib.rs`.
@@ -505,7 +511,7 @@ pub(crate) fn generate_module_split(
     } else {
         root
     };
-    let root = if uses_eh {
+    let root = if deps.uses_eh {
         format!("{EXC_DEF}\n{root}")
     } else {
         root
