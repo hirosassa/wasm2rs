@@ -1099,6 +1099,50 @@ fn switch_in_a_region_resumes_mid_region_on_switch_back() {
 }
 
 #[test]
+fn switch_propagates_across_a_cross_call_checkpoint() {
+    // A `switch` performed by a function reached through a cross-call checkpoint
+    // (P8-3). `$a` (a continuation) tail-calls `$c`; that call is a checkpoint, so
+    // `$a` drives `$c` as a nested step frame. `$c` switches to `$b`, handing it
+    // the reified *outer* continuation (`$a`'s handle, since `$c`'s frame nests
+    // inside `$a`'s). The `Switch` therefore has to propagate up through `$a`'s
+    // checkpoint arm to the driving `resume`, which follows it to `$b`. `$b`
+    // returns 11 + 2 = 13; `$a`/`$c` stay parked at the switch.
+    //
+    // `$c` contains only a `switch` (no `suspend`), so this also exercises that a
+    // switch-only callee is pulled into the step-function set and its caller's
+    // `call` becomes a checkpoint.
+    compile_run(
+        "cont_switch_across_checkpoint",
+        r#"(module
+            (type $ht (func (result i32)))
+            (tag $t (type $ht))
+            (type $fa (func (result i32)))
+            (type $ca (cont $fa))
+            (type $fc (func (result i32)))
+            (type $cc (cont $fc))
+            (type $fc_s (func (result i32)))
+            (type $cc_s (cont $fc_s))
+            (type $fb (func (param i32) (param (ref $cc_s)) (result i32)))
+            (type $cb (cont $fb))
+            (func $a (type $fa)
+              call $c)
+            (func $b (type $fb)
+              local.get 0 i32.const 2 i32.add)
+            (func $c (type $fc)
+              i32.const 11
+              ref.func $b cont.new $cb
+              switch $cb $t
+              i32.const 888)
+            (func (export "run") (type $fa)
+              ref.func $a cont.new $ca
+              resume $ca (on $t switch)))"#,
+        // `$a`/`$b`/`$c` are func0/1/2 (step functions); the exported `run` is
+        // func3.
+        "let mut inst = Instance::new(); assert_eq!(inst.func3(), 13);",
+    );
+}
+
+#[test]
 fn null_cont_local_defaults_to_null() {
     // A local typed `(ref null $ct)` defaults to the null handle, so reading it
     // back and testing `ref.is_null` reports null (1) without any assignment.

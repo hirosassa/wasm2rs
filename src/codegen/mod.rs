@@ -2388,14 +2388,16 @@ fn continuation_bodies(funcs: &[FuncInput<'_>]) -> Result<Vec<u32>, TranspileErr
     Ok(bodies)
 }
 
-/// The functions that can transitively reach a `suspend`: either directly in
-/// their own body, or through a `call`/`return_call` to another function that
-/// can. Computed as a fixpoint over the direct-call graph (full index space).
+/// The functions that can transitively reach a control transfer (`suspend` or
+/// `switch`): either directly in their own body, or through a `call`/`return_call`
+/// to another function that can. Computed as a fixpoint over the direct-call graph
+/// (full index space). A caller reaching one must itself become a step function so
+/// the transfer can propagate up through a cross-call checkpoint.
 ///
 /// Indirect edges (`call_indirect`/`call_ref`) are deliberately ignored: a step
 /// function may not cross them (they are rejected), and a continuation step
 /// function is barred from appearing in an element segment, so no indirect edge
-/// can reach one. Imported functions never suspend (they have no body).
+/// can reach one. Imported functions never transfer (they have no body).
 fn can_suspend_functions(
     funcs: &[FuncInput<'_>],
     n_imports: usize,
@@ -2405,7 +2407,7 @@ fn can_suspend_functions(
     for (i, input) in funcs.iter().enumerate() {
         for op in input.body.get_operators_reader()? {
             match op? {
-                Operator::Suspend { .. } => suspends[i] = true,
+                Operator::Suspend { .. } | Operator::Switch { .. } => suspends[i] = true,
                 Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
                     calls[i].push(function_index);
                 }
