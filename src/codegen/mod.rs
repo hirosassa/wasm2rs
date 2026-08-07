@@ -31,6 +31,7 @@ mod func;
 mod helpers;
 mod info;
 mod render;
+mod render_cont;
 mod runtime;
 mod simd_rt;
 mod wasi;
