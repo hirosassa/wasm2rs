@@ -202,6 +202,29 @@ impl WasiFn {
         )
     }
 
+    /// Whether this method resolves a guest path (or advertises the preopen's
+    /// name) against the instance's preopen root, so a module importing it needs
+    /// the `wasi_preopen` field. This is broader than `wasi_files`: the
+    /// non-`fd`-table `path_*` mutators resolve a path without a descriptor
+    /// table. `fd_filestat_get` is excluded — it operates on an open descriptor,
+    /// not a path.
+    pub(super) fn resolves_path(self) -> bool {
+        matches!(
+            self,
+            WasiFn::PathOpen
+                | WasiFn::FdPrestatGet
+                | WasiFn::FdPrestatDirName
+                | WasiFn::FdReaddir
+                | WasiFn::PathFilestatGet
+                | WasiFn::PathCreateDirectory
+                | WasiFn::PathRemoveDirectory
+                | WasiFn::PathUnlinkFile
+                | WasiFn::PathRename
+                | WasiFn::PathSymlink
+                | WasiFn::PathLink
+        )
+    }
+
     /// The Rust source for this WASI method's inherent-method definition. When
     /// `files` is set the module also imports the preopen/`path_open` functions,
     /// so `fd_read`/`fd_write`/`fd_seek`/`fd_close` route descriptors >= 4 to the
@@ -451,28 +474,33 @@ impl WasiFn {
             ]),
             // `fd_prestat_get(fd, buf)` describes a preopened directory. Exactly
             // one is advertised: fd 3, whose 8-byte prestat is `{ tag: u8 = 0
-            // (dir), pr_name_len: u32 = 1 }`. Any other fd returns EBADF (8) so
-            // wasi-libc stops scanning for preopens.
+            // (dir), pr_name_len: u32 = <preopen name's byte length> }` (1 for the
+            // default "."). Any other fd returns EBADF (8) so wasi-libc stops
+            // scanning for preopens.
             WasiFn::FdPrestatGet => owned(&[
                 "fn wasi_fd_prestat_get(&mut self, a0: i32, a1: i32) -> i32 {",
+                "    use std::os::unix::ffi::OsStrExt;",
                 "    if a0 != 3 {",
                 "        return 8;",
                 "    }",
+                "    let name_len = self.wasi_preopen.as_os_str().as_bytes().len() as u32;",
                 "    let b = a1 as u32 as usize;",
                 "    let mut pre = [0u8; 8];",
-                "    pre[4..8].copy_from_slice(&1u32.to_le_bytes());",
+                "    pre[4..8].copy_from_slice(&name_len.to_le_bytes());",
                 "    self.mem_mut()[b..b + 8].copy_from_slice(&pre);",
                 "    0",
                 "}",
             ]),
             // `fd_prestat_dir_name(fd, path, path_len)` writes the preopen's name.
-            // fd 3 is the current directory, named ".". Other fds are EBADF (8).
+            // fd 3 is the preopen directory, named by the configured preopen root
+            // (the process CWD "." by default). Other fds are EBADF (8).
             WasiFn::FdPrestatDirName => owned(&[
                 "fn wasi_fd_prestat_dir_name(&mut self, a0: i32, a1: i32, a2: i32) -> i32 {",
+                "    use std::os::unix::ffi::OsStrExt;",
                 "    if a0 != 3 {",
                 "        return 8;",
                 "    }",
-                "    let name = b\".\";",
+                "    let name = self.wasi_preopen.as_os_str().as_bytes().to_vec();",
                 "    let p = a1 as u32 as usize;",
                 "    let n = (a2 as u32 as usize).min(name.len());",
                 "    self.mem_mut()[p..p + n].copy_from_slice(&name[..n]);",
@@ -522,7 +550,8 @@ impl WasiFn {
                 "    if trunc {",
                 "        opts.truncate(true);",
                 "    }",
-                "    let file = match opts.open(&rel) {",
+                "    let full = self.wasi_preopen.join(&rel);",
+                "    let file = match opts.open(&full) {",
                 "        Ok(f) => f,",
                 "        Err(e) => return match e.kind() {",
                 "            std::io::ErrorKind::NotFound => 44,",
@@ -532,8 +561,8 @@ impl WasiFn {
                 "        },",
                 "    };",
                 "    let idx = match self.wasi_fds.iter().position(|s| s.is_none()) {",
-                "        Some(i) => { self.wasi_fds[i] = Some((file, rel)); i }",
-                "        None => { self.wasi_fds.push(Some((file, rel))); self.wasi_fds.len() - 1 }",
+                "        Some(i) => { self.wasi_fds[i] = Some((file, full)); i }",
+                "        None => { self.wasi_fds.push(Some((file, full))); self.wasi_fds.len() - 1 }",
                 "    };",
                 "    let fd = idx as u32 + 4;",
                 "    let w = a8 as u32 as usize;",
@@ -698,7 +727,7 @@ impl WasiFn {
                 "            _ => return 76,",
                 "        }",
                 "    }",
-                "    let meta = match std::fs::metadata(&rel) {",
+                "    let meta = match std::fs::metadata(self.wasi_preopen.join(&rel)) {",
                 "        Ok(m) => m,",
                 "        Err(e) => return match e.kind() {",
                 "            std::io::ErrorKind::NotFound => 44,",
@@ -784,7 +813,7 @@ impl WasiFn {
                 body
             }
             // `fd_readdir(fd, buf, buf_len, cookie, bufused)` enumerates a
-            // directory: fd 3 is the preopen ".", and fd >= 4 is a directory
+            // directory: fd 3 is the preopen root, and fd >= 4 is a directory
             // opened via `path_open` (whose recorded path is re-opened with
             // `read_dir`). It writes packed `dirent` records (a 24-byte header
             // then the name) starting at `cookie`, stores the byte count at
@@ -798,7 +827,7 @@ impl WasiFn {
                 "    use std::os::unix::ffi::OsStrExt;",
                 "    use std::os::unix::fs::DirEntryExt;",
                 "    let dir = if a0 == 3 {",
-                "        std::path::PathBuf::from(\".\")",
+                "        self.wasi_preopen.clone()",
                 "    } else {",
                 "        let idx = a0 as u32 as usize;",
                 "        match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()) {",
@@ -878,10 +907,11 @@ fn path_mutate_lines(method: &str, op: &str) -> Vec<String> {
 }
 
 /// Emit the lines that read a UTF-8 path from linear memory at (`ptr_arg`,
-/// `len_arg`) and build a lexically-contained relative `PathBuf` bound to a
-/// local named `out`. An absolute path or a `..` escape returns ENOTCAPABLE
-/// (76); invalid UTF-8 returns EINVAL (28). The scratch locals are derived from
-/// `out`, so two calls in one body (e.g. `path_rename`) do not collide.
+/// `len_arg`), lexically contain it, and bind the result — resolved against the
+/// instance's preopen root — to a local named `out`. An absolute path or a `..`
+/// escape returns ENOTCAPABLE (76); invalid UTF-8 returns EINVAL (28). The
+/// scratch locals are derived from `out`, so two calls in one body (e.g.
+/// `path_rename`) do not collide.
 fn contain_path(out: &str, ptr_arg: &str, len_arg: &str) -> Vec<String> {
     vec![
         format!("    let {out}_p = {ptr_arg} as u32 as usize;"),
@@ -890,14 +920,15 @@ fn contain_path(out: &str, ptr_arg: &str, len_arg: &str) -> Vec<String> {
         format!(
             "    let {out}_s = match std::str::from_utf8(&{out}_raw) {{ Ok(s) => s.to_owned(), Err(_) => return 28 }};"
         ),
-        format!("    let mut {out} = std::path::PathBuf::new();"),
+        format!("    let mut {out}_rel = std::path::PathBuf::new();"),
         format!("    for comp in std::path::Path::new(&{out}_s).components() {{"),
         "        match comp {".to_string(),
-        format!("            std::path::Component::Normal(c) => {out}.push(c),"),
+        format!("            std::path::Component::Normal(c) => {out}_rel.push(c),"),
         "            std::path::Component::CurDir => {}".to_string(),
         "            _ => return 76,".to_string(),
         "        }".to_string(),
         "    }".to_string(),
+        format!("    let {out} = self.wasi_preopen.join(&{out}_rel);"),
     ]
 }
 
