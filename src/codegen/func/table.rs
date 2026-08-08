@@ -139,10 +139,23 @@ impl<'a> super::FuncGen<'a> {
         dest: &Val,
         src: &Val,
         len: &Val,
+        unchecked: bool,
     ) {
+        // `unchecked` (opt-in `unsafe_memory`, memory.init only) drops the slice
+        // bounds check on both the destination memory and the segment source,
+        // turning an out-of-range copy into undefined behaviour rather than a
+        // trap.
+        let (dst_slice, seg_slice) = if unchecked {
+            (
+                format!("(*unsafe {{ {dst}.get_unchecked_mut(d..d + n) }})"),
+                "unsafe { seg.get_unchecked(s..s + n) }".to_string(),
+            )
+        } else {
+            (format!("{dst}[d..d + n]"), "&seg[s..s + n]".to_string())
+        };
         self.line(format!(
             "{{ let seg = {src_seg}; let n = ({}) as usize; let s = ({}) as usize; \
-             let d = ({}) as usize; {dst}[d..d + n].copy_from_slice(&seg[s..s + n]); }}",
+             let d = ({}) as usize; {dst_slice}.copy_from_slice({seg_slice}); }}",
             len.code, src.code, dest.code
         ));
     }
@@ -161,7 +174,17 @@ impl<'a> super::FuncGen<'a> {
             let (_, dst_get_mut) = mem_accessor(mem);
             format!("self.{dst_get_mut}()")
         };
-        self.emit_bulk_init(&dst, &format!("self.data{data_index}"), &dest, &src, &len);
+        // Unchecked memory access is opt-in and not wired through the shared
+        // memory's lock, so it applies only to a non-shared memory.
+        let unchecked = self.ctx.unsafe_memory && !self.ctx.memory_shared;
+        self.emit_bulk_init(
+            &dst,
+            &format!("self.data{data_index}"),
+            &dest,
+            &src,
+            &len,
+            unchecked,
+        );
         Ok(())
     }
 
@@ -182,6 +205,8 @@ impl<'a> super::FuncGen<'a> {
             &dest,
             &src,
             &len,
+            // Table storage is out of scope for unchecked memory access.
+            false,
         );
         Ok(())
     }

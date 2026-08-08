@@ -204,3 +204,48 @@ fn unreadable_input_file_fails_with_a_read_error() {
         "expected a read error on stderr, got: {stderr:?}",
     );
 }
+
+/// A module that writes to a temp `.wasm` file for the `--unsafe-memory` tests:
+/// one memory, one `i32.load`, one `i32.store`. Returns `(dir, input_path)`.
+fn write_memory_wasm(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let wat = r#"(module
+        (memory 1)
+        (func (export "l") (param i32) (result i32) (i32.load (local.get 0)))
+        (func (export "s") (param i32 i32) (i32.store (local.get 0) (local.get 1))))"#;
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    let dir = std::env::temp_dir().join(format!("wasm2rs_cli_{name}"));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let input = dir.join("in.wasm");
+    std::fs::write(&input, wasm).expect("write wasm");
+    (dir, input)
+}
+
+/// `--unsafe-memory` makes the CLI emit unchecked (`get_unchecked`) memory
+/// access; without it the default output stays bounds-checked.
+#[test]
+fn unsafe_memory_flag_emits_unchecked_access() {
+    let (_dir, input) = write_memory_wasm("unsafe_flag");
+
+    let safe = Command::new(wasm2rs_bin())
+        .arg(&input)
+        .output()
+        .expect("run wasm2rs");
+    assert!(safe.status.success(), "safe run exited nonzero");
+    let safe_src = String::from_utf8_lossy(&safe.stdout);
+    assert!(
+        !safe_src.contains("get_unchecked"),
+        "default output must stay bounds-checked",
+    );
+
+    let unsafe_out = Command::new(wasm2rs_bin())
+        .arg("--unsafe-memory")
+        .arg(&input)
+        .output()
+        .expect("run wasm2rs");
+    assert!(unsafe_out.status.success(), "unsafe run exited nonzero");
+    let unsafe_src = String::from_utf8_lossy(&unsafe_out.stdout);
+    assert!(
+        unsafe_src.contains("get_unchecked") && unsafe_src.contains("unsafe"),
+        "--unsafe-memory must emit unchecked access:\n{unsafe_src}",
+    );
+}

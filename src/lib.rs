@@ -91,6 +91,22 @@ impl SplitOptions {
     }
 }
 
+/// Code-generation options that change the emitted Rust (as opposed to how it is
+/// split across files, which is [`SplitOptions`]).
+///
+/// The default is the safe, portable output produced by [`transpile`]; set a
+/// field to opt into a faster-but-less-safe lowering.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TranspileOptions {
+    /// Emit unchecked (`unsafe`) linear-memory access: every load/store and bulk
+    /// `memory.*` drops its Rust slice bounds check and reads/writes through
+    /// `get_unchecked`, gaining speed. **An out-of-bounds access then becomes
+    /// undefined behaviour instead of a wasm trap**, so this is sound only for
+    /// modules you trust to stay in bounds. Off by default. Not applied to a
+    /// `shared` memory.
+    pub unsafe_memory: bool,
+}
+
 /// The recommended `Cargo.toml` for a split crate, named `package_name`.
 ///
 /// A split module is emitted as a bare `lib.rs` root plus `funcs_{n}.rs` chunks
@@ -129,13 +145,7 @@ pub fn cargo_manifest(package_name: &str) -> String {
 /// use `transpile_split` when a module is large enough that one file is
 /// impractical to compile.
 pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
-    let mut code = None;
-    transpile_split(wasm, &SplitOptions::single_file(), |file| {
-        code = Some(file.code);
-        Ok(())
-    })?;
-    // The single-file path always emits exactly one file.
-    code.ok_or_else(|| TranspileError::Unsupported("no source emitted".into()))
+    transpile_with_options(wasm, &TranspileOptions::default())
 }
 
 /// Transpile a wasm binary, handing each generated [`SourceFile`] to `sink` as
@@ -146,9 +156,48 @@ pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
 /// function count) exactly one `lib.rs` is emitted, identical to [`transpile`].
 /// Otherwise the module is split into a `lib.rs` root plus `funcs_{n}.rs` chunk
 /// files that together form one Rust crate.
-pub fn transpile_split<F>(
+pub fn transpile_split<F>(wasm: &[u8], opts: &SplitOptions, sink: F) -> Result<(), TranspileError>
+where
+    F: FnMut(SourceFile) -> Result<(), TranspileError>,
+{
+    transpile_split_impl(wasm, opts, &TranspileOptions::default(), sink)
+}
+
+/// Transpile a wasm binary with explicit [`TranspileOptions`] into a single Rust
+/// source string — like [`transpile`], but able to opt into codegen options such
+/// as [`TranspileOptions::unsafe_memory`].
+pub fn transpile_with_options(
+    wasm: &[u8],
+    opts: &TranspileOptions,
+) -> Result<String, TranspileError> {
+    let mut code = None;
+    transpile_split_impl(wasm, &SplitOptions::single_file(), opts, |file| {
+        code = Some(file.code);
+        Ok(())
+    })?;
+    // The single-file path always emits exactly one file.
+    code.ok_or_else(|| TranspileError::Unsupported("no source emitted".into()))
+}
+
+/// Split-transpile a wasm binary with explicit [`TranspileOptions`], handing each
+/// [`SourceFile`] to `sink` as it completes (see [`transpile_split`]). Use this
+/// when a large module needs both file splitting and codegen options.
+pub fn transpile_split_with_options<F>(
+    wasm: &[u8],
+    split: &SplitOptions,
+    opts: &TranspileOptions,
+    sink: F,
+) -> Result<(), TranspileError>
+where
+    F: FnMut(SourceFile) -> Result<(), TranspileError>,
+{
+    transpile_split_impl(wasm, split, opts, sink)
+}
+
+fn transpile_split_impl<F>(
     wasm: &[u8],
     opts: &SplitOptions,
+    topts: &TranspileOptions,
     mut sink: F,
 ) -> Result<(), TranspileError>
 where
@@ -474,6 +523,7 @@ where
         table: table.as_ref(),
         elements: &elements,
         tags: &tags,
+        unsafe_memory: topts.unsafe_memory,
     };
     codegen::generate_module_split(
         &parts,

@@ -100,6 +100,11 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) tags: TagTypes,
     /// The typed-continuations analysis (`ctx.cont.bodies`/`step_set`/…).
     pub(crate) cont: ContInfo,
+    /// Opt-in: emit unchecked (`unsafe`) linear-memory access, dropping the
+    /// slice bounds check on every load/store and bulk `memory.*`. Off by
+    /// default; when set, an out-of-bounds access is undefined behaviour rather
+    /// than a wasm trap, so it is only sound for trusted modules.
+    pub(crate) unsafe_memory: bool,
 }
 impl ModuleCtx<'_> {
     /// Every concrete struct/array type index whose declared supertype chain
@@ -195,6 +200,8 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) table: Option<&'a TableInfo>,
     pub(crate) elements: &'a [ElemSegment],
     pub(crate) tags: &'a [TagInfo],
+    /// Opt-in unchecked linear-memory access (see [`ModuleCtx::unsafe_memory`]).
+    pub(crate) unsafe_memory: bool,
 }
 /// Derive the translation context from a module's raw parts.
 ///
@@ -320,6 +327,7 @@ pub(crate) fn build_ctx<'a>(
             checkpoint_callee,
             step_locals,
         },
+        unsafe_memory: parts.unsafe_memory,
     };
     Ok((ctx, stateful))
 }

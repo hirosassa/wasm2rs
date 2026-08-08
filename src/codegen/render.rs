@@ -84,6 +84,23 @@ pub(super) fn render_module(
 
     let mut lines: Vec<String> = Vec::new();
 
+    // Under the opt-in `unsafe_memory` mode the emitted linear-memory access is
+    // unchecked, so an out-of-bounds access is undefined behaviour rather than a
+    // wasm trap. Flag that at the top of the module (off by default, so the safe
+    // output stays byte-for-byte unchanged).
+    if ctx.unsafe_memory {
+        lines.push(
+            "// Built with `unsafe_memory`: linear-memory loads/stores and bulk `memory.*`"
+                .to_string(),
+        );
+        lines.push(
+            "// are UNCHECKED. An out-of-bounds access is undefined behaviour, not a wasm"
+                .to_string(),
+        );
+        lines.push("// trap. Only sound for modules trusted to stay in bounds.".to_string());
+        lines.push(String::new());
+    }
+
     // The `pub trait Imports` the instance dispatches host calls through.
     if layout.has_imports {
         lines.extend(import_trait_lines(
@@ -127,7 +144,11 @@ pub(super) fn render_module(
     inner.extend(memory_accessor_lines(parts, ctx));
     inner.extend(table_accessor_lines(parts));
     inner.extend(wasi_method_lines(parts.imports, layout.wasi_files));
-    inner.extend(helper_method_lines(used, ctx.memory_shared));
+    inner.extend(helper_method_lines(
+        used,
+        ctx.memory_shared,
+        ctx.unsafe_memory,
+    ));
     inner.extend(dispatch_method_block(
         ctx,
         dispatch_sigs,
@@ -623,7 +644,11 @@ fn wasi_method_lines(imports: &[ImportInfo], wasi_files: bool) -> Vec<String> {
 /// the historic single-memory helpers keep their position) then in the canonical
 /// `HELPER_ORDER` within each memory. A shared module (single memory 0) emits
 /// the variants that lock `self.memory.bytes()` instead of borrowing.
-fn helper_method_lines(used: &HashSet<(Helper, u32)>, memory_shared: bool) -> Vec<String> {
+fn helper_method_lines(
+    used: &HashSet<(Helper, u32)>,
+    memory_shared: bool,
+    unsafe_memory: bool,
+) -> Vec<String> {
     let mut inner: Vec<String> = Vec::new();
     let mut mem_indices: Vec<u32> = used.iter().map(|(_, mem)| *mem).collect();
     mem_indices.sort_unstable();
@@ -633,9 +658,12 @@ fn helper_method_lines(used: &HashSet<(Helper, u32)>, memory_shared: bool) -> Ve
             if used.contains(&(helper, mem)) {
                 inner.push(String::new());
                 if memory_shared {
+                    // The shared-memory backend locks `self.memory.bytes()` per
+                    // body; unchecked access is not wired through that guard, so
+                    // `unsafe_memory` does not apply to a shared memory.
                     inner.extend(shared_helper_lines(helper));
                 } else {
-                    inner.extend(helper_lines(helper, mem));
+                    inner.extend(helper_lines(helper, mem, unsafe_memory));
                 }
             }
         }

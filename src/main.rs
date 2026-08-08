@@ -12,7 +12,10 @@
 use std::io::Write as _;
 use std::process::ExitCode;
 
-use wasm2rs::{SplitOptions, cargo_manifest, transpile_split};
+use wasm2rs::{
+    SplitOptions, TranspileOptions, cargo_manifest, transpile_split_with_options,
+    transpile_with_options,
+};
 
 // Transpiling a huge module churns roughly a gigabyte of output through
 // countless short-lived `String` allocations. The system allocator keeps the
@@ -25,7 +28,8 @@ use wasm2rs::{SplitOptions, cargo_manifest, transpile_split};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]";
+const USAGE: &str =
+    "usage: wasm2rs [--unsafe-memory] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -52,21 +56,32 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let mut args = std::env::args().skip(1);
+    // Flags may appear anywhere; the remaining positional arguments keep their
+    // order. `--unsafe-memory` opts into unchecked linear-memory access.
+    let mut unsafe_memory = false;
+    let mut positional: Vec<String> = Vec::new();
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--unsafe-memory" => unsafe_memory = true,
+            _ => positional.push(arg),
+        }
+    }
+    let mut args = positional.into_iter();
     let input = args.next().ok_or(USAGE)?;
     let output = args.next();
     let funcs_per_file = parse_usize_arg(args.next(), "funcs_per_file")?;
     let max_bytes_per_file = parse_usize_arg(args.next(), "max_bytes_per_file")?;
 
     let wasm = std::fs::read(&input).map_err(|e| format!("cannot read {input}: {e}"))?;
+    let topts = TranspileOptions { unsafe_memory };
 
     // Splitting into files requires a target directory to write them into.
     if funcs_per_file > 0 || max_bytes_per_file > 0 {
         let dir = output.ok_or("splitting requires an output directory")?;
-        return write_split(&wasm, &dir, funcs_per_file, max_bytes_per_file);
+        return write_split(&wasm, &dir, funcs_per_file, max_bytes_per_file, &topts);
     }
 
-    let rust = wasm2rs::transpile(&wasm).map_err(|e| e.to_string())?;
+    let rust = transpile_with_options(&wasm, &topts).map_err(|e| e.to_string())?;
     match output {
         Some(path) => {
             std::fs::write(&path, rust).map_err(|e| format!("cannot write {path}: {e}"))?;
@@ -117,6 +132,7 @@ fn write_split(
     dir: &str,
     funcs_per_file: usize,
     max_bytes_per_file: usize,
+    topts: &TranspileOptions,
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
 
@@ -133,7 +149,7 @@ fn write_split(
         max_bytes_per_file,
     };
     let mut write_err: Option<String> = None;
-    let result = transpile_split(wasm, &opts, |file| {
+    let result = transpile_split_with_options(wasm, &opts, topts, |file| {
         let path = std::path::Path::new(dir).join(&file.name);
         if let Err(e) = std::fs::write(&path, &file.code) {
             // Record the first I/O failure and stop; the transpile itself is

@@ -145,12 +145,100 @@ pub(super) const HELPER_ORDER: [Helper; 50] = [
 /// `i > 0` the method name gains an `_m{i}` suffix and the body borrows
 /// `self.mem{i}()`/`self.mem{i}_mut()`, so each memory owns an independent
 /// helper set.
-pub(super) fn helper_lines(helper: Helper, mem: u32) -> Vec<String> {
+pub(super) fn helper_lines(helper: Helper, mem: u32, unsafe_memory: bool) -> Vec<String> {
     let base = base_helper_lines(helper);
+    // The unchecked rewrite runs on the memory-0 template (whose accessors are
+    // the literal `self.mem()`/`self.mem_mut()`) before `specialise_helper_lines`
+    // retargets them to `mem{i}`, so both memory 0 and `i > 0` get the same
+    // bounds-check removal.
+    let base = if unsafe_memory {
+        unchecked_helper_lines(helper, base)
+    } else {
+        base
+    };
     if mem == 0 {
         return base;
     }
     specialise_helper_lines(helper, mem, base)
+}
+
+/// Rewrite a memory-0 helper template to its unchecked (`unsafe`) form for the
+/// opt-in `unsafe_memory` mode: every `self.mem()[idx]` / `self.mem_mut()[idx]`
+/// slice access drops its bounds check and reads/writes through
+/// `get_unchecked`(`_mut`), and the method is marked `#[inline(always)]`.
+///
+/// `memory.copy` uses `copy_within` (no `[..]` access to rewrite), so it is
+/// swapped for an explicit `ptr::copy` (memmove, overlap-safe). `memory.grow`
+/// and the `table_*` helpers touch no linear-memory slice, so they are returned
+/// unchanged. An out-of-bounds access under this mode is undefined behaviour.
+fn unchecked_helper_lines(helper: Helper, base: Vec<String>) -> Vec<String> {
+    match helper {
+        // `copy_within` is bounds-checked and has no `self.mem()[..]` to rewrite;
+        // replace the whole body with an explicit memmove over raw pointers.
+        Helper::MemoryCopy => vec![
+            "#[inline(always)]".to_string(),
+            "fn memory_copy(&mut self, dest: u32, src: u32, len: u32) {".to_string(),
+            "    let s = src as usize;".to_string(),
+            "    let d = dest as usize;".to_string(),
+            "    let n = len as usize;".to_string(),
+            "    let p = self.mem_mut().as_mut_ptr();".to_string(),
+            "    // SAFETY: unsafe_memory opt-in; the range is assumed in-bounds. \
+             `ptr::copy` is memmove, so overlapping source and destination copy \
+             correctly."
+                .to_string(),
+            "    unsafe { core::ptr::copy(p.add(s), p.add(d), n); }".to_string(),
+            "}".to_string(),
+        ],
+        // These touch no linear-memory slice, so there is nothing to make
+        // unchecked: emit the safe template verbatim.
+        Helper::Grow | Helper::TableCopy | Helper::TableFill => base,
+        _ => {
+            let mut out = Vec::with_capacity(base.len() + 1);
+            out.push("#[inline(always)]".to_string());
+            for line in base {
+                out.push(rewrite_memory_index_unchecked(&line));
+            }
+            out
+        }
+    }
+}
+
+/// Rewrite every `self.mem()[EXPR]` / `self.mem_mut()[EXPR]` in one line to a
+/// bounds-check-free `(*unsafe {{ ACCESSOR.get_unchecked[_mut](EXPR) }})`.
+///
+/// Wrapping the dereferenced `get_unchecked` result in parentheses reproduces
+/// the original indexing *place* expression, so the surrounding syntax — a
+/// leading `&`, a trailing `.try_into()`/`.copy_from_slice()`/`.fill()`, an `as`
+/// cast, or an assignment `=` — continues to type-check unchanged. `get_unchecked`
+/// accepts both a range (yielding `&[u8]`) and a single index (`&u8`), so one
+/// rewrite covers scalar, v128, lane and `memory.fill` helpers alike.
+fn rewrite_memory_index_unchecked(line: &str) -> String {
+    // `self.mem_mut()` must be handled before `self.mem()` (it is the longer
+    // accessor); neither literal is a substring of the other's rewrite output,
+    // so the two passes do not interfere.
+    let line = rewrite_accessor_unchecked(line, "self.mem_mut()", "get_unchecked_mut");
+    rewrite_accessor_unchecked(&line, "self.mem()", "get_unchecked")
+}
+
+/// Replace each `{accessor}[EXPR]` in `line` with
+/// `(*unsafe {{ {accessor}.{method}(EXPR) }})`. A helper-template index never
+/// contains `[`/`]`, so the matching `]` is simply the next one.
+fn rewrite_accessor_unchecked(line: &str, accessor: &str, method: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    let open = format!("{accessor}[");
+    while let Some(pos) = rest.find(&open) {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + open.len()..];
+        let close = after
+            .find(']')
+            .expect("a memory-helper index is always closed on the same line");
+        let expr = &after[..close];
+        out.push_str(&format!("(*unsafe {{ {accessor}.{method}({expr}) }})"));
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Specialise the memory-0 template to memory `i > 0`: rename the method and

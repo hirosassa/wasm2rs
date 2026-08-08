@@ -77,6 +77,7 @@ mod tail_call;
 mod tier2;
 mod traps;
 mod unreachable;
+mod unsafe_memory;
 mod unsupported;
 mod wasi;
 mod wasi_fs;
