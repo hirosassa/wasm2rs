@@ -3,3 +3,6 @@
 
 # Coverage artifacts (cargo llvm-cov)
 /lcov.info
+
+# scratch/working docs
+tmp/
