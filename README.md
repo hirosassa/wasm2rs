@@ -1,5 +1,10 @@
 # wasm2rs
 
+[![Crates.io](https://img.shields.io/crates/v/wasm2rs.svg)](https://crates.io/crates/wasm2rs)
+[![Documentation](https://docs.rs/wasm2rs/badge.svg)](https://docs.rs/wasm2rs)
+[![build](https://github.com/hirosassa/wasm2rs/actions/workflows/test.yaml/badge.svg?branch=main)](https://github.com/hirosassa/wasm2rs/actions/workflows/test.yaml)
+[![codecov](https://codecov.io/gh/hirosassa/wasm2rs/branch/main/graph/badge.svg)](https://codecov.io/gh/hirosassa/wasm2rs)
+
 **wasm2rs** transpiles a WebAssembly binary into standalone, native Rust source code.
 
 Instead of embedding a WebAssembly runtime and JIT-compiling a `.wasm` module at startup, wasm2rs turns the module into ordinary Rust that you compile with `rustc`/`cargo` like any other crate.
@@ -14,11 +19,43 @@ The generated code preserves WebAssembly semantics (wrapping arithmetic, linear-
 
 ## Installation
 
+### Download a prebuilt binary
+
+Prebuilt binaries for Linux, macOS, and Windows are attached to each [GitHub Release](https://github.com/hirosassa/wasm2rs/releases).
+Pick the archive for your platform, extract it, and put the `wasm2rs` binary somewhere on your `PATH`.
+
+```bash
+# Linux (x86_64) — adjust the target and version to match your platform / the latest release
+curl -sSL https://github.com/hirosassa/wasm2rs/releases/latest/download/wasm2rs-x86_64-unknown-linux-gnu.tar.gz \
+  | tar xz
+sudo mv wasm2rs /usr/local/bin/
+
+# macOS (Apple Silicon)
+curl -sSL https://github.com/hirosassa/wasm2rs/releases/latest/download/wasm2rs-aarch64-apple-darwin.tar.gz \
+  | tar xz
+sudo mv wasm2rs /usr/local/bin/
+```
+
+Available targets:
+
+| Platform | Archive |
+|---|---|
+| Linux x86_64 | `wasm2rs-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux aarch64 | `wasm2rs-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `wasm2rs-x86_64-apple-darwin.tar.gz` |
+| macOS aarch64 | `wasm2rs-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `wasm2rs-x86_64-pc-windows-msvc.zip` |
+
+### Build from source
+
 Requires a Rust toolchain (2024 edition).
 
 ```bash
 # Install from a local checkout
 cargo install --path .
+
+# Or install the published crate from crates.io
+cargo install wasm2rs
 
 # Or just build
 cargo build --release
