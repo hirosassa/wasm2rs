@@ -39,7 +39,7 @@ fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
         .current_dir(&dir)
         .arg(&src)
         .arg("--edition")
-        .arg("2021")
+        .arg("2024")
         // Deny warnings so any lint the generated code does not explicitly allow
         // (e.g. genuinely unreachable code from a codegen bug) fails the test.
         .arg("-D")

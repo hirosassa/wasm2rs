@@ -2,6 +2,12 @@
 name = "wasm2rs"
 version = "0.1.0"
 edition = "2024"
+description = "Transpile WebAssembly binaries into standalone native Rust source code."
+license = "MIT"
+repository = "https://github.com/hirosassa/wasm2rs"
+readme = "README.md"
+keywords = ["webassembly", "wasm", "transpiler", "codegen"]
+categories = ["compilers", "development-tools", "wasm"]
 # Integration tests are consolidated into a single binary (`tests/it/main.rs`)
 # so the suite links once instead of once per file; disable auto-discovery so
 # the sole target below is the only integration-test crate.
@@ -13,9 +19,17 @@ autotests = false
 name = "it"
 path = "tests/it/main.rs"
 
+# `cli` (default) is what the `wasm2rs` binary needs; it pulls in mimalloc as the
+# global allocator to keep peak RSS down on huge modules (see `src/main.rs`).
+# Library users can depend on this crate with `default-features = false` to avoid
+# building mimalloc's C code, since the library never uses it.
+[features]
+default = ["cli"]
+cli = ["dep:mimalloc"]
+
 [dependencies]
 wasmparser = "0.255.0"
-mimalloc = "0.1"
+mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
 wat = "1.255.0"

@@ -125,7 +125,7 @@ pub fn cargo_manifest(package_name: &str) -> String {
         "[package]\n\
          name = \"{package_name}\"\n\
          version = \"0.1.0\"\n\
-         edition = \"2021\"\n\
+         edition = \"2024\"\n\
          \n\
          [lib]\n\
          path = \"lib.rs\"\n\

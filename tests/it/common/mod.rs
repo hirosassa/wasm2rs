@@ -36,7 +36,7 @@ use wasm2rs::{SourceFile, SplitOptions, transpile_split};
 /// the cache key covers them: changing a flag must invalidate cached binaries.
 const RUSTC_FLAGS: &[&str] = &[
     "--edition",
-    "2021",
+    "2024",
     "-D",
     "warnings",
     "-C",
@@ -127,7 +127,7 @@ pub fn compile_run_split(
         .current_dir(&dir)
         .arg("lib.rs")
         .arg("--edition")
-        .arg("2021")
+        .arg("2024")
         .arg("-D")
         .arg("warnings")
         .arg("-o")

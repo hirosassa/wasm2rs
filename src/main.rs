@@ -24,7 +24,11 @@ use wasm2rs::{
 // live structure — dominates peak memory. mimalloc returns memory to the OS far
 // more readily: on the googlesql benchmark it cuts peak RSS from ~4.35GB to
 // ~2.63GB. It is set only on the binary, so the library's own allocator choice
-// is left to its embedder.
+// is left to its embedder. Gated on the `cli` feature (on by default) so a
+// library consumer building with `default-features = false` never compiles
+// mimalloc's C code; without it the binary just falls back to the system
+// allocator.
+#[cfg(feature = "cli")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

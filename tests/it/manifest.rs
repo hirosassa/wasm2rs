@@ -71,13 +71,13 @@ fn manifest_release_profile_is_size_optimized_but_fast() {
 }
 
 #[test]
-fn manifest_is_stable_and_uses_edition_2021() {
-    // The generated Rust is compiled at edition 2021 elsewhere in the test suite;
+fn manifest_is_stable_and_uses_edition_2024() {
+    // The generated Rust is compiled at edition 2024 elsewhere in the test suite;
     // the manifest must agree so the emitted crate builds identically.
     let m = cargo_manifest("m");
     assert!(
-        m.contains("edition = \"2021\""),
-        "expected edition 2021:\n{m}"
+        m.contains("edition = \"2024\""),
+        "expected edition 2024:\n{m}"
     );
     // Deterministic output: the same package name yields byte-identical bytes.
     assert_eq!(cargo_manifest("m"), cargo_manifest("m"));

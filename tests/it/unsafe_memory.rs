@@ -54,7 +54,7 @@ fn compile_and_run(test: &str, generated: &str, main_body: &str) {
         .current_dir(&dir)
         .arg(&src)
         .arg("--edition")
-        .arg("2021")
+        .arg("2024")
         .arg("-D")
         .arg("warnings")
         .arg("-o")

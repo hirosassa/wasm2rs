@@ -6,3 +6,6 @@
 
 # scratch/working docs
 tmp/
+
+# Claude Code local state
+.claude/

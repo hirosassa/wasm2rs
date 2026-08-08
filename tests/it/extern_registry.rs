@@ -46,7 +46,7 @@ fn compile(test: &str, modules: &[(&str, &str)], extra: &str) -> std::path::Path
         .current_dir(&dir)
         .arg(&src)
         .arg("--edition")
-        .arg("2021")
+        .arg("2024")
         .arg("-D")
         .arg("warnings")
         .arg("-o")

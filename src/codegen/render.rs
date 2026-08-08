@@ -711,7 +711,7 @@ struct SharedPark {
     waiters: std::collections::HashMap<u32, u32>,
     // addr -> notification generation; a waiter wakes when its address's
     // generation advances past the value captured on entry.
-    gen: std::collections::HashMap<u32, u64>,
+    generation: std::collections::HashMap<u32, u64>,
 }
 
 fn shared_width_mask(width: usize) -> u64 {
@@ -790,8 +790,8 @@ impl SharedMemory {
         let waiting = park.waiters.get(&addr).copied().unwrap_or(0);
         let n = waiting.min(count);
         if n > 0 {
-            let g = park.gen.get(&addr).copied().unwrap_or(0).wrapping_add(1);
-            park.gen.insert(addr, g);
+            let g = park.generation.get(&addr).copied().unwrap_or(0).wrapping_add(1);
+            park.generation.insert(addr, g);
             drop(park);
             self.0.cvar.notify_all();
         }
@@ -811,12 +811,12 @@ impl SharedMemory {
                 return 1;
             }
         }
-        let start = park.gen.get(&addr).copied().unwrap_or(0);
+        let start = park.generation.get(&addr).copied().unwrap_or(0);
         *park.waiters.entry(addr).or_insert(0) += 1;
         let result;
         if timeout_ns < 0 {
             loop {
-                if park.gen.get(&addr).copied().unwrap_or(0) != start {
+                if park.generation.get(&addr).copied().unwrap_or(0) != start {
                     result = 0;
                     break;
                 }
@@ -826,7 +826,7 @@ impl SharedMemory {
             let deadline = std::time::Instant::now()
                 + std::time::Duration::from_nanos(timeout_ns as u64);
             loop {
-                if park.gen.get(&addr).copied().unwrap_or(0) != start {
+                if park.generation.get(&addr).copied().unwrap_or(0) != start {
                     result = 0;
                     break;
                 }
@@ -837,7 +837,7 @@ impl SharedMemory {
                 }
                 let (g, to) = self.0.cvar.wait_timeout(park, deadline - now).unwrap();
                 park = g;
-                if to.timed_out() && park.gen.get(&addr).copied().unwrap_or(0) == start {
+                if to.timed_out() && park.generation.get(&addr).copied().unwrap_or(0) == start {
                     result = 2;
                     break;
                 }

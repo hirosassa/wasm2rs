@@ -59,7 +59,7 @@ fn generated_add_compiles_and_produces_correct_result() {
         .current_dir(&dir)
         .arg(&src)
         .arg("--edition")
-        .arg("2021")
+        .arg("2024")
         // Deny warnings so the generated code is proven to be warning-free.
         .arg("-D")
         .arg("warnings")

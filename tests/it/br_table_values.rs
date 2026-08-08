@@ -37,7 +37,7 @@ fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
         .current_dir(&dir)
         .arg(&src)
         .arg("--edition")
-        .arg("2021")
+        .arg("2024")
         .arg("-D")
         .arg("warnings")
         .arg("-o")
