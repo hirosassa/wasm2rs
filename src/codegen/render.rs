@@ -28,6 +28,7 @@ struct Layout {
     mem_imported: bool,
     table_imported: bool,
     wasi_files: bool,
+    wasi_preopen: bool,
     global_base: usize,
 }
 
@@ -51,11 +52,19 @@ impl Layout {
                 )
             )
         });
+        // Any path-resolving/preopen-naming WASI import (broader than
+        // `wasi_files`, which needs only the fd-table subset) requires the
+        // configurable preopen root, defaulting to the process CWD (".").
+        let wasi_preopen = parts
+            .imports
+            .iter()
+            .any(|im| im.wasi.is_some_and(WasiFn::resolves_path));
         Layout {
             has_imports: needs_host_trait(parts),
             mem_imported,
             table_imported,
             wasi_files,
+            wasi_preopen,
             // Defined globals are named by their full index, i.e. after the
             // imported globals in the shared global index space.
             global_base: parts.imported_globals.len(),
@@ -290,6 +299,12 @@ fn instance_field_lines(
     if layout.wasi_files {
         lines.push("    wasi_fds: Vec<Option<(std::fs::File, std::path::PathBuf)>>,".to_string());
     }
+    // The single WASI preopen's host root: guest paths resolve within it and its
+    // name is advertised through `fd_prestat_dir_name`. Defaults to the process
+    // CWD ("."); `with_preopen_root` re-points it.
+    if layout.wasi_preopen {
+        lines.push("    wasi_preopen: std::path::PathBuf,".to_string());
+    }
     // A retained passive segment is a `&'static` slice; `data.drop`/`elem.drop`
     // reset it to an empty slice.
     for (d, seg) in data.iter().enumerate() {
@@ -340,6 +355,7 @@ fn constructor_lines(
     let mem_imported = layout.mem_imported;
     let table_imported = layout.table_imported;
     let wasi_files = layout.wasi_files;
+    let wasi_preopen = layout.wasi_preopen;
     let global_base = layout.global_base;
 
     let mut inner: Vec<String> = Vec::new();
@@ -420,6 +436,9 @@ fn constructor_lines(
         }
         if wasi_files {
             inner.push("        wasi_fds: Vec::new(),".to_string());
+        }
+        if wasi_preopen {
+            inner.push("        wasi_preopen: std::path::PathBuf::from(\".\"),".to_string());
         }
         // Passive segments are retained as `&'static` slices of the module-scope
         // statics, so `memory.init`/`table.init` can copy from them on demand.
@@ -543,6 +562,21 @@ fn constructor_lines(
             }
             inner.push("    instance".to_string());
         }
+        inner.push("}".to_string());
+    }
+    // Re-point the single WASI preopen away from the process CWD. Guest
+    // `path_*`/`fd_readdir` calls then resolve within `root`, which is also the
+    // name advertised through `fd_prestat_dir_name`; absolute-path and `..`
+    // escapes are still refused. Chained after `new`, e.g.
+    // `Instance::new(host).with_preopen_root("/usr/share/zoneinfo")`.
+    if wasi_preopen {
+        inner.push(String::new());
+        inner.push(
+            "pub fn with_preopen_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {"
+                .to_string(),
+        );
+        inner.push("    self.wasi_preopen = root.into();".to_string());
+        inner.push("    self".to_string());
         inner.push("}".to_string());
     }
     Ok(inner)

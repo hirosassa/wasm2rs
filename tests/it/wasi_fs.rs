@@ -907,6 +907,59 @@ fn main() {
     let _ = std::fs::remove_file(&hard);
 }
 
+// `with_preopen_root` re-points the single preopen away from the process CWD.
+// `fd_prestat_dir_name` must then advertise the configured name (its byte
+// length in the prestat), so wasi-libc maps guest paths against that root.
+#[test]
+fn with_preopen_root_advertises_the_configured_name() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new().with_preopen_root(\"root_sub\");
+    assert_eq!(i.func2(), 8, \"probing fd 4 must report EBADF\");
+    assert_eq!(i.mem()[0], 0, \"fd 3 should be a preopen directory (tag 0)\");
+    let name_len = u32::from_le_bytes([i.mem()[4], i.mem()[5], i.mem()[6], i.mem()[7]]);
+    assert_eq!(name_len, 8, \"the preopen name \\\"root_sub\\\" is eight bytes\");
+    assert_eq!(&i.mem()[16..24], b\"root_sub\", \"the preopen dir name is the configured root\");
+}
+";
+    let (bin, dir) = compile("preopen_name", PRESTAT, extra);
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "custom preopen name assertions failed");
+}
+
+// With a custom preopen root, `path_open` resolves the guest path *within that
+// root*, not the process CWD. The file lives at `<cwd>/root_sub/input.txt`; the
+// child runs from `<cwd>`, so only a root redirect finds it (the default "."
+// preopen would look for `<cwd>/input.txt`, which does not exist).
+#[test]
+fn with_preopen_root_redirects_path_open() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new().with_preopen_root(\"root_sub\");
+    let errno = i.func2();
+    assert_eq!(errno, 0, \"read through the custom preopen root should succeed\");
+    let n = u32::from_le_bytes([i.mem()[8], i.mem()[9], i.mem()[10], i.mem()[11]]) as usize;
+    assert_eq!(&i.mem()[200..200 + n], b\"under-the-root\\n\");
+}
+";
+    let (bin, dir) = compile("preopen_open", OPEN_READ, extra);
+    let root = dir.join("root_sub");
+    std::fs::create_dir_all(&root).expect("create preopen root");
+    std::fs::write(root.join("input.txt"), b"under-the-root\n").expect("write input file");
+    let _ = std::fs::remove_file(dir.join("input.txt"));
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(
+        status.success(),
+        "custom preopen path_open assertions failed"
+    );
+}
+
 #[test]
 fn fd_readdir_rejects_a_bogus_fd() {
     // A descriptor that was never opened is EBADF (8).
