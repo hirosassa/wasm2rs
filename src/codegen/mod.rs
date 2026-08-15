@@ -157,6 +157,11 @@ pub(crate) struct GenMeta {
     /// Whether the function uses legacy exception handling, so the module needs
     /// the [`EXC_TYPE`] definition.
     pub(crate) uses_eh: bool,
+    /// Shared state-struct definitions produced by splitting a large flattened
+    /// method's dispatch (see [`SplitPlan`]); emitted at the crate root so every
+    /// chunk's `use super::*` resolves them. Empty for a free function (whose
+    /// struct is emitted inline) or an un-split function.
+    pub(crate) state_structs: Vec<String>,
 }
 /// The lint-suppression attribute prefixed to generated functions/impls.
 const ALLOW: &str =

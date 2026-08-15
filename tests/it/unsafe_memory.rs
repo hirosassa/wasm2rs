@@ -33,6 +33,7 @@ fn transpile_unsafe(wat: &str) -> String {
         &wasm,
         &TranspileOptions {
             unsafe_memory: true,
+            ..Default::default()
         },
     )
     .expect("transpile ok")

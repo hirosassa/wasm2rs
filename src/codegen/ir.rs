@@ -721,13 +721,15 @@ pub(crate) fn flatten_body(
     nodes: Vec<Node>,
     trailing: Option<String>,
     returns_value: bool,
-) -> Vec<Node> {
+    split: Option<SplitPlan>,
+) -> DispatchArtifacts {
     let mut f = Flattener {
         arms: Vec::new(),
         next_state: 0,
         labels: HashMap::new(),
         uses_continue: false,
         allow_structured_loop: true,
+        split,
     };
     let start = f.alloc();
     let exit = f.alloc();
@@ -761,6 +763,7 @@ pub(crate) fn flatten_cont_body(nodes: Vec<Node>, exit_stmt: String) -> Vec<Node
         labels: HashMap::new(),
         uses_continue: false,
         allow_structured_loop: false,
+        split: None,
     };
     let start = f.alloc();
     let exit = f.alloc();

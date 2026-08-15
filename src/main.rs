@@ -63,8 +63,15 @@ fn run() -> Result<(), String> {
     // Flags may appear anywhere; the remaining positional arguments keep their
     // order. `--unsafe-memory` opts into unchecked linear-memory access.
     let mut unsafe_memory = false;
+    let mut split_dispatch = 0usize;
     let mut positional: Vec<String> = Vec::new();
     for arg in std::env::args().skip(1) {
+        if let Some(n) = arg.strip_prefix("--split-dispatch=") {
+            split_dispatch = n
+                .parse()
+                .map_err(|_| format!("invalid --split-dispatch value: {n}"))?;
+            continue;
+        }
         match arg.as_str() {
             "--unsafe-memory" => unsafe_memory = true,
             _ => positional.push(arg),
@@ -77,7 +84,10 @@ fn run() -> Result<(), String> {
     let max_bytes_per_file = parse_usize_arg(args.next(), "max_bytes_per_file")?;
 
     let wasm = std::fs::read(&input).map_err(|e| format!("cannot read {input}: {e}"))?;
-    let topts = TranspileOptions { unsafe_memory };
+    let topts = TranspileOptions {
+        unsafe_memory,
+        split_dispatch,
+    };
 
     // Splitting into files requires a target directory to write them into.
     if funcs_per_file > 0 || max_bytes_per_file > 0 {

@@ -388,6 +388,9 @@ impl super::FuncGen<'_> {
             simd: self.used_simd,
             dispatch_sigs: self.dispatch_sigs,
             uses_eh: self.uses_eh,
+            // Continuation step functions are already bounded, so they never
+            // split and contribute no shared state structs.
+            state_structs: Vec::new(),
         })
     }
 
@@ -514,6 +517,9 @@ impl super::FuncGen<'_> {
             simd: self.used_simd,
             dispatch_sigs: self.dispatch_sigs,
             uses_eh: self.uses_eh,
+            // Continuation step functions are already bounded, so they never
+            // split and contribute no shared state structs.
+            state_structs: Vec::new(),
         })
     }
 

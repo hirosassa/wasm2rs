@@ -1,7 +1,7 @@
 use wasmparser::ValType;
 
 use super::super::{
-    ALLOW, FLATTEN_DEPTH_THRESHOLD, GenMeta, Node, Val, can_flatten, default_value,
+    ALLOW, FLATTEN_DEPTH_THRESHOLD, GenMeta, Node, SplitPlan, Val, can_flatten, default_value,
     estimate_body_len, flatten_body, index_u32, push_body_line, render_body_into, rust_type,
     rust_types,
 };
@@ -411,19 +411,61 @@ impl<'a> super::FuncGen<'a> {
         // expression. When flattening, the tail is returned from the dispatch's
         // exit state instead.
         let flatten = self.max_depth > FLATTEN_DEPTH_THRESHOLD && can_flatten(&self.cur);
-        let (body, trailing) = if flatten {
+        // A flattened dispatch past `split_dispatch` arms is emitted as sibling
+        // part functions over a shared state struct (see [`SplitPlan`]). The part
+        // functions sit beside the driver (in the `impl` for a method), while the
+        // state struct must live at module scope: a free function's chunk already
+        // is module scope, but a method's `impl` block is not — so a method's
+        // struct is bubbled up through `GenMeta` and emitted at the crate root.
+        let (body, trailing, split) = if flatten {
+            let plan = SplitPlan {
+                max_arms: self.ctx.split_dispatch,
+                func_index: index,
+                is_method: self.ctx.is_method,
+                params: params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ty)| Ok((i, rust_type(*ty, self.ctx.type_kinds)?.to_string())))
+                    .collect::<Result<Vec<_>, TranspileError>>()?,
+                ret: match results {
+                    [] => None,
+                    [ty] => Some(rust_type(*ty, self.ctx.type_kinds)?.to_string()),
+                    many => Some(format!(
+                        "({})",
+                        rust_types(many, self.ctx.type_kinds)?.join(", ")
+                    )),
+                },
+            };
+            let artifacts = flatten_body(self.cur, self.trailing, !results.is_empty(), Some(plan));
             (
-                flatten_body(self.cur, self.trailing, !results.is_empty()),
+                artifacts.body,
                 None,
+                Some((artifacts.siblings, artifacts.state_struct)),
             )
         } else {
-            (self.cur, self.trailing)
+            (self.cur, self.trailing, None)
         };
 
         // Reserve the function's whole size in one go so appending it never
         // triggers repeated doublings of a multi-megabyte buffer.
         let body_bytes = estimate_body_len(&body);
         out.reserve(body_bytes + params_src.len() + ret.len() + ALLOW.len() + 32);
+
+        let (siblings, state_struct) = match split {
+            Some((siblings, state_struct)) => (siblings, state_struct),
+            None => (Vec::new(), String::new()),
+        };
+        // A free function's state struct precedes its driver at module scope; a
+        // method's is bubbled to the crate root instead (an `impl` cannot hold a
+        // struct definition).
+        let mut state_structs = Vec::new();
+        if !state_struct.is_empty() {
+            if self.ctx.is_method {
+                state_structs.push(state_struct);
+            } else {
+                out.push_str(&state_struct);
+            }
+        }
 
         // For a method the lint-suppression attribute is applied once on the
         // enclosing `impl`; free functions carry it individually.
@@ -444,12 +486,22 @@ impl<'a> super::FuncGen<'a> {
 
         out.push_str(line_prefix);
         out.push_str("}\n");
+
+        // The sibling part functions follow the driver, at the same scope.
+        for line in siblings {
+            if !line.is_empty() {
+                out.push_str(line_prefix);
+                out.push_str(&line);
+            }
+            out.push('\n');
+        }
         Ok(GenMeta {
             helpers: self.used_helpers,
             rt: self.used_rt,
             simd: self.used_simd,
             dispatch_sigs: self.dispatch_sigs,
             uses_eh: self.uses_eh,
+            state_structs,
         })
     }
 }

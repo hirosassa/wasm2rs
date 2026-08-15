@@ -1,6 +1,6 @@
 use super::*;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// One statement of a dispatch arm: its indent *relative to the arm body* (0 for
 /// an ordinary flat statement; >0 for lines nested inside a structured loop) and
@@ -24,6 +24,45 @@ pub(crate) struct Flattener {
     /// function and re-enter through the `pc` dispatch, which a structured Rust
     /// loop cannot express, so continuation loops always flatten.
     pub(crate) allow_structured_loop: bool,
+    /// When set (and the flattened dispatch has more arms than
+    /// [`SplitPlan::max_arms`]), split the dispatch into sibling part functions
+    /// over a shared state struct instead of rendering one giant function. The
+    /// continuation flattener leaves this `None` (its step functions are already
+    /// bounded and resume through `__frame.pc`).
+    pub(crate) split: Option<SplitPlan>,
+}
+/// The enclosing function's signature, threaded into the flattener so a split
+/// dispatch can synthesise the shared state struct, the part functions and the
+/// trampoline driver that match it.
+pub(crate) struct SplitPlan {
+    /// Cap on match arms per part function (`0` disables the split).
+    pub(crate) max_arms: usize,
+    /// The function index `N`, naming `S{N}` / `func{N}_part{k}`.
+    pub(crate) func_index: usize,
+    /// Whether the function is a `&mut self` method (its parts take `&mut self`
+    /// and the state struct lives at module scope) or a free function.
+    pub(crate) is_method: bool,
+    /// The function parameters as `(local index, Rust type)`; each becomes a
+    /// state-struct field `l{index}` the driver initialises from its argument.
+    pub(crate) params: Vec<(usize, String)>,
+    /// The Rust return type (`None` for a unit-returning function), wrapped as
+    /// `Option<_>` in each part's signature.
+    pub(crate) ret: Option<String>,
+}
+/// The pieces a (possibly split) dispatch renders to: the driver body that goes
+/// inside `func{N}`, the sibling part functions, and — when split — the shared
+/// state struct's definition (emitted at module scope). For an un-split dispatch
+/// `siblings` and `state_struct` are empty.
+pub(crate) struct DispatchArtifacts {
+    /// The driver body placed inside `func{N}` (rendered like any function body).
+    pub(crate) body: Vec<Node>,
+    /// The sibling part functions, each element one line at column-0-relative
+    /// indentation; the caller prepends its `line_prefix` (empty for a free
+    /// function, one level for a method inside its `impl`).
+    pub(crate) siblings: Vec<String>,
+    /// The shared state struct definition (multi-line, module scope); empty when
+    /// the dispatch was not split.
+    pub(crate) state_struct: String,
 }
 impl Flattener {
     pub(crate) fn alloc(&mut self) -> usize {
@@ -443,13 +482,25 @@ impl Flattener {
     /// hoisted to a declaration above the loop (kept in scope for all arms) while
     /// its initialising assignment — which may carry side effects and must run at
     /// its original program point — stays in the arm.
-    pub(crate) fn assemble(mut self, start: usize) -> Vec<Node> {
+    pub(crate) fn assemble(mut self, start: usize) -> DispatchArtifacts {
         let start = contract_pc_edges(&mut self.arms, start);
         // Fusing never removes a `continue 'sm` (those live only in conditional
         // `br_if` lines or structured-loop arms, neither of which is a linear
         // tail), so `self.uses_continue` stays accurate across the fold.
         fuse_linear_chains(&mut self.arms, start);
-        self.render_dispatch(format!("let mut pc: usize = {start};"))
+        // A large flattened dispatch is split into sibling part functions so the
+        // Rust backend optimises each independently; a small one (or when the
+        // split is disabled) renders whole.
+        match self.split.take() {
+            Some(plan) if plan.max_arms > 0 && self.arms.len() > plan.max_arms => {
+                self.render_split(start, &plan)
+            }
+            _ => DispatchArtifacts {
+                body: self.render_dispatch(format!("let mut pc: usize = {start};")),
+                siblings: Vec::new(),
+                state_struct: String::new(),
+            },
+        }
     }
 
     /// Assemble the dispatch loop of a continuation step function. Unlike
@@ -516,6 +567,396 @@ impl Flattener {
         push(0, "}".to_string());
         out
     }
+
+    /// Render a large flattened dispatch as several sibling *part* functions over
+    /// a shared state struct, plus the trampoline `func{N}` driver body. Every
+    /// arm's locals/temps (and `pc`) become fields of `S{N}`; each part runs a
+    /// contiguous slice of the (renumbered) states and returns `None` once `pc`
+    /// leaves its slice, so the driver bounces control to the owning part. A
+    /// terminating arm's `return x;` becomes `return Some(x);`, threaded back out
+    /// through the driver.
+    fn render_split(self, start: usize, plan: &SplitPlan) -> DispatchArtifacts {
+        let uses_continue = self.uses_continue;
+        let mut arms = self.arms;
+        arms.sort_by_key(|(state, _)| *state);
+
+        // Hoist typed `let`s just as `render_dispatch` hoists them above the loop
+        // (dedup by full declaration text); each becomes a state-struct field.
+        let mut decls: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut hoisted: Vec<(usize, Vec<ArmLine>)> = Vec::with_capacity(arms.len());
+        for (state, stmts) in arms {
+            let mut arm = Vec::with_capacity(stmts.len());
+            for (indent, stmt) in stmts {
+                match hoist_decl(&stmt) {
+                    Some((decl, assign)) => {
+                        if seen.insert(decl.clone()) {
+                            decls.push(decl);
+                        }
+                        arm.push((indent, assign));
+                    }
+                    None => arm.push((indent, stmt)),
+                }
+            }
+            hoisted.push((state, arm));
+        }
+
+        // Renumber the surviving states to a dense `0..N` in sorted order, so part
+        // `k` owns the contiguous range `[k*max, (k+1)*max)` and `pc / max` selects
+        // the owning part in O(1).
+        let renum: HashMap<usize, usize> = hoisted
+            .iter()
+            .enumerate()
+            .map(|(i, (state, _))| (*state, i))
+            .collect();
+        let n = hoisted.len();
+        let max = plan.max_arms;
+        let nparts = n.div_ceil(max);
+        let start = renum[&start];
+
+        // How each state name is spelled inside a relocated arm: `repl[name]` is the
+        // full replacement expression (already `st.`-qualified). Lookups are by exact
+        // token text (membership, not a `v\d+`-style pattern), so a SIMD `v128`
+        // helper or any lookalike token is never touched. `pc` and the parameters
+        // stay individual fields; the hoisted locals/temps are banked (below).
+        let mut repl: HashMap<String, String> = HashMap::new();
+        repl.insert("pc".to_string(), "st.pc".to_string());
+        let mut named: Vec<(String, String)> = Vec::new();
+        for (idx, ty) in &plan.params {
+            let name = format!("l{idx}");
+            if repl.insert(name.clone(), format!("st.{name}")).is_none() {
+                named.push((name, ty.clone()));
+            }
+        }
+        // Bank the Copy-typed hoisted temps into one array per Rust type, so a
+        // function that hoists thousands of temps yields a handful of struct fields
+        // (and a `Default` of a few array-repeats) instead of one field — and one
+        // `Default::default()` — per temp, which made rustc's typeck super-linear.
+        // A non-Copy `GcRef` temp can't ride an array-repeat, so it stays a field.
+        let mut bank_count: BTreeMap<String, usize> = BTreeMap::new();
+        for decl in &decls {
+            for (name, ty) in parse_hoisted_decl(decl) {
+                if repl.contains_key(&name) {
+                    continue;
+                }
+                if is_bankable(&ty) {
+                    let idx = bank_count.entry(ty.clone()).or_insert(0);
+                    repl.insert(name, format!("st.bank_{ty}[{idx}]"));
+                    *idx += 1;
+                } else {
+                    repl.insert(name.clone(), format!("st.{name}"));
+                    named.push((name, ty));
+                }
+            }
+        }
+
+        // Rewrite every arm body — renumber its `pc = N` targets, prefix state
+        // references with `st.`, wrap `return` values in `Some(...)` — and group
+        // the arms by their part index.
+        let mut parts: Vec<Vec<(usize, Vec<ArmLine>)>> = vec![Vec::new(); nparts];
+        for (state, stmts) in hoisted {
+            let ns = renum[&state];
+            let rewritten: Vec<ArmLine> = stmts
+                .into_iter()
+                .map(|(indent, line)| {
+                    let line = rewrite_pc_targets(&line, &|s| renum[&s]);
+                    let line = rewrite_state_refs(&line, &repl);
+                    (indent, wrap_returns(&line))
+                })
+                .collect();
+            parts[ns / max].push((ns, rewritten));
+        }
+
+        let ret = plan.ret.as_deref().unwrap_or("()");
+        let sname = format!("S{}", plan.func_index);
+
+        // The shared state struct (emitted at module scope by the caller): `pc`, the
+        // individual `pc`/param/`GcRef` fields, then one array bank per Copy temp
+        // type. The hand-written `Default` initialises each bank with a single
+        // array-repeat (`[Default::default(); N]`, valid for the `Copy` scalar temp
+        // types) so `..Default::default()` in the driver still reproduces every
+        // hoisted `let mut … = <default>` initial value — without a per-temp field.
+        let mut state_struct = String::new();
+        state_struct.push_str("#[allow(dead_code)]\n");
+        state_struct.push_str(&format!("struct {sname} {{\n"));
+        state_struct.push_str("    pc: usize,\n");
+        for (name, ty) in &named {
+            state_struct.push_str(&format!("    {name}: {ty},\n"));
+        }
+        for (ty, count) in &bank_count {
+            state_struct.push_str(&format!("    bank_{ty}: [{ty}; {count}],\n"));
+        }
+        state_struct.push_str("}\n");
+        state_struct.push_str(&format!("impl Default for {sname} {{\n"));
+        state_struct.push_str("    fn default() -> Self {\n");
+        state_struct.push_str("        Self {\n");
+        state_struct.push_str("            pc: 0,\n");
+        for (name, _ty) in &named {
+            state_struct.push_str(&format!("            {name}: Default::default(),\n"));
+        }
+        for (ty, count) in &bank_count {
+            state_struct.push_str(&format!(
+                "            bank_{ty}: [Default::default(); {count}],\n"
+            ));
+        }
+        state_struct.push_str("        }\n");
+        state_struct.push_str("    }\n");
+        state_struct.push_str("}\n");
+
+        // Each part function: a bounded `loop { match st.pc { … } }` over its own
+        // states; any `pc` outside the slice returns `None` to the driver. Lines
+        // are indented relative to column 0; the caller adds its `line_prefix`.
+        let self_param = if plan.is_method { "&mut self, " } else { "" };
+        let loop_head = if uses_continue {
+            "'sm: loop {"
+        } else {
+            "loop {"
+        };
+        let mut siblings: Vec<String> = Vec::new();
+        for (k, states) in parts.iter().enumerate() {
+            if !plan.is_method {
+                siblings.push(ALLOW.to_string());
+            }
+            siblings.push(format!(
+                "fn func{}_part{k}({self_param}st: &mut {sname}) -> Option<{ret}> {{",
+                plan.func_index
+            ));
+            siblings.push(format!("    {loop_head}"));
+            siblings.push("        match st.pc {".to_string());
+            for (ns, stmts) in states {
+                siblings.push(format!("            {ns} => {{"));
+                for (indent, stmt) in stmts {
+                    siblings.push(format!("{}{stmt}", "    ".repeat(4 + indent)));
+                }
+                siblings.push("            }".to_string());
+            }
+            siblings.push("            _ => return None,".to_string());
+            siblings.push("        }".to_string());
+            siblings.push("    }".to_string());
+            siblings.push("}".to_string());
+        }
+
+        // The driver body placed inside `func{N}`: seed the state from the params,
+        // then trampoline between parts until one returns a value.
+        let mut body: Vec<Node> = Vec::new();
+        let mut push_body = |depth: usize, line: String| {
+            body.push(Node::Line(format!("{}{line}", "    ".repeat(depth))));
+        };
+        let inits: String = plan
+            .params
+            .iter()
+            .map(|(idx, _)| format!("l{idx}, "))
+            .collect();
+        push_body(
+            0,
+            format!("let mut st = {sname} {{ pc: {start}, {inits}..Default::default() }};"),
+        );
+        push_body(0, "loop {".to_string());
+        let callee = if plan.is_method { "self." } else { "" };
+        push_body(1, format!("let __step = match st.pc / {max} {{"));
+        for k in 0..nparts {
+            push_body(
+                2,
+                format!("{k} => {callee}func{}_part{k}(&mut st),", plan.func_index),
+            );
+        }
+        push_body(2, "_ => unreachable!(),".to_string());
+        push_body(1, "};".to_string());
+        push_body(1, "if let Some(__ret) = __step {".to_string());
+        push_body(2, "return __ret;".to_string());
+        push_body(1, "}".to_string());
+        push_body(0, "}".to_string());
+
+        DispatchArtifacts {
+            body,
+            siblings,
+            state_struct,
+        }
+    }
+}
+/// Parse a hoisted declaration into the `(name, type)` of every local it binds.
+/// [`hoist_decl`] emits two shapes: a single `let mut <name>: <type> = <default>;`
+/// (one pair) and a batched tuple `let (mut a, mut b): (T, U) = <default>;` (one
+/// pair per element — these MUST be recovered too, or the tuple's locals get no
+/// state slot and dangle as unresolved names). Returns an empty vec for any other
+/// line, so only real hoisted state becomes struct fields.
+fn parse_hoisted_decl(decl: &str) -> Vec<(String, String)> {
+    let Some(rest) = decl.strip_prefix("let ") else {
+        return Vec::new();
+    };
+    let Some(eq) = top_level_find(rest, " = ") else {
+        return Vec::new();
+    };
+    let lhs = &rest[..eq];
+    let Some(colon) = top_level_find(lhs, ":") else {
+        return Vec::new();
+    };
+    let binding = lhs[..colon].trim();
+    let ty = lhs[colon + 1..].trim();
+    // A batched tuple binding: `(mut a, mut b): (T, U)`. Pair each name with its
+    // element type positionally (both split naively on `,`, matching `hoist_decl`,
+    // which is safe because every wasm value type is a single comma-free token).
+    if let Some(names) = binding.strip_prefix('(').and_then(|b| b.strip_suffix(')'))
+        && let Some(types) = ty.strip_prefix('(').and_then(|t| t.strip_suffix(')'))
+    {
+        return names
+            .split(',')
+            .zip(types.split(','))
+            .map(|(n, t)| {
+                let n = n.trim().strip_prefix("mut ").unwrap_or(n.trim());
+                (n.to_string(), t.trim().to_string())
+            })
+            .collect();
+    }
+    let name = binding.strip_prefix("mut ").unwrap_or(binding).trim();
+    vec![(name.to_string(), ty.to_string())]
+}
+/// Whether `c` can start a Rust identifier.
+fn is_ident_start(c: u8) -> bool {
+    c == b'_' || c.is_ascii_alphabetic()
+}
+/// Whether `c` can continue a Rust identifier.
+fn is_ident_continue(c: u8) -> bool {
+    c == b'_' || c.is_ascii_alphanumeric()
+}
+/// The byte length of a UTF-8 code point from its leading byte.
+fn utf8_len(lead: u8) -> usize {
+    match lead {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        _ => 4,
+    }
+}
+/// Whether a hoisted temp of Rust type `ty` can ride a Copy array bank. Only the
+/// scalar value-type lowerings qualify (`[x; N]` array-repeat needs `Copy`); a
+/// non-Copy `GcRef` handle falls back to an individual struct field.
+fn is_bankable(ty: &str) -> bool {
+    matches!(ty, "i32" | "i64" | "f32" | "f64" | "u32" | "u128")
+}
+/// Rewrite every whole-identifier occurrence of a state name in `line` to its
+/// shared-state expression (`repl[name]`, e.g. `st.pc` or `st.bank_i32[7]`) so a
+/// relocated arm reads/writes the shared struct. Only tokens whose exact text is a
+/// key in `repl` are touched (never a substring, a field access after `.`, a
+/// `'label`, or anything inside a string literal), so lookalikes like the SIMD
+/// helper token `v128` are safe.
+fn rewrite_state_refs(line: &str, repl: &HashMap<String, String>) -> String {
+    let b = line.as_bytes();
+    let n = b.len();
+    let mut out = String::with_capacity(line.len() + 16);
+    let mut i = 0;
+    while i < n {
+        let c = b[i];
+        // Copy a string literal verbatim (its contents are never rewritten).
+        if c == b'"' {
+            let start = i;
+            i += 1;
+            while i < n {
+                match b[i] {
+                    b'\\' => i = (i + 2).min(n),
+                    b'"' => {
+                        i += 1;
+                        break;
+                    }
+                    _ => i += 1,
+                }
+            }
+            out.push_str(&line[start..i]);
+            continue;
+        }
+        if is_ident_start(c) {
+            let start = i;
+            i += 1;
+            while i < n && is_ident_continue(b[i]) {
+                i += 1;
+            }
+            let word = &line[start..i];
+            let prev = if start == 0 { 0 } else { b[start - 1] };
+            // Not a field access, not a `'label`, not mid-identifier.
+            if prev != b'.'
+                && prev != b'\''
+                && !is_ident_continue(prev)
+                && let Some(expr) = repl.get(word)
+            {
+                out.push_str(expr);
+            } else {
+                out.push_str(word);
+            }
+            continue;
+        }
+        let len = utf8_len(c);
+        out.push_str(&line[i..(i + len).min(n)]);
+        i += len;
+    }
+    out
+}
+/// Whether `needle` occurs in `b` at `i` as a whole word (not preceded/followed
+/// by an identifier character).
+fn matches_word(b: &[u8], i: usize, needle: &[u8]) -> bool {
+    if i + needle.len() > b.len() || &b[i..i + needle.len()] != needle {
+        return false;
+    }
+    let before = if i == 0 { 0 } else { b[i - 1] };
+    let after = b.get(i + needle.len()).copied().unwrap_or(0);
+    !is_ident_continue(before) && !is_ident_continue(after)
+}
+/// Wrap each `return <expr>;` (or bare `return;`) in `line` as `return
+/// Some(<expr>);` (or `return Some(());`), so a part function that reaches the
+/// original function's exit yields the value to the trampoline driver. Matches
+/// only a whole `return` keyword outside string literals, so `__returning` and a
+/// quoted `"return"` are left alone.
+fn wrap_returns(line: &str) -> String {
+    let b = line.as_bytes();
+    let n = b.len();
+    let mut out = String::with_capacity(line.len() + 8);
+    let mut i = 0;
+    while i < n {
+        let c = b[i];
+        if c == b'"' {
+            let start = i;
+            i += 1;
+            while i < n {
+                match b[i] {
+                    b'\\' => i = (i + 2).min(n),
+                    b'"' => {
+                        i += 1;
+                        break;
+                    }
+                    _ => i += 1,
+                }
+            }
+            out.push_str(&line[start..i]);
+            continue;
+        }
+        if matches_word(b, i, b"return") {
+            let after = i + 6;
+            match b.get(after).copied() {
+                // `return;` — a unit return.
+                Some(b';') => {
+                    out.push_str("return Some(());");
+                    i = after + 1;
+                    continue;
+                }
+                // `return <expr>;` — wrap the expression up to its terminator.
+                Some(b' ') => {
+                    let expr_start = after + 1;
+                    if let Some(off) = line[expr_start..].find(';') {
+                        let end = expr_start + off;
+                        out.push_str("return Some(");
+                        out.push_str(&line[expr_start..end]);
+                        out.push_str(");");
+                        i = end + 1;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let len = utf8_len(c);
+        out.push_str(&line[i..(i + len).min(n)]);
+        i += len;
+    }
+    out
 }
 /// If `body` is a single unconditional `pc = N;` (a pure forwarding state with
 /// no side effect), return `N`. Such a state only re-enters the `match pc`
@@ -841,10 +1282,32 @@ pub(crate) fn top_level_find(s: &str, pat: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArmLine, fuse_linear_chains};
+    use super::{ArmLine, fuse_linear_chains, parse_hoisted_decl};
 
     fn line(s: &str) -> ArmLine {
         (0, s.to_string())
+    }
+
+    #[test]
+    fn parse_hoisted_decl_reads_single_and_batched_tuple_bindings() {
+        // A single binding yields its one `(name, type)`.
+        assert_eq!(
+            parse_hoisted_decl("let mut l7: i32 = 0;"),
+            vec![("l7".to_string(), "i32".to_string())]
+        );
+        // A batched tuple binding (the shape `hoist_decl` emits for grouped locals)
+        // must yield every element paired with its type — regression guard for the
+        // dropped-local bug where a tuple's names got no state slot and dangled.
+        assert_eq!(
+            parse_hoisted_decl("let (mut l3, mut l4, mut l5): (i32, i64, f32) = (0, 0, 0.0);"),
+            vec![
+                ("l3".to_string(), "i32".to_string()),
+                ("l4".to_string(), "i64".to_string()),
+                ("l5".to_string(), "f32".to_string()),
+            ]
+        );
+        // A non-declaration line contributes nothing.
+        assert!(parse_hoisted_decl("l4 = st.bank_i32[7];").is_empty());
     }
 
     fn texts(body: &[ArmLine]) -> Vec<&str> {

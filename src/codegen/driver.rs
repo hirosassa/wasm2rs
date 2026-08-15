@@ -105,6 +105,11 @@ pub(crate) struct ModuleCtx<'a> {
     /// default; when set, an out-of-bounds access is undefined behaviour rather
     /// than a wasm trap, so it is only sound for trusted modules.
     pub(crate) unsafe_memory: bool,
+    /// Cap on match arms per flattened-dispatch *part* function. When a flattened
+    /// `loop { match pc { … } }` has more surviving arms than this, it is split
+    /// into `ceil(arms / split_dispatch)` sibling part functions over a shared
+    /// state struct. `0` (the default) keeps each flattened function whole.
+    pub(crate) split_dispatch: usize,
 }
 impl ModuleCtx<'_> {
     /// Every concrete struct/array type index whose declared supertype chain
@@ -202,6 +207,9 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) tags: &'a [TagInfo],
     /// Opt-in unchecked linear-memory access (see [`ModuleCtx::unsafe_memory`]).
     pub(crate) unsafe_memory: bool,
+    /// Cap on match arms per flattened-dispatch part function; `0` disables the
+    /// split (see [`ModuleCtx::split_dispatch`]).
+    pub(crate) split_dispatch: usize,
 }
 /// Derive the translation context from a module's raw parts.
 ///
@@ -328,6 +336,7 @@ pub(crate) fn build_ctx<'a>(
             step_locals,
         },
         unsafe_memory: parts.unsafe_memory,
+        split_dispatch: parts.split_dispatch,
     };
     Ok((ctx, stateful))
 }
@@ -342,6 +351,9 @@ pub(crate) struct ModuleDeps {
     pub(crate) simd: HashSet<&'static str>,
     pub(crate) dispatch_sigs: HashSet<u32>,
     pub(crate) uses_eh: bool,
+    /// Shared state structs from split flattened methods, emitted at the crate
+    /// root (see [`GenMeta::state_structs`]).
+    pub(crate) state_structs: Vec<String>,
 }
 impl ModuleDeps {
     /// Fold one function's discovered dependencies into the running totals.
@@ -351,6 +363,7 @@ impl ModuleDeps {
         self.simd.extend(meta.simd);
         self.dispatch_sigs.extend(meta.dispatch_sigs);
         self.uses_eh |= meta.uses_eh;
+        self.state_structs.extend(meta.state_structs);
     }
 }
 /// Translate a whole module into a single Rust source string.
@@ -394,6 +407,13 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     }
     if needs_gc_types(parts)? {
         prelude.push_str(GCREF_DEF);
+        prelude.push('\n');
+    }
+    // Shared state structs from split flattened methods, at module scope ahead of
+    // the `struct Instance`/functions that reference them (a field may be a
+    // `GcRef`, so after its definition above).
+    for state_struct in &deps.state_structs {
+        prelude.push_str(state_struct);
         prelude.push('\n');
     }
     prelude.push_str(&rt_helpers);
@@ -511,6 +531,15 @@ pub(crate) fn generate_module_split(
         dispatch_sigs: &deps.dispatch_sigs,
     };
     let root = render_lib_root(parts, &ctx, stateful, &root_deps, n_chunks)?;
+    // Shared state structs from split flattened methods live at the crate root
+    // (an `impl` block cannot hold a struct), ahead of the `impl` that references
+    // them. Placed here so the later `GcRef`/exception prepends stay above them —
+    // a struct field may be a `GcRef`, which must already be in scope.
+    let root = if deps.state_structs.is_empty() {
+        root
+    } else {
+        format!("{}\n{root}", deps.state_structs.join("\n"))
+    };
     // The exception type and the managed value model live at the crate root so
     // every chunk's `use super::*` sees them, ahead of everything else in
     // `lib.rs`.

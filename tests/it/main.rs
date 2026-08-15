@@ -70,6 +70,7 @@ mod select_op;
 mod simd;
 mod simd_coverage;
 mod split;
+mod split_dispatch;
 mod state;
 mod streaming;
 mod table_ops;
