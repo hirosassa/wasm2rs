@@ -105,6 +105,14 @@ pub struct TranspileOptions {
     /// modules you trust to stay in bounds. Off by default. Not applied to a
     /// `shared` memory.
     pub unsafe_memory: bool,
+
+    /// Split a flattened `loop { match pc { … } }` dispatch whose surviving arm
+    /// count exceeds this cap into several sibling *part* functions over a shared
+    /// state struct, so a pathologically large flattened function is emitted as
+    /// many smaller ones the Rust backend can optimise (and codegen-parallelise)
+    /// independently — without changing what it computes. The value caps the arms
+    /// per part; `0` (the default) keeps each flattened function whole.
+    pub split_dispatch: usize,
 }
 
 /// The recommended `Cargo.toml` for a split crate, named `package_name`.
@@ -524,6 +532,7 @@ where
         elements: &elements,
         tags: &tags,
         unsafe_memory: topts.unsafe_memory,
+        split_dispatch: topts.split_dispatch,
     };
     codegen::generate_module_split(
         &parts,
