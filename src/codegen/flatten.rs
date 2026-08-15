@@ -1282,10 +1282,94 @@ pub(crate) fn top_level_find(s: &str, pat: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArmLine, fuse_linear_chains, parse_hoisted_decl};
+    use std::collections::HashMap;
+
+    use super::{
+        ArmLine, fuse_linear_chains, is_bankable, parse_hoisted_decl, rewrite_state_refs,
+        wrap_returns,
+    };
 
     fn line(s: &str) -> ArmLine {
         (0, s.to_string())
+    }
+
+    /// The name→access map `render_split` feeds [`rewrite_state_refs`]: `pc` and a
+    /// param stay plain fields, a banked temp becomes an array index. `l3405` is a
+    /// local whose textual form also appears as a `'l3405` loop label below — the
+    /// case the `'`-skip exists for.
+    fn state_repl() -> HashMap<String, String> {
+        [
+            ("pc", "st.pc"),
+            ("l0", "st.l0"),
+            ("l4", "st.bank_i32[7]"),
+            ("l3405", "st.l3405"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn rewrite_state_refs_rewrites_only_whole_word_state_tokens() {
+        let r = state_repl();
+        // Bare whole-word state names become their shared-state access; a banked
+        // temp indexes its array.
+        assert_eq!(
+            rewrite_state_refs("pc = l4;", &r),
+            "st.pc = st.bank_i32[7];"
+        );
+        // A lookalike that merely *contains* a state name is a different identifier
+        // and is left alone; the real `l4` beside it is still rewritten.
+        assert_eq!(
+            rewrite_state_refs("let pcx = l4 + l40;", &r),
+            "let pcx = st.bank_i32[7] + l40;"
+        );
+    }
+
+    #[test]
+    fn rewrite_state_refs_skips_field_access_labels_and_string_contents() {
+        let r = state_repl();
+        // A token after `.` is a field access, not a state read — so rewriting is
+        // idempotent (`st.pc` must not become `st.st.pc`).
+        assert_eq!(rewrite_state_refs("st.pc = 3;", &r), "st.pc = 3;");
+        // A `'label` that spells a state name must survive: `'l3405` is a loop
+        // label, not the local `l3405`. Rewriting it would produce invalid Rust.
+        assert_eq!(
+            rewrite_state_refs("if c { pc = 5; continue 'l3405; }", &r),
+            "if c { st.pc = 5; continue 'l3405; }"
+        );
+        // A state name inside a string literal is data, not code.
+        assert_eq!(
+            rewrite_state_refs(r#"trace("pc l4"); pc = 1;"#, &r),
+            r#"trace("pc l4"); st.pc = 1;"#
+        );
+    }
+
+    #[test]
+    fn wrap_returns_wraps_real_returns_and_leaves_lookalikes() {
+        // A value return is wrapped for the trampoline; a bare return yields unit.
+        assert_eq!(wrap_returns("return l4;"), "return Some(l4);");
+        assert_eq!(wrap_returns("return f(a, b);"), "return Some(f(a, b));");
+        assert_eq!(wrap_returns("return;"), "return Some(());");
+        // `return` as a substring of another identifier is not the keyword.
+        assert_eq!(wrap_returns("let x = __returning;"), "let x = __returning;");
+        // `return` inside a string literal is data, left verbatim.
+        assert_eq!(
+            wrap_returns(r#"panic!("return here");"#),
+            r#"panic!("return here");"#
+        );
+    }
+
+    #[test]
+    fn is_bankable_covers_copy_scalars_and_excludes_gcref() {
+        // Every Copy scalar lowering rides an array bank (`[x; N]` needs `Copy`).
+        for ty in ["i32", "i64", "f32", "f64", "u32", "u128"] {
+            assert!(is_bankable(ty), "{ty} should be bankable");
+        }
+        // A non-Copy `GcRef` cannot ride an array-repeat and must fall back to an
+        // individual field; an unknown type is conservatively non-bankable too.
+        assert!(!is_bankable("GcRef"));
+        assert!(!is_bankable("bool"));
     }
 
     #[test]
