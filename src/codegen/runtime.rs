@@ -22,11 +22,15 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::SplatI64x2 => "i64x2_splat",
         Rt::SplatF32x4 => "f32x4_splat",
         Rt::SplatF64x2 => "f64x2_splat",
+        Rt::TrapUnreachable => "trap_unreachable",
+        Rt::TrapIndirectTypeMismatch => "trap_indirect_type_mismatch",
     }
 }
 
 /// All runtime free-function helpers, in a deterministic emission order.
-const RT_ORDER: [Rt; 18] = [
+const RT_ORDER: [Rt; 20] = [
+    Rt::TrapUnreachable,
+    Rt::TrapIndirectTypeMismatch,
     Rt::F32Min,
     Rt::F32Max,
     Rt::F64Min,
@@ -67,6 +71,20 @@ pub(super) fn render_rt_helpers(used: &HashSet<Rt>) -> String {
 /// trapping-truncation template.
 fn rt_lines(rt: Rt) -> Vec<String> {
     match rt {
+        Rt::TrapUnreachable => vec![
+            "#[cold]".to_string(),
+            "#[inline(never)]".to_string(),
+            "fn trap_unreachable() -> ! {".to_string(),
+            "    panic!(\"unreachable\")".to_string(),
+            "}".to_string(),
+        ],
+        Rt::TrapIndirectTypeMismatch => vec![
+            "#[cold]".to_string(),
+            "#[inline(never)]".to_string(),
+            "fn trap_indirect_type_mismatch() -> ! {".to_string(),
+            "    panic!(\"indirect call type mismatch\")".to_string(),
+            "}".to_string(),
+        ],
         Rt::F32Min | Rt::F32Max | Rt::F64Min | Rt::F64Max => rt_minmax_lines(rt),
         Rt::I32TruncF32S => {
             trunc_lines("i32_trunc_f32_s", "f32", "i32", TRUNC_I32_S_F32, "x as i32")

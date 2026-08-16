@@ -137,6 +137,14 @@ pub(crate) enum Rt {
     SplatI64x2,
     SplatF32x4,
     SplatF64x2,
+    /// The `unreachable` trap, emitted as a `#[cold] #[inline(never)]` helper so
+    /// its `panic!` is out-of-line: one call site per `unreachable` instead of a
+    /// panic expansion inlined into every hot body.
+    TrapUnreachable,
+    /// The `call_indirect` type-mismatch trap, emitted as a `#[cold]
+    /// #[inline(never)]` helper so the panic stays out-of-line even when the
+    /// dispatch method is inlined onto the hot indirect-call path.
+    TrapIndirectTypeMismatch,
 }
 /// The helper dependencies discovered while generating one function.
 ///

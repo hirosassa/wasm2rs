@@ -88,3 +88,36 @@ fn unreachable_in_branch_traps() {
         .expect("run generated binary");
     assert!(!run.status.success(), "expected a trap");
 }
+
+/// The trap for `unreachable` is emitted once as a `#[cold] #[inline(never)]`
+/// module-scope helper, and every `unreachable` site calls it instead of
+/// expanding `panic!` inline. Keeping the trap out-of-line shrinks the hot
+/// function bodies (fewer inlined panic setups) and lets the optimiser lay the
+/// cold path away from the hot instructions.
+#[test]
+fn unreachable_routed_through_cold_helper() {
+    let wasm = wat::parse_str(M).expect("valid wat");
+    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
+
+    assert!(
+        generated.contains("#[cold]") && generated.contains("#[inline(never)]"),
+        "expected a cold, never-inlined trap helper:\n{generated}"
+    );
+    assert!(
+        generated.contains("fn trap_unreachable() -> ! {"),
+        "expected the module-scope trap_unreachable helper:\n{generated}"
+    );
+    // The trap message expands exactly once — inside the helper — rather than at
+    // each of the module's two `unreachable` sites.
+    let inline_traps = generated.matches(r#"panic!("unreachable")"#).count();
+    assert_eq!(
+        inline_traps, 1,
+        "the trap message should appear once (in the helper), not inline:\n{generated}"
+    );
+    // Both `unreachable` sites route through the helper (2 calls + 1 definition).
+    let refs = generated.matches("trap_unreachable()").count();
+    assert!(
+        refs >= 3,
+        "expected each unreachable site to call the helper, saw {refs} refs:\n{generated}"
+    );
+}

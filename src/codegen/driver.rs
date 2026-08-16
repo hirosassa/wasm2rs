@@ -387,6 +387,11 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         deps.merge(meta);
         sources.push(src);
     }
+    // Every rendered dispatch method (`call_ref_t{ti}`) carries the type-mismatch
+    // trap, so its cold helper must exist whenever any dispatch method is emitted.
+    if !deps.dispatch_sigs.is_empty() {
+        deps.rt.insert(Rt::TrapIndirectTypeMismatch);
+    }
 
     // Free-function runtime helpers live at module scope, above the functions
     // (or the `struct Instance`) that call them, in both module shapes.
@@ -522,6 +527,11 @@ pub(crate) fn generate_module_split(
         chunk_index += 1;
     }
     let n_chunks = chunk_index;
+    // Every rendered dispatch method (`call_ref_t{ti}`) carries the type-mismatch
+    // trap, so its cold helper must exist whenever any dispatch method is emitted.
+    if !deps.dispatch_sigs.is_empty() {
+        deps.rt.insert(Rt::TrapIndirectTypeMismatch);
+    }
 
     // The root is emitted last, once the used-helper/dispatch sets are complete.
     let root_deps = render::RootDeps {

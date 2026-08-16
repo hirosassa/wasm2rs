@@ -129,6 +129,27 @@ fn call_indirect_with_a_type_mismatch_traps() {
 }
 
 #[test]
+fn call_indirect_to_an_absent_type_traps() {
+    // No defined function has type `$sig = () -> i32` (both funcs are
+    // `(i32) -> i32`), and the module has no host. The call can therefore never
+    // resolve, so the transpiler emits the trap directly in the body (the
+    // `targets.is_empty() && !has_imports` path) rather than a dispatch method —
+    // a distinct site from the dispatch-method traps above. The trap must still
+    // compile (its cold helper is emitted) and carry the right message.
+    expect_trap_with(
+        "trap_ci_absent_type",
+        r#"(module
+             (type $sig (func (result i32)))
+             (table 1 funcref)
+             (func $only (param i32) (result i32) (local.get 0))
+             (func (export "call") (param i32) (result i32)
+               (call_indirect (type $sig) (local.get 0))))"#,
+        "let mut inst = Instance::new();\n    inst.func1(0);",
+        "indirect call type mismatch",
+    );
+}
+
+#[test]
 fn out_of_bounds_memory_load_traps() {
     // One page is 64 KiB; loading at 100000 reaches past it.
     expect_trap_with(

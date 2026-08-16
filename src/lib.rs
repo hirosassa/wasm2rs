@@ -1054,7 +1054,8 @@ impl Instance {
             "{rust}"
         );
         assert!(
-            rust.contains("_ => panic!(\"indirect call type mismatch\")"),
+            rust.contains("_ => trap_indirect_type_mismatch(),")
+                && rust.contains("fn trap_indirect_type_mismatch() -> ! {"),
             "{rust}"
         );
     }
