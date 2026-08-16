@@ -1048,13 +1048,13 @@ fn dispatch_method_lines(
     // and traps rather than being forwarded. Only a module with a host (an
     // `Imports` trait) can receive external handles.
     if has_imports {
-        lines.push("        u32::MAX => panic!(\"indirect call type mismatch\"),".to_string());
+        lines.push("        u32::MAX => trap_indirect_type_mismatch(),".to_string());
         lines.push(format!(
             "        h if (h & {EXTERNAL_HANDLE_BIT}) != 0 => \
              self.imports.call_ref_t{type_index}(h & {EXTERNAL_HANDLE_SLOT_MASK}{sep}{arg_list}),"
         ));
     }
-    lines.push("        _ => panic!(\"indirect call type mismatch\"),".to_string());
+    lines.push("        _ => trap_indirect_type_mismatch(),".to_string());
     lines.push("    }".to_string());
     lines.push("}".to_string());
     Ok(lines)

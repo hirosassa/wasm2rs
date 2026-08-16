@@ -1,7 +1,7 @@
 use wasmparser::ValType;
 
 use super::super::{
-    ALLOW, FLATTEN_DEPTH_THRESHOLD, GenMeta, Node, SplitPlan, Val, can_flatten, default_value,
+    ALLOW, FLATTEN_DEPTH_THRESHOLD, GenMeta, Node, Rt, SplitPlan, Val, can_flatten, default_value,
     estimate_body_len, flatten_body, index_u32, push_body_line, render_body_into, rust_type,
     rust_types,
 };
@@ -153,7 +153,8 @@ impl<'a> super::FuncGen<'a> {
         // host resolves, so fall through to the shared dispatch method (which
         // has only the null/external/catch-all arms).
         if targets.is_empty() && !self.ctx.has_imports {
-            self.term("panic!(\"indirect call type mismatch\");".to_string());
+            self.used_rt.insert(Rt::TrapIndirectTypeMismatch);
+            self.term("trap_indirect_type_mismatch();".to_string());
             self.reachable = false;
             self.dead_nesting = 0;
             return Ok(());

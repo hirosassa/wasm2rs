@@ -3,7 +3,7 @@ use std::mem;
 use wasmparser::{BlockType, ValType};
 
 use super::super::{
-    BrArm, BranchEscape, CatchArm, CatchKind, EXC_TYPE, Frame, FrameKind, Node, RegionNode,
+    BrArm, BranchEscape, CatchArm, CatchKind, EXC_TYPE, Frame, FrameKind, Node, RegionNode, Rt,
     TryRegionNode, TryState, Val, condition_code, decode_exc_value, default_value,
     encode_exc_value, index_u32, reachable_after, rust_type,
 };
@@ -33,7 +33,8 @@ impl<'a> super::FuncGen<'a> {
     /// `unreachable`: always traps, and code after it is dead, so emit the trap
     /// and stop lowering until the enclosing region ends (as for `return`/`br`).
     pub(super) fn emit_unreachable(&mut self) {
-        self.term("panic!(\"unreachable\");".to_string());
+        self.used_rt.insert(Rt::TrapUnreachable);
+        self.term("trap_unreachable();".to_string());
         self.reachable = false;
         self.dead_nesting = 0;
     }

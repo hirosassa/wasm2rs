@@ -100,6 +100,52 @@ fn dispatches_to_selected_function() {
     );
 }
 
+/// Two `call_indirect` signatures, so two dispatch methods each carrying a
+/// type-mismatch trap. The trap is emitted once as a `#[cold] #[inline(never)]`
+/// module-scope helper that every dispatch arm calls, rather than expanding
+/// `panic!` inline in each dispatch method (which the optimiser may inline onto
+/// the hot indirect-call path).
+#[test]
+fn type_mismatch_trap_routed_through_cold_helper() {
+    const TWO_SIGS: &str = r#"
+        (module
+          (type $unop (func (param i32) (result i32)))
+          (type $binop (func (param i32 i32) (result i32)))
+          (table 2 funcref)
+          (elem (i32.const 0) $inc $add)
+          (func $inc (param i32) (result i32) (i32.add (local.get 0) (i32.const 1)))
+          (func $add (param i32 i32) (result i32) (i32.add (local.get 0) (local.get 1)))
+          (func $call_unop (param i32 i32) (result i32)
+            (call_indirect (type $unop) (local.get 1) (local.get 0)))
+          (func $call_binop (param i32 i32 i32) (result i32)
+            (call_indirect (type $binop) (local.get 1) (local.get 2) (local.get 0))))
+        "#;
+    let wasm = wat::parse_str(TWO_SIGS).expect("valid wat");
+    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
+
+    assert!(
+        generated.contains("#[cold]")
+            && generated.contains("#[inline(never)]")
+            && generated.contains("fn trap_indirect_type_mismatch() -> ! {"),
+        "expected a cold, never-inlined trap_indirect_type_mismatch helper:\n{generated}"
+    );
+    // The trap message expands once — inside the helper — not in each of the two
+    // dispatch methods.
+    let inline_traps = generated
+        .matches(r#"panic!("indirect call type mismatch")"#)
+        .count();
+    assert_eq!(
+        inline_traps, 1,
+        "the trap message should appear once (in the helper), not per dispatch:\n{generated}"
+    );
+    // Both dispatch methods route through the helper (2 calls + 1 definition).
+    let refs = generated.matches("trap_indirect_type_mismatch()").count();
+    assert!(
+        refs >= 3,
+        "expected each dispatch method to call the helper, saw {refs} refs:\n{generated}"
+    );
+}
+
 #[test]
 fn out_of_bounds_index_traps() {
     expect_trap(
