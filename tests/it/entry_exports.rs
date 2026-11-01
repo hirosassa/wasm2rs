@@ -325,3 +325,40 @@ fn a_tail_call_keeps_its_target() {
     );
     assert!(!code.contains("fn func2("), "{code}");
 }
+
+#[test]
+fn exporting_an_import_as_a_root_keeps_nothing_else_alive() {
+    // The root is an imported function: there is no body to scan, and the
+    // locally defined function stays dead.
+    let wat = r#"(module
+        (import "env" "log" (func $log (param i32)))
+        (export "log" (func $log))
+        (func (export "other")))"#;
+    let code = generate(wat, &["log"]);
+    assert!(!code.contains("fn func1("), "{code}");
+}
+
+#[test]
+fn the_cli_ignores_empty_names_in_the_list() {
+    let wasm = wat::parse_str(DIRECT).unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "wasm2rs_entry_exports_cli_empty_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("in.wasm");
+    std::fs::write(&input, wasm).unwrap();
+    let gen_with = |flag: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_wasm2rs"))
+            .arg(flag)
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(
+        gen_with("--entry-exports=a,,"),
+        gen_with("--entry-exports=a")
+    );
+}
