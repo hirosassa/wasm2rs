@@ -230,3 +230,46 @@ fn imported_shared_memory_data_is_applied_once_by_new() {
         }"#,
     );
 }
+
+#[test]
+fn imported_shared_memory_with_a_host_import_takes_memory_and_imports() {
+    // The wasi-threads shape: a shared `env.memory` *and* a host function
+    // import. `new(memory, imports)` / `with_memory(memory, imports)` must both
+    // compile and run; each thread brings its own host value. `inc` adds
+    // `double(1)` = 2 atomically, so four threads x 1_000 calls total 8_000.
+    compile_run_raw(
+        "atomics_threads_imported_with_host",
+        r#"(module
+            (import "env" "memory" (memory 1 1 shared))
+            (import "env" "double" (func (param i32) (result i32)))
+            (func (export "inc")
+              i32.const 0
+              i32.const 1
+              call 0
+              i32.atomic.rmw.add
+              drop)
+            (func (export "get") (result i32)
+              i32.const 0 i32.atomic.load))"#,
+        r#"struct Host;
+        impl Imports for Host {
+            fn import0(&mut self, a0: i32) -> i32 { a0 * 2 }
+        }
+        fn main() {
+            let handle = SharedMemory::new(65536);
+            let _first = Instance::new(handle.clone(), Host);
+            let threads = 4;
+            let per = 1_000;
+            let mut joins = Vec::new();
+            for _ in 0..threads {
+                let m = handle.clone();
+                joins.push(std::thread::spawn(move || {
+                    let mut t = Instance::with_memory(m, Host);
+                    for _ in 0..per { t.func1(); }
+                }));
+            }
+            for j in joins { j.join().unwrap(); }
+            let mut reader = Instance::with_memory(handle, Host);
+            assert_eq!(reader.func2(), 2 * threads * per);
+        }"#,
+    );
+}
