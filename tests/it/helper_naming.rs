@@ -64,7 +64,7 @@ fn load_store_pass_the_address_without_a_cast() {
     let src = transpile(wat);
 
     assert!(
-        src.contains("self.w32(l0, 0u32, 42i32)") && src.contains("self.r32(l0, 0u32)"),
+        src.contains("self.w32(l0, 0, 42i32)") && src.contains("self.r32(l0, 0)"),
         "expected the address to be passed without an `as u32` cast\n{src}",
     );
     assert!(
@@ -90,5 +90,53 @@ fn negative_address_is_treated_as_unsigned_and_traps() {
         "helper_addr_unsigned",
         wat,
         "let mut inst = Instance::new();\n    inst.func0(-1);",
+    );
+}
+
+#[test]
+fn static_offsets_are_passed_without_a_type_suffix() {
+    // The helper's `offset` parameter fixes the literal's type, so a `u32`
+    // suffix is redundant. A non-zero offset checks the value is still passed.
+    let wat = r#"(module (memory 1) (data (i32.const 40) "\2a\00\00\00")
+        (func (export "f") (param i32) (result i32)
+          (i32.store offset=8 (local.get 0) (i32.const 7))
+          (i32.add
+            (i32.load offset=8 (local.get 0))
+            (i32.load offset=40 (i32.const 0)))))"#;
+    let src = transpile(wat);
+
+    assert!(
+        src.contains("self.r32(l0, 8)") && src.contains("self.w32(l0, 8, 7i32)"),
+        "expected unsuffixed offsets\n{src}",
+    );
+    assert!(
+        !src.contains("8u32") && !src.contains("0u32"),
+        "no offset should carry a `u32` suffix\n{src}",
+    );
+
+    compile_run(
+        "helper_offset_no_suffix",
+        wat,
+        "let mut inst = Instance::new();\n    assert_eq!(inst.func0(16), 49);",
+    );
+}
+
+#[test]
+fn memory64_offsets_are_passed_without_a_type_suffix() {
+    let wat = r#"(module (memory i64 1)
+        (func (export "f") (param i64) (result i32)
+          (i32.store offset=8 (local.get 0) (i32.const 7))
+          (i32.load offset=8 (local.get 0))))"#;
+    let src = transpile(wat);
+
+    assert!(
+        src.contains("self.r32(l0, 8)") && !src.contains("8u64"),
+        "expected an unsuffixed memory64 offset\n{src}",
+    );
+
+    compile_run(
+        "helper_offset64_no_suffix",
+        wat,
+        "let mut inst = Instance::new();\n    assert_eq!(inst.func0(16), 7);",
     );
 }
