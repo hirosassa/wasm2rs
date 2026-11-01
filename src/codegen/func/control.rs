@@ -922,6 +922,7 @@ impl<'a> super::FuncGen<'a> {
             cur_binds: Vec::new(),
             escapes: Vec::new(),
             has_ret_escape: false,
+            unwrap_delegate: false,
         });
         // The barrier starts in the body phase; the first catch flips it so the
         // handler no longer counts as inside this try's closure (only a branch to
@@ -1037,6 +1038,7 @@ impl<'a> super::FuncGen<'a> {
             cur_binds,
             escapes,
             has_ret_escape,
+            unwrap_delegate,
         } = ts;
         arms.push(CatchArm {
             kind: cur_kind,
@@ -1065,6 +1067,7 @@ impl<'a> super::FuncGen<'a> {
             body: body_arm.body,
             body_reachable_at_end: body_arm.reachable_at_end,
             catches,
+            unwrap_delegate,
         });
 
         let out_var = format!("__out{}", frame.label);
@@ -1166,6 +1169,61 @@ impl<'a> super::FuncGen<'a> {
         self.line(format!("let {handle_var}: u32 = {};", handle.code));
         self.line(format!("let _ = self.conts[{handle_var} as usize].take();"));
         self.emit_throw_payload(tag_index)
+    }
+
+    /// Close a `try ... delegate N` region. The region has no handlers of its own:
+    /// an exception raised in its body continues to the label `N` levels out
+    /// (a function-level depth means the caller). It is lowered as a `try` whose
+    /// only handler re-raises the exception — a handler runs outside its own
+    /// try's closure, so the re-raise lands in the enclosing `catch_unwind`, or
+    /// leaves the function. When the delegate must also bypass enclosing try
+    /// *bodies*, those would wrongly catch the re-raise, so the exception is
+    /// wrapped in a [`Rt::DelegateExc`] carrying the number of bodies to skip;
+    /// each bypassed try is marked to let it pass (see `render_delegate_pass`).
+    pub(super) fn handle_delegate(&mut self, relative_depth: u32) -> Result<(), TranspileError> {
+        let idx = self
+            .frames
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| TranspileError::Unsupported("delegate without try".into()))?;
+        let exc_var = self
+            .frames
+            .get(idx)
+            .and_then(|f| f.try_state.as_ref())
+            .map(|ts| ts.exc_var.clone())
+            .ok_or_else(|| TranspileError::Unsupported("delegate without try".into()))?;
+        // Frames outside the `try` are `0..idx`; the function itself (the caller)
+        // is one level past them, so a depth beyond `idx` names no label.
+        let first_bypassed = idx
+            .checked_sub(relative_depth as usize)
+            .ok_or_else(|| TranspileError::Unsupported("delegate depth out of range".into()))?;
+        // Only a try still in its body phase has a closure around this point; a
+        // try in its handler phase is already outside its own `catch_unwind`.
+        let bypassed: Vec<usize> = self
+            .try_barriers
+            .iter()
+            .filter(|b| b.phase == CatchPhase::Body && (first_bypassed..idx).contains(&b.frame_idx))
+            .map(|b| b.frame_idx)
+            .collect();
+
+        self.handle_catch(None)?;
+        if bypassed.is_empty() {
+            self.emit_rethrow(0)?;
+        } else {
+            for &frame_idx in &bypassed {
+                if let Some(ts) = self.frames[frame_idx].try_state.as_mut() {
+                    ts.unwrap_delegate = true;
+                }
+            }
+            self.used_rt.insert(Rt::DelegateExc);
+            self.term(format!(
+                "::std::panic::resume_unwind(Box::new(Wasm2RsDelegate {{ skip: {}u32, payload: {exc_var} }}));",
+                bypassed.len()
+            ));
+            self.reachable = false;
+            self.dead_nesting = 0;
+        }
+        self.handle_try_end()
     }
 
     /// Emit a `rethrow`: re-raise the exception caught by the targeted enclosing

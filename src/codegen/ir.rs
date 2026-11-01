@@ -93,6 +93,9 @@ pub(crate) struct TryState {
     /// Whether a `return` escapes this try's body (routed through the
     /// function-wide return signal rather than the outcome variable).
     pub(crate) has_ret_escape: bool,
+    /// Whether a `delegate` bypasses this try's body, so its landing pad must
+    /// first unwrap a [`Rt::DelegateExc`](super::Rt::DelegateExc) and re-raise.
+    pub(crate) unwrap_delegate: bool,
 }
 /// A branch that leaves a `try` body, recorded so the try's post-`match`
 /// dispatch can re-issue it outside the `catch_unwind` closure (as a direct
@@ -199,6 +202,8 @@ pub(crate) struct TryRegionNode {
     pub(crate) body_reachable_at_end: bool,
     /// The catch handlers, in source order.
     pub(crate) catches: Vec<CatchArm>,
+    /// Whether the landing pad starts by letting a delegated exception pass.
+    pub(crate) unwrap_delegate: bool,
 }
 /// One arm of a [`Node::BrTable`]: a match pattern that assigns its target's
 /// value-carrying variables then `break`/`continue`s to `label`.
@@ -466,6 +471,7 @@ pub(crate) fn render_try_into(
         body,
         body_reachable_at_end,
         catches,
+        unwrap_delegate,
     } = node;
 
     push_body_line(
@@ -494,9 +500,35 @@ pub(crate) fn render_try_into(
         depth + 1,
         line_prefix,
     );
+    if unwrap_delegate {
+        render_delegate_pass(&exc_var, depth + 2, line_prefix, out);
+    }
     render_landing_pad(catches, &exc_var, depth + 2, line_prefix, out);
     push_body_line(out, "}", depth + 1, line_prefix);
     push_body_line(out, "}", depth, line_prefix);
+}
+/// Let an exception raised by a `delegate` pass through a try it bypasses: a
+/// wrapped exception is re-raised with one fewer body left to skip, or raw once
+/// the last bypassed body has been left, so the next enclosing try sees it plain.
+fn render_delegate_pass(exc_var: &str, depth: usize, line_prefix: &str, out: &mut String) {
+    let lines = [
+        format!("let {exc_var} = match {exc_var}.downcast::<Wasm2RsDelegate>() {{"),
+        "    Ok(__d) => {".to_string(),
+        "        let __d = *__d;".to_string(),
+        "        let __p: Box<dyn ::std::any::Any + Send> = if __d.skip > 1 {".to_string(),
+        "            Box::new(Wasm2RsDelegate { skip: __d.skip - 1, payload: __d.payload })"
+            .to_string(),
+        "        } else {".to_string(),
+        "            __d.payload".to_string(),
+        "        };".to_string(),
+        "        ::std::panic::resume_unwind(__p)".to_string(),
+        "    }".to_string(),
+        "    Err(__e) => __e,".to_string(),
+        "};".to_string(),
+    ];
+    for line in &lines {
+        push_body_line(out, line, depth, line_prefix);
+    }
 }
 /// Render the `Err` arm of a try's `catch_unwind`: resolve the caught tag and
 /// dispatch to the matching handler, re-raising anything unmatched. Consumes the
