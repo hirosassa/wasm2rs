@@ -211,6 +211,19 @@ pub fn compile_run(name: &str, wat: &str, main_body: &str) {
     );
 }
 
+/// Transpile an already-assembled wasm module (e.g. one built by an external
+/// toolchain), run `main_body`, and assert it exits 0.
+pub fn compile_run_wasm(name: &str, wasm: &[u8], main_body: &str) {
+    let generated = wasm2rs::transpile(wasm).expect("transpile ok");
+    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
+    let bin = build(name, &program);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(
+        run.success(),
+        "generated program assertions failed:\n{name}"
+    );
+}
+
 /// Transpile `wat` and append `trailer` verbatim — used when the test needs
 /// module-level definitions (e.g. a host `impl Imports`) in addition to a
 /// `fn main`. Asserts the program exits 0.
