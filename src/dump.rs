@@ -23,6 +23,9 @@ enum Resolution {
     HostTrait,
     /// A shared memory: a handle passed to `Instance::new`, not lent by the host.
     SharedHandle,
+    /// An imported exception tag: it only occupies a tag index, and codegen
+    /// needs no host item for it.
+    Tag,
 }
 
 impl Resolution {
@@ -31,6 +34,7 @@ impl Resolution {
             Self::NativeWasi => "native WASI",
             Self::HostTrait => "host trait",
             Self::SharedHandle => "shared memory handle",
+            Self::Tag => "exception tag",
         }
     }
 }
@@ -301,7 +305,7 @@ fn add_import(
         }
         TypeRef::Tag(_) => {
             s.tags = s.tags.saturating_add(1);
-            ("tag".to_string(), Resolution::HostTrait)
+            ("tag".to_string(), Resolution::Tag)
         }
     };
     s.imports.push(ImportLine {

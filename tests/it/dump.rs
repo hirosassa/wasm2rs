@@ -143,6 +143,9 @@ fn the_host_trait_verdict_matches_what_codegen_generates() {
         r#"(module (import "env" "memory" (memory 1)))"#,
         r#"(module (import "env" "memory" (memory 1 1 shared)))"#,
         r#"(module (memory 1))"#,
+        // An imported tag is not a host-trait item in codegen.
+        r#"(module (import "env" "e" (tag (param i32))))"#,
+        r#"(module (import "env" "t" (table 1 funcref)))"#,
     ];
     for wat in modules {
         let wasm = wat::parse_str(wat).unwrap();
@@ -197,4 +200,92 @@ fn the_dump_flag_rejects_an_output_path() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn an_imported_tag_is_listed_but_does_not_need_the_host_trait() {
+    let text = summary(r#"(module (import "env" "e" (tag (param i32))))"#);
+    assert!(text.contains("env.e tag [exception tag]"), "{text}");
+    assert!(text.contains("tags: 1"), "{text}");
+    assert!(text.contains("host trait: not required"), "{text}");
+}
+
+#[test]
+fn describes_non_function_imports_and_every_export_kind() {
+    let text = summary(
+        r#"(module
+            (import "env" "g" (global (mut i64)))
+            (import "env" "t" (table 1 funcref))
+            (import "env" "m" (memory 1))
+            (tag $e (param i32))
+            (global (export "glob") i32 (i32.const 0))
+            (table (export "tab") 1 funcref)
+            (export "tag" (tag $e))
+            (export "mem" (memory 0)))"#,
+    );
+    assert!(text.contains("env.g global mut i64 [host trait]"), "{text}");
+    assert!(text.contains("env.t table [host trait]"), "{text}");
+    assert!(text.contains("env.m memory [host trait]"), "{text}");
+    assert!(
+        text.contains("memory 0: min 1, no max (imported)"),
+        "{text}"
+    );
+    assert!(text.contains("globals: 2"), "{text}");
+    assert!(text.contains("tables: 2"), "{text}");
+    assert!(text.contains("glob (global 1)"), "{text}");
+    assert!(text.contains("tab (table 1)"), "{text}");
+    assert!(text.contains("tag (tag 0)"), "{text}");
+}
+
+#[test]
+fn counts_segments() {
+    let text = summary(
+        r#"(module
+            (memory 1)
+            (table 2 funcref)
+            (func $f)
+            (data (i32.const 0) "ab")
+            (data "cd")
+            (elem (i32.const 0) $f))"#,
+    );
+    assert!(text.contains("data segments: 2"), "{text}");
+    assert!(text.contains("element segments: 1"), "{text}");
+}
+
+#[test]
+fn reports_exceptions_gc_multi_memory_and_wasi_threads() {
+    let eh = summary(
+        r#"(module (tag $e)
+            (func (try_table (catch_all 0) (throw $e))))"#,
+    );
+    assert!(eh.contains("features: exceptions"), "{eh}");
+
+    let gc = summary(
+        r#"(module (type $s (struct (field i32)))
+            (func (result (ref $s)) i32.const 1 struct.new $s))"#,
+    );
+    assert!(gc.contains("features: gc"), "{gc}");
+
+    let multi = summary(r#"(module (memory 1) (memory 1))"#);
+    assert!(multi.contains("features: multi-memory"), "{multi}");
+
+    let threads = summary(
+        r#"(module
+            (import "wasi" "thread-spawn" (func (param i32) (result i32)))
+            (memory 1 1 shared))"#,
+    );
+    assert!(threads.contains("features: wasi-threads"), "{threads}");
+}
+
+#[test]
+fn reports_continuations() {
+    let text = summary(
+        r#"(module
+            (type $ft (func))
+            (type $ct (cont $ft))
+            (func $f)
+            (elem declare func $f)
+            (func (result (ref $ct)) ref.func $f cont.new $ct))"#,
+    );
+    assert!(text.contains("continuations"), "{text}");
 }
