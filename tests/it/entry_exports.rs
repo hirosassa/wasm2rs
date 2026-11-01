@@ -208,7 +208,8 @@ fn the_split_output_skips_dead_functions_too() {
 #[test]
 fn the_cli_flag_selects_the_roots() {
     let wasm = wat::parse_str(DIRECT).unwrap();
-    let dir = std::env::temp_dir().join("wasm2rs_entry_exports_cli");
+    let dir =
+        std::env::temp_dir().join(format!("wasm2rs_entry_exports_cli_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("in.wasm");
     std::fs::write(&input, wasm).unwrap();
