@@ -517,3 +517,156 @@ fn memory_access_targeting_a_gc_array_is_rejected() {
         "GC array payload",
     );
 }
+
+#[test]
+fn exception_payload_with_a_reference_type_is_rejected() {
+    // An exception stores its payload as raw `u64` bits, which cannot hold a
+    // managed reference, so a tag with a reference-typed parameter must be
+    // refused rather than mistranspiled.
+    assert_unsupported(
+        r#"(module
+            (tag $e (param funcref))
+            (func (export "f")
+              ref.null func
+              throw $e))"#,
+        "exception payload with a reference type",
+    );
+}
+
+#[test]
+fn exception_payload_with_a_v128_is_rejected() {
+    assert_unsupported(
+        r#"(module
+            (tag $e (param v128))
+            (func (export "f")
+              v128.const i32x4 0 0 0 0
+              throw $e))"#,
+        "exception payload with a v128 value",
+    );
+}
+
+/// A module whose continuation body `$body` is `body`, next to `$s` (a
+/// suspending step function, so a call to it from `$body` is a cross-call
+/// checkpoint) and `$sp` (the same but taking one i32 parameter).
+fn cont_body_wat(body: &str) -> String {
+    format!(
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (type $fp (func (param i32) (result i32)))
+            (type $cp (cont $fp))
+            (tag $y (param i32))
+            (func $s (result i32)
+              i32.const 1 suspend $y
+              i32.const 2)
+            (func $sp (param i32) (result i32)
+              i32.const 1 suspend $y
+              i32.const 2)
+            (func $body (result i32) {body})
+            (func (export "run") (result i32)
+              (block $on (result i32 (ref $ct))
+                ref.func $body cont.new $ct
+                resume $ct (on $y $on)
+                return)
+              drop drop
+              ;; make `$s`/`$sp` reachable as continuation bodies in their own right
+              ref.func $s cont.new $ct drop
+              ref.func $sp cont.new $cp drop
+              i32.const 0))"#
+    )
+}
+
+#[test]
+fn two_cross_call_checkpoints_in_one_body_are_rejected() {
+    // A body is lowered with at most one checkpoint (its tail call); a second
+    // one would need a second saved callee frame.
+    assert_unsupported(
+        &cont_body_wat("call $s drop call $s"),
+        "more than one cross-call checkpoint",
+    );
+}
+
+#[test]
+fn checkpoint_with_a_live_operand_is_rejected() {
+    // `10` is still on the operand stack when `$s` is called; it would have to
+    // survive the callee's suspension, which the checkpoint cannot save.
+    assert_unsupported(
+        &cont_body_wat("i32.const 10 call $s i32.add"),
+        "non-empty operand stack before a cross-call checkpoint",
+    );
+}
+
+#[test]
+fn checkpoint_to_a_function_with_parameters_is_rejected() {
+    assert_unsupported(
+        &cont_body_wat("i32.const 3 call $sp"),
+        "cross-call checkpoint to a continuation with parameters",
+    );
+}
+
+#[test]
+fn checkpoint_inside_a_block_is_rejected() {
+    assert_unsupported(
+        &cont_body_wat("block (result i32) call $s end"),
+        "cross-call checkpoint inside nested control flow",
+    );
+}
+
+#[test]
+fn return_call_into_a_suspending_function_is_rejected() {
+    assert_unsupported(
+        &cont_body_wat("return_call $s"),
+        "return_call across a continuation",
+    );
+}
+
+#[test]
+fn a_second_imported_table_is_rejected() {
+    // Only one table is supported; the limit applies to imports too.
+    assert_unsupported(
+        r#"(module (import "e" "t0" (table 1 funcref)) (import "e" "t1" (table 1 funcref)))"#,
+        "multiple tables",
+    );
+}
+
+#[test]
+fn imported_64_bit_table_is_rejected() {
+    assert_unsupported(
+        r#"(module (import "e" "t" (table i64 1 funcref)))"#,
+        "64-bit or shared table",
+    );
+}
+
+#[test]
+fn imported_table_of_a_gc_reference_type_is_rejected() {
+    assert_unsupported(
+        r#"(module (import "e" "t" (table 1 anyref)))"#,
+        "table of a non-funcref/externref type",
+    );
+}
+
+#[test]
+fn error_display_names_the_failure_kind() {
+    // The CLI prints `TranspileError` via `Display`, so the prefix is how a
+    // user tells a malformed input from a merely unsupported one.
+    let parse = transpile(b"definitely not wasm").unwrap_err();
+    assert!(matches!(parse, TranspileError::Parse(_)));
+    assert!(
+        parse.to_string().starts_with("failed to parse wasm: "),
+        "got {parse}",
+    );
+
+    let wasm =
+        wat::parse_str(r#"(module (import "e" "m0" (memory 1)) (import "e" "m1" (memory 1)))"#)
+            .unwrap();
+    let unsupported = transpile(&wasm).unwrap_err();
+    assert_eq!(
+        unsupported.to_string(),
+        "unsupported: imported non-zero memory",
+    );
+
+    assert_eq!(
+        TranspileError::StackUnderflow.to_string(),
+        "operand stack underflow",
+    );
+}

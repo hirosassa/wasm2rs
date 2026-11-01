@@ -1208,3 +1208,60 @@ fn null_cont_local_defaults_to_null() {
         "assert_eq!(func0(), 1);",
     );
 }
+
+/// Module whose generator yields `$lit` of type `$ty` up through `suspend`, then
+/// returns whatever the driver sends back. The driver forwards the yielded
+/// payload straight back down, so the value crosses the width-erased `i64`
+/// slot four times: suspend payload, yield handler, resume injection, return.
+fn echo_generator_wat(ty: &str, lit: &str) -> String {
+    format!(
+        r#"(module
+            (type $ft (func (result {ty})))
+            (type $ct (cont $ft))
+            (type $ft2 (func (param {ty}) (result {ty})))
+            (type $ct2 (cont $ft2))
+            (tag $ch (param {ty}) (result {ty}))
+            (func $gen (result {ty})
+              {ty}.const {lit} suspend $ch)
+            (func (export "run") (result {ty})
+              (local $k (ref null $ct2))
+              (block $on_ch (result {ty} (ref $ct2))
+                ref.func $gen cont.new $ct
+                resume $ct (on $ch $on_ch)
+                return)
+              local.set $k
+              local.get $k
+              resume $ct2))"#
+    )
+}
+
+#[test]
+fn i64_survives_the_erased_continuation_slot() {
+    // The top bit and the low bit are both set, so a sign-extending or
+    // truncating erasure would change the value.
+    compile_run(
+        "cont_echo_i64",
+        &echo_generator_wat("i64", "0x8000000000000001"),
+        "let mut inst = Instance::new(); assert_eq!(inst.func1() as u64, 0x8000_0000_0000_0001);",
+    );
+}
+
+#[test]
+fn f32_nan_payload_survives_the_erased_continuation_slot() {
+    // A quiet NaN with a nonzero payload: erasure by value (`as i64`) instead
+    // of by bit pattern would canonicalize or corrupt it.
+    compile_run(
+        "cont_echo_f32",
+        &echo_generator_wat("f32", "nan:0x400001"),
+        "let mut inst = Instance::new(); assert_eq!(inst.func1().to_bits(), 0x7fc0_0001);",
+    );
+}
+
+#[test]
+fn f64_nan_payload_survives_the_erased_continuation_slot() {
+    compile_run(
+        "cont_echo_f64",
+        &echo_generator_wat("f64", "nan:0x8000000000001"),
+        "let mut inst = Instance::new(); assert_eq!(inst.func1().to_bits(), 0x7ff8_0000_0000_0001);",
+    );
+}
