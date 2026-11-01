@@ -145,14 +145,26 @@ pub(super) const HELPER_ORDER: [Helper; 50] = [
 /// `i > 0` the method name gains an `_m{i}` suffix and the body borrows
 /// `self.mem{i}()`/`self.mem{i}_mut()`, so each memory owns an independent
 /// helper set.
-pub(super) fn helper_lines(helper: Helper, mem: u32, unsafe_memory: bool) -> Vec<String> {
+pub(super) fn helper_lines(
+    helper: Helper,
+    mem: u32,
+    unsafe_memory: bool,
+    memory64: bool,
+) -> Vec<String> {
     let base = base_helper_lines(helper);
+    // A 64-bit memory widens the memory-0 template first, so the unchecked and
+    // per-memory rewrites below apply to it unchanged.
+    let base = if memory64 {
+        widen_helper_lines(helper, base)
+    } else {
+        base
+    };
     // The unchecked rewrite runs on the memory-0 template (whose accessors are
     // the literal `self.mem()`/`self.mem_mut()`) before `specialise_helper_lines`
     // retargets them to `mem{i}`, so both memory 0 and `i > 0` get the same
     // bounds-check removal.
     let base = if unsafe_memory {
-        unchecked_helper_lines(helper, base)
+        unchecked_helper_lines(helper, base, memory64)
     } else {
         base
     };
@@ -160,6 +172,16 @@ pub(super) fn helper_lines(helper: Helper, mem: u32, unsafe_memory: bool) -> Vec
         return base;
     }
     specialise_helper_lines(helper, mem, base)
+}
+
+/// The index conversion of an unchecked `memory_copy` parameter: its 32-bit
+/// operands are `u32` parameters, a 64-bit memory's are `i64`.
+fn copy_index(name: &str, memory64: bool) -> String {
+    if memory64 {
+        index_expr64(name)
+    } else {
+        format!("{name} as usize")
+    }
 }
 
 /// Rewrite a memory-0 helper template to its unchecked (`unsafe`) form for the
@@ -171,16 +193,20 @@ pub(super) fn helper_lines(helper: Helper, mem: u32, unsafe_memory: bool) -> Vec
 /// swapped for an explicit `ptr::copy` (memmove, overlap-safe). `memory.grow`
 /// and the `table_*` helpers touch no linear-memory slice, so they are returned
 /// unchanged. An out-of-bounds access under this mode is undefined behaviour.
-fn unchecked_helper_lines(helper: Helper, base: Vec<String>) -> Vec<String> {
+fn unchecked_helper_lines(helper: Helper, base: Vec<String>, memory64: bool) -> Vec<String> {
     match helper {
         // `copy_within` is bounds-checked and has no `self.mem()[..]` to rewrite;
         // replace the whole body with an explicit memmove over raw pointers.
         Helper::MemoryCopy => vec![
             "#[inline(always)]".to_string(),
-            "fn memory_copy(&mut self, dest: u32, src: u32, len: u32) {".to_string(),
-            "    let s = src as usize;".to_string(),
-            "    let d = dest as usize;".to_string(),
-            "    let n = len as usize;".to_string(),
+            if memory64 {
+                "fn memory_copy(&mut self, dest: i64, src: i64, len: i64) {".to_string()
+            } else {
+                "fn memory_copy(&mut self, dest: u32, src: u32, len: u32) {".to_string()
+            },
+            format!("    let s = {};", copy_index("src", memory64)),
+            format!("    let d = {};", copy_index("dest", memory64)),
+            format!("    let n = {};", copy_index("len", memory64)),
             "    let p = self.mem_mut().as_mut_ptr();".to_string(),
             "    // SAFETY: unsafe_memory opt-in; the range is assumed in-bounds. \
              `ptr::copy` is memmove, so overlapping source and destination copy \
@@ -200,6 +226,74 @@ fn unchecked_helper_lines(helper: Helper, base: Vec<String>) -> Vec<String> {
             }
             out
         }
+    }
+}
+
+/// The Rust expression converting the wasm `i64` operand `code` of a 64-bit
+/// memory to a `usize` index, clamped to `isize::MAX`: no linear memory is that
+/// large, so the clamped index is always out of bounds (a trap), and small
+/// offsets added to it by a helper cannot wrap around into a valid index. A
+/// 32-bit operand keeps its historic `as usize` cast at each call site.
+pub(super) fn index_expr64(code: &str) -> String {
+    format!("(({code}) as u64).min(isize::MAX as u64) as usize")
+}
+
+/// Widen a memory-0 helper template to a 64-bit memory (memory64 proposal): the
+/// address becomes `i64` and the static offset `u64`; `memory.grow`/`fill`/`copy`
+/// take `i64` operands. The effective address is clamped like [`index_expr64`], so
+/// an address whose sum with the offset overflows `u64` still traps.
+fn widen_helper_lines(helper: Helper, base: Vec<String>) -> Vec<String> {
+    let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    match helper {
+        Helper::Grow => vec![
+            "fn memory_grow(&mut self, delta: i64) -> i64 {".to_string(),
+            format!("    let old_pages = (self.mem().len() / {WASM_PAGE_SIZE}) as u64;"),
+            "    let Some(new_pages) = old_pages.checked_add(delta as u64) else {".to_string(),
+            "        return -1;".to_string(),
+            "    };".to_string(),
+            format!("    let Some(new_len) = new_pages.checked_mul({WASM_PAGE_SIZE}) else {{"),
+            "        return -1;".to_string(),
+            "    };".to_string(),
+            "    let Ok(new_len) = usize::try_from(new_len) else {".to_string(),
+            "        return -1;".to_string(),
+            "    };".to_string(),
+            // A failed allocation reports -1 (as the spec allows) instead of
+            // aborting the process.
+            "    let extra = new_len - self.mem().len();".to_string(),
+            "    if self.mem_mut().try_reserve_exact(extra).is_err() {".to_string(),
+            "        return -1;".to_string(),
+            "    }".to_string(),
+            "    self.mem_mut().resize(new_len, 0);".to_string(),
+            "    old_pages as i64".to_string(),
+            "}".to_string(),
+        ],
+        Helper::MemoryFill => owned(&[
+            "fn memory_fill(&mut self, dest: i64, val: i32, len: i64) {",
+            "    let d = (dest as u64).min(isize::MAX as u64) as usize;",
+            "    let n = (len as u64).min(isize::MAX as u64) as usize;",
+            "    self.mem_mut()[d..d + n].fill(val as u8);",
+            "}",
+        ]),
+        Helper::MemoryCopy => owned(&[
+            "fn memory_copy(&mut self, dest: i64, src: i64, len: i64) {",
+            "    let s = (src as u64).min(isize::MAX as u64) as usize;",
+            "    let d = (dest as u64).min(isize::MAX as u64) as usize;",
+            "    let n = (len as u64).min(isize::MAX as u64) as usize;",
+            "    self.mem_mut().copy_within(s..s + n, d);",
+            "}",
+        ]),
+        Helper::TableCopy | Helper::TableFill => base,
+        _ => base
+            .into_iter()
+            .map(|line| {
+                line.replace("addr: i32", "addr: i64")
+                    .replace("offset: u32", "offset: u64")
+                    .replace(
+                        "addr as u32 as usize + offset as usize",
+                        "(addr as u64).saturating_add(offset).min(isize::MAX as u64) as usize",
+                    )
+            })
+            .collect(),
     }
 }
 

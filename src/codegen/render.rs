@@ -158,6 +158,7 @@ pub(super) fn render_module(
         used,
         ctx.memory_shared,
         ctx.unsafe_memory,
+        &ctx.memory64,
     ));
     inner.extend(dispatch_method_block(
         ctx,
@@ -403,8 +404,11 @@ fn constructor_lines(
     // surrounding block.
     let copy_active_data = |lines: &mut Vec<String>, mem: u32, target: &str, indent: &str| {
         for (d, seg) in active_for(mem) {
-            let off = seg.offset.unwrap_or(0) as usize;
-            let end = off + seg.bytes.len();
+            // The offset is only spelled into the generated source, so it stays a
+            // `u64` (a 64-bit memory's segment can lie above 4 GiB); an end that
+            // would overflow saturates and is then out of bounds in the target.
+            let off = seg.offset.unwrap_or(0);
+            let end = off.saturating_add(u64::try_from(seg.bytes.len()).unwrap_or(u64::MAX));
             lines.push(format!(
                 "{indent}{target}[{off}..{end}].copy_from_slice(&DATA{d});"
             ));
@@ -696,6 +700,7 @@ fn helper_method_lines(
     used: &HashSet<(Helper, u32)>,
     memory_shared: bool,
     unsafe_memory: bool,
+    memory64: &[bool],
 ) -> Vec<String> {
     let mut inner: Vec<String> = Vec::new();
     let mut mem_indices: Vec<u32> = used.iter().map(|(_, mem)| *mem).collect();
@@ -711,7 +716,8 @@ fn helper_method_lines(
                     // `unsafe_memory` does not apply to a shared memory.
                     inner.extend(shared_helper_lines(helper));
                 } else {
-                    inner.extend(helper_lines(helper, mem, unsafe_memory));
+                    let is64 = memory64.get(mem as usize).copied().unwrap_or(false);
+                    inner.extend(helper_lines(helper, mem, unsafe_memory, is64));
                 }
             }
         }

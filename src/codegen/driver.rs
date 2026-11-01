@@ -77,6 +77,9 @@ pub(crate) struct ModuleCtx<'a> {
     /// The number of linear memories (imported first, then defined). Memory
     /// operations carry a static index that must be below this.
     pub(crate) n_memories: usize,
+    /// Per memory (indexed like the memory operands), whether it is 64-bit
+    /// (memory64 proposal), so its addresses and sizes are `i64`.
+    pub(crate) memory64: Vec<bool>,
     /// True iff the module has exactly one memory and it is `shared`. When set,
     /// linear memory is backed by a thread-shareable `SharedMemory` (Mutex) and
     /// the atomic RMW/cmpxchg/wait/notify ops lower to genuine atomics.
@@ -308,6 +311,7 @@ pub(crate) fn build_ctx<'a>(
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,
         n_memories: memories.len(),
+        memory64: memories.iter().map(|m| m.memory64).collect(),
         memory_shared,
         has_table,
         has_imports,
