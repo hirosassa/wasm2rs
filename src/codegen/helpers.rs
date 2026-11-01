@@ -240,7 +240,7 @@ pub(super) fn index_expr64(code: &str) -> String {
 
 /// Widen a memory-0 helper template to a 64-bit memory (memory64 proposal): the
 /// address becomes `i64` and the static offset `u64`; `memory.grow`/`fill`/`copy`
-/// take `i64` operands. The effective address is clamped like [`index_expr`], so
+/// take `i64` operands. The effective address is clamped like [`index_expr64`], so
 /// an address whose sum with the offset overflows `u64` still traps.
 fn widen_helper_lines(helper: Helper, base: Vec<String>) -> Vec<String> {
     let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
