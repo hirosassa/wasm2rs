@@ -28,11 +28,11 @@ default = ["cli"]
 cli = ["dep:mimalloc"]
 
 [dependencies]
-wasmparser = "0.255.0"
+wasmparser = "0.263.0"
 mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
-wat = "1.255.0"
+wat = "1.263.0"
 
 # Hardening gates (rust-hardening skill). This crate is a code generator, so a
 # chunk of the restriction lints below fire on *intentional* index/offset

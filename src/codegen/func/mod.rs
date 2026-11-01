@@ -664,7 +664,7 @@ impl<'a> FuncGen<'a> {
             }
             // Fence and wait/notify. A fence is a no-op on a single instance;
             // `notify` wakes nobody; `wait` traps (would block) or returns 1.
-            Operator::AtomicFence => {}
+            Operator::AtomicFence { .. } => {}
             Operator::MemoryAtomicNotify { memarg } => self.atomic_notify(memarg)?,
             Operator::MemoryAtomicWait32 { memarg } => self.atomic_wait(Helper::LoadI32, memarg)?,
             Operator::MemoryAtomicWait64 { memarg } => self.atomic_wait(Helper::LoadI64, memarg)?,

@@ -245,7 +245,12 @@ where
                         // Record the direct supertype (if any) before matching
                         // the kind, keeping `supers` aligned with the type index
                         // space so a subtype chain can be walked at codegen time.
-                        supers.push(sub.supertype_idx.and_then(|p| p.as_module_index()));
+                        if sub.supertype_idxs.len() > 1 {
+                            return Err(TranspileError::Unsupported(
+                                "type with multiple supertypes".into(),
+                            ));
+                        }
+                        supers.push(sub.supertype_idxs.first().and_then(|p| p.as_module_index()));
                         match &sub.composite_type.inner {
                             CompositeInnerType::Func(func_ty) => {
                                 signatures.push(signature_from(func_ty));
