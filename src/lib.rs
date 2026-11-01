@@ -1027,10 +1027,27 @@ impl Instance {
             rust.contains("let mut m: Vec<u8> = vec![0u8; 65536];"),
             "{rust}"
         );
-        // The byte literal is wrapped across lines (see `byte_array_literal`),
-        // so check the destination slice and the byte sequence separately.
-        assert!(rust.contains("m[4..6].copy_from_slice(&["), "{rust}");
-        assert!(rust.contains("1u8, 2u8,"), "{rust}");
+        // The bytes live in a module-scope `static` (a single string literal),
+        // and `new()` copies from it.
+        assert!(
+            rust.contains("static DATA0: [u8; 2] = *b\"\\x01\\x02\";"),
+            "{rust}"
+        );
+        assert!(rust.contains("m[4..6].copy_from_slice(&DATA0);"), "{rust}");
+    }
+
+    #[test]
+    fn active_data_source_stays_compact() {
+        let segment = "\\ff".repeat(4096);
+        let wasm = wat_to_wasm(&format!(
+            r#"(module (memory 1) (data (i32.const 0) "{segment}"))"#
+        ));
+
+        let rust = transpile(&wasm).expect("transpile ok");
+
+        // One escaped byte costs 4 characters; the array-literal form spent 7
+        // (`255u8, `) per byte on the same segment.
+        assert!(rust.len() < 4096 * 5, "{} bytes of source", rust.len());
     }
 
     #[test]

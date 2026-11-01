@@ -269,21 +269,37 @@ fn memarg_offset(memarg: MemArg) -> Result<u32, TranspileError> {
     u32::try_from(memarg.offset)
         .map_err(|_| TranspileError::Unsupported("memory offset too large".into()))
 }
-/// Render bytes as a comma-separated list of `u8` literals (a Rust array body).
+/// Render bytes as the body of a byte-string literal (without the `b"` quotes).
 ///
-/// The list is broken onto a new line every `PER_LINE` bytes: a large data
-/// segment would otherwise render as one multi-megabyte line that overflows
-/// rustc's parser. The embedded newlines sit inside the `[ ... ]` wrapper at the
-/// call site, producing an ordinary multi-line array literal.
-fn byte_array_literal(bytes: &[u8]) -> String {
+/// A segment is one string literal rather than an array of per-byte
+/// expressions, which keeps the source small and spares rustc one AST node per
+/// byte. The literal is broken with `\` line continuations every `PER_LINE`
+/// bytes so no source line grows to megabytes. A continuation skips the next
+/// line's leading whitespace, so the first byte of each line is always escaped.
+fn byte_string_literal(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
-    const PER_LINE: usize = 32;
+    const PER_LINE: usize = 64;
     let mut out = String::new();
-    for (i, b) in bytes.iter().enumerate() {
-        out.push_str(if i % PER_LINE == 0 { "\n" } else { " " });
-        let _ = write!(out, "{b}u8,");
+    for (i, &b) in bytes.iter().enumerate() {
+        let line_start = i % PER_LINE == 0;
+        if line_start && i > 0 {
+            out.push_str("\\\n");
+        }
+        if b.is_ascii_graphic() && b != b'"' && b != b'\\' || b == b' ' && !line_start {
+            out.push(char::from(b));
+        } else {
+            let _ = write!(out, "\\x{b:02x}");
+        }
     }
     out
+}
+/// A module-scope `static DATA{d}` holding one data segment's bytes.
+fn data_static_line(d: usize, bytes: &[u8]) -> String {
+    format!(
+        "static DATA{d}: [u8; {}] = *b\"{}\";",
+        bytes.len(),
+        byte_string_literal(bytes)
+    )
 }
 /// Indent each non-empty line by four spaces.
 fn indent(lines: &[String]) -> Vec<String> {
