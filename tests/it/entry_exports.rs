@@ -235,3 +235,92 @@ fn the_cli_flag_selects_the_roots() {
     let (ok, _) = run("--entry-exports=nope");
     assert!(!ok);
 }
+
+#[test]
+fn a_call_to_an_import_is_not_a_function_to_keep() {
+    let wat = r#"(module
+        (import "env" "log" (func $log (param i32)))
+        (func (export "a") i32.const 1 call $log)
+        (func (export "b")))"#;
+    let code = generate(wat, &["a"]);
+    assert!(code.contains("fn func1("), "{code}");
+    assert!(!code.contains("fn func2("), "{code}");
+}
+
+#[test]
+fn every_table_read_keeps_the_element_functions() {
+    // `table.get`, `table.copy` and `table.init` each read the table, so the
+    // element function (func 0) stays live; `other` stays dead.
+    for (name, body) in [
+        ("get", "i32.const 0 table.get 0 drop"),
+        ("copy", "i32.const 0 i32.const 0 i32.const 1 table.copy 0 0"),
+        (
+            "init",
+            "i32.const 0 i32.const 0 i32.const 1 table.init 0 $seg",
+        ),
+    ] {
+        let wat = format!(
+            r#"(module
+                (table 2 funcref)
+                (elem $seg func $slot)
+                (func $slot)
+                (func (export "a") {body})
+                (func (export "other")))"#
+        );
+        let code = generate(&wat, &["a"]);
+        assert!(code.contains("fn func0("), "{name}: {code}");
+        assert!(code.contains("fn func1("), "{name}: {code}");
+        assert!(!code.contains("fn func2("), "{name}: {code}");
+    }
+}
+
+#[test]
+fn a_global_initialiser_ref_func_is_a_root() {
+    let wat = r#"(module
+        (func $f)
+        (global funcref (ref.func $f))
+        (elem declare func $f)
+        (func (export "a"))
+        (func (export "other")))"#;
+    let code = generate(wat, &["a"]);
+    assert!(code.contains("fn func0("), "{code}");
+    assert!(code.contains("fn func1("), "{code}");
+    assert!(!code.contains("fn func2("), "{code}");
+}
+
+#[test]
+fn the_emscripten_thread_entries_and_table_stay_live() {
+    // `__pthread_create_js` makes the thread start-up exports roots and the
+    // generated `emscripten_call_start` reads the table, keeping `$start`.
+    let wat = r#"(module
+        (import "env" "memory" (memory 1 1 shared))
+        (import "env" "__pthread_create_js"
+          (func $create (param i32 i32 i32 i32) (result i32)))
+        (table 2 funcref)
+        (elem (i32.const 1) $start)
+        (func (export "_emscripten_thread_init") (param i32 i32 i32 i32 i32 i32))
+        (func (export "_emscripten_tls_init") (result i32) i32.const 0)
+        (func $start (param i32) (result i32) i32.const 0)
+        (func (export "_emscripten_thread_exit") (param i32))
+        (func (export "run") (result i32) i32.const 0))"#;
+    let code = generate(wat, &[]);
+    for kept in ["func1", "func2", "func3", "func4"] {
+        assert!(code.contains(&format!("fn {kept}(")), "{kept}: {code}");
+    }
+    assert!(!code.contains("fn func5("), "{code}");
+    common::build("entry_emscripten", &format!("{code}\nfn main() {{}}\n"));
+}
+
+#[test]
+fn a_tail_call_keeps_its_target() {
+    let wat = r#"(module
+        (func $t (result i32) i32.const 1)
+        (func (export "a") (result i32) return_call $t)
+        (func (export "other") (result i32) i32.const 2))"#;
+    let code = generate(wat, &["a"]);
+    assert!(
+        code.contains("fn func0(") && code.contains("fn func1("),
+        "{code}"
+    );
+    assert!(!code.contains("fn func2("), "{code}");
+}

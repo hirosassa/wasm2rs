@@ -67,15 +67,14 @@ pub(crate) fn live_functions(
             let Some(i) = (f as usize).checked_sub(n_imports) else {
                 continue;
             };
-            let Some(slot) = live.get_mut(i) else {
+            // `live` and `funcs` have the same length; an out-of-range index
+            // (a malformed module) is skipped rather than panicking.
+            let (Some(slot), Some(func)) = (live.get_mut(i), input.funcs.get(i)) else {
                 continue;
             };
             if std::mem::replace(slot, true) {
                 continue;
             }
-            let Some(func) = input.funcs.get(i) else {
-                continue;
-            };
             for op in func.body.get_operators_reader()? {
                 match op? {
                     Operator::Call { function_index }
