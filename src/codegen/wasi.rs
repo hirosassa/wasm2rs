@@ -52,6 +52,12 @@ pub(crate) enum WasiFn {
     /// start-up, which the JS runtime answers by running the thread init and TLS
     /// init exports (see `render::entry_point_lines`).
     EmscriptenInitMainThread,
+    /// `env.emscripten_get_now() -> f64`: milliseconds on a monotonic clock.
+    EmscriptenGetNow,
+    /// `env.emscripten_resize_heap(requested_bytes) -> i32`: the JS runtime's
+    /// `memory.grow` hook. A shared memory cannot move, so natively it always
+    /// reports failure (0) and the allocator falls back to its own error path.
+    EmscriptenResizeHeap,
 }
 
 impl WasiFn {
@@ -78,6 +84,10 @@ impl WasiFn {
             ) => WasiFn::EmscriptenNoop1,
             ("env", "_emscripten_init_main_thread_js") => WasiFn::EmscriptenInitMainThread,
             ("env", "_emscripten_notify_mailbox_postmessage") => WasiFn::EmscriptenNoop2,
+            // The JS build's `exit` is `proc_exit` under another name.
+            ("env", "exit") => WasiFn::ProcExit,
+            ("env", "emscripten_get_now") => WasiFn::EmscriptenGetNow,
+            ("env", "emscripten_resize_heap") => WasiFn::EmscriptenResizeHeap,
             ("wasi_snapshot_preview1", _) => {
                 return Self::recognise_preview1(name, params, results);
             }
@@ -124,11 +134,12 @@ impl WasiFn {
     fn params(self) -> &'static [ValType] {
         use ValType::{I32, I64};
         match self {
-            WasiFn::SchedYield | WasiFn::EmscriptenNoop0 => &[],
+            WasiFn::SchedYield | WasiFn::EmscriptenNoop0 | WasiFn::EmscriptenGetNow => &[],
             WasiFn::ProcExit
             | WasiFn::FdClose
             | WasiFn::ThreadSpawn
             | WasiFn::EmscriptenNoop1
+            | WasiFn::EmscriptenResizeHeap
             | WasiFn::EmscriptenInitMainThread => &[I32],
             WasiFn::EmscriptenNoop2 => &[I32, I32],
             WasiFn::FdWrite | WasiFn::FdRead | WasiFn::PthreadCreateJs => &[I32, I32, I32, I32],
@@ -202,7 +213,9 @@ impl WasiFn {
             | WasiFn::PathLink
             | WasiFn::FdReaddir
             | WasiFn::ThreadSpawn
-            | WasiFn::PthreadCreateJs => &[ValType::I32],
+            | WasiFn::PthreadCreateJs
+            | WasiFn::EmscriptenResizeHeap => &[ValType::I32],
+            WasiFn::EmscriptenGetNow => &[ValType::F64],
         }
     }
 
@@ -243,6 +256,8 @@ impl WasiFn {
             WasiFn::EmscriptenNoop1 => "emscripten_noop1",
             WasiFn::EmscriptenNoop2 => "emscripten_noop2",
             WasiFn::EmscriptenInitMainThread => "emscripten_init_main_thread_js",
+            WasiFn::EmscriptenGetNow => "emscripten_get_now",
+            WasiFn::EmscriptenResizeHeap => "emscripten_resize_heap",
         }
     }
 
@@ -267,6 +282,8 @@ impl WasiFn {
                 | WasiFn::EmscriptenNoop1
                 | WasiFn::EmscriptenNoop2
                 | WasiFn::EmscriptenInitMainThread
+                | WasiFn::EmscriptenGetNow
+                | WasiFn::EmscriptenResizeHeap
         )
     }
 
@@ -684,6 +701,16 @@ impl WasiFn {
                 "    self._emscripten_tls_init();",
                 "}",
             ]),
+            // Milliseconds since the process first asked, like `performance.now()`.
+            WasiFn::EmscriptenGetNow => owned(&[
+                "fn emscripten_get_now(&mut self) -> f64 {",
+                "    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();",
+                "    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0",
+                "}",
+            ]),
+            WasiFn::EmscriptenResizeHeap => {
+                owned(&["fn emscripten_resize_heap(&mut self, a0: i32) -> i32 { 0 }"])
+            }
             WasiFn::EmscriptenNoop0 => owned(&["fn emscripten_noop0(&mut self) {}"]),
             WasiFn::EmscriptenNoop1 => owned(&["fn emscripten_noop1(&mut self, a0: i32) {}"]),
             WasiFn::EmscriptenNoop2 => {

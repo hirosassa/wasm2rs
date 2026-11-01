@@ -10,6 +10,7 @@ check that binaries produced by real compilers work too.
 | `a_wasi_sdk_pthread_reactor_runs_after_initialize` | wasi-sdk `clang` | A C reactor with a constructor and four pthreads. The test calls `_initialize`, then `run` twice on one instance. |
 | `a_wasi_sdk_pthread_command_counts_across_threads` | wasi-sdk `clang` | A C command (`_start`, no `-mexec-model`) with four pthreads; `main` returns non-zero on a wrong count, which exits the process non-zero. |
 | `a_rust_wasi_threads_command_counts_across_threads` | `rustc --target wasm32-wasip1-threads` | A Rust command (`_start`) that spawns four `std::thread`s on a shared atomic counter and asserts the total itself. |
+| `an_emscripten_js_build_counts_across_threads` | `emcc -pthread` (emsdk, the default JS build's `.wasm`) | The same counter through the JS build: no `_start`, so the test calls `__wasm_call_ctors` and then `main(0, 0)`. Its extra imports (`emscripten_get_now`, `exit`, `emscripten_resize_heap`) are native too. |
 | `an_emscripten_pthread_command_counts_across_threads` | `emcc -pthread -sSTANDALONE_WASM` (emsdk) | An emscripten command (`_start`) with four pthreads on a shared atomic counter. Emscripten asks its JS host for a Worker (`env.__pthread_create_js`); wasm2rs answers with a native thread running a sibling instance. |
 
 The first three exercise the `start` section (`__wasm_init_memory`), `wasi::thread-spawn`,
@@ -26,8 +27,10 @@ imports (`_emscripten_thread_cleanup`, mailbox, `emscripten_check_blocking_allow
 `emscripten_exit_with_live_runtime`, ...) are no-ops, and
 `_emscripten_init_main_thread_js` runs the main thread's init. Everything else
 under `env` (for example proxying a call to the main thread) is still left to the
-host. Only the standalone (`-sSTANDALONE_WASM`) build is covered; the default JS
-build also needs `emscripten_get_now`, `emscripten_resize_heap` and `exit`.
+host. Both the standalone (`-sSTANDALONE_WASM`) build and the default JS build's
+`.wasm` are covered. The JS build adds `emscripten_get_now` (a monotonic
+millisecond clock), `exit` (the same as `proc_exit`) and `emscripten_resize_heap`
+(always 0: a shared memory cannot grow, so the allocator reports its own failure).
 
 ## Skipping
 
@@ -129,5 +132,5 @@ Install an [emsdk](https://github.com/emscripten-core/emsdk) and source its
 
 ```sh
 source ~/tools/emsdk/emsdk_env.sh
-cargo test --test it an_emscripten_pthread -- --nocapture
+cargo test --test it emscripten -- --nocapture
 ```

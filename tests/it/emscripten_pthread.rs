@@ -185,3 +185,45 @@ fn the_main_thread_init_import_runs_thread_init_and_tls_init_as_the_main_thread(
         "let mut inst = Instance::new(SharedMemory::new(65536)); assert_eq!(inst.func4(), 9 + 1 + 1 + 5);",
     );
 }
+
+#[test]
+fn emscripten_get_now_is_a_native_millisecond_clock_that_never_goes_back() {
+    // No host is given: the clock is generated natively. Two reads around a
+    // 20 ms sleep must differ by at least that much, in milliseconds.
+    compile_run(
+        "emscripten_get_now",
+        r#"(module
+            (import "env" "emscripten_get_now" (func $now (result f64)))
+            (func (export "run") (result f64) call $now))"#,
+        "let mut inst = Instance::new();
+         let a = inst.func1();
+         std::thread::sleep(std::time::Duration::from_millis(20));
+         let b = inst.func1();
+         assert!(a >= 0.0 && b - a >= 20.0 && b - a < 5000.0, \"{a} {b}\");",
+    );
+}
+
+#[test]
+fn emscripten_resize_heap_refuses_to_grow_the_fixed_shared_memory() {
+    compile_run(
+        "emscripten_resize_heap",
+        r#"(module
+            (import "env" "memory" (memory 1 1 shared))
+            (import "env" "emscripten_resize_heap" (func $grow (param i32) (result i32)))
+            (func (export "run") (param i32) (result i32) local.get 0 call $grow))"#,
+        "let mut inst = Instance::new(SharedMemory::new(65536)); assert_eq!(inst.func1(1 << 20), 0);",
+    );
+}
+
+#[test]
+fn emscripten_exit_ends_the_process_with_the_given_code() {
+    let wat = r#"(module
+        (import "env" "exit" (func $exit (param i32)))
+        (func (export "run") (param i32) local.get 0 call $exit))"#;
+    let generated = transpile(&wat::parse_str(wat).unwrap()).unwrap();
+    let program =
+        format!("{generated}\nfn main() {{ let mut i = Instance::new(); i.func1(42); }}\n");
+    let bin = common::build("emscripten_exit", &program);
+    let status = std::process::Command::new(&bin).status().unwrap();
+    assert_eq!(status.code(), Some(42));
+}
