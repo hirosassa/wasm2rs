@@ -6,6 +6,9 @@
 //! `if`/`else`, `br`, `br_if`, `br_table`, `return`, `drop` and `select`.
 
 mod codegen;
+mod dump;
+
+pub use dump::{ModuleSummary, dump};
 
 use wasmparser::{
     CompositeInnerType, DataKind, ElementItems, ElementKind, ExternalKind, FuncType, Parser,
