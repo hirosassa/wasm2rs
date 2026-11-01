@@ -28,7 +28,8 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
     }
 }
 
-/// All runtime free-function helpers, in a deterministic emission order.
+/// All runtime helpers (free functions and support types), in a deterministic
+/// emission order.
 const RT_ORDER: [Rt; 21] = [
     Rt::DelegateExc,
     Rt::TrapUnreachable,
@@ -53,7 +54,7 @@ const RT_ORDER: [Rt; 21] = [
     Rt::SplatF64x2,
 ];
 
-/// Render the used runtime helpers as module-scope free functions, in
+/// Render the used runtime helpers as module-scope items, in
 /// [`RT_ORDER`], separated by blank lines. Returns an empty string if none.
 pub(super) fn render_rt_helpers(used: &HashSet<Rt>) -> String {
     let mut blocks: Vec<String> = Vec::new();
