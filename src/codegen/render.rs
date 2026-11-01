@@ -950,6 +950,18 @@ const EMSCRIPTEN_ENTRIES: [(&str, &[ValType], &[ValType]); 3] = {
     ]
 };
 
+/// The export names the generated code itself calls into, and whether the
+/// module also reads the table through them (`emscripten_call_start` calls a
+/// table entry by index). Used to keep them live under `entry_exports`.
+pub(super) fn internal_entry_names(imports: &[ImportInfo]) -> (Vec<&'static str>, bool) {
+    let imports_wasi = |f: WasiFn| imports.iter().any(|im| im.wasi == Some(f));
+    let mut names = vec![WASI_THREAD_START];
+    if imports_wasi(WasiFn::PthreadCreateJs) || imports_wasi(WasiFn::EmscriptenInitMainThread) {
+        names.extend(EMSCRIPTEN_ENTRIES.iter().map(|(name, ..)| *name));
+    }
+    (names, imports_wasi(WasiFn::PthreadCreateJs))
+}
+
 /// By-name entry points forwarding to the exported functions' `func{N}`: always
 /// `wasi_thread_start` when exported, and, for a module importing
 /// `env.__pthread_create_js`, the emscripten thread start-up exports plus

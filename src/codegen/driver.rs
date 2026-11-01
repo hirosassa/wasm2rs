@@ -182,6 +182,10 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) imports: &'a [ImportInfo],
     pub(crate) imported_globals: &'a [ImportedGlobalInfo],
     pub(crate) funcs: &'a [FuncInput<'a>],
+    /// Parallel to `funcs`: whether each defined function is emitted. A dead
+    /// function (see `TranspileOptions::entry_exports`) is skipped and left out
+    /// of every `call_indirect` dispatch, but keeps its index and name.
+    pub(crate) live: &'a [bool],
     pub(crate) types: &'a [TypeSig],
     pub(crate) type_kinds: &'a [CompositeKind],
     /// The declared direct supertype of every type index (`None` when none),
@@ -338,7 +342,13 @@ pub(crate) fn build_ctx<'a>(
         imports
             .iter()
             .map(|im| (im.params.as_slice(), im.results.as_slice()))
-            .chain(funcs.iter().map(|f| (f.params, f.results))),
+            .map(Some)
+            .chain(
+                funcs
+                    .iter()
+                    .zip(parts.live)
+                    .map(|(f, live)| live.then_some((f.params, f.results))),
+            ),
     );
     let ctx = ModuleCtx {
         imports,
@@ -420,6 +430,9 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     let mut ends = Vec::with_capacity(parts.funcs.len());
     let mut deps = ModuleDeps::default();
     for (index, f) in parts.funcs.iter().enumerate() {
+        if !parts.live[index] {
+            continue;
+        }
         // Defined functions are named by their full function index, i.e. after
         // the imported functions in the shared index space.
         let meta =
@@ -563,6 +576,9 @@ pub(crate) fn generate_module_split(
     let mut funcs_in_chunk = 0usize;
     let mut chunk_index = 0usize;
     for (index, f) in parts.funcs.iter().enumerate() {
+        if !parts.live[index] {
+            continue;
+        }
         if funcs_in_chunk == 0 {
             chunk.push_str(&chunk_prelude(parts, stateful));
         }
@@ -663,10 +679,15 @@ type SigIndex = HashMap<(Vec<ValType>, Vec<ValType>), Vec<usize>>;
 /// Groups function indices (in iteration order, so ascending) by their exact
 /// `(params, results)` signature.
 fn index_by_signature<'a>(
-    sigs: impl IntoIterator<Item = (&'a [ValType], &'a [ValType])>,
+    sigs: impl IntoIterator<Item = Option<(&'a [ValType], &'a [ValType])>>,
 ) -> SigIndex {
     let mut index = SigIndex::new();
-    for (fidx, (params, results)) in sigs.into_iter().enumerate() {
+    // A `None` entry (a dead function) keeps its slot in the index space but is
+    // never a dispatch target.
+    for (fidx, sig) in sigs.into_iter().enumerate() {
+        let Some((params, results)) = sig else {
+            continue;
+        };
         index
             .entry((params.to_vec(), results.to_vec()))
             .or_default()
@@ -716,7 +737,8 @@ mod tests {
         let i32_to_i32: (&[ValType], &[ValType]) = (&[ValType::I32], &[ValType::I32]);
         let i64_to_i64: (&[ValType], &[ValType]) = (&[ValType::I64], &[ValType::I64]);
         let nullary: (&[ValType], &[ValType]) = (&[], &[]);
-        let index = index_by_signature([i32_to_i32, i64_to_i64, i32_to_i32, nullary, i32_to_i32]);
+        let index =
+            index_by_signature([i32_to_i32, i64_to_i64, i32_to_i32, nullary, i32_to_i32].map(Some));
 
         let key = |(p, r): (&[ValType], &[ValType])| (p.to_vec(), r.to_vec());
         assert_eq!(index.get(&key(i32_to_i32)), Some(&vec![0, 2, 4]));

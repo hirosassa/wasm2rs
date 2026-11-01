@@ -32,7 +32,7 @@ use wasm2rs::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--entry-exports=a,b] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -63,6 +63,7 @@ fn run() -> Result<(), String> {
     // order. `--unsafe-memory` opts into unchecked linear-memory access.
     let mut unsafe_memory = false;
     let mut dump = false;
+    let mut entry_exports: Option<Vec<String>> = None;
     let mut split_dispatch = 0usize;
     let mut positional: Vec<String> = Vec::new();
     for arg in std::env::args().skip(1) {
@@ -70,6 +71,15 @@ fn run() -> Result<(), String> {
             split_dispatch = n
                 .parse()
                 .map_err(|_| format!("invalid --split-dispatch value: {n}"))?;
+            continue;
+        }
+        if let Some(list) = arg.strip_prefix("--entry-exports=") {
+            entry_exports = Some(
+                list.split(',')
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            );
             continue;
         }
         match arg.as_str() {
@@ -96,6 +106,7 @@ fn run() -> Result<(), String> {
     let topts = TranspileOptions {
         unsafe_memory,
         split_dispatch,
+        entry_exports,
     };
 
     // Splitting into files requires a target directory to write them into.
