@@ -984,3 +984,386 @@ fn main() {
         .expect("run generated binary");
     assert!(status.success(), "fd_readdir bogus fd assertions failed");
 }
+
+// ---------------------------------------------------------------------------
+// fd_tell, fd_sync/fd_datasync, fd_advise, fd_allocate, fd_filestat_set_size,
+// fd_filestat_set_times, path_filestat_set_times, path_readlink,
+// fd_fdstat_set_flags/rights and fd_renumber.
+//
+// Every module opens "f.txt" (fd 4) through `path_open` with the descriptor
+// stored at 300; the exported-in-order helper functions then exercise one WASI
+// call each and return its errno. The generated `main` calls them by index
+// (`func{N}`, N = number of imports + position).
+// ---------------------------------------------------------------------------
+
+/// `path_open("f.txt")` for read+write, the new fd stored at 300.
+const OPEN_F: &str = "(drop (call $po (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 5)
+                        (i32.const 0) (i64.const 64) (i64.const 0) (i32.const 0) (i32.const 300)))";
+const FD_F: &str = "(i32.load (i32.const 300))";
+const PATH_OPEN_IMPORT: &str = r#"(import "wasi_snapshot_preview1" "path_open"
+        (func $po (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))"#;
+
+/// Compile `wat`, let `seed` prepare the temp directory, then run the
+/// generated `main` there and require it to succeed.
+fn exec(
+    test: &str,
+    wat: &str,
+    extra: &str,
+    seed: impl FnOnce(&std::path::Path),
+) -> std::path::PathBuf {
+    let (bin, dir) = compile(test, wat, extra);
+    seed(&dir);
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "{test}: generated main assertions failed");
+    dir
+}
+
+fn fs_module(imports: &str, funcs: &str) -> String {
+    format!(
+        r#"(module
+      {PATH_OPEN_IMPORT}
+      {imports}
+      (memory 1)
+      (data (i32.const 100) "f.txt")
+      (data (i32.const 110) "g.txt")
+      (data (i32.const 120) "link")
+      (data (i32.const 140) "../x")
+      {funcs})"#
+    )
+}
+
+#[test]
+fn fd_tell_reports_the_current_offset() {
+    let wat = fs_module(
+        r#"(import "wasi_snapshot_preview1" "fd_seek"
+             (func $seek (param i32 i64 i32 i32) (result i32)))
+           (import "wasi_snapshot_preview1" "fd_tell"
+             (func $tell (param i32 i32) (result i32)))"#,
+        &format!(
+            r#"(func (export "run") (result i32)
+                 {OPEN_F}
+                 (drop (call $seek {FD_F} (i64.const 5) (i32.const 0) (i32.const 308)))
+                 (call $tell {FD_F} (i32.const 316)))
+               (func (export "stdio") (result i32)
+                 (call $tell (i32.const 1) (i32.const 316)))"#
+        ),
+    );
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func3(), 0, "tell on an open file succeeds");
+    let off = u64::from_le_bytes(i.mem()[316..324].try_into().unwrap());
+    assert_eq!(off, 5, "tell reports the offset set by seek");
+    assert_eq!(i.func4(), 70, "stdio is not seekable (ESPIPE)");
+}
+"#;
+    exec("fd_tell", &wat, extra, |d| {
+        std::fs::write(d.join("f.txt"), b"hello, world!").expect("seed");
+    });
+}
+
+#[test]
+fn fd_sync_and_datasync_flush_files_and_accept_stdio() {
+    let wat = fs_module(
+        r#"(import "wasi_snapshot_preview1" "fd_sync" (func $sync (param i32) (result i32)))
+           (import "wasi_snapshot_preview1" "fd_datasync" (func $dsync (param i32) (result i32)))"#,
+        &format!(
+            r#"(func (export "file") (result i32)
+                 {OPEN_F}
+                 (i32.or (call $sync {FD_F}) (call $dsync {FD_F})))
+               (func (export "stdio") (result i32)
+                 (i32.or (call $sync (i32.const 1)) (call $dsync (i32.const 2))))
+               (func (export "bad") (result i32) (call $sync (i32.const 99)))"#
+        ),
+    );
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func3(), 0, "sync/datasync on a file succeed");
+    assert_eq!(i.func4(), 0, "stdio sync is a no-op success");
+    assert_eq!(i.func5(), 8, "unknown fd is EBADF");
+}
+"#;
+    exec("fd_sync", &wat, extra, |d| {
+        std::fs::write(d.join("f.txt"), b"data").expect("seed");
+    });
+}
+
+#[test]
+fn fd_advise_validates_fd_and_advice() {
+    let wat = fs_module(
+        r#"(import "wasi_snapshot_preview1" "fd_advise"
+             (func $adv (param i32 i64 i64 i32) (result i32)))"#,
+        &format!(
+            r#"(func (export "ok") (result i32)
+                 {OPEN_F}
+                 (call $adv {FD_F} (i64.const 0) (i64.const 4) (i32.const 0)))
+               (func (export "bad_advice") (result i32)
+                 (call $adv (i32.const 4) (i64.const 0) (i64.const 4) (i32.const 9)))
+               (func (export "bad_fd") (result i32)
+                 (call $adv (i32.const 99) (i64.const 0) (i64.const 4) (i32.const 0)))"#
+        ),
+    );
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func2(), 0, "advice on an open file is accepted");
+    assert_eq!(i.func3(), 28, "advice > 5 is EINVAL");
+    assert_eq!(i.func4(), 8, "unknown fd is EBADF");
+}
+"#;
+    exec("fd_advise", &wat, extra, |d| {
+        std::fs::write(d.join("f.txt"), b"data").expect("seed");
+    });
+}
+
+#[test]
+fn fd_allocate_grows_but_never_shrinks() {
+    let wat = fs_module(
+        r#"(import "wasi_snapshot_preview1" "fd_allocate"
+             (func $alloc (param i32 i64 i64) (result i32)))"#,
+        &format!(
+            r#"(func (export "grow") (result i32)
+                 {OPEN_F}
+                 (call $alloc {FD_F} (i64.const 4) (i64.const 6)))
+               (func (export "no_shrink") (result i32)
+                 (call $alloc {FD_F} (i64.const 0) (i64.const 1)))
+               (func (export "stdio") (result i32)
+                 (call $alloc (i32.const 1) (i64.const 0) (i64.const 1)))"#
+        ),
+    );
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func2(), 0);
+    assert_eq!(i.func3(), 0, "a range inside the file leaves its size alone");
+    assert_eq!(i.func4(), 70, "stdio is ESPIPE");
+}
+"#;
+    let dir = exec("fd_allocate", &wat, extra, |d| {
+        std::fs::write(d.join("f.txt"), b"abc").expect("seed");
+    });
+    assert_eq!(std::fs::metadata(dir.join("f.txt")).unwrap().len(), 10);
+}
+
+#[test]
+fn fd_filestat_set_size_truncates_and_extends() {
+    let wat = fs_module(
+        r#"(import "wasi_snapshot_preview1" "fd_filestat_set_size"
+             (func $sz (param i32 i64) (result i32)))"#,
+        &format!(
+            r#"(func (export "shrink") (result i32)
+                 {OPEN_F}
+                 (call $sz {FD_F} (i64.const 2)))
+               (func (export "grow") (result i32)
+                 (call $sz {FD_F} (i64.const 8)))
+               (func (export "stdio") (result i32)
+                 (call $sz (i32.const 1) (i64.const 0)))"#
+        ),
+    );
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func2(), 0);
+    assert_eq!(i.func3(), 0);
+    assert_eq!(i.func4(), 70, "stdio cannot be resized");
+}
+"#;
+    let dir = exec("fd_set_size", &wat, extra, |d| {
+        std::fs::write(d.join("f.txt"), b"abcdef").expect("seed");
+    });
+    assert_eq!(
+        std::fs::read(dir.join("f.txt")).unwrap(),
+        b"ab\0\0\0\0\0\0",
+        "truncated to 2 then zero-extended to 8",
+    );
+}
+
+#[test]
+fn fd_filestat_set_times_sets_explicit_times() {
+    let wat = fs_module(
+        r#"(import "wasi_snapshot_preview1" "fd_filestat_set_times"
+             (func $st (param i32 i64 i64 i32) (result i32)))"#,
+        &format!(
+            r#"(func (export "set") (result i32)
+                 {OPEN_F}
+                 (call $st {FD_F} (i64.const 1000000000000) (i64.const 1700000000000000000)
+                           (i32.const 5)))
+               (func (export "conflict") (result i32)
+                 (call $st {FD_F} (i64.const 0) (i64.const 0) (i32.const 3)))
+               (func (export "stdio") (result i32)
+                 (call $st (i32.const 1) (i64.const 0) (i64.const 0) (i32.const 1)))"#
+        ),
+    );
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func2(), 0);
+    assert_eq!(i.func3(), 28, "ATIM and ATIM_NOW together are EINVAL");
+    assert_eq!(i.func4(), 70, "stdio has no settable times");
+}
+"#;
+    let dir = exec("fd_set_times", &wat, extra, |d| {
+        std::fs::write(d.join("f.txt"), b"x").expect("seed");
+    });
+    let meta = std::fs::metadata(dir.join("f.txt")).unwrap();
+    let at = |secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    assert_eq!(meta.accessed().unwrap(), at(1000));
+    assert_eq!(meta.modified().unwrap(), at(1_700_000_000));
+}
+
+#[test]
+fn path_filestat_set_times_sets_times_and_guards_paths() {
+    let wat = fs_module(
+        r#"(import "wasi_snapshot_preview1" "path_filestat_set_times"
+             (func $pst (param i32 i32 i32 i32 i64 i64 i32) (result i32)))"#,
+        r#"(func (export "set") (result i32)
+             (call $pst (i32.const 3) (i32.const 1) (i32.const 100) (i32.const 5)
+                        (i64.const 1000000000000) (i64.const 1700000000000000000) (i32.const 5)))
+           (func (export "nofollow_symlink") (result i32)
+             (call $pst (i32.const 3) (i32.const 0) (i32.const 120) (i32.const 4)
+                        (i64.const 0) (i64.const 0) (i32.const 5)))
+           (func (export "escape") (result i32)
+             (call $pst (i32.const 3) (i32.const 1) (i32.const 140) (i32.const 4)
+                        (i64.const 0) (i64.const 0) (i32.const 5)))
+           (func (export "missing") (result i32)
+             (call $pst (i32.const 3) (i32.const 1) (i32.const 110) (i32.const 5)
+                        (i64.const 0) (i64.const 0) (i32.const 5)))"#,
+    );
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func2(), 0);
+    assert_eq!(i.func3(), 58, "NOFOLLOW on a symlink cannot be honoured (ENOTSUP)");
+    assert_eq!(i.func4(), 76, "escaping the preopen is ENOTCAPABLE");
+    assert_eq!(i.func5(), 44, "a missing path is ENOENT");
+}
+"#;
+    let dir = exec("path_set_times", &wat, extra, |d| {
+        std::fs::write(d.join("f.txt"), b"x").expect("seed");
+        let _ = std::fs::remove_file(d.join("g.txt"));
+        let _ = std::fs::remove_file(d.join("link"));
+        std::os::unix::fs::symlink("f.txt", d.join("link")).expect("symlink");
+    });
+    let meta = std::fs::metadata(dir.join("f.txt")).unwrap();
+    let at = |secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    assert_eq!(meta.accessed().unwrap(), at(1000));
+    assert_eq!(meta.modified().unwrap(), at(1_700_000_000));
+}
+
+#[test]
+fn path_readlink_returns_the_target_and_truncates() {
+    let wat = fs_module(
+        r#"(import "wasi_snapshot_preview1" "path_readlink"
+             (func $rl (param i32 i32 i32 i32 i32 i32) (result i32)))"#,
+        r#"(func (export "full") (result i32)
+             (call $rl (i32.const 3) (i32.const 120) (i32.const 4)
+                       (i32.const 400) (i32.const 64) (i32.const 500)))
+           (func (export "short") (result i32)
+             (call $rl (i32.const 3) (i32.const 120) (i32.const 4)
+                       (i32.const 600) (i32.const 3) (i32.const 700)))
+           (func (export "not_a_link") (result i32)
+             (call $rl (i32.const 3) (i32.const 100) (i32.const 5)
+                       (i32.const 400) (i32.const 64) (i32.const 500)))
+           (func (export "escape") (result i32)
+             (call $rl (i32.const 3) (i32.const 140) (i32.const 4)
+                       (i32.const 400) (i32.const 64) (i32.const 500)))"#,
+    );
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func2(), 0);
+    let used = u32::from_le_bytes(i.mem()[500..504].try_into().unwrap());
+    assert_eq!(used, 5);
+    assert_eq!(&i.mem()[400..405], b"f.txt");
+    assert_eq!(i.func3(), 0);
+    let used = u32::from_le_bytes(i.mem()[700..704].try_into().unwrap());
+    assert_eq!(used, 3, "the result is truncated to the buffer");
+    assert_eq!(&i.mem()[600..603], b"f.t");
+    assert_eq!(i.func4(), 28, "a regular file is not a link (EINVAL)");
+    assert_eq!(i.func5(), 76, "escaping the preopen is ENOTCAPABLE");
+}
+"#;
+    exec("path_readlink", &wat, extra, |d| {
+        std::fs::write(d.join("f.txt"), b"x").expect("seed");
+        let _ = std::fs::remove_file(d.join("link"));
+        std::os::unix::fs::symlink("f.txt", d.join("link")).expect("symlink");
+    });
+}
+
+#[test]
+fn fd_fdstat_set_flags_and_rights() {
+    let wat = fs_module(
+        r#"(import "wasi_snapshot_preview1" "fd_fdstat_set_flags"
+             (func $flags (param i32 i32) (result i32)))
+           (import "wasi_snapshot_preview1" "fd_fdstat_set_rights"
+             (func $rights (param i32 i64 i64) (result i32)))"#,
+        &format!(
+            r#"(func (export "clear_flags") (result i32)
+                 {OPEN_F}
+                 (call $flags {FD_F} (i32.const 0)))
+               (func (export "append") (result i32)
+                 (call $flags {FD_F} (i32.const 1)))
+               (func (export "bad_fd") (result i32)
+                 (call $flags (i32.const 99) (i32.const 0)))
+               (func (export "rights") (result i32)
+                 (call $rights {FD_F} (i64.const 0) (i64.const 0)))
+               (func (export "rights_bad_fd") (result i32)
+                 (call $rights (i32.const 99) (i64.const 0) (i64.const 0)))"#
+        ),
+    );
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func3(), 0, "clearing flags is a no-op success");
+    assert_eq!(i.func4(), 58, "changing flags cannot be honoured (ENOTSUP)");
+    assert_eq!(i.func5(), 8, "unknown fd is EBADF");
+    assert_eq!(i.func6(), 0, "rights are not tracked, so narrowing succeeds");
+    assert_eq!(i.func7(), 8, "unknown fd is EBADF");
+}
+"#;
+    exec("fd_set_flags", &wat, extra, |d| {
+        std::fs::write(d.join("f.txt"), b"x").expect("seed");
+    });
+}
+
+#[test]
+fn fd_renumber_moves_a_descriptor_over_another() {
+    let wat = fs_module(
+        r#"(import "wasi_snapshot_preview1" "fd_renumber" (func $ren (param i32 i32) (result i32)))
+           (import "wasi_snapshot_preview1" "fd_fdstat_get" (func $fdstat (param i32 i32) (result i32)))
+           (import "wasi_snapshot_preview1" "fd_filestat_get" (func $fstat (param i32 i32) (result i32)))"#,
+        &format!(
+            r#"(func (export "renumber") (result i32)
+                 {OPEN_F}
+                 (drop (call $po (i32.const 3) (i32.const 0) (i32.const 110) (i32.const 5)
+                        (i32.const 0) (i64.const 64) (i64.const 0) (i32.const 0) (i32.const 304)))
+                 (call $ren (i32.load (i32.const 300)) (i32.load (i32.const 304))))
+               (func (export "old_fd_closed") (result i32)
+                 (call $fdstat (i32.load (i32.const 300)) (i32.const 400)))
+               (func (export "target_is_f") (result i32)
+                 (call $fstat (i32.load (i32.const 304)) (i32.const 448)))
+               (func (export "stdio") (result i32) (call $ren (i32.const 1) (i32.const 2)))
+               (func (export "unknown") (result i32) (call $ren (i32.const 99) (i32.const 100)))"#
+        ),
+    );
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func4(), 0, "renumber of two open files succeeds");
+    assert_eq!(i.func5(), 8, "the source descriptor is closed afterwards");
+    assert_eq!(i.func6(), 0);
+    let size = u64::from_le_bytes(i.mem()[480..488].try_into().unwrap());
+    assert_eq!(size, 4, "the target descriptor now refers to f.txt (4 bytes)");
+    assert_eq!(i.func7(), 58, "stdio descriptors cannot be renumbered (ENOTSUP)");
+    assert_eq!(i.func8(), 8, "unknown descriptors are EBADF");
+}
+"#;
+    exec("fd_renumber", &wat, extra, |d| {
+        std::fs::write(d.join("f.txt"), b"AAAA").expect("seed f");
+        std::fs::write(d.join("g.txt"), b"BB").expect("seed g");
+    });
+}

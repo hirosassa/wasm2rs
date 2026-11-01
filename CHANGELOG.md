@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Twelve more WASI preview1 functions are generated natively** instead of being
+  left to the host trait: `fd_tell`, `fd_sync`, `fd_datasync`, `fd_advise`,
+  `fd_allocate`, `fd_filestat_set_size`, `fd_filestat_set_times`,
+  `path_filestat_set_times`, `path_readlink`, `fd_fdstat_set_flags`,
+  `fd_fdstat_set_rights` and `fd_renumber`. Requests `std` cannot honour (changing
+  descriptor flags, renumbering stdio, setting times on a symlink itself) return
+  `ENOTSUP` rather than being silently ignored.
+
 ## [0.1.1] - 2026-08-17
 
 ### Added
