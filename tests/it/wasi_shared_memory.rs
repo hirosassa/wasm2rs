@@ -150,6 +150,21 @@ fn every_native_wasi_function_compiles_on_a_shared_memory() {
             &["i32", "i32", "i32", "i32", "i32", "i32", "i32"],
         ),
         ("fd_readdir", &["i32", "i32", "i32", "i64", "i32"]),
+        ("fd_tell", &["i32", "i32"]),
+        ("fd_sync", &["i32"]),
+        ("fd_datasync", &["i32"]),
+        ("fd_advise", &["i32", "i64", "i64", "i32"]),
+        ("fd_allocate", &["i32", "i64", "i64"]),
+        ("fd_filestat_set_size", &["i32", "i64"]),
+        ("fd_filestat_set_times", &["i32", "i64", "i64", "i32"]),
+        (
+            "path_filestat_set_times",
+            &["i32", "i32", "i32", "i32", "i64", "i64", "i32"],
+        ),
+        ("path_readlink", &["i32", "i32", "i32", "i32", "i32", "i32"]),
+        ("fd_fdstat_set_flags", &["i32", "i32"]),
+        ("fd_fdstat_set_rights", &["i32", "i64", "i64"]),
+        ("fd_renumber", &["i32", "i32"]),
     ];
     let mut imports = String::new();
     for (name, params) in funcs {
