@@ -317,8 +317,10 @@ int main(void) {
     );
 }
 
-#[test]
-fn an_emscripten_pthread_command_counts_across_threads() {
+/// Build the four-thread atomic counter with emcc (`flags` pick the command or
+/// JS form), transpile the `.wasm` and run it: `entry` gives the Rust that
+/// drives the instance `inst`, and a wrong count makes it fail.
+fn run_emscripten_counter(name: &str, flags: &[&str], entry: impl Fn(&[u8]) -> String) {
     let Some(emcc) = emcc() else {
         skip_missing_tool(
             "emsdk",
@@ -326,12 +328,11 @@ fn an_emscripten_pthread_command_counts_across_threads() {
         );
         return;
     };
-    let dir = work_dir("emscripten_command");
+    let dir = work_dir(name);
     // Emscripten starts a pthread by asking its JS host for a Worker
-    // (`__pthread_create_js`); wasm2rs answers with a native thread. A wrong
-    // count makes `main` return non-zero, which exits the process non-zero.
+    // (`__pthread_create_js`); wasm2rs answers with a native thread.
     std::fs::write(
-        dir.join("command.c"),
+        dir.join("counter.c"),
         r#"
 #include <pthread.h>
 #include <stdatomic.h>
@@ -351,26 +352,20 @@ int main(void) {
     .unwrap();
     let status = Command::new(emcc)
         .current_dir(&dir)
-        .args([
-            "-O1",
-            "-pthread",
-            "-sSTANDALONE_WASM",
-            "command.c",
-            "-o",
-            "command.wasm",
-        ])
+        .args(["-O1", "-pthread"])
+        .args(flags)
+        .args(["counter.c", "-o", "counter.js"])
         .status()
         .expect("run emcc");
     assert!(status.success(), "emcc failed");
-    let wasm = std::fs::read(dir.join("command.wasm")).unwrap();
+    let wasm = std::fs::read(dir.join("counter.wasm")).unwrap();
 
-    let start = export_index(&wasm, "_start");
     let pages = imported_memory_pages(&wasm).expect("imported memory");
     // The only imports left to the host proxy a call to the main thread, which
     // this program never does.
     let proxy = import_index(&wasm, "env", "_emscripten_receive_on_main_thread_js");
     compile_run_wasm(
-        "emscripten_c_command",
+        name,
         &wasm,
         &format!(
             "#[derive(Clone)]\n\
@@ -380,8 +375,28 @@ int main(void) {
                      panic!(\"unexpected proxy to the main thread\")\n\
                  }}\n\
              }}\n\
-             let mut inst = Instance::new(SharedMemory::new({pages} * 65536), Host);\n\
-             inst.func{start}();"
+             let mut inst = Instance::new(SharedMemory::new({pages} * 65536), Host);\n{}",
+            entry(&wasm)
         ),
     );
+}
+
+#[test]
+fn an_emscripten_pthread_command_counts_across_threads() {
+    run_emscripten_counter("emscripten_c_command", &["-sSTANDALONE_WASM"], |wasm| {
+        format!("inst.func{}();", export_index(wasm, "_start"))
+    });
+}
+
+#[test]
+fn an_emscripten_js_build_counts_across_threads() {
+    // The JS form has no `_start`: its runtime runs the constructors and then
+    // `main(argc, argv)`, whose result is the exit status.
+    run_emscripten_counter("emscripten_c_js", &[], |wasm| {
+        format!(
+            "inst.func{}();\nassert_eq!(inst.func{}(0, 0), 0);",
+            export_index(wasm, "__wasm_call_ctors"),
+            export_index(wasm, "main")
+        )
+    });
 }
