@@ -145,6 +145,9 @@ pub(crate) enum Rt {
     /// #[inline(never)]` helper so the panic stays out-of-line even when the
     /// dispatch method is inlined onto the hot indirect-call path.
     TrapIndirectTypeMismatch,
+    /// The wrapper a `delegate` raises when it must bypass enclosing `try`
+    /// bodies: the exception plus how many more bodies to skip.
+    DelegateExc,
 }
 /// The helper dependencies discovered while generating one function.
 ///

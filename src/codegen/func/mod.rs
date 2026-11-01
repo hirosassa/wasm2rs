@@ -849,6 +849,7 @@ impl<'a> FuncGen<'a> {
             Operator::CatchAll => self.handle_catch(None)?,
             Operator::Throw { tag_index } => self.emit_throw(tag_index)?,
             Operator::Rethrow { relative_depth } => self.emit_rethrow(relative_depth)?,
+            Operator::Delegate { relative_depth } => self.handle_delegate(relative_depth)?,
             // SIMD/v128 (round 1: foundation). A v128 is a `u128`; see `simd.rs`.
             Operator::V128Const { value } => self.v128_const(value.bytes()),
             Operator::V128Load { memarg } => self.load(Helper::LoadV128, ValType::V128, memarg)?,
@@ -1228,6 +1229,15 @@ impl<'a> FuncGen<'a> {
             }
             Operator::CatchAll if self.dead_nesting == 0 => {
                 self.handle_catch(None)?;
+            }
+            // Like `end`, a `delegate` closes the live `try` frame (or a nested
+            // dead region) even though the body ended unreachable.
+            Operator::Delegate { relative_depth } => {
+                if self.dead_nesting > 0 {
+                    self.dead_nesting -= 1;
+                } else {
+                    self.handle_delegate(*relative_depth)?;
+                }
             }
             _ => {}
         }

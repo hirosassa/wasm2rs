@@ -430,3 +430,174 @@ fn float_payloads_keep_their_bit_patterns_through_throw_and_catch() {
          assert_eq!(b.to_bits(), 0x8000_0000_0000_0000);",
     );
 }
+
+#[test]
+fn delegate_forwards_exception_to_outer_handler() {
+    // `delegate 0` has no handlers of its own: an exception thrown in its body
+    // continues to the enclosing `try`, whose `catch $e` handles it.
+    compile_run(
+        "eh_delegate_outer",
+        r#"(module
+            (tag $e (param i32))
+            (func (export "f") (param i32) (result i32)
+              try (result i32)
+                try (result i32)
+                  local.get 0
+                  throw $e
+                delegate 0
+              catch $e
+                i32.const 10
+                i32.add
+              end))"#,
+        "assert_eq!(func0(5), 15);",
+    );
+}
+
+#[test]
+fn delegate_body_falls_through_when_nothing_is_thrown() {
+    compile_run(
+        "eh_delegate_fallthrough",
+        r#"(module
+            (tag $e (param i32))
+            (func (export "f") (param i32) (result i32)
+              try (result i32)
+                try (result i32)
+                  local.get 0
+                  i32.eqz
+                  if
+                    i32.const 1
+                    throw $e
+                  end
+                  i32.const 20
+                delegate 0
+              catch $e
+                i32.const 100
+                i32.add
+              end))"#,
+        "assert_eq!(func0(1), 20); assert_eq!(func0(0), 101);",
+    );
+}
+
+#[test]
+fn delegate_to_caller_propagates_out_of_the_function() {
+    // At function level, depth 0 names the function itself: the exception
+    // leaves the function uncaught.
+    expect_trap(
+        "eh_delegate_caller",
+        r#"(module
+            (tag $e)
+            (func (export "f") (result i32)
+              try (result i32)
+                throw $e
+              delegate 0))"#,
+        "func0();",
+    );
+}
+
+#[test]
+fn delegate_inside_catch_handler_skips_that_try() {
+    // The shape clang emits for a cleanup inside a catch: the `delegate` sits in
+    // the handler of the middle `try`, so it is outside that try's closure and
+    // the exception goes straight to the outer `try`, not back to `catch_all`.
+    compile_run(
+        "eh_delegate_in_handler",
+        r#"(module
+            (tag $e (param i32))
+            (func (export "f") (param i32) (result i32)
+              try (result i32)
+                try (result i32)
+                  local.get 0
+                  throw $e
+                catch_all
+                  try
+                    local.get 0
+                    i32.const 1
+                    i32.add
+                    throw $e
+                  delegate 1
+                  i32.const -1
+                end
+              catch $e
+              end))"#,
+        "assert_eq!(func0(5), 6);",
+    );
+}
+
+#[test]
+fn delegate_bypasses_an_enclosing_try_body() {
+    // `delegate 1` skips the middle `try` (whose `catch $e` would answer 100) and
+    // lands in the outer one.
+    compile_run(
+        "eh_delegate_bypass",
+        r#"(module
+            (tag $e)
+            (func (export "f") (result i32)
+              try (result i32)
+                try (result i32)
+                  try (result i32)
+                    throw $e
+                  delegate 1
+                catch $e
+                  i32.const 100
+                end
+              catch $e
+                i32.const 7
+              end))"#,
+        "assert_eq!(func0(), 7);",
+    );
+}
+
+#[test]
+fn delegate_to_caller_bypasses_the_functions_own_handlers() {
+    // The clang shape: inside a `try` that would `catch_all`, a nested
+    // `try ... delegate 1` targets the caller. The callee's own `catch_all`
+    // must not see it; the caller's handler does.
+    compile_run(
+        "eh_delegate_caller_bypass",
+        r#"(module
+            (tag $e)
+            (func $inner (result i32)
+              try (result i32)
+                try (result i32)
+                  throw $e
+                delegate 1
+              catch_all
+                i32.const 99
+              end)
+            (func (export "f") (result i32)
+              try (result i32)
+                call $inner
+              catch $e
+                i32.const 7
+              end))"#,
+        "assert_eq!(func1(), 7);",
+    );
+}
+
+#[test]
+fn delegate_bypassing_several_bodies_counts_each_one() {
+    // Two enclosing bodies are bypassed; both catch_all handlers are skipped and
+    // the exception reaches the outermost handler.
+    compile_run(
+        "eh_delegate_two_bodies",
+        r#"(module
+            (tag $e)
+            (func (export "f") (result i32)
+              try (result i32)
+                try (result i32)
+                  try (result i32)
+                    try (result i32)
+                      throw $e
+                    delegate 2
+                  catch_all
+                    i32.const 1
+                  end
+                catch_all
+                  i32.const 2
+                end
+              catch $e
+                i32.const 3
+              end))"#,
+        "assert_eq!(func0(), 3);",
+    );
+}

@@ -24,11 +24,14 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::SplatF64x2 => "f64x2_splat",
         Rt::TrapUnreachable => "trap_unreachable",
         Rt::TrapIndirectTypeMismatch => "trap_indirect_type_mismatch",
+        Rt::DelegateExc => "Wasm2RsDelegate",
     }
 }
 
-/// All runtime free-function helpers, in a deterministic emission order.
-const RT_ORDER: [Rt; 20] = [
+/// All runtime helpers (free functions and support types), in a deterministic
+/// emission order.
+const RT_ORDER: [Rt; 21] = [
+    Rt::DelegateExc,
     Rt::TrapUnreachable,
     Rt::TrapIndirectTypeMismatch,
     Rt::F32Min,
@@ -51,7 +54,7 @@ const RT_ORDER: [Rt; 20] = [
     Rt::SplatF64x2,
 ];
 
-/// Render the used runtime helpers as module-scope free functions, in
+/// Render the used runtime helpers as module-scope items, in
 /// [`RT_ORDER`], separated by blank lines. Returns an empty string if none.
 pub(super) fn render_rt_helpers(used: &HashSet<Rt>) -> String {
     let mut blocks: Vec<String> = Vec::new();
@@ -71,6 +74,13 @@ pub(super) fn render_rt_helpers(used: &HashSet<Rt>) -> String {
 /// trapping-truncation template.
 fn rt_lines(rt: Rt) -> Vec<String> {
     match rt {
+        Rt::DelegateExc => vec![
+            "#[allow(dead_code)]".to_string(),
+            "struct Wasm2RsDelegate {".to_string(),
+            "    skip: u32,".to_string(),
+            "    payload: Box<dyn ::std::any::Any + Send>,".to_string(),
+            "}".to_string(),
+        ],
         Rt::TrapUnreachable => vec![
             "#[cold]".to_string(),
             "#[inline(never)]".to_string(),
