@@ -252,7 +252,7 @@ pub(crate) fn build_ctx<'a>(
     // functions, or host-owned memory/table).
     let has_imports = !imports.is_empty()
         || !imported_globals.is_empty()
-        || memories.iter().any(|m| m.imported)
+        || memories.iter().any(|m| m.imported && !m.shared)
         || table.is_some_and(|t| t.imported);
     // Imports must be held by an instance, so a module that has them (or any
     // other mutable state) becomes a `struct Instance` with method functions.

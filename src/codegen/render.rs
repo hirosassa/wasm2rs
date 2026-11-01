@@ -36,7 +36,11 @@ impl Layout {
     fn of(parts: &ModuleParts<'_>) -> Self {
         // Only memory 0 may be imported (an imported non-zero memory is rejected
         // during parsing); `mem_imported` therefore governs just memory 0.
-        let mem_imported = parts.memories.first().is_some_and(|m| m.imported);
+        // An imported *shared* memory is a handle passed to `new`, not lent by the host.
+        let mem_imported = parts
+            .memories
+            .first()
+            .is_some_and(|m| m.imported && !m.shared);
         let table_imported = parts.table.is_some_and(|t| t.imported);
         // A module that imports any preopen/`path_open` function gains a real
         // file-descriptor table (`wasi_fds`) and the file-backed fd_* variants.
@@ -493,8 +497,19 @@ fn constructor_lines(
             .checked_mul(WASM_PAGE_SIZE)
             .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
 
-        inner.push(format!("pub fn new({new_param}) -> Self {{"));
-        inner.push(format!("    let memory = SharedMemory::new({bytes});"));
+        if mem0.imported {
+            // The host created the memory and hands it in; `new` still owns the
+            // (one-time) data initialisation, `with_memory` never repeats it.
+            let params = if has_imports {
+                "memory: SharedMemory, imports: H"
+            } else {
+                "memory: SharedMemory"
+            };
+            inner.push(format!("pub fn new({params}) -> Self {{"));
+        } else {
+            inner.push(format!("pub fn new({new_param}) -> Self {{"));
+            inner.push(format!("    let memory = SharedMemory::new({bytes});"));
+        }
         if !active_for(0).is_empty() {
             inner.push("    {".to_string());
             inner.push("        let mut __m = memory.bytes();".to_string());
@@ -806,7 +821,7 @@ fn shared_combine(op: u8, old: u64, val: u64, width: usize) -> u64 {
 
 #[allow(dead_code)]
 impl SharedMemory {
-    fn new(min_bytes: usize) -> Self {
+    pub fn new(min_bytes: usize) -> Self {
         SharedMemory(std::sync::Arc::new(SharedMemInner {
             bytes: std::sync::Mutex::new(vec![0u8; min_bytes]),
             park: std::sync::Mutex::new(SharedPark::default()),
@@ -910,7 +925,7 @@ impl SharedMemory {
 fn needs_host_trait(parts: &ModuleParts<'_>) -> bool {
     parts.imports.iter().any(|im| im.wasi.is_none())
         || !parts.imported_globals.is_empty()
-        || parts.memories.iter().any(|m| m.imported)
+        || parts.memories.iter().any(|m| m.imported && !m.shared)
         || parts.table.is_some_and(|t| t.imported)
 }
 
