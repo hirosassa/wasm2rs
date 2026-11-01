@@ -1,3 +1,7 @@
+//! Print the Rust generated for a module with a `call_indirect` dispatch.
+//!
+//! Run with `cargo run --example show_dispatch`.
+
 fn main() {
     let wat = r#"
     (module

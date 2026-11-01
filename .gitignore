@@ -9,3 +9,6 @@ tmp/
 
 # Claude Code local state
 .claude/
+
+# Emacs undo-tree history
+*.~undo-tree~

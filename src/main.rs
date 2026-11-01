@@ -1,5 +1,7 @@
 //! Command-line entry point:
-//! `wasm2rs <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`.
+//! `wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b]
+//! <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
+//! `wasm2rs --dump <input.wasm>` to summarize a module.
 //!
 //! Reads a WebAssembly binary and writes the transpiled Rust source. With no
 //! `funcs_per_file`/`max_bytes_per_file`, the whole module is one file, written
@@ -32,7 +34,7 @@ use wasm2rs::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--entry-exports=a,b] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the

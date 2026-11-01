@@ -15,7 +15,9 @@ The generated code preserves WebAssembly semantics (wrapping arithmetic, linear-
 - Emits **standalone Rust source** — the output is a normal crate with no runtime dependency on a WebAssembly engine.
 - **Memory-efficient** for very large modules: output can be split across many files so no single file (and no peak allocation) balloons.
   The binary uses `mimalloc` to keep peak RSS down while transpiling gigabyte-scale output.
-- Wide **WebAssembly proposal coverage**, including advanced-phase features.
+- Wide **WebAssembly proposal coverage**: SIMD and relaxed SIMD, atomics and shared memory, multi-memory, tail calls, exception handling (including legacy), GC, and stack-switching continuations.
+- **WASI**: preview1 calls are implemented natively; other imports go through a generated host `Imports` trait. wasi-threads, emscripten pthread builds and emscripten JS-glue builds run on native threads (see [docs/wasi-threads-e2e.md](docs/wasi-threads-e2e.md)). The WASI preopen root is configurable in the generated code (default: the current directory).
+- **Parallel code generation**: function bodies are lowered on multiple threads with byte-identical output (`--jobs`).
 
 ## Installation
 
@@ -64,7 +66,7 @@ cargo build --release
 ## Usage
 
 ```
-wasm2rs [--unsafe-memory] [--entry-exports=a,b] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]
+wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]
 wasm2rs --dump <input.wasm>
 ```
 
@@ -77,7 +79,9 @@ wasm2rs --dump <input.wasm>
 
 | Flag | Description |
 |---|---|
-| `--unsafe-memory` | Emit linear-memory loads/stores without bounds checks. Faster, but only sound if the module never accesses memory out of bounds — an out-of-bounds access becomes undefined behavior. Off by default. May appear anywhere in the arguments. |
+| `--unsafe-memory` | Emit linear-memory loads/stores without bounds checks. Faster, but only sound if the module never accesses memory out of bounds — an out-of-bounds access becomes undefined behavior. Off by default. Not applied to a `shared` memory. May appear anywhere in the arguments. |
+| `--jobs=N` | Threads used to generate function bodies. The output is byte-identical for every value. `0` (default) = automatic (at most 8, only for modules large enough to benefit); `1` = calling thread only. |
+| `--split-dispatch=N` | Split a flattened dispatch function with more than `N` arms into several smaller part functions so the Rust backend can optimize them independently. `0` (default) = keep each function whole. |
 | `--entry-exports=a,b` | Emit only the functions reachable from the listed exported functions, plus the start function and the entry points the generated code itself calls (`wasi_thread_start`, the emscripten thread exports). Shortens the generated source and the Rust build; surviving functions keep their `func{N}` names. Reachable `call_indirect`/`table.*` keeps every table-element function. An empty list (`--entry-exports=`) keeps no export as a root; an unknown name is an error. Off by default. |
 | `--dump` | Print a summary of the module (function/import/export counts, how each import resolves — native WASI or host trait —, memory limits, proposals in use, whether a host `Imports` implementation is needed) and generate no code. Takes only the input file. Works for modules the transpiler would reject. |
 
@@ -129,9 +133,19 @@ let rust = transpile_with_options(&wasm, &TranspileOptions::default())?;
 
 `wasm2rs::dump(&wasm)` returns the same summary as `--dump` (a `ModuleSummary` that implements `Display`).
 
-Streaming/split transpilation is available via `transpile_split_with_options`, and `cargo_manifest` produces the recommended `Cargo.toml` for split output.
+Code generation is configured through `TranspileOptions` (`unsafe_memory`, `split_dispatch`, `entry_exports`, `jobs`). It is `Clone` and `Default` but not `Copy`, so pass it by reference.
+`transpile(&wasm)` is the shortcut for the default options.
+
+Streaming/split transpilation is available via `transpile_split` / `transpile_split_with_options`, which take a `SplitOptions` (`SplitOptions::single_file()` for one file) and call a sink with each `SourceFile`. Errors are reported as `TranspileError`. `cargo_manifest` produces the recommended `Cargo.toml` for split output.
+
+The `mimalloc` allocator is behind the default `cli` feature. Depend on the crate with `default-features = false` to use it as a library without compiling mimalloc.
 
 ## Testing
+
+```bash
+cargo test --release                 # whole suite (a single integration-test binary, tests/it)
+cargo test --release --test it <name> # a subset, by module name
+```
 
 See [docs/wasi-threads-e2e.md](docs/wasi-threads-e2e.md) for the end-to-end tests that run real wasi-sdk and Rust `wasm32-wasip1-threads` binaries (they need extra tools and skip when those are missing).
 

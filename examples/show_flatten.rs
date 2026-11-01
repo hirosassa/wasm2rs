@@ -1,3 +1,7 @@
+//! Print the flattened (`loop { match pc }`) form of a deeply nested block function.
+//!
+//! Run with `cargo run --example show_flatten`.
+
 fn main() {
     let depth = 50;
     let mut body = String::new();
