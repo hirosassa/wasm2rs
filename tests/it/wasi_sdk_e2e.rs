@@ -193,3 +193,58 @@ fn main() {
         ),
     );
 }
+
+#[test]
+fn a_wasi_sdk_pthread_command_counts_across_threads() {
+    let Some(clang) = wasi_sdk_clang() else {
+        eprintln!("skipped: set WASI_SDK_PATH to a wasi-sdk to run this test");
+        return;
+    };
+    let dir = work_dir("c_command");
+    // The command model: `_start` runs the constructors, then `main`. A wrong
+    // count makes `main` return non-zero, which exits the process non-zero.
+    std::fs::write(
+        dir.join("command.c"),
+        r#"
+#include <pthread.h>
+#include <stdatomic.h>
+static atomic_int counter;
+static void *work(void *arg) {
+  for (int i = 0; i < 1000; i++) atomic_fetch_add(&counter, 1);
+  return 0;
+}
+int main(void) {
+  pthread_t t[4];
+  for (int i = 0; i < 4; i++) pthread_create(&t[i], 0, work, 0);
+  for (int i = 0; i < 4; i++) pthread_join(t[i], 0);
+  return atomic_load(&counter) == 4000 ? 0 : 1;
+}
+"#,
+    )
+    .unwrap();
+    let status = Command::new(clang)
+        .current_dir(&dir)
+        .args([
+            "--target=wasm32-wasip1-threads",
+            "-pthread",
+            "-O1",
+            "command.c",
+            "-o",
+            "command.wasm",
+            "-Wl,--max-memory=67108864",
+        ])
+        .status()
+        .expect("run clang");
+    assert!(status.success(), "clang failed");
+    let wasm = std::fs::read(dir.join("command.wasm")).unwrap();
+
+    let start = export_index(&wasm, "_start");
+    compile_run_wasm(
+        "sdk_c_command",
+        &wasm,
+        &format!(
+            "let mut inst = Instance::new();\n\
+             inst.func{start}();"
+        ),
+    );
+}
