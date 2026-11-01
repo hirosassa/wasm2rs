@@ -233,13 +233,14 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
-    /// The static offset of `memarg` as a typed literal for a memory-access
-    /// helper: `u64` for a 64-bit memory, `u32` otherwise.
+    /// The static offset of `memarg` as a literal for a memory-access helper.
+    /// The helper's `offset` parameter is `u64` for a 64-bit memory and `u32`
+    /// otherwise, so the literal needs no type suffix.
     pub(super) fn offset_lit(&self, memarg: MemArg, mem: u32) -> Result<String, TranspileError> {
         if self.is_memory64(mem) {
-            Ok(format!("{}u64", memarg.offset))
+            Ok(memarg.offset.to_string())
         } else {
-            Ok(format!("{}u32", memarg_offset(memarg)?))
+            Ok(memarg_offset(memarg)?.to_string())
         }
     }
 
