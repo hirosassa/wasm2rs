@@ -71,6 +71,7 @@ fn abort(shared: &Shared) {
     shared.room.notify_all();
 }
 
+/// The worker count for `requested` jobs (`0` = auto) over `live` functions.
 fn resolve_jobs(requested: usize, live: usize) -> usize {
     let jobs = if requested == 0 {
         if live < AUTO_MIN_FUNCS {
@@ -107,6 +108,8 @@ where
             let input = parts.funcs.get(index).ok_or_else(|| {
                 TranspileError::Unsupported(format!("function {index} has no input"))
             })?;
+            // Defined functions are named by their full function index, i.e.
+            // after the imported functions in the shared index space.
             generate_function_into(base + index, input, ctx, line_prefix, out)
         };
 
@@ -175,6 +178,9 @@ where
         if spawned == 0 {
             return serial(&mut consume);
         }
+        // `consume` runs the caller's code (a split sink); if it unwinds, the
+        // throttled workers must be released or the scope would never join.
+        let _consumer_guard = AbortOnUnwind(&shared);
         for k in 0..total {
             let piece = {
                 let mut st = lock(&shared);

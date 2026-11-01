@@ -114,3 +114,19 @@ fn a_failing_function_reports_the_same_error_for_any_job_count() {
         assert_eq!(serial.to_string(), parallel.to_string(), "jobs={jobs}");
     }
 }
+
+#[test]
+fn a_panicking_sink_unwinds_instead_of_hanging_the_workers() {
+    // Far more functions than the look-ahead window of 2 jobs, one per file, so
+    // the first flush (and its panic) happens while the workers are throttled.
+    let wasm = many_functions(400, false);
+    let split = SplitOptions {
+        funcs_per_file: 1,
+        max_bytes_per_file: 0,
+    };
+    let outcome = std::panic::catch_unwind(|| {
+        let _ =
+            transpile_split_with_options(&wasm, &split, &with_jobs(2), |_| panic!("sink failed"));
+    });
+    assert!(outcome.is_err(), "the sink's panic must reach the caller");
+}

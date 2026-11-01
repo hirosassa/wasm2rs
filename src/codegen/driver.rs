@@ -575,10 +575,11 @@ pub(crate) fn generate_module_split(
     // at column zero.
     let line_prefix = if stateful { "    " } else { "" };
     // The current chunk is built in place: its prelude is written when the first
-    // function joins it, each function's source is appended
-    // as `for_each_function` hands it over (in index order), and the whole buffer
-    // is handed to `emit` and reset at a flush. Peak memory is therefore about
-    // one chunk (plus the few functions in flight), not the whole program.
+    // function joins it, each function's source is appended as
+    // `for_each_function` hands it over (in index order), and the whole buffer is
+    // handed to `emit` and reset at a flush. Peak memory is therefore about one
+    // chunk (plus the parallel look-ahead window of finished functions), not the
+    // whole program.
     let mut chunk = String::new();
     let mut funcs_in_chunk = 0usize;
     let mut chunk_index = 0usize;
