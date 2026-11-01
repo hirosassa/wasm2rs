@@ -7,10 +7,9 @@
 
 mod codegen;
 
-use wasmparser::ExternalKind;
 use wasmparser::{
-    CompositeInnerType, DataKind, ElementItems, ElementKind, FuncType, Parser, Payload, TableInit,
-    TypeRef, ValType,
+    CompositeInnerType, DataKind, ElementItems, ElementKind, ExternalKind, FuncType, Parser,
+    Payload, TableInit, TypeRef, ValType,
 };
 
 /// An error that can occur while transpiling a wasm module.
