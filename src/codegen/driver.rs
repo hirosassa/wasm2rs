@@ -63,11 +63,11 @@ pub(crate) struct ModuleCtx<'a> {
     /// reference and the struct/array operators can resolve field/element
     /// storage and pick the right value lowering.
     pub(crate) type_kinds: &'a [CompositeKind],
-    /// The declared direct supertype of every type index (`None` when a type
-    /// declares no supertype), parallel to `type_kinds`. A runtime downcast
-    /// check (`ref.test`/`ref.cast`/`br_on_cast`) walks this chain to compute
-    /// the set of concrete subtypes of a static target.
-    pub(crate) supers: &'a [Option<u32>],
+    /// Per type index, every concrete struct/array type whose super chain
+    /// reaches it (see [`ModuleCtx::concrete_descendants`]), ascending. Built
+    /// once so each `ref.test`/`ref.cast` site looks it up instead of walking
+    /// the whole hierarchy.
+    descendants: Vec<Vec<u32>>,
     /// Per-imported-global `(type, mutable)`, occupying the low global indices.
     pub(crate) imported_globals: Vec<(ValType, bool)>,
     /// Per-defined-global `(type, mutable)`, indexed after the imported globals.
@@ -118,35 +118,15 @@ pub(crate) struct ModuleCtx<'a> {
 }
 impl ModuleCtx<'_> {
     /// Every concrete struct/array type index whose declared supertype chain
-    /// reaches `target` (including `target` itself when it is a struct/array).
+    /// reaches `target` (including `target` itself when it is a struct/array),
+    /// ascending; empty for an unknown `target`.
     ///
     /// The whole type hierarchy is known statically, so a runtime downcast to a
     /// static `target` reduces to membership in this set of concrete type ids.
-    /// The chain is walked per candidate; a cycle (which a validated module
-    /// cannot contain) is guarded by a hop budget so the walk always terminates.
-    pub(crate) fn concrete_descendants(&self, target: u32) -> Vec<u32> {
-        let n = self.type_kinds.len();
-        self.type_kinds
-            .iter()
-            .enumerate()
-            // A candidate must be a concrete struct/array type with a
-            // representable index (a valid module never overflows `u32`).
-            .filter(|(_, kind)| matches!(kind, CompositeKind::Struct(_) | CompositeKind::Array(_)))
-            .filter_map(|(i, _)| index_u32(i).ok())
-            .filter(|&t| {
-                // Walk `t`'s super chain, bounded by the type count, looking for
-                // `target` (a type is trivially a subtype of itself).
-                let mut cur = Some(t);
-                for _ in 0..=n {
-                    match cur {
-                        Some(c) if c == target => return true,
-                        Some(c) => cur = self.supers.get(c as usize).copied().flatten(),
-                        None => return false,
-                    }
-                }
-                false
-            })
-            .collect()
+    pub(crate) fn concrete_descendants(&self, target: u32) -> &[u32] {
+        self.descendants
+            .get(target as usize)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// The signature `(params, results)` of the function at full index `fidx`,
@@ -323,7 +303,7 @@ pub(crate) fn build_ctx<'a>(
         funcs_by_sig,
         types,
         type_kinds,
-        supers,
+        descendants: index_descendants(type_kinds, supers),
         imported_globals: imported_globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,
@@ -647,6 +627,38 @@ fn index_by_signature<'a>(
     index
 }
 
+/// For every type index, the concrete struct/array types whose declared
+/// supertype chain reaches it (a type reaches itself), each list ascending.
+///
+/// Each candidate walks its own chain once and registers itself with every
+/// ancestor, so the whole table costs O(types x chain depth) instead of a
+/// full-hierarchy scan per query. The walk is bounded by the type count, so a
+/// cycle (which a validated module cannot contain) still terminates; the
+/// `last()` check keeps a cycle from registering a type twice.
+fn index_descendants(type_kinds: &[CompositeKind], supers: &[Option<u32>]) -> Vec<Vec<u32>> {
+    let n = type_kinds.len();
+    let mut index = vec![Vec::new(); n];
+    for (i, kind) in type_kinds.iter().enumerate() {
+        // A candidate must be a concrete struct/array type with a
+        // representable index (a valid module never overflows `u32`).
+        if !matches!(kind, CompositeKind::Struct(_) | CompositeKind::Array(_)) {
+            continue;
+        }
+        let Ok(t) = u32::try_from(i) else { continue };
+        let mut cur = Some(t);
+        for _ in 0..=n {
+            let Some(c) = cur else { break };
+            if let Some(list) = index.get_mut(c as usize)
+                && list.last() != Some(&t)
+            {
+                list.push(t);
+            }
+            cur = supers.get(c as usize).copied().flatten();
+        }
+    }
+    index
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,5 +675,69 @@ mod tests {
         assert_eq!(index.get(&key(i64_to_i64)), Some(&vec![1]));
         assert_eq!(index.get(&key(nullary)), Some(&vec![3]));
         assert_eq!(index.get(&key((&[ValType::F32], &[]))), None);
+    }
+
+    /// The pre-index algorithm: scan every type and walk its super chain.
+    fn descendants_by_scan(
+        type_kinds: &[CompositeKind],
+        supers: &[Option<u32>],
+        target: u32,
+    ) -> Vec<u32> {
+        let n = type_kinds.len();
+        (0u32..)
+            .take(n)
+            .filter(|&t| matches!(type_kinds[t as usize], CompositeKind::Struct(_)))
+            .filter(|&t| {
+                let mut cur = Some(t);
+                for _ in 0..=n {
+                    match cur {
+                        Some(c) if c == target => return true,
+                        Some(c) => cur = supers.get(c as usize).copied().flatten(),
+                        None => return false,
+                    }
+                }
+                false
+            })
+            .collect()
+    }
+
+    #[test]
+    fn index_descendants_matches_a_scan_of_every_type() {
+        // 0 <- 1 <- 2 (chain), 0 <- 3 (sibling), 4 func (abstract root of 5),
+        // 5 struct under a func type, 6 lone struct, 7 cont, 8 <- 2 shares no
+        // chain with 0.
+        let kinds = vec![
+            CompositeKind::Struct(vec![]),
+            CompositeKind::Struct(vec![]),
+            CompositeKind::Struct(vec![]),
+            CompositeKind::Struct(vec![]),
+            CompositeKind::Func,
+            CompositeKind::Struct(vec![]),
+            CompositeKind::Struct(vec![]),
+            CompositeKind::Cont(4),
+            CompositeKind::Struct(vec![]),
+        ];
+        let supers = vec![
+            None,
+            Some(0),
+            Some(1),
+            Some(0),
+            None,
+            Some(4),
+            None,
+            None,
+            None,
+        ];
+        let index = index_descendants(&kinds, &supers);
+
+        assert_eq!(index.len(), kinds.len());
+        for target in (0u32..).take(kinds.len()) {
+            assert_eq!(
+                index[target as usize],
+                descendants_by_scan(&kinds, &supers, target),
+                "descendants of type {target}"
+            );
+        }
+        assert_eq!(index[0], vec![0, 1, 2, 3]);
     }
 }
