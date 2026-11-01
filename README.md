@@ -64,7 +64,7 @@ cargo build --release
 ## Usage
 
 ```
-wasm2rs [--unsafe-memory] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]
+wasm2rs [--unsafe-memory] [--entry-exports=a,b] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]
 wasm2rs --dump <input.wasm>
 ```
 
@@ -78,6 +78,7 @@ wasm2rs --dump <input.wasm>
 | Flag | Description |
 |---|---|
 | `--unsafe-memory` | Emit linear-memory loads/stores without bounds checks. Faster, but only sound if the module never accesses memory out of bounds — an out-of-bounds access becomes undefined behavior. Off by default. May appear anywhere in the arguments. |
+| `--entry-exports=a,b` | Emit only the functions reachable from the listed exported functions, plus the start function and the entry points the generated code itself calls (`wasi_thread_start`, the emscripten thread exports). Shortens the generated source and the Rust build; surviving functions keep their `func{N}` names. Reachable `call_indirect`/`table.*` keeps every table-element function. An empty list (`--entry-exports=`) keeps no export as a root; an unknown name is an error. Off by default. |
 | `--dump` | Print a summary of the module (function/import/export counts, how each import resolves — native WASI or host trait —, memory limits, proposals in use, whether a host `Imports` implementation is needed) and generate no code. Takes only the input file. Works for modules the transpiler would reject. |
 
 ### Examples
@@ -123,7 +124,7 @@ wasm2rs is also usable as a library:
 use wasm2rs::{TranspileOptions, transpile_with_options};
 
 let wasm: Vec<u8> = std::fs::read("module.wasm")?;
-let rust = transpile_with_options(&wasm, &TranspileOptions { unsafe_memory: false })?;
+let rust = transpile_with_options(&wasm, &TranspileOptions::default())?;
 ```
 
 `wasm2rs::dump(&wasm)` returns the same summary as `--dump` (a `ModuleSummary` that implements `Display`).

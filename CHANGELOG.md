@@ -7,8 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`TranspileOptions` is no longer `Copy`** (it now owns `entry_exports`); it is
+  still `Clone` and `Default`. Pass it by reference or `.clone()` it.
+
 ### Added
 
+- **`--entry-exports=a,b` CLI flag and `TranspileOptions::entry_exports`** emit only the
+  functions reachable from the chosen exports (plus the start function and the
+  entry points the generated code calls itself). Surviving functions keep their
+  wasm-index names. Off by default, so existing output is unchanged. On a 40k-function
+  C++ module (26k exports) keeping ~25 exports drops 37% of the functions and 24%
+  of the source; reachable table reads keep every element-segment function, which
+  bounds the saving.
 - **`--dump` CLI flag and `wasm2rs::dump` API** print a summary of a module without
   generating code: function counts, each import and how it resolves (native WASI
   or host trait), exports, memory limits, the proposals in use, and whether the

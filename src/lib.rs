@@ -99,7 +99,7 @@ impl SplitOptions {
 ///
 /// The default is the safe, portable output produced by [`transpile`]; set a
 /// field to opt into a faster-but-less-safe lowering.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TranspileOptions {
     /// Emit unchecked (`unsafe`) linear-memory access: every load/store and bulk
     /// `memory.*` drops its Rust slice bounds check and reads/writes through
@@ -116,6 +116,18 @@ pub struct TranspileOptions {
     /// independently — without changing what it computes. The value caps the arms
     /// per part; `0` (the default) keeps each flattened function whole.
     pub split_dispatch: usize,
+
+    /// Emit only the functions reachable from these exported functions, plus the
+    /// start function and the entry points the generated code itself calls
+    /// (`wasi_thread_start` and the emscripten thread start-up exports).
+    /// Everything else is left out, which shortens the generated source and the
+    /// Rust build; surviving functions keep their wasm-index names (`func{N}`).
+    ///
+    /// `None` (the default) emits every function. `Some(vec![])` keeps no export
+    /// as a root. A name that is not an exported function is an error. Reading
+    /// the table (`call_indirect`, `table.get/copy/init`) from reachable code
+    /// keeps every element-segment function.
+    pub entry_exports: Option<Vec<String>>,
 }
 
 /// The recommended `Cargo.toml` for a split crate, named `package_name`.
@@ -241,6 +253,8 @@ where
     let mut tags: Vec<codegen::TagInfo> = Vec::new();
     let mut exports: Vec<codegen::ExportInfo> = Vec::new();
     let mut start: Option<u32> = None;
+    // Functions named by `ref.func` in a global initialiser (roots for `entry_exports`).
+    let mut global_funcs: Vec<u32> = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
@@ -471,6 +485,11 @@ where
             Payload::GlobalSection(reader) => {
                 for global in reader {
                     let global = global?;
+                    for op in global.init_expr.get_operators_reader() {
+                        if let wasmparser::Operator::RefFunc { function_index } = op? {
+                            global_funcs.push(function_index);
+                        }
+                    }
                     let init = codegen::const_expr_to_rust(&global.init_expr, &type_kinds)?;
                     globals.push(codegen::GlobalInfo {
                         ty: global.ty.content_type,
@@ -544,10 +563,26 @@ where
         })
         .collect();
 
+    let live = match &topts.entry_exports {
+        Some(entries) => codegen::live_functions(
+            &codegen::ReachInput {
+                funcs: &funcs,
+                imports: &imports,
+                exports: &exports,
+                elements: &elements,
+                global_funcs: &global_funcs,
+                start,
+            },
+            entries,
+        )?,
+        None => vec![true; funcs.len()],
+    };
+
     let parts = codegen::ModuleParts {
         imports: &imports,
         imported_globals: &imported_globals,
         funcs: &funcs,
+        live: &live,
         types: &types,
         type_kinds: &type_kinds,
         supers: &supers,

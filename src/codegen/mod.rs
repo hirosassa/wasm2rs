@@ -47,12 +47,14 @@ pub(crate) use self::info::{
     ImportInfo, ImportedGlobalInfo, MemInfo, TableInfo, TagInfo, TypeSig, WASM_MAX_PAGES,
     WASM_PAGE_SIZE,
 };
+pub(crate) use self::reach::{ReachInput, live_functions};
 pub(crate) use self::wasi::WasiFn;
 
 mod analysis;
 mod driver;
 mod flatten;
 mod ir;
+mod reach;
 
 pub(crate) use self::analysis::*;
 pub(crate) use self::driver::*;

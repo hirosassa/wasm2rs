@@ -28,6 +28,7 @@ mod convert;
 mod data;
 mod dump;
 mod emscripten_pthread;
+mod entry_exports;
 mod exceptions;
 mod export_names;
 mod extern_registry;
