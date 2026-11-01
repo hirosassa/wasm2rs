@@ -686,7 +686,12 @@ mod tests {
         let n = type_kinds.len();
         (0u32..)
             .take(n)
-            .filter(|&t| matches!(type_kinds[t as usize], CompositeKind::Struct(_)))
+            .filter(|&t| {
+                matches!(
+                    type_kinds[t as usize],
+                    CompositeKind::Struct(_) | CompositeKind::Array(_)
+                )
+            })
             .filter(|&t| {
                 let mut cur = Some(t);
                 for _ in 0..=n {
@@ -701,12 +706,30 @@ mod tests {
             .collect()
     }
 
+    fn assert_matches_scan(kinds: &[CompositeKind], supers: &[Option<u32>]) {
+        let index = index_descendants(kinds, supers);
+        assert_eq!(index.len(), kinds.len());
+        for target in (0u32..).take(kinds.len()) {
+            assert_eq!(
+                index[target as usize],
+                descendants_by_scan(kinds, supers, target),
+                "descendants of type {target}"
+            );
+        }
+    }
+
+    fn array() -> CompositeKind {
+        CompositeKind::Array(FieldInfo {
+            storage: wasmparser::StorageType::Val(ValType::I32),
+        })
+    }
+
     #[test]
     fn index_descendants_matches_a_scan_of_every_type() {
         // 0 <- 1 <- 2 (chain), 0 <- 3 (sibling), 4 func (abstract root of 5),
-        // 5 struct under a func type, 6 lone struct, 7 cont, 8 <- 2 shares no
-        // chain with 0.
-        let kinds = vec![
+        // 5 struct under a func type, 6 lone struct, 7 cont, 8 array under 0,
+        // 9 lone array.
+        let kinds = [
             CompositeKind::Struct(vec![]),
             CompositeKind::Struct(vec![]),
             CompositeKind::Struct(vec![]),
@@ -715,9 +738,10 @@ mod tests {
             CompositeKind::Struct(vec![]),
             CompositeKind::Struct(vec![]),
             CompositeKind::Cont(4),
-            CompositeKind::Struct(vec![]),
+            array(),
+            array(),
         ];
-        let supers = vec![
+        let supers = [
             None,
             Some(0),
             Some(1),
@@ -726,18 +750,21 @@ mod tests {
             Some(4),
             None,
             None,
+            Some(0),
             None,
         ];
-        let index = index_descendants(&kinds, &supers);
+        assert_matches_scan(&kinds, &supers);
+        assert_eq!(index_descendants(&kinds, &supers)[0], vec![0, 1, 2, 3, 8]);
+    }
 
-        assert_eq!(index.len(), kinds.len());
-        for target in (0u32..).take(kinds.len()) {
-            assert_eq!(
-                index[target as usize],
-                descendants_by_scan(&kinds, &supers, target),
-                "descendants of type {target}"
-            );
-        }
-        assert_eq!(index[0], vec![0, 1, 2, 3]);
+    #[test]
+    fn index_descendants_terminates_and_dedups_on_a_cycle() {
+        // A validated module has no cyclic super chain, but the walk is hop
+        // bounded so malformed input must still terminate with each type
+        // registered once per ancestor.
+        let kinds = [CompositeKind::Struct(vec![]), CompositeKind::Struct(vec![])];
+        let supers = [Some(1), Some(0)];
+        assert_matches_scan(&kinds, &supers);
+        assert_eq!(index_descendants(&kinds, &supers)[0], vec![0, 1]);
     }
 }
