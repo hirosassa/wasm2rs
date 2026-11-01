@@ -193,3 +193,172 @@ fn thread_spawn_works_alongside_a_host_import() {
         "#,
     );
 }
+
+const FS_IMPORTS: &str = r#"
+      (import "env" "memory" (memory 1 1 shared))
+      (import "wasi" "thread-spawn" (func $spawn (param i32) (result i32)))
+      (import "wasi_snapshot_preview1" "path_open"
+        (func $po (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_write"
+        (func $wr (param i32 i32 i32 i32) (result i32)))"#;
+
+#[test]
+fn a_child_can_use_a_descriptor_the_parent_opened() {
+    // The parent creates "out.txt" (fd 4) and hands the fd to a child, which
+    // writes to it and reports the errno at 312. The descriptor table is shared
+    // by every thread, so the write must succeed and reach the file.
+    compile_run(
+        "wasi_threads_shared_fd",
+        &format!(
+            r#"(module {FS_IMPORTS}
+              (data (i32.const 100) "out.txt")
+              (data (i32.const 0) "\c8\00\00\00\09\00\00\00")
+              (data (i32.const 200) "persisted")
+              (func (export "wasi_thread_start") (param i32 i32)
+                i32.const 312
+                local.get 1
+                i32.const 0
+                i32.const 1
+                i32.const 308
+                call $wr
+                i32.atomic.store
+                i32.const 400
+                i32.const 1
+                i32.atomic.store
+                i32.const 400
+                i32.const 1
+                memory.atomic.notify
+                drop)
+              (func (export "run") (result i32)
+                i32.const 3 i32.const 0 i32.const 100 i32.const 7
+                i32.const 9 i64.const 64 i64.const 0 i32.const 0 i32.const 300
+                call $po
+                if unreachable end
+                i32.const 300
+                i32.load
+                call $spawn
+                drop
+                i32.const 400
+                i32.const 0
+                i64.const 5000000000
+                memory.atomic.wait32
+                drop
+                i32.const 312
+                i32.atomic.load))"#
+        ),
+        r#"let dir = std::env::temp_dir().join(format!("wasm2rs_shared_fd_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut inst = Instance::new(SharedMemory::new(65536)).with_preopen_root(&dir);
+        assert_eq!(inst.func4(), 0, "the child's fd_write must succeed");
+        assert_eq!(std::fs::read(dir.join("out.txt")).unwrap(), b"persisted");
+        std::fs::remove_dir_all(&dir).ok();"#,
+    );
+}
+
+#[test]
+fn concurrent_path_opens_get_distinct_descriptors() {
+    // Four children each open the same file and record `1 << fd` in a mask at
+    // 500. With one shared table the descriptors are 4..=7 (mask 0xf0); a slot
+    // handed out twice, or a per-thread table, would leave bits unset.
+    compile_run(
+        "wasi_threads_distinct_fds",
+        &format!(
+            r#"(module {FS_IMPORTS}
+              (data (i32.const 100) "same.txt")
+              (func (export "wasi_thread_start") (param i32 i32)
+                i32.const 3 i32.const 0 i32.const 100 i32.const 8
+                i32.const 1 i64.const 64 i64.const 0 i32.const 0
+                local.get 0 i32.const 4 i32.mul i32.const 600 i32.add
+                call $po
+                if unreachable end
+                i32.const 500
+                i32.const 1
+                local.get 0 i32.const 4 i32.mul i32.const 600 i32.add
+                i32.load
+                i32.shl
+                i32.atomic.rmw.or
+                drop
+                i32.const 504
+                i32.const 1
+                i32.atomic.rmw.add
+                drop
+                i32.const 504
+                i32.const 1
+                memory.atomic.notify
+                drop)
+              (func $spawn_one
+                i32.const 0
+                call $spawn
+                i32.const 0
+                i32.le_s
+                if unreachable end)
+              (func (export "run") (result i32)
+                call $spawn_one
+                call $spawn_one
+                call $spawn_one
+                call $spawn_one
+                (loop $again
+                  i32.const 504
+                  i32.atomic.load
+                  i32.const 4
+                  i32.ne
+                  if
+                    i32.const 504
+                    i32.const 0
+                    i64.const 5000000000
+                    memory.atomic.wait32
+                    drop
+                    br $again
+                  end)
+                i32.const 500
+                i32.atomic.load))"#
+        ),
+        r#"let dir = std::env::temp_dir().join(format!("wasm2rs_distinct_fds_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut inst = Instance::new(SharedMemory::new(65536)).with_preopen_root(&dir);
+        assert_eq!(inst.func5(), 0xf0);
+        std::fs::remove_dir_all(&dir).ok();"#,
+    );
+}
+
+#[test]
+fn every_descriptor_table_function_compiles_with_thread_spawn() {
+    // Each WASI function that touches `wasi_fds` is rewritten to lock the shared
+    // table; the whole set must compile together under `-D warnings`.
+    let funcs: &[(&str, &[&str])] = &[
+        ("fd_write", &["i32", "i32", "i32", "i32"]),
+        ("fd_read", &["i32", "i32", "i32", "i32"]),
+        ("fd_close", &["i32"]),
+        ("fd_seek", &["i32", "i64", "i32", "i32"]),
+        ("fd_fdstat_get", &["i32", "i32"]),
+        (
+            "path_open",
+            &[
+                "i32", "i32", "i32", "i32", "i32", "i64", "i64", "i32", "i32",
+            ],
+        ),
+        ("fd_prestat_get", &["i32", "i32"]),
+        ("fd_prestat_dir_name", &["i32", "i32", "i32"]),
+        ("fd_filestat_get", &["i32", "i32"]),
+        ("fd_pread", &["i32", "i32", "i32", "i64", "i32"]),
+        ("fd_pwrite", &["i32", "i32", "i32", "i64", "i32"]),
+        ("fd_readdir", &["i32", "i32", "i32", "i64", "i32"]),
+    ];
+    let imports: String = funcs
+        .iter()
+        .map(|(name, params)| {
+            format!(
+                "(import \"wasi_snapshot_preview1\" \"{name}\" (func (param {}) (result i32)))\n",
+                params.join(" ")
+            )
+        })
+        .collect();
+    compile_run(
+        "wasi_threads_every_fd_function",
+        &format!(
+            r#"(module {SPAWN_IMPORT} {imports}
+              (func (export "wasi_thread_start") (param i32 i32)))"#
+        ),
+        "let _inst = Instance::new(SharedMemory::new(65536));",
+    );
+}
