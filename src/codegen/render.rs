@@ -5,7 +5,7 @@ use super::render_cont::{continuation_method_lines, continuation_runtime_lines};
 use super::runtime::render_rt_helpers;
 use super::{
     ALLOW, DataSegment, ElemSegment, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
-    ModuleParts, WASM_PAGE_SIZE, WasiFn, byte_array_literal, indent, index_u32, rust_type,
+    ModuleParts, WASM_PAGE_SIZE, WasiFn, data_static_line, indent, index_u32, rust_type,
     rust_types,
 };
 use crate::TranspileError;
@@ -129,8 +129,8 @@ pub(super) fn render_module(
         lines.extend(shared_memory_runtime_lines());
         lines.push(String::new());
     }
-    // Module-scope statics backing the retained passive segments.
-    lines.extend(passive_segment_statics(parts.data, parts.elements));
+    // Module-scope statics backing the data and element segments.
+    lines.extend(segment_statics(parts.data, parts.elements));
     // Typed-continuations runtime: the step result, the per-continuation frame
     // structs and the tagged object stored in the instance's `conts` table.
     if !ctx.cont.bodies.is_empty() {
@@ -211,19 +211,15 @@ fn push_function_source(out: &mut String, src: &str) {
     }
 }
 
-/// Module-scope `static`s backing the retained passive segments: each passive
-/// `data`/`elem` segment is kept as a `&'static` slice of one of these, so
-/// `memory.init`/`table.init` can copy from it on demand.
-fn passive_segment_statics(data: &[DataSegment], elements: &[ElemSegment]) -> Vec<String> {
+/// Module-scope `static`s backing the data and element segments. Every data
+/// segment's bytes live in `DATA{d}`: an active one is copied from it when the
+/// instance is built, a passive one is kept as a `&'static` slice of it so
+/// `memory.init` can copy from it on demand. Passive element segments likewise
+/// back `table.init`.
+fn segment_statics(data: &[DataSegment], elements: &[ElemSegment]) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for (d, seg) in data.iter().enumerate() {
-        if seg.offset.is_none() {
-            let bytes_lit = byte_array_literal(&seg.bytes);
-            lines.push(format!(
-                "static DATA{d}: [u8; {}] = [{bytes_lit}];",
-                seg.bytes.len()
-            ));
-        }
+        lines.push(data_static_line(d, &seg.bytes));
     }
     for (e, seg) in elements.iter().enumerate() {
         if seg.offset.is_none() && !seg.declared {
@@ -373,11 +369,20 @@ fn constructor_lines(
     // Only active segments are copied at instantiation; passive ones are
     // retained (see the `data{d}` fields) for `memory.init`. Each active data
     // segment names the memory it initialises.
-    let active: Vec<&DataSegment> = data.iter().filter(|d| d.offset.is_some()).collect();
+    let active: Vec<(usize, &DataSegment)> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.offset.is_some())
+        .collect();
     let active_elem: Vec<&ElemSegment> = elements.iter().filter(|e| e.offset.is_some()).collect();
     // The active data segments that target a given memory index, in order.
-    let active_for =
-        |mem: u32| -> Vec<&&DataSegment> { active.iter().filter(|d| d.mem_index == mem).collect() };
+    let active_for = |mem: u32| -> Vec<(usize, &DataSegment)> {
+        active
+            .iter()
+            .copied()
+            .filter(|(_, d)| d.mem_index == mem)
+            .collect()
+    };
     // Imported memory/table are host-owned, so their active data/elements cannot
     // be written into a `memory`/`table` field literal; instead the instance is
     // bound and the segments are copied into the host storage through
@@ -392,17 +397,16 @@ fn constructor_lines(
         ("    Self {", "    }")
     };
 
-    // Emit `<target>[off..end].copy_from_slice(&[bytes]);` for each active data
+    // Emit `<target>[off..end].copy_from_slice(&DATA{d});` for each active data
     // segment targeting memory `mem`; `target` is a defined buffer (`m`) or the
     // host buffer accessor (`instance.mem_mut()`), and `indent` matches the
     // surrounding block.
     let copy_active_data = |lines: &mut Vec<String>, mem: u32, target: &str, indent: &str| {
-        for seg in active_for(mem) {
+        for (d, seg) in active_for(mem) {
             let off = seg.offset.unwrap_or(0) as usize;
             let end = off + seg.bytes.len();
-            let bytes_lit = byte_array_literal(&seg.bytes);
             lines.push(format!(
-                "{indent}{target}[{off}..{end}].copy_from_slice(&[{bytes_lit}]);"
+                "{indent}{target}[{off}..{end}].copy_from_slice(&DATA{d});"
             ));
         }
     };
