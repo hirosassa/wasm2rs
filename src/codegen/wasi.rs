@@ -1051,3 +1051,40 @@ fn share_memory_access(line: &str) -> String {
     line.replace("self.mem_mut()", "self.memory.bytes()")
         .replace("self.mem()", "self.memory.bytes()")
 }
+
+/// Rewrite WASI method source for a descriptor table shared between threads
+/// (`wasi_fds: Arc<Mutex<..>>`): every access locks the table. The lock is held
+/// only for the statement (a `match` scrutinee's guard lives to the end of the
+/// `match`) and never together with the memory lock. `path_open`'s slot search
+/// and insertion must run under one guard, or two threads could take the same
+/// slot — and a guard in a `match` scrutinee must not be locked again in its
+/// arms — so that block is replaced wholesale.
+pub(super) fn share_fd_table(lines: Vec<String>) -> Vec<String> {
+    const SLOT_SEARCH: &str =
+        "    let idx = match self.wasi_fds.iter().position(|s| s.is_none()) {";
+    // The search is four lines: the `match`, its two arms and the closing `};`.
+    const SLOT_SEARCH_LEN: usize = 4;
+    let mut out = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while let Some(line) = lines.get(i) {
+        if line == SLOT_SEARCH {
+            out.extend(
+                [
+                    "    let idx = {",
+                    "        let mut fds = self.wasi_fds.lock().unwrap();",
+                    "        match fds.iter().position(|s| s.is_none()) {",
+                    "            Some(i) => { fds[i] = Some((file, full)); i }",
+                    "            None => { fds.push(Some((file, full))); fds.len() - 1 }",
+                    "        }",
+                    "    };",
+                ]
+                .map(str::to_string),
+            );
+            i += SLOT_SEARCH_LEN;
+        } else {
+            out.push(line.replace("self.wasi_fds", "self.wasi_fds.lock().unwrap()"));
+            i += 1;
+        }
+    }
+    out
+}

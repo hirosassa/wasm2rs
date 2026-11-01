@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use super::helpers::{HELPER_ORDER, helper_lines, shared_helper_lines};
 use super::render_cont::{continuation_method_lines, continuation_runtime_lines};
 use super::runtime::render_rt_helpers;
+use super::wasi::share_fd_table;
 use super::{
     ALLOW, DataSegment, ElemSegment, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
     ModuleParts, WASM_PAGE_SIZE, WasiFn, data_static_line, indent, index_u32, rust_type,
@@ -316,7 +317,15 @@ fn instance_field_lines(
     // is what `fd_readdir` re-opens with `read_dir`, since a `File` cannot be
     // enumerated directly with std alone).
     if layout.wasi_files {
-        lines.push("    wasi_fds: Vec<Option<(std::fs::File, std::path::PathBuf)>>,".to_string());
+        // Threads of one process share the table (descriptor numbers are
+        // process-wide), so it sits behind an `Arc<Mutex<..>>` when the module
+        // can spawn them.
+        let table = "Vec<Option<(std::fs::File, std::path::PathBuf)>>";
+        lines.push(if layout.wasi_threads {
+            format!("    wasi_fds: std::sync::Arc<std::sync::Mutex<{table}>>,")
+        } else {
+            format!("    wasi_fds: {table},")
+        });
     }
     // The single WASI preopen's host root: guest paths resolve within it and its
     // name is advertised through `fd_prestat_dir_name`. Defaults to the process
@@ -470,7 +479,14 @@ fn constructor_lines(
             inner.push(format!("        g{}: {},", global_base + i, g.init));
         }
         if wasi_files {
-            inner.push("        wasi_fds: Vec::new(),".to_string());
+            inner.push(
+                if layout.wasi_threads {
+                    "        wasi_fds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),"
+                } else {
+                    "        wasi_fds: Vec::new(),"
+                }
+                .to_string(),
+            );
         }
         if wasi_preopen {
             inner.push("        wasi_preopen: std::path::PathBuf::from(\".\"),".to_string());
@@ -721,13 +737,21 @@ fn wasi_method_lines(imports: &[ImportInfo], layout: &Layout, shared: bool) -> V
         {
             wasi_emitted.push(w);
             inner.push(String::new());
-            inner.extend(if w == WasiFn::ThreadSpawn {
+            let body = if w == WasiFn::ThreadSpawn {
                 thread_spawn_lines(layout)
             } else if shared {
                 w.lines_shared(wasi_files)
             } else {
                 w.lines(wasi_files)
-            });
+            };
+            // `thread_spawn_lines` clones the `Arc` itself rather than locking it.
+            inner.extend(
+                if layout.wasi_threads && wasi_files && w != WasiFn::ThreadSpawn {
+                    share_fd_table(body)
+                } else {
+                    body
+                },
+            );
         }
     }
     inner
@@ -738,7 +762,7 @@ fn wasi_method_lines(imports: &[ImportInfo], layout: &Layout, shared: bool) -> V
 /// instance over the same shared memory on a new thread, entering it through
 /// `wasi_thread_start(tid, start_arg)`. The child is detached. A trap in it ends
 /// the whole process with a nonzero status, as the proposal requires. The
-/// descriptor table is not shared: a child starts with none open beyond stdio.
+/// descriptor table is shared: a child sees the descriptors its siblings opened.
 fn thread_spawn_lines(layout: &Layout) -> Vec<String> {
     let mut lines = vec![
         "fn wasi_thread_spawn(&mut self, a0: i32) -> i32 {".to_string(),
@@ -751,6 +775,9 @@ fn thread_spawn_lines(layout: &Layout) -> Vec<String> {
     if layout.has_imports {
         lines.push("    let imports = self.imports.clone();".to_string());
     }
+    if layout.wasi_files {
+        lines.push("    let fds = self.wasi_fds.clone();".to_string());
+    }
     if layout.wasi_preopen {
         lines.push("    let preopen = self.wasi_preopen.clone();".to_string());
     }
@@ -761,6 +788,9 @@ fn thread_spawn_lines(layout: &Layout) -> Vec<String> {
         "        let mut t = Self::with_memory(mem);".to_string()
     });
     lines.push("        t.wasi_tid = tids;".to_string());
+    if layout.wasi_files {
+        lines.push("        t.wasi_fds = fds;".to_string());
+    }
     if layout.wasi_preopen {
         lines.push("        t.wasi_preopen = preopen;".to_string());
     }
