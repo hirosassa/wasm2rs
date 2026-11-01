@@ -40,12 +40,54 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       # The Rust wasi-threads E2E test must run here, not skip (see
-      # docs/wasi-threads-e2e.md). The wasi-sdk tests still skip: CI has no
-      # wasi-sdk.
+      # docs/wasi-threads-e2e.md). The wasi-sdk tests skip here; the
+      # e2e-wasi-sdk job runs them.
       - name: Run cargo test
         run: cargo test --release
         env:
           WASM2RS_REQUIRE_E2E: rust
+
+  # The wasi-sdk E2E tests need a ~190MB toolchain, so they live in their own job
+  # (cached) instead of slowing down every toolchain of the build matrix.
+  e2e-wasi-sdk:
+    name: E2E with wasi-sdk
+    runs-on: ubuntu-latest
+    env:
+      # To bump wasi-sdk, change both and the release tag in the download URL
+      # (the sha256 is of the release tarball; it also keys the cache).
+      WASI_SDK_TARBALL: wasi-sdk-34.0-x86_64-linux.tar.gz
+      WASI_SDK_SHA256: b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-wasip1-threads
+
+      - name: Cache wasi-sdk
+        id: wasi-sdk-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/wasi-sdk
+          key: wasi-sdk-${{ env.WASI_SDK_SHA256 }}
+
+      - name: Download wasi-sdk
+        if: steps.wasi-sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/wasi-sdk.tar.gz" \
+            "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/$WASI_SDK_TARBALL"
+          echo "$WASI_SDK_SHA256  $RUNNER_TEMP/wasi-sdk.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/wasi-sdk"
+          tar xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$HOME/wasi-sdk" --strip-components=1
+
+      # Both tools are required, so a missing one fails instead of skipping.
+      - name: Run the E2E tests
+        run: |
+          export WASI_SDK_PATH="$HOME/wasi-sdk"
+          cargo test --release --test it wasi_sdk_e2e -- --nocapture
+        env:
+          WASM2RS_REQUIRE_E2E: "1"
 
   coverage:
     runs-on: ubuntu-latest
