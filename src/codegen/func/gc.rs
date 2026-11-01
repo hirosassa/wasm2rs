@@ -364,10 +364,9 @@ impl super::FuncGen<'_> {
     /// `array.len`: pop the ref and push the element count as an `i32`.
     pub(super) fn array_len(&mut self) -> Result<(), TranspileError> {
         let r = self.pop()?;
-        self.push_combined(
+        self.push_trapping(
             format!("(({}).obj().borrow().len() as i32)", r.code),
             ValType::I32,
-            false,
         )
     }
 
@@ -766,6 +765,7 @@ impl super::FuncGen<'_> {
             code: temp,
             ty: fallthrough_ty,
             stable: true,
+            may_trap: false,
         });
         self.branch(
             depth,
@@ -773,6 +773,7 @@ impl super::FuncGen<'_> {
                 code: cond,
                 ty: ValType::I32,
                 stable: true,
+                may_trap: false,
             }),
         )
     }
@@ -784,6 +785,7 @@ impl super::FuncGen<'_> {
             code: "GcRef::Null".to_string(),
             ty: Self::concrete_ref_ty(type_index)?,
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }
@@ -804,7 +806,7 @@ impl super::FuncGen<'_> {
              _ => 0i32 }})",
             a.code, b.code
         );
-        self.push_combined(code, ValType::I32, false)
+        self.push_expr(code, ValType::I32, false, a.may_trap || b.may_trap)
     }
 
     /// `extern.convert_any`: internalise an `anyref` into an `externref`. Null
@@ -878,6 +880,7 @@ impl super::FuncGen<'_> {
                 code: format!("i32::from(matches!({temp}, GcRef::Null))"),
                 ty: ValType::I32,
                 stable: true,
+                may_trap: false,
             }),
         )?;
         // Fall-through continues with the ref (non-null) back on the stack.
@@ -885,6 +888,7 @@ impl super::FuncGen<'_> {
             code: temp,
             ty,
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }
@@ -903,6 +907,7 @@ impl super::FuncGen<'_> {
             code: temp.clone(),
             ty,
             stable: true,
+            may_trap: false,
         });
         self.branch(
             depth,
@@ -910,6 +915,7 @@ impl super::FuncGen<'_> {
                 code: format!("i32::from(!matches!({temp}, GcRef::Null))"),
                 ty: ValType::I32,
                 stable: true,
+                may_trap: false,
             }),
         )?;
         // `branch` (br_if-style) left the ref on the stack for fall-through, but

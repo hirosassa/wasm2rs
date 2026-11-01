@@ -164,6 +164,7 @@ impl<'a> super::FuncGen<'a> {
                 code: name.clone(),
                 ty,
                 stable: true,
+                may_trap: false,
             };
             vars.push((name, ty));
         }
@@ -286,6 +287,7 @@ impl<'a> super::FuncGen<'a> {
                 code: var,
                 ty,
                 stable: true,
+                may_trap: false,
             });
         }
 
@@ -561,6 +563,7 @@ impl<'a> super::FuncGen<'a> {
                 code: name,
                 ty: *ty,
                 stable: true,
+                may_trap: false,
             });
         }
         Ok(())
@@ -984,6 +987,7 @@ impl<'a> super::FuncGen<'a> {
                         code: var,
                         ty: *ty,
                         stable: true,
+                        may_trap: false,
                     });
                 }
                 (CatchKind::Tag(t), binds, pushed)
@@ -1098,6 +1102,7 @@ impl<'a> super::FuncGen<'a> {
                 code: var,
                 ty,
                 stable: true,
+                may_trap: false,
             });
         }
         self.reachable = next_reachable;

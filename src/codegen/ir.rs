@@ -12,6 +12,9 @@ pub(crate) struct Val {
     pub(crate) ty: ValType,
     /// Whether re-evaluating `code` is guaranteed to yield the same result.
     pub(crate) stable: bool,
+    /// Whether evaluating `code` can trap (an out-of-bounds load, say). Such a
+    /// value must still be evaluated when it is discarded or unselected.
+    pub(crate) may_trap: bool,
 }
 /// The kind of a structured control-flow region.
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -15,6 +15,7 @@ impl<'a> super::FuncGen<'a> {
             code: i32_literal(value),
             ty: ValType::I32,
             stable: true,
+            may_trap: false,
         });
     }
 
@@ -24,6 +25,7 @@ impl<'a> super::FuncGen<'a> {
             code: i64_literal(value),
             ty: ValType::I64,
             stable: true,
+            may_trap: false,
         });
     }
 
@@ -33,6 +35,7 @@ impl<'a> super::FuncGen<'a> {
             code: format!("f32::from_bits({bits}u32)"),
             ty: ValType::F32,
             stable: true,
+            may_trap: false,
         });
     }
 
@@ -43,6 +46,7 @@ impl<'a> super::FuncGen<'a> {
             code: format!("f64::from_bits({bits}u64)"),
             ty: ValType::F64,
             stable: true,
+            may_trap: false,
         });
     }
 
@@ -57,7 +61,7 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(
             format!("({}).{method}({})", lhs.code, rhs.code),
             lhs.ty,
-            lhs.stable && rhs.stable,
+            &[&lhs, &rhs],
         )
     }
 
@@ -67,17 +71,13 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(
             format!("({} {op} {})", lhs.code, rhs.code),
             lhs.ty,
-            lhs.stable && rhs.stable,
+            &[&lhs, &rhs],
         )
     }
 
     pub(super) fn compare_zero(&mut self) -> Result<(), TranspileError> {
         let a = self.pop()?;
-        self.push_combined(
-            format!("i32::from({} == 0)", a.code),
-            ValType::I32,
-            a.stable,
-        )
+        self.push_combined(format!("i32::from({} == 0)", a.code), ValType::I32, &[&a])
     }
 
     pub(super) fn compare_signed(&mut self, op: &str) -> Result<(), TranspileError> {
@@ -86,7 +86,7 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(
             format!("i32::from({} {op} {})", lhs.code, rhs.code),
             ValType::I32,
-            lhs.stable && rhs.stable,
+            &[&lhs, &rhs],
         )
     }
 
@@ -101,7 +101,7 @@ impl<'a> super::FuncGen<'a> {
                 lhs.code, rhs.code
             ),
             ValType::I32,
-            lhs.stable && rhs.stable,
+            &[&lhs, &rhs],
         )
     }
 
@@ -118,7 +118,7 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(
             format!("({}).{method}({} as u32)", lhs.code, rhs.code),
             lhs.ty,
-            lhs.stable && rhs.stable,
+            &[&lhs, &rhs],
         )
     }
 
@@ -137,6 +137,7 @@ impl<'a> super::FuncGen<'a> {
             code: name,
             ty,
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }
@@ -188,7 +189,7 @@ impl<'a> super::FuncGen<'a> {
                 lhs.code, rhs.code
             ),
             lhs.ty,
-            lhs.stable && rhs.stable,
+            &[&lhs, &rhs],
         )
     }
 
@@ -202,7 +203,7 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(
             format!("{}({}, {})", rt_name(rt), lhs.code, rhs.code),
             lhs.ty,
-            lhs.stable && rhs.stable,
+            &[&lhs, &rhs],
         )
     }
 
@@ -216,7 +217,7 @@ impl<'a> super::FuncGen<'a> {
     ) -> Result<(), TranspileError> {
         let a = self.pop()?;
         self.used_rt.insert(rt);
-        self.push_combined(format!("{}({})", rt_name(rt), a.code), result_ty, a.stable)
+        self.push_combined(format!("{}({})", rt_name(rt), a.code), result_ty, &[&a])
     }
 
     /// A unary call to a possibly-trapping runtime helper (the non-saturating
@@ -238,7 +239,7 @@ impl<'a> super::FuncGen<'a> {
     /// as `-(lit.method())` (a method call outranks unary minus in Rust).
     pub(super) fn unop_method(&mut self, method: &str) -> Result<(), TranspileError> {
         let a = self.pop()?;
-        self.push_combined(format!("({}).{method}()", a.code), a.ty, a.stable)
+        self.push_combined(format!("({}).{method}()", a.code), a.ty, &[&a])
     }
 
     /// wasm's bit-counting unary ops (`clz`/`ctz`/`popcnt`). Rust's
@@ -255,7 +256,7 @@ impl<'a> super::FuncGen<'a> {
     /// Floating-point negation, parenthesised so it composes as a subexpression.
     pub(super) fn unop_neg(&mut self) -> Result<(), TranspileError> {
         let a = self.pop()?;
-        self.push_combined(format!("(-{})", a.code), a.ty, a.stable)
+        self.push_combined(format!("(-{})", a.code), a.ty, &[&a])
     }
 
     /// A unary numeric conversion: pop one operand, build the converted
@@ -268,7 +269,7 @@ impl<'a> super::FuncGen<'a> {
         make: impl FnOnce(&str) -> String,
     ) -> Result<(), TranspileError> {
         let a = self.pop()?;
-        self.push_combined(make(&a.code), result_ty, a.stable)
+        self.push_combined(make(&a.code), result_ty, &[&a])
     }
 
     /// A single `operand as target` cast (`target` is the Rust primitive name),
@@ -303,10 +304,25 @@ impl<'a> super::FuncGen<'a> {
         self.convert(result_ty, |x| format!("({x}.to_bits() as {target})"))
     }
 
+    /// Return `val` unchanged, unless evaluating it can trap: then bind it to a
+    /// `let` temp now so the trap happens even if the value is later discarded.
+    fn evaluated(&mut self, val: Val) -> Result<Val, TranspileError> {
+        if !val.may_trap {
+            return Ok(val);
+        }
+        self.materialize(val.code, val.ty)?;
+        self.pop()
+    }
+
     pub(super) fn select(&mut self) -> Result<(), TranspileError> {
         let cond = self.pop()?;
         let b = self.pop()?;
         let a = self.pop()?;
+        // Both operands are evaluated in wasm, whatever the condition picks. An
+        // operand that can trap would vanish with the arm that is not taken, so
+        // run it into a temp first (in operand order).
+        let a = self.evaluated(a)?;
+        let b = self.evaluated(b)?;
         // Each arm consumes its operand by value, so a `GcRef` arm must clone
         // (see `move_val`): the arms may read the same live local place, and a
         // moved handle could not be read again afterwards.
@@ -319,7 +335,7 @@ impl<'a> super::FuncGen<'a> {
                 condition_code(&cond.code),
             ),
             a.ty,
-            cond.stable && a.stable && b.stable,
+            &[&cond, &a, &b],
         )
     }
 }

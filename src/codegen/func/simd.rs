@@ -22,7 +22,7 @@ impl<'a> super::FuncGen<'a> {
     ) -> Result<(), TranspileError> {
         let v = self.pop()?;
         let shifted = format!("({} >> {})", v.code, lane as u32 * lane_bits);
-        self.push_combined(build(&shifted), result_ty, v.stable)
+        self.push_combined(build(&shifted), result_ty, &[&v])
     }
 
     /// Replace one lane with a scalar: clear the lane's bits with a shifted mask,
@@ -44,7 +44,7 @@ impl<'a> super::FuncGen<'a> {
             v.code,
             to_bits(&x.code),
         );
-        self.push_combined(code, ValType::V128, v.stable && x.stable)
+        self.push_combined(code, ValType::V128, &[&v, &x])
     }
 
     // Per-variant lane extract/replace: each fixes the lane width, the result
@@ -130,7 +130,7 @@ impl<'a> super::FuncGen<'a> {
     /// `v128.not`: bitwise complement of the whole register.
     pub(super) fn v128_not(&mut self) -> Result<(), TranspileError> {
         let v = self.pop()?;
-        self.push_combined(format!("(!{})", v.code), ValType::V128, v.stable)
+        self.push_combined(format!("(!{})", v.code), ValType::V128, &[&v])
     }
 
     /// `v128.andnot`: `a & !b` over the whole register.
@@ -140,7 +140,7 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(
             format!("({} & !{})", a.code, b.code),
             ValType::V128,
-            a.stable && b.stable,
+            &[&a, &b],
         )
     }
 
@@ -155,18 +155,14 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(
             format!("(({} & {ct}) | ({} & !{ct}))", v1.code, v2.code),
             ValType::V128,
-            v1.stable && v2.stable && c.stable,
+            &[&v1, &v2, &c],
         )
     }
 
     /// `v128.any_true`: 1 if any bit of the register is set, else 0.
     pub(super) fn v128_any_true(&mut self) -> Result<(), TranspileError> {
         let v = self.pop()?;
-        self.push_combined(
-            format!("i32::from({} != 0)", v.code),
-            ValType::I32,
-            v.stable,
-        )
+        self.push_combined(format!("i32::from({} != 0)", v.code), ValType::I32, &[&v])
     }
 
     /// A binary lane-wise op `name(a, b) -> u128` (see `simd_rt.rs`): pop two
@@ -178,7 +174,7 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(
             format!("{name}({}, {})", a.code, b.code),
             ValType::V128,
-            a.stable && b.stable,
+            &[&a, &b],
         )
     }
 
@@ -193,7 +189,7 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(
             format!("{name}({}, {}, {})", a.code, b.code, c.code),
             ValType::V128,
-            a.stable && b.stable && c.stable,
+            &[&a, &b, &c],
         )
     }
 
@@ -201,7 +197,7 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn call_simd_unop(&mut self, name: &'static str) -> Result<(), TranspileError> {
         let a = self.pop()?;
         self.used_simd.insert(name);
-        self.push_combined(format!("{name}({})", a.code), ValType::V128, a.stable)
+        self.push_combined(format!("{name}({})", a.code), ValType::V128, &[&a])
     }
 
     /// `i8x16.shuffle`: a binary op with a constant 16-byte index vector baked in
@@ -214,7 +210,7 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(
             format!("i8x16_shuffle({}, {}, {idx}u128)", a.code, b.code),
             ValType::V128,
-            a.stable && b.stable,
+            &[&a, &b],
         )
     }
 
@@ -223,7 +219,7 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn call_simd_reduce(&mut self, name: &'static str) -> Result<(), TranspileError> {
         let a = self.pop()?;
         self.used_simd.insert(name);
-        self.push_combined(format!("{name}({})", a.code), ValType::I32, a.stable)
+        self.push_combined(format!("{name}({})", a.code), ValType::I32, &[&a])
     }
 
     /// A lane shift `name(a: u128, s: i32) -> u128` (see `simd_rt.rs`): pop the
@@ -235,7 +231,7 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(
             format!("{name}({}, {})", v.code, s.code),
             ValType::V128,
-            v.stable && s.stable,
+            &[&v, &s],
         )
     }
 
@@ -248,7 +244,7 @@ impl<'a> super::FuncGen<'a> {
         self.push_combined(
             format!("({} {op} 0x{mask:032x}u128)", v.code),
             ValType::V128,
-            v.stable,
+            &[&v],
         )
     }
 
@@ -258,6 +254,7 @@ impl<'a> super::FuncGen<'a> {
             code: format!("{}u128", u128::from_le_bytes(*bytes)),
             ty: ValType::V128,
             stable: true,
+            may_trap: false,
         });
     }
 }
