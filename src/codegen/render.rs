@@ -94,11 +94,31 @@ impl Layout {
 /// `impl`'s inherent methods (constructors, memory/table accessors, WASI/helper/
 /// dispatch/continuation methods), and finally each function's own source
 /// streamed in.
-pub(super) fn render_module(
+fn render_module(
     out: &mut String,
     parts: &ModuleParts<'_>,
     ctx: &ModuleCtx<'_>,
     sources: &[&str],
+    used: &HashSet<(Helper, u32)>,
+    dispatch_sigs: &HashSet<u32>,
+) -> Result<(), TranspileError> {
+    render_module_head(out, parts, ctx, used, dispatch_sigs)?;
+    // Stream each function's source straight into `out`, indenting as it is
+    // written: no per-line `String`, no intermediate line vector and no final
+    // `join` copy of the whole module.
+    for src in sources {
+        push_function_source(out, src);
+    }
+    render_module_tail(out, parts, ctx, dispatch_sigs)
+}
+
+/// Everything in a stateful module that precedes the method bodies: the
+/// `Imports` trait, the segment statics, the `Instance` struct and the
+/// `impl Instance` block up to (not including) the functions.
+pub(super) fn render_module_head(
+    out: &mut String,
+    parts: &ModuleParts<'_>,
+    ctx: &ModuleCtx<'_>,
     used: &HashSet<(Helper, u32)>,
     dispatch_sigs: &HashSet<u32>,
 ) -> Result<(), TranspileError> {
@@ -188,12 +208,18 @@ pub(super) fn render_module(
         lines.push(line);
     }
     push_lines(out, &lines);
-    // Stream each function's source straight into `out`, indenting as it is
-    // written: no per-line `String`, no intermediate line vector and no final
-    // `join` copy of the whole module.
-    for src in sources {
-        push_function_source(out, src);
-    }
+    Ok(())
+}
+
+/// What follows the method bodies of a stateful module: the closing brace of
+/// the `impl Instance` block and the external-funcref registries.
+pub(super) fn render_module_tail(
+    out: &mut String,
+    parts: &ModuleParts<'_>,
+    ctx: &ModuleCtx<'_>,
+    dispatch_sigs: &HashSet<u32>,
+) -> Result<(), TranspileError> {
+    let layout = Layout::of(parts);
     out.push_str("}\n");
 
     // Module-scope external-funcref registries (the Linker helper), one per
