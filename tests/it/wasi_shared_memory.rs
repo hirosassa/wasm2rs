@@ -165,6 +165,12 @@ fn every_native_wasi_function_compiles_on_a_shared_memory() {
         ("fd_fdstat_set_flags", &["i32", "i32"]),
         ("fd_fdstat_set_rights", &["i32", "i64", "i64"]),
         ("fd_renumber", &["i32", "i32"]),
+        ("poll_oneoff", &["i32", "i32", "i32", "i32"]),
+        ("sock_accept", &["i32", "i32", "i32"]),
+        ("sock_recv", &["i32", "i32", "i32", "i32", "i32", "i32"]),
+        ("sock_send", &["i32", "i32", "i32", "i32", "i32"]),
+        ("sock_shutdown", &["i32", "i32"]),
+        ("proc_raise", &["i32"]),
     ];
     let mut imports = String::new();
     for (name, params) in funcs {
