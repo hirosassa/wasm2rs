@@ -250,6 +250,23 @@ pub(crate) fn build_ctx<'a>(
             "native WASI memory access without a linear memory".into(),
         ));
     }
+    // `wasi::thread-spawn` starts each thread as a sibling instance over the
+    // same shared memory and enters it through the exported `wasi_thread_start`.
+    if imports
+        .iter()
+        .any(|im| im.wasi == Some(WasiFn::ThreadSpawn))
+    {
+        if !memory_shared {
+            return Err(TranspileError::Unsupported(
+                "wasi::thread-spawn requires a shared memory".into(),
+            ));
+        }
+        if !parts.exports.iter().any(|e| e.name == "wasi_thread_start") {
+            return Err(TranspileError::Unsupported(
+                "wasi::thread-spawn requires an exported wasi_thread_start".into(),
+            ));
+        }
+    }
     // The host is injected whenever anything is imported (globals, non-WASI
     // functions, or host-owned memory/table).
     let has_imports = !imports.is_empty()
