@@ -1,3 +1,7 @@
+//! Print the flattened form of a call nested inside many blocks.
+//!
+//! Run with `cargo run --example show_flatten_call`.
+
 fn main() {
     // Deeply nest a call inside `depth` blocks so the flattener has to thread a
     // call across the nested control flow. Building the wat programmatically keeps

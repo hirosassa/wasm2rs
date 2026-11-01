@@ -1,6 +1,6 @@
 [package]
 name = "wasm2rs"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Transpile WebAssembly binaries into standalone native Rust source code."
 license = "MIT"
@@ -70,6 +70,6 @@ allow_attributes_without_reason = "deny"
 #   let_underscore_must_use 1 (`let _ = write!(String, …)`, infallible).
 
 # Keep file:line info for panics/test failures but drop full variable/type
-# debug info. Shrinks the 54 test binaries and cuts link time on macOS.
+# debug info. Shrinks the test binary and cuts link time on macOS.
 [profile.dev]
 debug = "line-tables-only"

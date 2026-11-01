@@ -99,6 +99,16 @@ cargo test --test it wasi_sdk_e2e -- --nocapture
 The test uses `$WASI_SDK_PATH/bin/clang` with
 `--target=wasm32-wasip1-threads -pthread -mexec-model=reactor`.
 
+### emsdk (for the emscripten test)
+
+Install an [emsdk](https://github.com/emscripten-core/emsdk) and source its
+`emsdk_env.sh`, which sets `EMSDK`; the test runs `$EMSDK/upstream/emscripten/emcc`.
+
+```sh
+source ~/tools/emsdk/emsdk_env.sh
+cargo test --test it emscripten -- --nocapture
+```
+
 ## How a test works
 
 1. The test writes a small source file to a scratch directory under the system
@@ -129,13 +139,3 @@ Each test takes about one second: building the wasm, transpiling it (tens of
 milliseconds), `rustc` at `opt-level=0` (under a second) and running four
 threads. The generated binary is cached by content, so a rerun with unchanged
 inputs skips the `rustc` step.
-
-### emsdk (for the emscripten test)
-
-Install an [emsdk](https://github.com/emscripten-core/emsdk) and source its
-`emsdk_env.sh`, which sets `EMSDK`; the test runs `$EMSDK/upstream/emscripten/emcc`.
-
-```sh
-source ~/tools/emsdk/emsdk_env.sh
-cargo test --test it emscripten -- --nocapture
-```

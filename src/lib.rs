@@ -1,9 +1,12 @@
 //! wasm2rs: convert a WebAssembly binary into standalone Rust source code.
 //!
-//! Supported scope: functions whose values are `i32` (params, results, locals),
-//! using `i32.const`, `local.get`/`set`/`tee`, `i32` arithmetic/bitwise/compare
-//! operators and the structured control-flow instructions `block`, `loop`,
-//! `if`/`else`, `br`, `br_if`, `br_table`, `return`, `drop` and `select`.
+//! The generated Rust preserves WebAssembly semantics (wrapping arithmetic,
+//! bounds-checked linear memory, traps) with no runtime dependency. Supported:
+//! the MVP value types (`i32`/`i64`/`f32`/`f64`), SIMD and relaxed SIMD,
+//! atomics and shared memory, multi-memory, tail calls, exception handling,
+//! GC, stack-switching continuations, and native WASI preview1 /
+//! wasi-threads. Entry points: [`transpile`], [`transpile_with_options`],
+//! [`transpile_split`] and [`transpile_split_with_options`].
 
 mod codegen;
 mod dump;

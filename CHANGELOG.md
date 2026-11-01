@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-01
+
+### Fixed
+
+- A trapping load whose value is discarded by `drop` or `select` is still
+  evaluated, so the trap is no longer lost.
+
 ### Changed
 
+- Updated `wasmparser` / `wat` to 0.263.
+- Smaller generated code and fewer allocations while transpiling (no offset-literal
+  type suffixes, fewer temporary allocations, cheaper single-file memory).
 - **A `shared` memory no longer sits behind a `Mutex`.** Its bytes are reserved once
   (up to the declared maximum) and accessed without a lock, so threads that touch
   disjoint memory now scale instead of serialising (8 threads of load/store work:
@@ -23,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Parallel code generation: `--jobs=N` CLI flag and `TranspileOptions::jobs`.**
+  Function bodies are generated on several threads and joined in function-index
+  order, so the output is byte-identical for every value. `0` (default) picks the
+  available parallelism (at most 8); `1` stays on the calling thread.
+- **Emscripten pthread and emscripten JS-glue builds** run on native threads
+  (see `docs/wasi-threads-e2e.md`).
 - **`--entry-exports=a,b` CLI flag and `TranspileOptions::entry_exports`** emit only the
   functions reachable from the chosen exports (plus the start function and the
   entry points the generated code calls itself). Surviving functions keep their
@@ -127,5 +143,7 @@ bounds checks, and trap behaviour).
   faster code on modules trusted to stay in bounds (an out-of-bounds access
   becomes undefined behaviour instead of a wasm trap).
 
+[Unreleased]: https://github.com/hirosassa/wasm2rs/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/hirosassa/wasm2rs/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/hirosassa/wasm2rs/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hirosassa/wasm2rs/releases/tag/v0.1.0
