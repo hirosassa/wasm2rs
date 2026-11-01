@@ -713,7 +713,12 @@ impl<'a> FuncGen<'a> {
             Operator::TableGrow { table } => self.table_grow(table)?,
             Operator::TableFill { table } => self.table_fill(table)?,
             Operator::Drop => {
-                self.pop()?;
+                // A dropped value that can trap (an out-of-bounds load) must still
+                // run: wasm evaluates it even though nothing uses the result.
+                let val = self.pop()?;
+                if val.may_trap {
+                    self.line(format!("let _ = {};", val.code));
+                }
             }
             Operator::Select => self.select()?,
             Operator::TypedSelect { .. } => self.select()?,
@@ -1265,12 +1270,35 @@ impl<'a> FuncGen<'a> {
         &mut self,
         code: String,
         ty: ValType,
+        operands: &[&Val],
+    ) -> Result<(), TranspileError> {
+        let stable = operands.iter().all(|v| v.stable);
+        let may_trap = operands.iter().any(|v| v.may_trap);
+        self.push_expr(code, ty, stable, may_trap)
+    }
+
+    /// Like `push_combined`, for a value whose evaluation can trap (and so must
+    /// still run if the value is discarded or left unselected).
+    fn push_trapping(&mut self, code: String, ty: ValType) -> Result<(), TranspileError> {
+        self.push_expr(code, ty, false, true)
+    }
+
+    fn push_expr(
+        &mut self,
+        code: String,
+        ty: ValType,
         stable: bool,
+        may_trap: bool,
     ) -> Result<(), TranspileError> {
         if code.len() > Self::MAX_EXPR_LEN {
             return self.materialize(code, ty);
         }
-        self.push(Val { code, ty, stable });
+        self.push(Val {
+            code,
+            ty,
+            stable,
+            may_trap,
+        });
         Ok(())
     }
 
@@ -1310,7 +1338,9 @@ impl<'a> FuncGen<'a> {
     ///
     /// A deferred non-stable operand only ever *reads* state (a mutable local,
     /// a mutable or imported global, or a memory load; anything side-effecting
-    /// or trapping is materialised to a stable temp the moment it is produced).
+    /// is materialised to a stable temp the moment it is produced). A deferred
+    /// read may also trap (`Val::may_trap`); `drop` and `select` run such a value
+    /// explicitly so the trap is not lost with the discarded operand.
     /// So evaluating a consumed operand at the boundary cannot change a
     /// survivor, and the consumed operands are evaluated in wasm push order
     /// (left to right) exactly where the boundary emits them. That makes
@@ -1333,6 +1363,7 @@ impl<'a> FuncGen<'a> {
                 code: name,
                 ty,
                 stable: true,
+                may_trap: false,
             };
         }
         Ok(())

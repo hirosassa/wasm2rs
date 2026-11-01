@@ -161,3 +161,82 @@ fn out_of_bounds_memory_load_traps() {
         "out of range for slice",
     );
 }
+
+// A load is evaluated even when its result is never used: wasm runs every
+// instruction, so an out-of-bounds load traps after `drop` and inside the
+// operand of `select` that is not chosen.
+
+#[test]
+fn a_dropped_out_of_bounds_load_still_traps() {
+    expect_trap_with(
+        "trap_drop_load",
+        r#"(module (memory 1)
+             (func (export "f") (i32.load (i32.const 100000000)) drop))"#,
+        "let mut inst = Instance::new();\n    inst.func0();",
+        "out of range",
+    );
+}
+
+#[test]
+fn an_unchosen_select_operand_that_loads_out_of_bounds_still_traps() {
+    for (name, a, b, cond) in [
+        (
+            "trap_select_load_b",
+            "(i32.const 1)",
+            "(i32.load (i32.const 100000000))",
+            1,
+        ),
+        (
+            "trap_select_load_a",
+            "(i32.load (i32.const 100000000))",
+            "(i32.const 1)",
+            0,
+        ),
+    ] {
+        expect_trap_with(
+            name,
+            &format!(
+                r#"(module (memory 1)
+                     (func (export "f") (result i32)
+                       (select {a} {b} (i32.const {cond}))))"#
+            ),
+            "let mut inst = Instance::new();\n    inst.func0();",
+            "out of range",
+        );
+    }
+}
+
+#[test]
+fn in_bounds_dropped_and_selected_loads_keep_their_values() {
+    common::compile_run(
+        "drop_select_in_bounds",
+        r#"(module (memory 1) (data (i32.const 0) "\07\00\00\00")
+             (func (export "d") (i32.load (i32.const 0)) drop)
+             (func (export "s") (param i32) (result i32)
+               (select (i32.const 9) (i32.load (i32.const 0)) (local.get 0))))"#,
+        "let mut inst = Instance::new();\n    inst.func0();\n    assert_eq!(inst.func1(1), 9);\n    assert_eq!(inst.func1(0), 7);",
+    );
+}
+
+#[test]
+fn a_dropped_value_computed_from_an_out_of_bounds_load_still_traps() {
+    expect_trap_with(
+        "trap_drop_derived_load",
+        r#"(module (memory 1)
+             (func (export "f")
+               (i32.add (i32.load (i32.const 100000000)) (i32.const 1)) drop))"#,
+        "let mut inst = Instance::new();\n    inst.func0();",
+        "out of range",
+    );
+}
+
+#[test]
+fn a_dropped_out_of_bounds_table_get_still_traps() {
+    expect_trap_with(
+        "trap_drop_table_get",
+        r#"(module (table 1 funcref)
+             (func (export "f") (table.get (i32.const 5)) drop))"#,
+        "let mut inst = Instance::new();\n    inst.func0();",
+        "index out of bounds",
+    );
+}

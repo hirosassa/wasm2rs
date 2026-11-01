@@ -285,6 +285,7 @@ impl<'a> super::FuncGen<'a> {
                 code,
                 ty,
                 stable: true,
+                may_trap: false,
             });
         }
     }

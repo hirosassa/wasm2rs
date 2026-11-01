@@ -42,6 +42,7 @@ impl<'a> super::FuncGen<'a> {
             code: format!("l{local_index}"),
             ty,
             stable,
+            may_trap: false,
         });
         Ok(())
     }
@@ -107,7 +108,12 @@ impl<'a> super::FuncGen<'a> {
         } else {
             (format!("self.g{global_index}"), !mutable)
         };
-        self.push(Val { code, ty, stable });
+        self.push(Val {
+            code,
+            ty,
+            stable,
+            may_trap: false,
+        });
         Ok(())
     }
 
@@ -250,14 +256,13 @@ impl<'a> super::FuncGen<'a> {
         self.used_helpers.insert((helper, mem));
         // The result depends on memory contents, which a store can change, so
         // it is never stable.
-        self.push_combined(
+        self.push_trapping(
             format!(
                 "self.{}({}, {offset})",
                 helper_method_name(helper, mem),
                 addr.code
             ),
             ty,
-            false,
         )
     }
 
@@ -297,7 +302,7 @@ impl<'a> super::FuncGen<'a> {
         let addr = self.pop()?;
         self.used_helpers.insert((helper, mem));
         // The result reads memory, which a store can change, so it is never stable.
-        self.push_combined(
+        self.push_trapping(
             format!(
                 "self.{}({}, {offset}, {}, {lane})",
                 helper_method_name(helper, mem),
@@ -305,7 +310,6 @@ impl<'a> super::FuncGen<'a> {
                 value.code
             ),
             ValType::V128,
-            false,
         )
     }
 
@@ -373,6 +377,7 @@ impl<'a> super::FuncGen<'a> {
                 code: old,
                 ty,
                 stable: true,
+                may_trap: false,
             });
             return Ok(());
         }
@@ -396,6 +401,7 @@ impl<'a> super::FuncGen<'a> {
             code: old,
             ty,
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }
@@ -436,6 +442,7 @@ impl<'a> super::FuncGen<'a> {
                 code: old,
                 ty,
                 stable: true,
+                may_trap: false,
             });
             return Ok(());
         }
@@ -462,6 +469,7 @@ impl<'a> super::FuncGen<'a> {
             code: old,
             ty,
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }
@@ -489,6 +497,7 @@ impl<'a> super::FuncGen<'a> {
                 code: name,
                 ty: ValType::I32,
                 stable: true,
+                may_trap: false,
             });
             return Ok(());
         }
@@ -498,6 +507,7 @@ impl<'a> super::FuncGen<'a> {
             code: "0i32".to_string(),
             ty: ValType::I32,
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }
@@ -538,6 +548,7 @@ impl<'a> super::FuncGen<'a> {
                 code: name,
                 ty: ValType::I32,
                 stable: true,
+                may_trap: false,
             });
             return Ok(());
         }
@@ -557,6 +568,7 @@ impl<'a> super::FuncGen<'a> {
             code: name,
             ty: ValType::I32,
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }
@@ -585,6 +597,7 @@ impl<'a> super::FuncGen<'a> {
             code: name,
             ty: self.addr_val_ty(mem),
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }
@@ -606,6 +619,7 @@ impl<'a> super::FuncGen<'a> {
             code: name,
             ty: self.addr_val_ty(mem),
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }

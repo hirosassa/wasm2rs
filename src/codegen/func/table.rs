@@ -30,10 +30,9 @@ impl<'a> super::FuncGen<'a> {
         self.require_zero_index(table, "table.get")?;
         let index = self.pop()?;
         let element = self.ctx.table_element.unwrap_or(ValType::FUNCREF);
-        self.push_combined(
+        self.push_trapping(
             format!("self.table()[({}) as u32 as usize]", index.code),
             element,
-            false,
         )
     }
 
@@ -61,6 +60,7 @@ impl<'a> super::FuncGen<'a> {
             code: "(self.table().len() as i32)".to_string(),
             ty: ValType::I32,
             stable: false,
+            may_trap: false,
         });
         Ok(())
     }
@@ -89,6 +89,7 @@ impl<'a> super::FuncGen<'a> {
             code: name,
             ty: ValType::I32,
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }
@@ -235,6 +236,7 @@ impl<'a> super::FuncGen<'a> {
                         )
                     })?),
                     stable: true,
+                    may_trap: false,
                 });
                 Ok(())
             }
@@ -279,6 +281,7 @@ impl<'a> super::FuncGen<'a> {
             code: "u32::MAX".to_string(),
             ty,
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }
@@ -289,6 +292,7 @@ impl<'a> super::FuncGen<'a> {
             code: format!("{function_index}u32"),
             ty: ValType::FUNCREF,
             stable: true,
+            may_trap: false,
         });
     }
 
@@ -321,6 +325,7 @@ impl<'a> super::FuncGen<'a> {
             code: tmp,
             ty: ValType::Ref(RefType::concrete(false, packed)),
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }
@@ -379,6 +384,7 @@ impl<'a> super::FuncGen<'a> {
             code: result,
             ty: ValType::Ref(RefType::concrete(false, after_packed)),
             stable: true,
+            may_trap: false,
         });
         Ok(())
     }
@@ -394,7 +400,7 @@ impl<'a> super::FuncGen<'a> {
         } else {
             format!("i32::from({} == u32::MAX)", r.code)
         };
-        self.push_combined(code, ValType::I32, r.stable)
+        self.push_combined(code, ValType::I32, &[&r])
     }
 
     /// The non-null `(ref i31)` value type carried by an `i31ref` on the operand
@@ -417,11 +423,10 @@ impl<'a> super::FuncGen<'a> {
     /// Pure in its operand, so it keeps the operand's stability.
     pub(super) fn ref_i31(&mut self) -> Result<(), TranspileError> {
         let v = self.pop()?;
-        let stable = v.stable;
         self.push_combined(
             format!("GcRef::I31(({}) & 0x7FFF_FFFFi32)", v.code),
             Self::i31_ref_ty()?,
-            stable,
+            &[&v],
         )
     }
 
@@ -437,7 +442,7 @@ impl<'a> super::FuncGen<'a> {
                 r.code
             ),
             ValType::I32,
-            r.stable,
+            &[&r],
         )
     }
 

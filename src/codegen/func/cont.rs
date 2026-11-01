@@ -611,6 +611,7 @@ impl super::FuncGen<'_> {
                 code,
                 ty: *ty,
                 stable: true,
+                may_trap: false,
             });
         }
         *checkpoint = Some(callee);
@@ -689,6 +690,7 @@ impl super::FuncGen<'_> {
                 code,
                 ty: *ty,
                 stable: true,
+                may_trap: false,
             });
         }
         Ok(())
@@ -808,6 +810,7 @@ impl super::FuncGen<'_> {
                 code,
                 ty: *ty,
                 stable: true,
+                may_trap: false,
             });
         }
         *checkpoint = Some(callee);
