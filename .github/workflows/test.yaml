@@ -81,13 +81,14 @@ jobs:
           mkdir -p "$HOME/wasi-sdk"
           tar xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$HOME/wasi-sdk" --strip-components=1
 
-      # Both tools are required, so a missing one fails instead of skipping.
+      # Both tools are required, so a missing one fails instead of skipping. emsdk is
+      # not installed here, so its test skips (it is not named in the list).
       - name: Run the E2E tests
         run: |
           export WASI_SDK_PATH="$HOME/wasi-sdk"
           cargo test --release --test it wasi_sdk_e2e -- --nocapture
         env:
-          WASM2RS_REQUIRE_E2E: "1"
+          WASM2RS_REQUIRE_E2E: "rust,wasi-sdk"
 
   coverage:
     runs-on: ubuntu-latest

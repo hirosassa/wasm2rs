@@ -269,6 +269,24 @@ pub(crate) fn build_ctx<'a>(
             ));
         }
     }
+    // `env.__pthread_create_js` replays an emscripten Worker's start-up on a
+    // sibling instance, which needs the shared memory and a table owning the
+    // start routine.
+    if imports
+        .iter()
+        .any(|im| im.wasi == Some(WasiFn::PthreadCreateJs))
+    {
+        if !memory_shared {
+            return Err(TranspileError::Unsupported(
+                "env.__pthread_create_js requires a shared memory".into(),
+            ));
+        }
+        if table.is_none_or(|t| t.imported) {
+            return Err(TranspileError::Unsupported(
+                "env.__pthread_create_js requires a module-defined table".into(),
+            ));
+        }
+    }
     // The host is injected whenever anything is imported (globals, non-WASI
     // functions, or host-owned memory/table).
     let has_imports = !imports.is_empty()

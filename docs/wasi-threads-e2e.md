@@ -10,9 +10,24 @@ check that binaries produced by real compilers work too.
 | `a_wasi_sdk_pthread_reactor_runs_after_initialize` | wasi-sdk `clang` | A C reactor with a constructor and four pthreads. The test calls `_initialize`, then `run` twice on one instance. |
 | `a_wasi_sdk_pthread_command_counts_across_threads` | wasi-sdk `clang` | A C command (`_start`, no `-mexec-model`) with four pthreads; `main` returns non-zero on a wrong count, which exits the process non-zero. |
 | `a_rust_wasi_threads_command_counts_across_threads` | `rustc --target wasm32-wasip1-threads` | A Rust command (`_start`) that spawns four `std::thread`s on a shared atomic counter and asserts the total itself. |
+| `an_emscripten_pthread_command_counts_across_threads` | `emcc -pthread -sSTANDALONE_WASM` (emsdk) | An emscripten command (`_start`) with four pthreads on a shared atomic counter. Emscripten asks its JS host for a Worker (`env.__pthread_create_js`); wasm2rs answers with a native thread running a sibling instance. |
 
-All of them exercise the `start` section (`__wasm_init_memory`), `wasi::thread-spawn`,
+The first three exercise the `start` section (`__wasm_init_memory`), `wasi::thread-spawn`,
 the shared memory, and WASI on shared memory.
+
+### Emscripten pthreads
+
+A module importing `env.__pthread_create_js` is generated with that import
+native: it starts a thread, runs `_emscripten_thread_init`, `_emscripten_tls_init`,
+the start routine from the table and `_emscripten_thread_exit`, as emscripten's
+Worker does. These exports must exist, the memory must be shared and the table
+module-defined, otherwise transpiling is rejected. The JS-only bookkeeping
+imports (`_emscripten_thread_cleanup`, mailbox, `emscripten_check_blocking_allowed`,
+`emscripten_exit_with_live_runtime`, ...) are no-ops, and
+`_emscripten_init_main_thread_js` runs the main thread's init. Everything else
+under `env` (for example proxying a call to the main thread) is still left to the
+host. Only the standalone (`-sSTANDALONE_WASM`) build is covered; the default JS
+build also needs `emscripten_get_now`, `emscripten_resize_heap` and `exit`.
 
 ## Skipping
 
@@ -30,7 +45,7 @@ CI runs these tests in two places, and both make a missing tool an error:
   so the Rust command test must run on every toolchain of the matrix. It has
   no wasi-sdk, so the two wasi-sdk tests skip there.
 - The `E2E with wasi-sdk` job downloads wasi-sdk (cached, sha256-verified) and
-  runs this module with `WASM2RS_REQUIRE_E2E=1`, so all three tests must run.
+  runs this module with `WASM2RS_REQUIRE_E2E=rust,wasi-sdk`, so those three tests must run. The emscripten test skips there (no emsdk).
   To bump wasi-sdk, update `WASI_SDK_TARBALL`, `WASI_SDK_SHA256` and the
   release tag in the download URL together in `.github/workflows/test.yaml`
   (the sha256 also keys the cache).
@@ -43,7 +58,7 @@ CI runs these tests in two places, and both make a missing tool an error:
 |---|---|
 | unset / empty | a missing tool skips the test (the default) |
 | `1` | every tool is required |
-| `rust`, `wasi-sdk`, or a comma-separated list such as `rust,wasi-sdk` | only the named tools are required |
+| `rust`, `wasi-sdk`, `emsdk`, or a comma-separated list such as `rust,wasi-sdk` | only the named tools are required |
 
 ```sh
 WASM2RS_REQUIRE_E2E=1 cargo test --test it wasi_sdk_e2e
@@ -106,3 +121,13 @@ Each test takes about one second: building the wasm, transpiling it (tens of
 milliseconds), `rustc` at `opt-level=0` (under a second) and running four
 threads. The generated binary is cached by content, so a rerun with unchanged
 inputs skips the `rustc` step.
+
+### emsdk (for the emscripten test)
+
+Install an [emsdk](https://github.com/emscripten-core/emsdk) and source its
+`emsdk_env.sh`, which sets `EMSDK`; the test runs `$EMSDK/upstream/emscripten/emcc`.
+
+```sh
+source ~/tools/emsdk/emsdk_env.sh
+cargo test --test it an_emscripten_pthread -- --nocapture
+```

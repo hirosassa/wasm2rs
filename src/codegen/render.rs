@@ -69,7 +69,7 @@ impl Layout {
         let wasi_threads = parts
             .imports
             .iter()
-            .any(|im| im.wasi == Some(WasiFn::ThreadSpawn));
+            .any(|im| im.wasi.is_some_and(WasiFn::spawns_threads));
         Layout {
             has_imports: needs_host_trait(parts),
             mem_imported,
@@ -765,6 +765,8 @@ fn wasi_method_lines(imports: &[ImportInfo], layout: &Layout, shared: bool) -> V
             inner.push(String::new());
             let body = if w == WasiFn::ThreadSpawn {
                 thread_spawn_lines(layout)
+            } else if w == WasiFn::PthreadCreateJs {
+                pthread_create_js_lines(layout)
             } else if shared {
                 w.lines_shared(wasi_files)
             } else {
@@ -772,7 +774,7 @@ fn wasi_method_lines(imports: &[ImportInfo], layout: &Layout, shared: bool) -> V
             };
             // `thread_spawn_lines` clones the `Arc` itself rather than locking it.
             inner.extend(
-                if layout.wasi_threads && wasi_files && w != WasiFn::ThreadSpawn {
+                if layout.wasi_threads && wasi_files && !w.spawns_threads() {
                     share_fd_table(body)
                 } else {
                     body
@@ -790,14 +792,64 @@ fn wasi_method_lines(imports: &[ImportInfo], layout: &Layout, shared: bool) -> V
 /// the whole process with a nonzero status, as the proposal requires. The
 /// descriptor table is shared: a child sees the descriptors its siblings opened.
 fn thread_spawn_lines(layout: &Layout) -> Vec<String> {
-    let mut lines = vec![
-        "fn wasi_thread_spawn(&mut self, a0: i32) -> i32 {".to_string(),
-        "    let tid = self.wasi_tid.fetch_add(1, std::sync::atomic::Ordering::SeqCst).wrapping_add(1);"
-            .to_string(),
-        "    if !(1..=0x1fff_ffff).contains(&tid) { return -1; }".to_string(),
-        "    let mem = self.memory.clone();".to_string(),
-        "    let tids = self.wasi_tid.clone();".to_string(),
-    ];
+    spawn_thread_lines(
+        layout,
+        "fn wasi_thread_spawn(&mut self, a0: i32) -> i32 {",
+        &[
+            "let tid = self.wasi_tid.fetch_add(1, std::sync::atomic::Ordering::SeqCst).wrapping_add(1);",
+            "if !(1..=0x1fff_ffff).contains(&tid) { return -1; }",
+        ],
+        &["t.wasi_thread_start(tid, a0);"],
+        "\"wasi-threads: thread {tid} trapped; terminating the process\"",
+        ("tid", "-1"),
+    )
+}
+
+/// `env.__pthread_create_js(pthread_ptr, attr, start, arg)`: what an emscripten
+/// JS host answers by starting a Worker. Run a fresh sibling instance over the
+/// same shared memory on a new thread and replay the Worker's start-up: init the
+/// thread with its pthread pointer, init its TLS, call the table entry `start`
+/// with `arg`, then exit the thread with the result. The child is detached; a
+/// trap in it ends the whole process. Returns 0, or EAGAIN (6) if no thread could
+/// be started.
+fn pthread_create_js_lines(layout: &Layout) -> Vec<String> {
+    spawn_thread_lines(
+        layout,
+        "fn emscripten_pthread_create_js(&mut self, a0: i32, a1: i32, a2: i32, a3: i32) -> i32 {",
+        &[],
+        &[
+            "t._emscripten_thread_init(a0, 0, 0, 1, 0, 0);",
+            "t._emscripten_tls_init();",
+            "let r = t.emscripten_call_start(a2 as u32, a3);",
+            "t._emscripten_thread_exit(r);",
+        ],
+        "\"emscripten pthread trapped; terminating the process\"",
+        ("0", "6"),
+    )
+}
+
+/// The shared skeleton of a native thread-starting import: `prelude` runs on the
+/// parent, then a detached thread builds a sibling instance (`Self::with_memory`
+/// over the shared memory, sharing the tid counter, descriptor table and
+/// preopen), runs `run` and, if it unwinds, prints `trap_msg` and exits 134.
+/// `ok_err` is the (success, failure) value the import returns.
+fn spawn_thread_lines(
+    layout: &Layout,
+    header: &str,
+    prelude: &[&str],
+    run: &[&str],
+    trap_msg: &str,
+    ok_err: (&str, &str),
+) -> Vec<String> {
+    let mut lines = vec![header.to_string()];
+    lines.extend(prelude.iter().map(|l| format!("    {l}")));
+    lines.extend(
+        [
+            "    let mem = self.memory.clone();",
+            "    let tids = self.wasi_tid.clone();",
+        ]
+        .map(str::to_string),
+    );
     if layout.has_imports {
         lines.push("    let imports = self.imports.clone();".to_string());
     }
@@ -820,19 +872,29 @@ fn thread_spawn_lines(layout: &Layout) -> Vec<String> {
     if layout.wasi_preopen {
         lines.push("        t.wasi_preopen = preopen;".to_string());
     }
+    lines.push("        let run = std::panic::AssertUnwindSafe(|| {".to_string());
+    lines.extend(run.iter().map(|l| format!("            {l}")));
     lines.extend(
         [
-            "        let run = std::panic::AssertUnwindSafe(|| t.wasi_thread_start(tid, a0));",
+            "        });",
             "        if std::panic::catch_unwind(run).is_err() {",
-            "            eprintln!(\"wasi-threads: thread {tid} trapped; terminating the process\");",
-            "            std::process::exit(134);",
-            "        }",
-            "    });",
-            "    if started.is_ok() { tid } else { -1 }",
-            "}",
         ]
         .map(str::to_string),
     );
+    lines.push(format!("            eprintln!({trap_msg});"));
+    lines.extend(
+        [
+            "            std::process::exit(134);",
+            "        }",
+            "    });",
+        ]
+        .map(str::to_string),
+    );
+    lines.push(format!(
+        "    if started.is_ok() {{ {} }} else {{ {} }}",
+        ok_err.0, ok_err.1
+    ));
+    lines.push("}".to_string());
     lines
 }
 
@@ -872,34 +934,129 @@ fn helper_method_lines(
 /// The export name wasi-threads looks up to start a spawned thread.
 const WASI_THREAD_START: &str = "wasi_thread_start";
 
-/// A by-name entry point for the function exported as `wasi_thread_start`
-/// (`(i32 tid, i32 start_arg) -> ()`), forwarding to its `func{N}`. Empty when
-/// the module has no such export; any other export keeps only its `func{N}`
-/// name, so ordinary modules are emitted unchanged. A stateful module gets a
-/// method, a stateless one a free function.
+/// The exports an emscripten pthread's start-up drives, with their signatures:
+/// `_emscripten_thread_init(ptr, is_main, is_runtime, can_block, 0, 0)`,
+/// `_emscripten_tls_init() -> i32` and `_emscripten_thread_exit(result)`.
+const EMSCRIPTEN_ENTRIES: [(&str, &[ValType], &[ValType]); 3] = {
+    use ValType::I32;
+    [
+        (
+            "_emscripten_thread_init",
+            &[I32, I32, I32, I32, I32, I32],
+            &[],
+        ),
+        ("_emscripten_tls_init", &[], &[I32]),
+        ("_emscripten_thread_exit", &[I32], &[]),
+    ]
+};
+
+/// By-name entry points forwarding to the exported functions' `func{N}`: always
+/// `wasi_thread_start` when exported, and, for a module importing
+/// `env.__pthread_create_js`, the emscripten thread start-up exports plus
+/// `emscripten_call_start`, which calls a table entry `(i32) -> i32` by index
+/// (the Worker's `getWasmTableEntry(start)(arg)`). Any other export keeps only
+/// its `func{N}` name, so ordinary modules are emitted unchanged. A stateful
+/// module gets methods, a stateless one free functions.
 pub(super) fn entry_point_lines(
     parts: &ModuleParts<'_>,
     ctx: &ModuleCtx<'_>,
 ) -> Result<Vec<String>, TranspileError> {
-    let Some(export) = parts.exports.iter().find(|e| e.name == WASI_THREAD_START) else {
+    let mut lines = Vec::new();
+    if parts.exports.iter().any(|e| e.name == WASI_THREAD_START) {
+        lines.extend(named_entry(
+            parts,
+            ctx,
+            WASI_THREAD_START,
+            &[ValType::I32, ValType::I32],
+            &[],
+        )?);
+    }
+    let imports_wasi = |f: WasiFn| parts.imports.iter().any(|im| im.wasi == Some(f));
+    if imports_wasi(WasiFn::PthreadCreateJs) || imports_wasi(WasiFn::EmscriptenInitMainThread) {
+        for (name, params, results) in EMSCRIPTEN_ENTRIES {
+            if !parts.exports.iter().any(|e| e.name == name) {
+                return Err(TranspileError::Unsupported(format!(
+                    "emscripten thread imports require an exported {name}"
+                )));
+            }
+            lines.extend(named_entry(parts, ctx, name, params, results)?);
+        }
+        if imports_wasi(WasiFn::PthreadCreateJs) {
+            lines.extend(call_start_lines(ctx)?);
+        }
+    }
+    Ok(lines)
+}
+
+/// One by-name wrapper for the export `name`, whose function must be defined
+/// (not imported) and have exactly the given signature.
+fn named_entry(
+    parts: &ModuleParts<'_>,
+    ctx: &ModuleCtx<'_>,
+    name: &str,
+    params: &[ValType],
+    results: &[ValType],
+) -> Result<Vec<String>, TranspileError> {
+    let Some(export) = parts.exports.iter().find(|e| e.name == name) else {
         return Ok(Vec::new());
     };
-    let unsupported =
-        |why: &str| TranspileError::Unsupported(format!("{WASI_THREAD_START}: {why}"));
+    let unsupported = |why: &str| TranspileError::Unsupported(format!("{name}: {why}"));
     let sig = usize::try_from(export.func_index)
         .ok()
         .and_then(|i| i.checked_sub(parts.imports.len()))
         .and_then(|i| parts.funcs.get(i))
         .ok_or_else(|| unsupported("must be a defined function, not an import"))?;
-    if sig.params != [ValType::I32, ValType::I32] || !sig.results.is_empty() {
-        return Err(unsupported("must have type (i32, i32) -> ()"));
+    if sig.params != params || sig.results != results {
+        return Err(unsupported(&format!(
+            "must have type {params:?} -> {results:?}"
+        )));
     }
-    let self_param = if ctx.is_method { "&mut self, " } else { "" };
-    let call = ctx.call_expr(export.func_index as usize, "a0, a1");
+    let self_param = if ctx.is_method { "&mut self" } else { "" };
+    let arg_decls: Vec<String> = (0..params.len()).map(|k| format!("a{k}: i32")).collect();
+    let arg_list: Vec<String> = (0..params.len()).map(|k| format!("a{k}")).collect();
+    let sep = if ctx.is_method && !arg_decls.is_empty() {
+        ", "
+    } else {
+        ""
+    };
+    let ret = if results.is_empty() { "" } else { " -> i32" };
+    let call = ctx.call_expr(export.func_index as usize, &arg_list.join(", "));
     Ok(vec![
         String::new(),
-        format!("pub fn {WASI_THREAD_START}({self_param}a0: i32, a1: i32) {{ {call} }}"),
+        format!(
+            "pub fn {name}({self_param}{sep}{}){ret} {{ {call} }}",
+            arg_decls.join(", ")
+        ),
     ])
+}
+
+/// `emscripten_call_start(f, a0) -> i32`: look `f` up in the table and call the
+/// `(i32) -> i32` function it names, panicking (a trap) on null or a wrong type. Needs a
+/// module-owned table, since the start routine is a table index.
+fn call_start_lines(ctx: &ModuleCtx<'_>) -> Result<Vec<String>, TranspileError> {
+    if !ctx.is_method {
+        return Err(TranspileError::Unsupported(
+            "env.__pthread_create_js requires a stateful module".into(),
+        ));
+    }
+    let mut lines = vec![
+        String::new(),
+        "pub fn emscripten_call_start(&mut self, f: u32, a0: i32) -> i32 {".to_string(),
+        "    match self.table().get(f as usize).copied().unwrap_or(u32::MAX) {".to_string(),
+    ];
+    for &fidx in ctx.funcs_with_sig(&[ValType::I32], &[ValType::I32]) {
+        lines.push(format!(
+            "        {fidx}u32 => {},",
+            ctx.call_expr(fidx, "a0")
+        ));
+    }
+    lines.push(
+        "        _ => panic!(\"emscripten pthread: start routine is not a (i32) -> i32 function\"),"
+            .to_string(),
+    );
+    lines.push("    }".to_string());
+    lines.push("}".to_string());
+    Ok(lines)
 }
 
 /// One public `call_ref_t{ti}` dispatch method per `call_indirect` signature. It
@@ -1102,7 +1259,7 @@ fn host_generics(parts: &ModuleParts<'_>) -> (&'static str, &'static str) {
     if parts
         .imports
         .iter()
-        .any(|im| im.wasi == Some(WasiFn::ThreadSpawn))
+        .any(|im| im.wasi.is_some_and(WasiFn::spawns_threads))
     {
         ("<H: Imports + Clone + Send + 'static>", "<H>")
     } else {
