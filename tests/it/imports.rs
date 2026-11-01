@@ -190,3 +190,65 @@ fn call_indirect_dispatches_to_imported_function() {
          assert_eq!(inst.func1(7), 8);",
     );
 }
+
+#[test]
+fn compact_imports_with_per_item_types_keep_import_order() {
+    // `(import "env" (item ..) (item ..))` (compact encoding 1): each item
+    // carries its own type, and the items occupy consecutive function indices
+    // 0 and 1. A regular import after the group must continue at index 2, and
+    // the defined function is index 3. Each import is distinguishable (negate,
+    // a constant, increment) so a swapped or dropped index changes the result:
+    // neg(inc(4)) + seven() = -5 + 7 = 2.
+    transpile_compile_run(
+        "compact1",
+        r#"
+        (module
+          (import "env"
+            (item "neg" (func (param i32) (result i32)))
+            (item "seven" (func (result i32))))
+          (import "env" "inc" (func (param i32) (result i32)))
+          (func (param i32) (result i32)
+            local.get 0
+            call 2
+            call 0
+            call 1
+            i32.add))
+        "#,
+        "struct Host;\n    \
+         impl Imports for Host {\n        \
+             fn import0(&mut self, a0: i32) -> i32 { -a0 }\n        \
+             fn import1(&mut self) -> i32 { 7 }\n        \
+             fn import2(&mut self, a0: i32) -> i32 { a0 + 1 }\n    \
+         }\n    \
+         let mut inst = Instance::new(Host);\n    \
+         assert_eq!(inst.func3(4), 2);",
+    );
+}
+
+#[test]
+fn compact_imports_sharing_one_type_get_separate_host_methods() {
+    // `(import "env" (item ..) (item ..) (func ..))` (compact encoding 2): one
+    // type shared by every name. Each name is still its own import, so the host
+    // supplies two distinct methods: double(3) + triple(3) = 6 + 9 = 15.
+    transpile_compile_run(
+        "compact2",
+        r#"
+        (module
+          (import "env" (item "double") (item "triple")
+            (func (param i32) (result i32)))
+          (func (param i32) (result i32)
+            local.get 0
+            call 0
+            local.get 0
+            call 1
+            i32.add))
+        "#,
+        "struct Host;\n    \
+         impl Imports for Host {\n        \
+             fn import0(&mut self, a0: i32) -> i32 { a0 * 2 }\n        \
+             fn import1(&mut self, a0: i32) -> i32 { a0 * 3 }\n    \
+         }\n    \
+         let mut inst = Instance::new(Host);\n    \
+         assert_eq!(inst.func2(3), 15);",
+    );
+}

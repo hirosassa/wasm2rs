@@ -408,3 +408,25 @@ fn multi_value_return_escaping_a_try_uses_the_tuple_holder() {
         "assert_eq!(func0(1), (11, 22)); assert_eq!(func0(0), (33, 44));",
     );
 }
+
+#[test]
+fn float_payloads_keep_their_bit_patterns_through_throw_and_catch() {
+    // The payload is stored bit-encoded in a `u64`. A quiet NaN with a nonzero
+    // payload (f32) and -0.0 (f64) both change if the encoding goes through a
+    // numeric conversion instead of `to_bits`/`from_bits`.
+    compile_run(
+        "eh_float_payload",
+        r#"(module
+            (tag $e (param f32 f64))
+            (func (export "f") (result f32 f64)
+              try (result f32 f64)
+                f32.const nan:0x400001
+                f64.const -0.0
+                throw $e
+              catch $e
+              end))"#,
+        "let (a, b) = func0(); \
+         assert_eq!(a.to_bits(), 0x7fc0_0001); \
+         assert_eq!(b.to_bits(), 0x8000_0000_0000_0000);",
+    );
+}

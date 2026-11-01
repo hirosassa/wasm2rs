@@ -249,3 +249,31 @@ fn unsafe_memory_flag_emits_unchecked_access() {
         "--unsafe-memory must emit unchecked access:\n{unsafe_src}",
     );
 }
+
+/// A non-numeric `--split-dispatch` value is a usage error: nonzero exit, the
+/// bad value named on stderr, and nothing written to the output directory.
+#[test]
+fn rejects_a_non_numeric_split_dispatch_value() {
+    let (dir, input) = write_sample_wasm("bad_split_dispatch");
+    let out_dir = dir.join("out_bad_split_dispatch");
+    let _ = std::fs::remove_dir_all(&out_dir);
+
+    let output = Command::new(wasm2rs_bin())
+        .arg("--split-dispatch=lots")
+        .arg(&input)
+        .arg(&out_dir)
+        .arg("1")
+        .output()
+        .expect("run wasm2rs");
+
+    assert!(!output.status.success(), "expected a nonzero exit");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid --split-dispatch value: lots"),
+        "stderr was: {stderr}",
+    );
+    assert!(
+        !out_dir.exists(),
+        "no output should be written on a usage error"
+    );
+}
