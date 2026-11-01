@@ -30,6 +30,7 @@ struct Layout {
     table_imported: bool,
     wasi_files: bool,
     wasi_preopen: bool,
+    wasi_threads: bool,
     global_base: usize,
 }
 
@@ -64,12 +65,17 @@ impl Layout {
             .imports
             .iter()
             .any(|im| im.wasi.is_some_and(WasiFn::resolves_path));
+        let wasi_threads = parts
+            .imports
+            .iter()
+            .any(|im| im.wasi == Some(WasiFn::ThreadSpawn));
         Layout {
             has_imports: needs_host_trait(parts),
             mem_imported,
             table_imported,
             wasi_files,
             wasi_preopen,
+            wasi_threads,
             // Defined globals are named by their full index, i.e. after the
             // imported globals in the shared global index space.
             global_base: parts.imported_globals.len(),
@@ -158,11 +164,7 @@ pub(super) fn render_module(
     inner.extend(constructor_lines(parts, ctx, &layout)?);
     inner.extend(memory_accessor_lines(parts, ctx));
     inner.extend(table_accessor_lines(parts));
-    inner.extend(wasi_method_lines(
-        parts.imports,
-        layout.wasi_files,
-        ctx.memory_shared,
-    ));
+    inner.extend(wasi_method_lines(parts.imports, &layout, ctx.memory_shared));
     inner.extend(helper_method_lines(
         used,
         ctx.memory_shared,
@@ -322,6 +324,11 @@ fn instance_field_lines(
     if layout.wasi_preopen {
         lines.push("    wasi_preopen: std::path::PathBuf,".to_string());
     }
+    // The next thread id handed out by `wasi::thread-spawn`, shared by every
+    // thread of the process (each child instance holds a clone of the `Arc`).
+    if layout.wasi_threads {
+        lines.push("    wasi_tid: std::sync::Arc<std::sync::atomic::AtomicI32>,".to_string());
+    }
     // A retained passive segment is a `&'static` slice; `data.drop`/`elem.drop`
     // reset it to an empty slice.
     for (d, seg) in data.iter().enumerate() {
@@ -467,6 +474,12 @@ fn constructor_lines(
         }
         if wasi_preopen {
             inner.push("        wasi_preopen: std::path::PathBuf::from(\".\"),".to_string());
+        }
+        if layout.wasi_threads {
+            inner.push(
+                "        wasi_tid: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),"
+                    .to_string(),
+            );
         }
         // Passive segments are retained as `&'static` slices of the module-scope
         // statics, so `memory.init`/`table.init` can copy from them on demand.
@@ -698,7 +711,8 @@ fn table_accessor_lines(parts: &ModuleParts<'_>) -> Vec<String> {
 
 /// The native WASI functions as inherent methods backed by `self.mem()`, each
 /// recognised kind emitted once in first-import order.
-fn wasi_method_lines(imports: &[ImportInfo], wasi_files: bool, shared: bool) -> Vec<String> {
+fn wasi_method_lines(imports: &[ImportInfo], layout: &Layout, shared: bool) -> Vec<String> {
+    let wasi_files = layout.wasi_files;
     let mut inner: Vec<String> = Vec::new();
     let mut wasi_emitted: Vec<WasiFn> = Vec::new();
     for im in imports {
@@ -707,7 +721,9 @@ fn wasi_method_lines(imports: &[ImportInfo], wasi_files: bool, shared: bool) -> 
         {
             wasi_emitted.push(w);
             inner.push(String::new());
-            inner.extend(if shared {
+            inner.extend(if w == WasiFn::ThreadSpawn {
+                thread_spawn_lines(layout)
+            } else if shared {
                 w.lines_shared(wasi_files)
             } else {
                 w.lines(wasi_files)
@@ -715,6 +731,53 @@ fn wasi_method_lines(imports: &[ImportInfo], wasi_files: bool, shared: bool) -> 
         }
     }
     inner
+}
+
+/// `wasi::thread-spawn(start_arg) -> tid`: allocate a thread id (1..=0x1fff_ffff,
+/// negative when exhausted or the thread cannot start), then run a fresh sibling
+/// instance over the same shared memory on a new thread, entering it through
+/// `wasi_thread_start(tid, start_arg)`. The child is detached. A trap in it ends
+/// the whole process with a nonzero status, as the proposal requires. The
+/// descriptor table is not shared: a child starts with none open beyond stdio.
+fn thread_spawn_lines(layout: &Layout) -> Vec<String> {
+    let mut lines = vec![
+        "fn wasi_thread_spawn(&mut self, a0: i32) -> i32 {".to_string(),
+        "    let tid = self.wasi_tid.fetch_add(1, std::sync::atomic::Ordering::SeqCst).wrapping_add(1);"
+            .to_string(),
+        "    if !(1..=0x1fff_ffff).contains(&tid) { return -1; }".to_string(),
+        "    let mem = self.memory.clone();".to_string(),
+        "    let tids = self.wasi_tid.clone();".to_string(),
+    ];
+    if layout.has_imports {
+        lines.push("    let imports = self.imports.clone();".to_string());
+    }
+    if layout.wasi_preopen {
+        lines.push("    let preopen = self.wasi_preopen.clone();".to_string());
+    }
+    lines.push("    let started = std::thread::Builder::new().spawn(move || {".to_string());
+    lines.push(if layout.has_imports {
+        "        let mut t = Self::with_memory(mem, imports);".to_string()
+    } else {
+        "        let mut t = Self::with_memory(mem);".to_string()
+    });
+    lines.push("        t.wasi_tid = tids;".to_string());
+    if layout.wasi_preopen {
+        lines.push("        t.wasi_preopen = preopen;".to_string());
+    }
+    lines.extend(
+        [
+            "        let run = std::panic::AssertUnwindSafe(|| t.wasi_thread_start(tid, a0));",
+            "        if std::panic::catch_unwind(run).is_err() {",
+            "            eprintln!(\"wasi-threads: thread {tid} trapped; terminating the process\");",
+            "            std::process::exit(134);",
+            "        }",
+            "    });",
+            "    if started.is_ok() { tid } else { -1 }",
+            "}",
+        ]
+        .map(str::to_string),
+    );
+    lines
 }
 
 /// The used memory-access helper methods, grouped by memory index (0 first, so
@@ -976,10 +1039,18 @@ fn needs_host_trait(parts: &ModuleParts<'_>) -> bool {
 /// the parameter is bound (struct/impl headers) and `<H>` where the type is
 /// merely named (`Instance<H>`), or empty strings when no host is needed.
 fn host_generics(parts: &ModuleParts<'_>) -> (&'static str, &'static str) {
-    if needs_host_trait(parts) {
-        ("<H: Imports>", "<H>")
+    if !needs_host_trait(parts) {
+        return ("", "");
+    }
+    // `wasi::thread-spawn` hands each thread its own clone of the host.
+    if parts
+        .imports
+        .iter()
+        .any(|im| im.wasi == Some(WasiFn::ThreadSpawn))
+    {
+        ("<H: Imports + Clone + Send + 'static>", "<H>")
     } else {
-        ("", "")
+        ("<H: Imports>", "<H>")
     }
 }
 
