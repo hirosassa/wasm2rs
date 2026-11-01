@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--dump` CLI flag and `wasm2rs::dump` API** print a summary of a module without
+  generating code: function counts, each import and how it resolves (native WASI
+  or host trait), exports, memory limits, the proposals in use, and whether the
+  generated module needs a host `Imports` implementation. It reads the binary
+  directly, so it also works for modules the transpiler rejects.
 - **Twelve more WASI preview1 functions are generated natively** instead of being
   left to the host trait: `fd_tell`, `fd_sync`, `fd_datasync`, `fd_advise`,
   `fd_allocate`, `fd_filestat_set_size`, `fd_filestat_set_times`,

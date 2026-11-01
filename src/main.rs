@@ -32,8 +32,7 @@ use wasm2rs::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str =
-    "usage: wasm2rs [--unsafe-memory] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -63,6 +62,7 @@ fn run() -> Result<(), String> {
     // Flags may appear anywhere; the remaining positional arguments keep their
     // order. `--unsafe-memory` opts into unchecked linear-memory access.
     let mut unsafe_memory = false;
+    let mut dump = false;
     let mut split_dispatch = 0usize;
     let mut positional: Vec<String> = Vec::new();
     for arg in std::env::args().skip(1) {
@@ -74,6 +74,7 @@ fn run() -> Result<(), String> {
         }
         match arg.as_str() {
             "--unsafe-memory" => unsafe_memory = true,
+            "--dump" => dump = true,
             _ => positional.push(arg),
         }
     }
@@ -84,6 +85,14 @@ fn run() -> Result<(), String> {
     let max_bytes_per_file = parse_usize_arg(args.next(), "max_bytes_per_file")?;
 
     let wasm = std::fs::read(&input).map_err(|e| format!("cannot read {input}: {e}"))?;
+    if dump {
+        if output.is_some() || funcs_per_file > 0 || max_bytes_per_file > 0 {
+            return Err("--dump takes only the input file".to_string());
+        }
+        let summary = wasm2rs::dump(&wasm).map_err(|e| e.to_string())?;
+        print!("{summary}");
+        return Ok(());
+    }
     let topts = TranspileOptions {
         unsafe_memory,
         split_dispatch,

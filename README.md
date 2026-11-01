@@ -65,6 +65,7 @@ cargo build --release
 
 ```
 wasm2rs [--unsafe-memory] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]
+wasm2rs --dump <input.wasm>
 ```
 
 | Argument | Description |
@@ -77,6 +78,7 @@ wasm2rs [--unsafe-memory] <input.wasm> [output] [funcs_per_file] [max_bytes_per_
 | Flag | Description |
 |---|---|
 | `--unsafe-memory` | Emit linear-memory loads/stores without bounds checks. Faster, but only sound if the module never accesses memory out of bounds — an out-of-bounds access becomes undefined behavior. Off by default. May appear anywhere in the arguments. |
+| `--dump` | Print a summary of the module (function/import/export counts, how each import resolves — native WASI or host trait —, memory limits, proposals in use, whether a host `Imports` implementation is needed) and generate no code. Takes only the input file. Works for modules the transpiler would reject. |
 
 ### Examples
 
@@ -95,6 +97,9 @@ wasm2rs module.wasm out_dir 4 102400
 
 # Emit unchecked linear-memory access
 wasm2rs --unsafe-memory module.wasm module.rs
+
+# Inspect a module without generating code
+wasm2rs --dump module.wasm
 ```
 
 ### Single file vs. split output
@@ -120,6 +125,8 @@ use wasm2rs::{TranspileOptions, transpile_with_options};
 let wasm: Vec<u8> = std::fs::read("module.wasm")?;
 let rust = transpile_with_options(&wasm, &TranspileOptions { unsafe_memory: false })?;
 ```
+
+`wasm2rs::dump(&wasm)` returns the same summary as `--dump` (a `ModuleSummary` that implements `Display`).
 
 Streaming/split transpilation is available via `transpile_split_with_options`, and `cargo_manifest` produces the recommended `Cargo.toml` for split output.
 

@@ -26,6 +26,7 @@ mod cont;
 mod control_flow;
 mod convert;
 mod data;
+mod dump;
 mod emscripten_pthread;
 mod exceptions;
 mod export_names;
