@@ -158,7 +158,11 @@ pub(super) fn render_module(
     inner.extend(constructor_lines(parts, ctx, &layout)?);
     inner.extend(memory_accessor_lines(parts, ctx));
     inner.extend(table_accessor_lines(parts));
-    inner.extend(wasi_method_lines(parts.imports, layout.wasi_files));
+    inner.extend(wasi_method_lines(
+        parts.imports,
+        layout.wasi_files,
+        ctx.memory_shared,
+    ));
     inner.extend(helper_method_lines(
         used,
         ctx.memory_shared,
@@ -694,7 +698,7 @@ fn table_accessor_lines(parts: &ModuleParts<'_>) -> Vec<String> {
 
 /// The native WASI functions as inherent methods backed by `self.mem()`, each
 /// recognised kind emitted once in first-import order.
-fn wasi_method_lines(imports: &[ImportInfo], wasi_files: bool) -> Vec<String> {
+fn wasi_method_lines(imports: &[ImportInfo], wasi_files: bool, shared: bool) -> Vec<String> {
     let mut inner: Vec<String> = Vec::new();
     let mut wasi_emitted: Vec<WasiFn> = Vec::new();
     for im in imports {
@@ -703,7 +707,11 @@ fn wasi_method_lines(imports: &[ImportInfo], wasi_files: bool) -> Vec<String> {
         {
             wasi_emitted.push(w);
             inner.push(String::new());
-            inner.extend(w.lines(wasi_files));
+            inner.extend(if shared {
+                w.lines_shared(wasi_files)
+            } else {
+                w.lines(wasi_files)
+            });
         }
     }
     inner

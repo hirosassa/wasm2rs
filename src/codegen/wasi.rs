@@ -225,6 +225,16 @@ impl WasiFn {
         )
     }
 
+    /// The same definition as [`Self::lines`], rewritten for a shared linear
+    /// memory: guest memory is reached through the `SharedMemory` guard
+    /// (`self.memory.bytes()`) instead of `self.mem()` / `self.mem_mut()`.
+    pub(super) fn lines_shared(self, files: bool) -> Vec<String> {
+        self.lines(files)
+            .into_iter()
+            .map(|l| share_memory_access(&l))
+            .collect()
+    }
+
     /// The Rust source for this WASI method's inherent-method definition. When
     /// `files` is set the module also imports the preopen/`path_open` functions,
     /// so `fd_read`/`fd_write`/`fd_seek`/`fd_close` route descriptors >= 4 to the
@@ -998,4 +1008,30 @@ fn get_lines(method: &str, source: &str) -> Vec<String> {
         .map(str::to_string),
     );
     lines
+}
+
+/// Rewrite one line of a native WASI body, written against `self.mem()` /
+/// `self.mem_mut()` (a borrowed buffer), for a `shared` memory, where the bytes
+/// sit behind a `Mutex` (`self.memory.bytes()`).
+///
+/// A guard lives until the end of its statement, so a statement that takes the
+/// lock twice would deadlock against itself. Each line therefore locks at most
+/// once: the four-byte iovec field reads, which index memory four times, bind a
+/// single guard; every other line is one memory access. The lock is never held
+/// across I/O, because I/O sits on different lines from memory access.
+fn share_memory_access(line: &str) -> String {
+    const READ_U32: &str = "u32::from_le_bytes([self.mem()[";
+    let mut line = line.to_string();
+    if let Some(start) = line.find(READ_U32)
+        && let Some(len) = line[start..].find("]])")
+    {
+        let end = start + len + "]])".len();
+        let block = format!(
+            "{{ let __b = self.memory.bytes(); {} }}",
+            line[start..end].replace("self.mem()", "__b")
+        );
+        line.replace_range(start..end, &block);
+    }
+    line.replace("self.mem_mut()", "self.memory.bytes()")
+        .replace("self.mem()", "self.memory.bytes()")
 }

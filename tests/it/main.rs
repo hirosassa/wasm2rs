@@ -84,3 +84,4 @@ mod unsafe_memory;
 mod unsupported;
 mod wasi;
 mod wasi_fs;
+mod wasi_shared_memory;
