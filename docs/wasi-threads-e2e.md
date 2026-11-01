@@ -24,8 +24,24 @@ does not prove the test ran. Use `--nocapture` to see the messages:
 cargo test --test it wasi_sdk_e2e -- --nocapture
 ```
 
-CI does not install these tools, so CI skips them. Run them locally when you
-change thread, start-section, shared-memory or WASI code.
+CI installs the Rust target and sets `WASM2RS_REQUIRE_E2E=rust`, so the Rust
+command test must run there. CI has no wasi-sdk, so the two wasi-sdk tests are
+skipped in CI: run them locally when you change thread, start-section,
+shared-memory or WASI code.
+
+### Making a missing tool an error
+
+`WASM2RS_REQUIRE_E2E` turns the "skip" into a failure for the tools it names:
+
+| Value | Effect |
+|---|---|
+| unset / empty | a missing tool skips the test (the default) |
+| `1` | every tool is required |
+| `rust`, `wasi-sdk`, or a comma-separated list such as `rust,wasi-sdk` | only the named tools are required |
+
+```sh
+WASM2RS_REQUIRE_E2E=1 cargo test --test it wasi_sdk_e2e
+```
 
 ## Setup
 

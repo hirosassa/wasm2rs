@@ -25,6 +25,7 @@ jobs:
         run: |
           rustup toolchain install ${{ matrix.rust }} --profile minimal --component rustfmt,clippy
           rustup default ${{ matrix.rust }}
+          rustup target add wasm32-wasip1-threads
 
       - name: Run cargo check
         run: cargo check
@@ -38,8 +39,13 @@ jobs:
       - name: Run cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # The Rust wasi-threads E2E test must run here, not skip (see
+      # docs/wasi-threads-e2e.md). The wasi-sdk tests still skip: CI has no
+      # wasi-sdk.
       - name: Run cargo test
         run: cargo test --release
+        env:
+          WASM2RS_REQUIRE_E2E: rust
 
   coverage:
     runs-on: ubuntu-latest
