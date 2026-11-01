@@ -1534,8 +1534,6 @@ struct FdOp<'a> {
     pre: Vec<String>,
 }
 
-/// An `i32` expression that runs a `std::io::Result` expression and maps `Err`
-/// to the same errnos as `path_open`.
 /// A Rust `bool` expression: whether descriptor `var` (an `i32`) is open. Stdio
 /// is always open; with a file table so are the preopen (3) and the live slots.
 fn fd_open_expr(var: &str, files: bool) -> String {
@@ -1557,6 +1555,8 @@ fn sock_lines(sig: &str, files: bool) -> Vec<String> {
     ]
 }
 
+/// An `i32` expression that runs a `std::io::Result` expression and maps `Err`
+/// to the same errnos as `path_open`.
 fn errno_of(call: &str) -> String {
     format!(
         "match {call} {{ Ok(_) => 0, Err(e) => match e.kind() {{ std::io::ErrorKind::NotFound => 44, std::io::ErrorKind::PermissionDenied => 2, std::io::ErrorKind::AlreadyExists => 20, _ => 29 }} }}"
