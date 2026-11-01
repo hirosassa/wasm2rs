@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Keep SHA-pinned actions up to date (the `# vX.Y.Z` comment is updated too).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+
+  # Keep Cargo dependencies up to date.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns:
+          - '*'
