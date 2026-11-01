@@ -45,7 +45,7 @@ CI runs these tests in two places, and both make a missing tool an error:
   so the Rust command test must run on every toolchain of the matrix. It has
   no wasi-sdk, so the two wasi-sdk tests skip there.
 - The `E2E with wasi-sdk` job downloads wasi-sdk (cached, sha256-verified) and
-  runs this module with `WASM2RS_REQUIRE_E2E=1`, so all three tests must run.
+  runs this module with `WASM2RS_REQUIRE_E2E=rust,wasi-sdk`, so those three tests must run. The emscripten test skips there (no emsdk).
   To bump wasi-sdk, update `WASI_SDK_TARBALL`, `WASI_SDK_SHA256` and the
   release tag in the download URL together in `.github/workflows/test.yaml`
   (the sha256 also keys the cache).
