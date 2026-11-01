@@ -101,6 +101,13 @@ pub(crate) enum CompositeKind {
     Cont(u32),
 }
 
+/// A function the module exports: its export name and full function index
+/// (imports first). Only function exports are recorded.
+pub(crate) struct ExportInfo {
+    pub name: String,
+    pub func_index: u32,
+}
+
 /// An imported function: its signature. Imported functions occupy the low end
 /// of the function index space and are dispatched through the injected host,
 /// unless `wasi` recognises it as a natively-implemented WASI function.

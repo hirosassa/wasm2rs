@@ -9,6 +9,7 @@ use super::{
     rust_types,
 };
 use crate::TranspileError;
+use wasmparser::ValType;
 
 /// High bit tagging a funcref handle as an *external* (host-provided) callback
 /// rather than one of the module's own function indices. Emitted verbatim into
@@ -169,6 +170,7 @@ pub(super) fn render_module(
         dispatch_sigs,
         layout.has_imports,
     )?);
+    inner.extend(entry_point_lines(parts, ctx)?);
     // The continuation allocator (`cont.new`) and stepper (`resume`).
     if !ctx.cont.bodies.is_empty() {
         inner.push(String::new());
@@ -740,6 +742,39 @@ fn helper_method_lines(
     inner
 }
 
+/// The export name wasi-threads looks up to start a spawned thread.
+const WASI_THREAD_START: &str = "wasi_thread_start";
+
+/// A by-name entry point for the function exported as `wasi_thread_start`
+/// (`(i32 tid, i32 start_arg) -> ()`), forwarding to its `func{N}`. Empty when
+/// the module has no such export; any other export keeps only its `func{N}`
+/// name, so ordinary modules are emitted unchanged. A stateful module gets a
+/// method, a stateless one a free function.
+pub(super) fn entry_point_lines(
+    parts: &ModuleParts<'_>,
+    ctx: &ModuleCtx<'_>,
+) -> Result<Vec<String>, TranspileError> {
+    let Some(export) = parts.exports.iter().find(|e| e.name == WASI_THREAD_START) else {
+        return Ok(Vec::new());
+    };
+    let unsupported =
+        |why: &str| TranspileError::Unsupported(format!("{WASI_THREAD_START}: {why}"));
+    let sig = usize::try_from(export.func_index)
+        .ok()
+        .and_then(|i| i.checked_sub(parts.imports.len()))
+        .and_then(|i| parts.funcs.get(i))
+        .ok_or_else(|| unsupported("must be a defined function, not an import"))?;
+    if sig.params != [ValType::I32, ValType::I32] || !sig.results.is_empty() {
+        return Err(unsupported("must have type (i32, i32) -> ()"));
+    }
+    let self_param = if ctx.is_method { "&mut self, " } else { "" };
+    let call = ctx.call_expr(export.func_index as usize, "a0, a1");
+    Ok(vec![
+        String::new(),
+        format!("pub fn {WASI_THREAD_START}({self_param}a0: i32, a1: i32) {{ {call} }}"),
+    ])
+}
+
 /// One public `call_ref_t{ti}` dispatch method per `call_indirect` signature. It
 /// is both the target of the module's own `call_indirect` and the entry point
 /// through which the host invokes a funcref the module handed out.
@@ -1021,6 +1056,10 @@ pub(super) fn render_lib_root(
     if !stateful {
         for i in 0..n_chunks {
             out.push_str(&format!("pub use funcs_{i}::*;\n"));
+        }
+        for line in entry_point_lines(parts, ctx)? {
+            out.push_str(&line);
+            out.push('\n');
         }
     }
     Ok(out)

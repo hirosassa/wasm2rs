@@ -27,6 +27,7 @@ mod control_flow;
 mod convert;
 mod data;
 mod exceptions;
+mod export_names;
 mod extern_registry;
 mod external_funcref;
 mod externref;
