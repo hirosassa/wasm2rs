@@ -1042,7 +1042,7 @@ fn call_start_lines(ctx: &ModuleCtx<'_>) -> Result<Vec<String>, TranspileError> 
     let mut lines = vec![
         String::new(),
         "pub fn emscripten_call_start(&mut self, f: u32, a0: i32) -> i32 {".to_string(),
-        "    match self.table.get(f as usize).copied().unwrap_or(u32::MAX) {".to_string(),
+        "    match self.table().get(f as usize).copied().unwrap_or(u32::MAX) {".to_string(),
     ];
     for &fidx in ctx.funcs_with_sig(&[ValType::I32], &[ValType::I32]) {
         lines.push(format!(
