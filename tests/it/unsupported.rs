@@ -431,13 +431,13 @@ fn a_sixty_four_bit_table_is_rejected() {
 }
 
 #[test]
-fn an_imported_shared_memory_is_rejected() {
-    // A defined shared memory is supported (see tests/atomics.rs), but a *host*
-    // shared memory would need the embedder to hand in an atomically-shared
-    // buffer, which wasm2rs' single-owner memory model cannot express.
+fn an_imported_shared_64_bit_memory_is_rejected() {
+    // An imported shared memory is supported (a host-created `SharedMemory`
+    // passed to `Instance::new`), but like a defined one it is addressed by
+    // `u32`, so a 64-bit shared memory is rejected.
     assert_unsupported(
-        r#"(module (import "e" "m" (memory 1 1 shared)))"#,
-        "imported shared memory",
+        r#"(module (import "e" "m" (memory i64 1 1 shared)))"#,
+        "shared 64-bit memory",
     );
 }
 

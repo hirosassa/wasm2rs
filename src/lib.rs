@@ -608,10 +608,10 @@ fn classify_import(
             Ok(())
         }
         TypeRef::Memory(mem_ty) => {
-            // An imported shared memory is out of scope — the thread-shareable
-            // backend is only wired up for a single *defined* shared memory.
-            if mem_ty.shared {
-                return Err(TranspileError::Unsupported("imported shared memory".into()));
+            // An imported shared memory is a host-created `SharedMemory` handed
+            // to `Instance::new`; like a defined one it is addressed by `u32`.
+            if mem_ty.shared && mem_ty.memory64 {
+                return Err(TranspileError::Unsupported("shared 64-bit memory".into()));
             }
             // A host-lent buffer is only wired up for memory 0 (`Imports::memory`);
             // an imported memory at a higher index (rare, out of scope) is
@@ -625,7 +625,7 @@ fn classify_import(
             sink.memories.push(codegen::MemInfo {
                 min_pages: mem_ty.initial,
                 imported: true,
-                shared: false,
+                shared: mem_ty.shared,
                 memory64: mem_ty.memory64,
             });
             Ok(())
