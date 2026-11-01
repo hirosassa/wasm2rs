@@ -1144,7 +1144,7 @@ pub struct SharedMemory(std::sync::Arc<SharedMemInner>);
 
 struct SharedMemInner {
     // `cap` zeroed bytes reserved up front (lazily backed by the OS) and never
-    // reallocated; `len` is the current size, raised by `memory.grow`.
+    // reallocated (at least one byte is allocated, so `cap == 0` is fine); `len` is the current size, raised by `memory.grow`.
     base: *mut u8,
     cap: usize,
     len: std::sync::atomic::AtomicUsize,
@@ -1159,8 +1159,8 @@ unsafe impl Sync for SharedMemInner {}
 
 impl Drop for SharedMemInner {
     fn drop(&mut self) {
-        // SAFETY: `base`/`cap` came from `Box::<[u8]>::into_raw` in `with_max`.
-        unsafe { drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(self.base, self.cap))) }
+        // SAFETY: `base` was allocated in `with_max` with exactly this layout.
+        unsafe { std::alloc::dealloc(self.base, shared_layout(self.cap)) }
     }
 }
 
@@ -1171,6 +1171,10 @@ struct SharedPark {
     // tickets a `notify` has chosen to wake but whose waiter has not yet resumed
     woken: std::collections::HashSet<u64>,
     next_ticket: u64,
+}
+
+fn shared_layout(cap: usize) -> std::alloc::Layout {
+    std::alloc::Layout::array::<u8>(cap.max(1)).unwrap()
 }
 
 fn shared_width_mask(width: usize) -> u64 {
@@ -1196,12 +1200,25 @@ impl SharedMemory {
     // The host-created handle: room to grow to the wasm32 limit (4 GiB of
     // address space, only touched pages are backed).
     pub fn new(min_bytes: usize) -> Self {
-        Self::with_max(min_bytes, 65536 * 65536)
+        Self::with_max(min_bytes, usize::try_from(1u64 << 32).unwrap_or(usize::MAX))
     }
 
+    // Reserves up to `max_bytes`. If the host cannot reserve that much address
+    // space, the reservation is halved (down to `min_bytes`), which only lowers
+    // how far `memory.grow` can go.
     pub fn with_max(min_bytes: usize, max_bytes: usize) -> Self {
-        let cap = max_bytes.max(min_bytes);
-        let base = Box::into_raw(vec![0u8; cap].into_boxed_slice()) as *mut u8;
+        let mut cap = max_bytes.max(min_bytes);
+        let base = loop {
+            // SAFETY: the layout has a non-zero size.
+            let p = unsafe { std::alloc::alloc_zeroed(shared_layout(cap)) };
+            if !p.is_null() {
+                break p;
+            }
+            if cap <= min_bytes {
+                std::alloc::handle_alloc_error(shared_layout(cap));
+            }
+            cap = (cap / 2 / 65536 * 65536).max(min_bytes);
+        };
         SharedMemory(std::sync::Arc::new(SharedMemInner {
             base,
             cap,
@@ -1359,6 +1376,9 @@ impl SharedMemory {
     // Returns 0 (woken), 1 (value mismatch - did not block), or 2 (timed out).
     // `timeout_ns < 0` means wait forever. `width` is 4 (wait32) or 8 (wait64).
     fn wait(&self, addr: u32, expected: u64, width: usize, timeout_ns: i64) -> i32 {
+        // The bounds/alignment trap comes first, outside the lock, so a trapping
+        // wait cannot poison it for the other threads.
+        self.atomic_cell(addr as usize, width);
         // Hold `park` across the value check so a concurrent `notify` (which also
         // takes `park`) cannot slip between the check and our registration -
         // closing the lost-wakeup window.

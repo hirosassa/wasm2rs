@@ -395,3 +395,61 @@ fn threads_writing_disjoint_regions_keep_every_byte() {
         }"#,
     );
 }
+
+#[test]
+fn an_atomic_load_is_evaluated_in_program_order_even_when_dropped_or_fenced() {
+    // Sequential consistency needs `atomic.load x; atomic.load y` to read x
+    // first, and a load before an `atomic.fence` to be evaluated before it, so
+    // none of them may be left pending on the operand stack.
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory 1 1 shared)
+            (func (export "drops")
+              i32.const 100 i32.atomic.load
+              i32.const 200 i32.atomic.load
+              drop drop)
+            (func (export "fenced")
+              i32.const 300 i32.load
+              atomic.fence
+              i32.const 0 i32.const 1 i32.store
+              drop))"#,
+    );
+    let wasm = wasm.expect("valid wat");
+    let code = wasm2rs::transpile(&wasm).expect("transpile ok");
+    let at = |needle: &str| {
+        code.find(needle)
+            .unwrap_or_else(|| panic!("no {needle} in:\n{code}"))
+    };
+    assert!(
+        at("(100i32)") < at("(200i32)"),
+        "atomic loads read out of order:\n{code}"
+    );
+    assert!(
+        at("(300i32,") < at("fence("),
+        "the load before the fence must not move after it:\n{code}"
+    );
+}
+
+#[test]
+fn a_trapping_wait_does_not_poison_later_waits_and_notifies() {
+    // A `wait` on a misaligned address traps; another thread's `notify` (and a
+    // fresh `wait`) on the same memory must still work afterwards.
+    compile_run_raw(
+        "atomics_threads_wait_trap",
+        r#"(module
+            (memory 1 1 shared)
+            (func (export "bad_wait") (result i32)
+              i32.const 2 i32.const 0 i64.const 0 memory.atomic.wait32)
+            (func (export "ok_wait") (result i32)
+              i32.const 8 i32.const 5 i64.const 0 memory.atomic.wait32)
+            (func (export "notify") (result i32)
+              i32.const 8 i32.const 1 memory.atomic.notify))"#,
+        r#"fn main() {
+            use std::panic::{catch_unwind, AssertUnwindSafe};
+            let mut inst = Instance::new();
+            assert!(catch_unwind(AssertUnwindSafe(|| inst.func0())).is_err());
+            assert_eq!(inst.func1(), 1, "value mismatch still returns 1");
+            assert_eq!(inst.func2(), 0, "notify still works");
+        }"#,
+    );
+}

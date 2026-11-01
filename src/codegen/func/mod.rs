@@ -483,10 +483,11 @@ impl<'a> FuncGen<'a> {
             Operator::I64Store8 { memarg } => self.store(Helper::Store8I64, memarg)?,
             Operator::I64Store16 { memarg } => self.store(Helper::Store16I64, memarg)?,
             Operator::I64Store32 { memarg } => self.store(Helper::Store32I64, memarg)?,
-            // Threads/atomics proposal. The instance owns its memory exclusively
-            // (`&mut self`), so an atomic access lowers to the same code as the
-            // plain one — atomic loads/stores reuse the ordinary load/store
-            // helpers (narrow atomic loads are always zero-extending).
+            // Threads/atomics proposal. When the instance owns its memory
+            // exclusively (`&mut self`), an atomic access lowers to the same code
+            // as the plain one — atomic loads/stores reuse the ordinary load/store
+            // helpers (narrow atomic loads are always zero-extending). On a shared
+            // memory they are real, alignment-checked atomics.
             Operator::I32AtomicLoad { memarg } => {
                 self.atomic_load(Helper::LoadI32, ValType::I32, memarg)?
             }
@@ -672,9 +673,10 @@ impl<'a> FuncGen<'a> {
             Operator::I64AtomicRmw32CmpxchgU { memarg } => {
                 self.atomic_cmpxchg(AtomicWidth::I64As32, memarg)?
             }
-            // Fence and wait/notify. A fence is a no-op on a single instance;
-            // `notify` wakes nobody; `wait` traps (would block) or returns 1.
-            Operator::AtomicFence { .. } => self.atomic_fence(),
+            // Fence and wait/notify. On a single instance a fence is a no-op,
+            // `notify` wakes nobody and `wait` traps (would block) or returns 1;
+            // on a shared memory they are a real fence and park/wake threads.
+            Operator::AtomicFence { .. } => self.atomic_fence()?,
             Operator::MemoryAtomicNotify { memarg } => self.atomic_notify(memarg)?,
             Operator::MemoryAtomicWait32 { memarg } => self.atomic_wait(Helper::LoadI32, memarg)?,
             Operator::MemoryAtomicWait64 { memarg } => self.atomic_wait(Helper::LoadI64, memarg)?,

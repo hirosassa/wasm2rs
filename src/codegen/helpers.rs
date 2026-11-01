@@ -359,8 +359,9 @@ fn specialise_helper_lines(helper: Helper, mem: u32, base: Vec<String>) -> Vec<S
 /// once right after the signature (`SharedMemory::bytes`, no lock) and every
 /// `self.mem()` / `self.mem_mut()` is replaced with it. The method name and
 /// signature are unchanged (`fn r32(&self, ...)`, …); a store helper keeps its
-/// `&mut self`. `memory.grow` raises the shared length instead of resizing, and
-/// `table_*` helpers touch no memory, so they are emitted verbatim.
+/// `&mut self`. `memory.grow` is replaced by a call that raises the shared
+/// length instead of resizing; `table_*` helpers touch no memory, so they are
+/// emitted verbatim.
 pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
     let base = base_helper_lines(helper);
     if matches!(helper, Helper::TableCopy | Helper::TableFill) {
