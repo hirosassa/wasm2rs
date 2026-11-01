@@ -123,6 +123,10 @@ let rust = transpile_with_options(&wasm, &TranspileOptions { unsafe_memory: fals
 
 Streaming/split transpilation is available via `transpile_split_with_options`, and `cargo_manifest` produces the recommended `Cargo.toml` for split output.
 
+## Testing
+
+See [docs/wasi-threads-e2e.md](docs/wasi-threads-e2e.md) for the end-to-end tests that run real wasi-sdk and Rust `wasm32-wasip1-threads` binaries (they need extra tools and skip when those are missing).
+
 ## License
 
 Licensed under the [MIT License](LICENSE).
