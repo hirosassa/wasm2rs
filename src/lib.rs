@@ -404,6 +404,7 @@ where
                     }
                     memories.push(codegen::MemInfo {
                         min_pages: mem.initial,
+                        max_pages: mem.maximum,
                         imported: false,
                         shared: mem.shared,
                         memory64: mem.memory64,
@@ -690,6 +691,7 @@ fn classify_import(
             }
             sink.memories.push(codegen::MemInfo {
                 min_pages: mem_ty.initial,
+                max_pages: mem_ty.maximum,
                 imported: true,
                 shared: mem_ty.shared,
                 memory64: mem_ty.memory64,

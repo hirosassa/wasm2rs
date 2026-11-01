@@ -273,3 +273,183 @@ fn imported_shared_memory_with_a_host_import_takes_memory_and_imports() {
         }"#,
     );
 }
+
+#[test]
+fn a_misaligned_atomic_access_traps() {
+    // The threads proposal traps an atomic access whose effective address is not
+    // a multiple of its width (a plain access has no such rule).
+    compile_run_raw(
+        "atomics_threads_misaligned",
+        r#"(module
+            (memory 1 1 shared)
+            (func (export "load") (result i32)
+              i32.const 2 i32.atomic.load)
+            (func (export "store")
+              i32.const 6 i32.const 1 i32.atomic.store)
+            (func (export "rmw") (result i32)
+              i32.const 1 i32.const 1 i32.atomic.rmw.add)
+            (func (export "cmpxchg") (result i32)
+              i32.const 3 i32.const 0 i32.const 1 i32.atomic.rmw.cmpxchg)
+            (func (export "rmw16_ok") (result i32)
+              i32.const 2 i32.const 5 i32.atomic.rmw16.add_u)
+            (func (export "plain_ok") (result i32)
+              i32.const 2 i32.load))"#,
+        r#"fn main() {
+            use std::panic::{catch_unwind, AssertUnwindSafe};
+            let mut inst = Instance::new();
+            assert!(catch_unwind(AssertUnwindSafe(|| inst.func0())).is_err(), "load");
+            assert!(catch_unwind(AssertUnwindSafe(|| inst.func1())).is_err(), "store");
+            assert!(catch_unwind(AssertUnwindSafe(|| inst.func2())).is_err(), "rmw");
+            assert!(catch_unwind(AssertUnwindSafe(|| inst.func3())).is_err(), "cmpxchg");
+            assert_eq!(inst.func4(), 0, "an aligned narrow access is fine");
+            assert_eq!(inst.func5(), 5, "a plain access may be unaligned");
+        }"#,
+    );
+}
+
+#[test]
+fn growing_a_shared_memory_stops_at_its_declared_maximum() {
+    // `(memory 1 3 shared)`: growth succeeds up to 3 pages, then fails with -1,
+    // and a thread on the same memory sees the grown size.
+    compile_run_raw(
+        "atomics_threads_grow_max",
+        r#"(module
+            (memory 1 3 shared)
+            (func (export "grow") (param i32) (result i32)
+              local.get 0 memory.grow)
+            (func (export "size") (result i32) memory.size))"#,
+        r#"fn main() {
+            let mut a = Instance::new();
+            let handle = a.shared_memory();
+            assert_eq!(a.func0(2), 1, "old size in pages");
+            assert_eq!(a.func0(1), -1, "past the declared maximum");
+            assert_eq!(a.func1(), 3);
+            let seen = std::thread::spawn(move || Instance::with_memory(handle).func1())
+                .join()
+                .unwrap();
+            assert_eq!(seen, 3, "another instance sees the grown memory");
+        }"#,
+    );
+}
+
+#[test]
+fn a_spin_on_atomic_load_observes_another_threads_atomic_store() {
+    // The waiter loops on `i32.atomic.load` until the flag becomes 1. A plain
+    // (hoistable) load would spin forever, so this only terminates if the load
+    // really re-reads shared memory. The flag publishes `data` stored before it.
+    compile_run_raw(
+        "atomics_threads_spin",
+        r#"(module
+            (memory 1 1 shared)
+            (func (export "spin") (result i32)
+              (loop $l
+                (br_if $l (i32.eqz (i32.atomic.load (i32.const 0)))))
+              (i32.load (i32.const 8)))
+            (func (export "publish")
+              (i32.store (i32.const 8) (i32.const 77))
+              (i32.atomic.store (i32.const 0) (i32.const 1))))"#,
+        r#"fn main() {
+            let inst = Instance::new();
+            let handle = inst.shared_memory();
+            let m = handle.clone();
+            let waiter = std::thread::spawn(move || Instance::with_memory(m).func0());
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Instance::with_memory(handle).func1();
+            assert_eq!(waiter.join().unwrap(), 77);
+        }"#,
+    );
+}
+
+#[test]
+fn threads_writing_disjoint_regions_keep_every_byte() {
+    // Four threads each fill their own 16 KiB region with a per-thread byte
+    // pattern, concurrently; afterwards every region holds exactly its pattern.
+    compile_run_raw(
+        "atomics_threads_disjoint",
+        r#"(module
+            (memory 1 1 shared)
+            (func (export "fill") (param $base i32) (param $v i32)
+              (local $i i32)
+              (loop $l
+                (i32.store8 (i32.add (local.get $base) (local.get $i)) (local.get $v))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br_if $l (i32.lt_u (local.get $i) (i32.const 16384)))))
+            (func (export "at") (param i32) (result i32)
+              local.get 0 i32.load8_u))"#,
+        r#"fn main() {
+            let inst = Instance::new();
+            let handle = inst.shared_memory();
+            let joins: Vec<_> = (0..4).map(|k| {
+                let m = handle.clone();
+                std::thread::spawn(move || {
+                    Instance::with_memory(m).func0(k * 16384, 10 + k);
+                })
+            }).collect();
+            for j in joins { j.join().unwrap(); }
+            let mut r = Instance::with_memory(handle);
+            for k in 0..4 {
+                for off in [0, 1, 8191, 16383] {
+                    assert_eq!(r.func1(k * 16384 + off), 10 + k);
+                }
+            }
+        }"#,
+    );
+}
+
+#[test]
+fn an_atomic_load_is_evaluated_in_program_order_even_when_dropped_or_fenced() {
+    // Sequential consistency needs `atomic.load x; atomic.load y` to read x
+    // first, and a load before an `atomic.fence` to be evaluated before it, so
+    // none of them may be left pending on the operand stack.
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory 1 1 shared)
+            (func (export "drops")
+              i32.const 100 i32.atomic.load
+              i32.const 200 i32.atomic.load
+              drop drop)
+            (func (export "fenced")
+              i32.const 300 i32.load
+              atomic.fence
+              i32.const 0 i32.const 1 i32.store
+              drop))"#,
+    );
+    let wasm = wasm.expect("valid wat");
+    let code = wasm2rs::transpile(&wasm).expect("transpile ok");
+    let at = |needle: &str| {
+        code.find(needle)
+            .unwrap_or_else(|| panic!("no {needle} in:\n{code}"))
+    };
+    assert!(
+        at("(100i32)") < at("(200i32)"),
+        "atomic loads read out of order:\n{code}"
+    );
+    assert!(
+        at("(300i32,") < at("fence("),
+        "the load before the fence must not move after it:\n{code}"
+    );
+}
+
+#[test]
+fn a_trapping_wait_does_not_poison_later_waits_and_notifies() {
+    // A `wait` on a misaligned address traps; another thread's `notify` (and a
+    // fresh `wait`) on the same memory must still work afterwards.
+    compile_run_raw(
+        "atomics_threads_wait_trap",
+        r#"(module
+            (memory 1 1 shared)
+            (func (export "bad_wait") (result i32)
+              i32.const 2 i32.const 0 i64.const 0 memory.atomic.wait32)
+            (func (export "ok_wait") (result i32)
+              i32.const 8 i32.const 5 i64.const 0 memory.atomic.wait32)
+            (func (export "notify") (result i32)
+              i32.const 8 i32.const 1 memory.atomic.notify))"#,
+        r#"fn main() {
+            use std::panic::{catch_unwind, AssertUnwindSafe};
+            let mut inst = Instance::new();
+            assert!(catch_unwind(AssertUnwindSafe(|| inst.func0())).is_err());
+            assert_eq!(inst.func1(), 1, "value mismatch still returns 1");
+            assert_eq!(inst.func2(), 0, "notify still works");
+        }"#,
+    );
+}

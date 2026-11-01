@@ -4,7 +4,7 @@ use super::super::helpers::{helper_method_name, index_expr64, mem_accessor};
 use super::super::{Helper, Val, WASM_PAGE_SIZE, memarg_offset, rust_type};
 use crate::TranspileError;
 
-/// The Rust integer type an atomic RMW/cmpxchg result is cast to on the shared
+/// The Rust integer type an atomic load/RMW/cmpxchg result is cast to on the shared
 /// path. An atomic access is always over an i32- or i64-typed cell; any other
 /// type is unreachable here (validation rejects it), so it falls back to `i64`.
 fn shared_result_ty(ty: ValType) -> &'static str {
@@ -293,6 +293,87 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    /// The byte width an atomic load/store helper accesses.
+    fn atomic_access_width(helper: Helper) -> usize {
+        match helper {
+            Helper::Load8U | Helper::Load8UI64 | Helper::Store8 | Helper::Store8I64 => 1,
+            Helper::Load16U | Helper::Load16UI64 | Helper::Store16 | Helper::Store16I64 => 2,
+            Helper::LoadI32 | Helper::Load32UI64 | Helper::StoreI32 | Helper::Store32I64 => 4,
+            _ => 8,
+        }
+    }
+
+    /// An atomic load. On a shared memory it is a real (sequentially consistent)
+    /// atomic access that traps when misaligned; otherwise the instance owns its
+    /// memory and it is the plain load.
+    pub(super) fn atomic_load(
+        &mut self,
+        helper: Helper,
+        ty: ValType,
+        memarg: MemArg,
+    ) -> Result<(), TranspileError> {
+        if !self.ctx.memory_shared {
+            return self.load(helper, ty, memarg);
+        }
+        self.require_memory()?;
+        self.memarg_memory(memarg)?;
+        let offset = self.shared_offset(memarg)?;
+        // A sequentially consistent load is ordered against every earlier
+        // access, so evaluate it now rather than leaving it pending (a deferred
+        // load could be read after a later one, or after a fence or store).
+        self.spill_nonstable()?;
+        let addr = self.pop()?;
+        let name = self.fresh_temp();
+        self.line(format!(
+            "let {name} = self.memory.atomic_load(({}) as u32 as usize + {offset}usize, {}) as {};",
+            addr.code,
+            Self::atomic_access_width(helper),
+            shared_result_ty(ty)
+        ));
+        self.push(Val {
+            code: name,
+            ty,
+            stable: true,
+            may_trap: false,
+        });
+        Ok(())
+    }
+
+    /// An atomic store (see [`Self::atomic_load`]).
+    pub(super) fn atomic_store(
+        &mut self,
+        helper: Helper,
+        memarg: MemArg,
+    ) -> Result<(), TranspileError> {
+        if !self.ctx.memory_shared {
+            return self.store(helper, memarg);
+        }
+        self.require_memory()?;
+        self.memarg_memory(memarg)?;
+        let offset = self.shared_offset(memarg)?;
+        self.freeze_survivors(2)?;
+        let value = self.pop()?;
+        let addr = self.pop()?;
+        self.line(format!(
+            "self.memory.atomic_store(({}) as u32 as usize + {offset}usize, {}, ({}) as u64);",
+            addr.code,
+            Self::atomic_access_width(helper),
+            value.code
+        ));
+        Ok(())
+    }
+
+    /// `atomic.fence`: a sequentially consistent fence on a shared memory; a
+    /// no-op when the instance owns its memory.
+    pub(super) fn atomic_fence(&mut self) -> Result<(), TranspileError> {
+        if self.ctx.memory_shared {
+            // Operands still pending on the stack came before the fence.
+            self.spill_nonstable()?;
+            self.line("std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);".to_string());
+        }
+        Ok(())
+    }
+
     /// `v128.load*_lane`: read one element from memory into lane `lane` of the
     /// v128 on the stack, leaving the other lanes intact. Pops the vector (on
     /// top) then the address, and pushes the updated vector.
@@ -368,10 +449,10 @@ impl<'a> super::FuncGen<'a> {
         let value = self.pop()?;
         let addr = self.pop()?;
         if self.ctx.memory_shared {
-            // A shared memory does the whole read-modify-write in one critical
-            // section (`SharedMemory::atomic_rmw`), so it is atomic across
-            // threads; the runtime masks the operand and zero-extends the old
-            // value. No load/store helper is used on this path.
+            // A shared memory does the whole read-modify-write as one atomic
+            // compare-exchange loop (`SharedMemory::atomic_rmw`), so it is atomic
+            // across threads; the runtime masks the operand and zero-extends the
+            // old value. No load/store helper is used on this path.
             let byte = width.byte_width();
             let code = op.op_code();
             let rust_ty = shared_result_ty(ty);
@@ -435,7 +516,7 @@ impl<'a> super::FuncGen<'a> {
         let expected = self.pop()?;
         let addr = self.pop()?;
         if self.ctx.memory_shared {
-            // One critical section compares at the access width (the runtime
+            // One atomic compare-exchange compares at the access width (the runtime
             // masks `expected`) and stores `replacement` only on a match,
             // returning the zero-extended old value either way.
             let byte = width.byte_width();

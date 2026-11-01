@@ -483,38 +483,43 @@ impl<'a> FuncGen<'a> {
             Operator::I64Store8 { memarg } => self.store(Helper::Store8I64, memarg)?,
             Operator::I64Store16 { memarg } => self.store(Helper::Store16I64, memarg)?,
             Operator::I64Store32 { memarg } => self.store(Helper::Store32I64, memarg)?,
-            // Threads/atomics proposal. The instance owns its memory exclusively
-            // (`&mut self`), so an atomic access lowers to the same code as the
-            // plain one — atomic loads/stores reuse the ordinary load/store
-            // helpers (narrow atomic loads are always zero-extending).
+            // Threads/atomics proposal. When the instance owns its memory
+            // exclusively (`&mut self`), an atomic access lowers to the same code
+            // as the plain one — atomic loads/stores reuse the ordinary load/store
+            // helpers (narrow atomic loads are always zero-extending). On a shared
+            // memory they are real, alignment-checked atomics.
             Operator::I32AtomicLoad { memarg } => {
-                self.load(Helper::LoadI32, ValType::I32, memarg)?
+                self.atomic_load(Helper::LoadI32, ValType::I32, memarg)?
             }
             Operator::I32AtomicLoad8U { memarg } => {
-                self.load(Helper::Load8U, ValType::I32, memarg)?
+                self.atomic_load(Helper::Load8U, ValType::I32, memarg)?
             }
             Operator::I32AtomicLoad16U { memarg } => {
-                self.load(Helper::Load16U, ValType::I32, memarg)?
+                self.atomic_load(Helper::Load16U, ValType::I32, memarg)?
             }
             Operator::I64AtomicLoad { memarg } => {
-                self.load(Helper::LoadI64, ValType::I64, memarg)?
+                self.atomic_load(Helper::LoadI64, ValType::I64, memarg)?
             }
             Operator::I64AtomicLoad8U { memarg } => {
-                self.load(Helper::Load8UI64, ValType::I64, memarg)?
+                self.atomic_load(Helper::Load8UI64, ValType::I64, memarg)?
             }
             Operator::I64AtomicLoad16U { memarg } => {
-                self.load(Helper::Load16UI64, ValType::I64, memarg)?
+                self.atomic_load(Helper::Load16UI64, ValType::I64, memarg)?
             }
             Operator::I64AtomicLoad32U { memarg } => {
-                self.load(Helper::Load32UI64, ValType::I64, memarg)?
+                self.atomic_load(Helper::Load32UI64, ValType::I64, memarg)?
             }
-            Operator::I32AtomicStore { memarg } => self.store(Helper::StoreI32, memarg)?,
-            Operator::I32AtomicStore8 { memarg } => self.store(Helper::Store8, memarg)?,
-            Operator::I32AtomicStore16 { memarg } => self.store(Helper::Store16, memarg)?,
-            Operator::I64AtomicStore { memarg } => self.store(Helper::StoreI64, memarg)?,
-            Operator::I64AtomicStore8 { memarg } => self.store(Helper::Store8I64, memarg)?,
-            Operator::I64AtomicStore16 { memarg } => self.store(Helper::Store16I64, memarg)?,
-            Operator::I64AtomicStore32 { memarg } => self.store(Helper::Store32I64, memarg)?,
+            Operator::I32AtomicStore { memarg } => self.atomic_store(Helper::StoreI32, memarg)?,
+            Operator::I32AtomicStore8 { memarg } => self.atomic_store(Helper::Store8, memarg)?,
+            Operator::I32AtomicStore16 { memarg } => self.atomic_store(Helper::Store16, memarg)?,
+            Operator::I64AtomicStore { memarg } => self.atomic_store(Helper::StoreI64, memarg)?,
+            Operator::I64AtomicStore8 { memarg } => self.atomic_store(Helper::Store8I64, memarg)?,
+            Operator::I64AtomicStore16 { memarg } => {
+                self.atomic_store(Helper::Store16I64, memarg)?
+            }
+            Operator::I64AtomicStore32 { memarg } => {
+                self.atomic_store(Helper::Store32I64, memarg)?
+            }
             // Atomic read-modify-write. Each pops (addr, operand), combines the
             // old value with the operand, stores the result, and pushes the old
             // value. The `AtomicWidth` fixes the (load, store, type) triple;
@@ -668,9 +673,10 @@ impl<'a> FuncGen<'a> {
             Operator::I64AtomicRmw32CmpxchgU { memarg } => {
                 self.atomic_cmpxchg(AtomicWidth::I64As32, memarg)?
             }
-            // Fence and wait/notify. A fence is a no-op on a single instance;
-            // `notify` wakes nobody; `wait` traps (would block) or returns 1.
-            Operator::AtomicFence { .. } => {}
+            // Fence and wait/notify. On a single instance a fence is a no-op,
+            // `notify` wakes nobody and `wait` traps (would block) or returns 1;
+            // on a shared memory they are a real fence and park/wake threads.
+            Operator::AtomicFence { .. } => self.atomic_fence()?,
             Operator::MemoryAtomicNotify { memarg } => self.atomic_notify(memarg)?,
             Operator::MemoryAtomicWait32 { memarg } => self.atomic_wait(Helper::LoadI32, memarg)?,
             Operator::MemoryAtomicWait64 { memarg } => self.atomic_wait(Helper::LoadI64, memarg)?,

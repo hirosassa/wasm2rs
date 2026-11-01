@@ -83,8 +83,9 @@ pub(crate) struct ModuleCtx<'a> {
     /// (memory64 proposal), so its addresses and sizes are `i64`.
     pub(crate) memory64: Vec<bool>,
     /// True iff the module has exactly one memory and it is `shared`. When set,
-    /// linear memory is backed by a thread-shareable `SharedMemory` (Mutex) and
-    /// the atomic RMW/cmpxchg/wait/notify ops lower to genuine atomics.
+    /// linear memory is backed by a thread-shareable, lock-free `SharedMemory`
+    /// and the atomic load/store/RMW/cmpxchg/wait/notify ops lower to genuine
+    /// atomics.
     pub(crate) memory_shared: bool,
     /// Whether the module declares a table (so `self.table()` exists).
     pub(crate) has_table: bool,
