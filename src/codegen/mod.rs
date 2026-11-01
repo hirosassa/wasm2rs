@@ -37,7 +37,7 @@ mod simd_rt;
 mod wasi;
 
 use self::func::FuncGen;
-use self::render::{chunk_prelude, render_lib_root, render_module};
+use self::render::{chunk_prelude, render_lib_root};
 use self::runtime::{render_rt_helpers, rt_name};
 use self::simd_rt::render_simd_helpers;
 

@@ -425,7 +425,10 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
 
     // Every function is rendered back to back into one buffer; `ends` marks
     // where each one stops so the pieces can be re-sliced without per-function
-    // allocations.
+    // allocations. A stateful module's methods sit inside `impl Instance`, so
+    // they are indented as they are generated (a blank line before each, as in
+    // the split output) and the buffer then becomes the module body as is.
+    let line_prefix = if stateful { "    " } else { "" };
     let mut funcs_buf = String::new();
     let mut ends = Vec::with_capacity(parts.funcs.len());
     let mut deps = ModuleDeps::default();
@@ -433,14 +436,21 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         if !parts.live[index] {
             continue;
         }
+        if stateful {
+            funcs_buf.push('\n');
+        }
         // Defined functions are named by their full function index, i.e. after
         // the imported functions in the shared index space.
-        let meta =
-            generate_function_into(parts.imports.len() + index, f, &ctx, "", &mut funcs_buf)?;
+        let meta = generate_function_into(
+            parts.imports.len() + index,
+            f,
+            &ctx,
+            line_prefix,
+            &mut funcs_buf,
+        )?;
         deps.merge(meta);
         ends.push(funcs_buf.len());
     }
-    let sources = split_at_ends(&funcs_buf, &ends);
     // Every rendered dispatch method (`call_ref_t{ti}`) carries the type-mismatch
     // trap, so its cold helper must exist whenever any dispatch method is emitted.
     if !deps.dispatch_sigs.is_empty() {
@@ -475,9 +485,10 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         out.push('\n');
     }
 
-    // The body is written straight after the prelude: no separate body string
-    // and no final `prelude + body` copy.
     if !stateful {
+        // The functions are written straight after the prelude: no separate
+        // body string and no final `prelude + body` copy.
+        let sources = split_at_ends(&funcs_buf, &ends);
         out.reserve(funcs_buf.len() + sources.len());
         for (i, src) in sources.iter().enumerate() {
             if i > 0 {
@@ -489,17 +500,19 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
             out.push('\n');
             out.push_str(&line);
         }
+        Ok(out)
     } else {
-        render_module(
-            &mut out,
-            parts,
-            &ctx,
-            &sources,
-            &deps.helpers,
-            &deps.dispatch_sigs,
-        )?;
+        // Everything before the methods goes in front of the already-rendered
+        // method bodies and the tail after them, in place: the bodies (the bulk
+        // of the output) are never copied into a second module-sized buffer.
+        render::render_module_head(&mut out, parts, &ctx, &deps.helpers, &deps.dispatch_sigs)?;
+        let mut tail = String::new();
+        render::render_module_tail(&mut tail, parts, &ctx, &deps.dispatch_sigs)?;
+        funcs_buf.reserve(out.len() + tail.len());
+        funcs_buf.insert_str(0, &out);
+        funcs_buf.push_str(&tail);
+        Ok(funcs_buf)
     }
-    Ok(out)
 }
 
 /// Slice `buf` into consecutive pieces ending at each offset in `ends`.
@@ -627,29 +640,29 @@ pub(crate) fn generate_module_split(
         simd: &deps.simd,
         dispatch_sigs: &deps.dispatch_sigs,
     };
-    let root = render_lib_root(parts, &ctx, stateful, &root_deps, n_chunks)?;
-    // Shared state structs from split flattened methods live at the crate root
-    // (an `impl` block cannot hold a struct), ahead of the `impl` that references
-    // them. Placed here so the later `GcRef`/exception prepends stay above them —
-    // a struct field may be a `GcRef`, which must already be in scope.
-    let root = if deps.state_structs.is_empty() {
-        root
-    } else {
-        format!("{}\n{root}", deps.state_structs.join("\n"))
-    };
-    // The exception type and the managed value model live at the crate root so
-    // every chunk's `use super::*` sees them, ahead of everything else in
-    // `lib.rs`.
-    let root = if needs_gc_types(parts)? {
-        format!("{GCREF_DEF}\n{root}")
-    } else {
-        root
-    };
-    let root = if deps.uses_eh {
-        format!("{EXC_DEF}\n{root}")
-    } else {
-        root
-    };
+    let mut root = render_lib_root(parts, &ctx, stateful, &root_deps, n_chunks)?;
+    // Everything that must sit above the root, outermost first, assembled once
+    // and placed in front in a single insertion (the root carries the data
+    // statics, so re-formatting it per piece would copy it each time):
+    //  - the exception type and the managed value model, so every chunk's
+    //    `use super::*` sees them;
+    //  - the shared state structs from split flattened methods (an `impl` block
+    //    cannot hold a struct), after `GcRef` since a field may be one, and
+    //    ahead of the `impl` that references them.
+    let mut prefix = String::new();
+    if deps.uses_eh {
+        prefix.push_str(EXC_DEF);
+        prefix.push('\n');
+    }
+    if needs_gc_types(parts)? {
+        prefix.push_str(GCREF_DEF);
+        prefix.push('\n');
+    }
+    if !deps.state_structs.is_empty() {
+        prefix.push_str(&deps.state_structs.join("\n"));
+        prefix.push('\n');
+    }
+    root.insert_str(0, &prefix);
     emit("lib.rs".to_string(), root)
 }
 /// Generate the Rust source of one function, appending it to `out` (each
