@@ -368,15 +368,17 @@ where
                     let mem = mem?;
                     // `shared` memory (threads proposal) is backed by a
                     // thread-shareable `SharedMemory` when it is the module's
-                    // single defined memory (see codegen atomic ops). 64-bit
-                    // memory is still unsupported.
-                    if mem.memory64 {
-                        return Err(TranspileError::Unsupported("64-bit memory".into()));
+                    // single defined memory (see codegen atomic ops). A shared
+                    // memory cannot also be 64-bit: the shared backend is
+                    // addressed by `u32`.
+                    if mem.memory64 && mem.shared {
+                        return Err(TranspileError::Unsupported("shared 64-bit memory".into()));
                     }
                     memories.push(codegen::MemInfo {
                         min_pages: mem.initial,
                         imported: false,
                         shared: mem.shared,
+                        memory64: mem.memory64,
                     });
                 }
             }
@@ -479,7 +481,7 @@ where
                         DataKind::Active {
                             memory_index,
                             offset_expr,
-                        } => (Some(codegen::const_expr_u32(offset_expr)?), *memory_index),
+                        } => (Some(codegen::const_expr_u64(offset_expr)?), *memory_index),
                         DataKind::Passive => (None, 0),
                     };
                     data.push(codegen::DataSegment {
@@ -606,12 +608,8 @@ fn classify_import(
             Ok(())
         }
         TypeRef::Memory(mem_ty) => {
-            // See the defined-memory case: 64-bit is not supported. An imported
-            // shared memory is out of scope — the thread-shareable backend is
-            // only wired up for a single *defined* shared memory.
-            if mem_ty.memory64 {
-                return Err(TranspileError::Unsupported("64-bit memory".into()));
-            }
+            // An imported shared memory is out of scope — the thread-shareable
+            // backend is only wired up for a single *defined* shared memory.
             if mem_ty.shared {
                 return Err(TranspileError::Unsupported("imported shared memory".into()));
             }
@@ -628,6 +626,7 @@ fn classify_import(
                 min_pages: mem_ty.initial,
                 imported: true,
                 shared: false,
+                memory64: mem_ty.memory64,
             });
             Ok(())
         }

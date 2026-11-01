@@ -41,7 +41,7 @@ use self::render::{chunk_prelude, render_lib_root, render_module};
 use self::runtime::{render_rt_helpers, rt_name};
 use self::simd_rt::render_simd_helpers;
 
-pub(crate) use self::const_expr::{const_expr_to_rust, const_expr_u32};
+pub(crate) use self::const_expr::{const_expr_to_rust, const_expr_u32, const_expr_u64};
 pub(crate) use self::info::{
     CompositeKind, DataSegment, ElemSegment, FieldInfo, FuncInput, GlobalInfo, ImportInfo,
     ImportedGlobalInfo, MemInfo, TableInfo, TagInfo, TypeSig, WASM_MAX_PAGES, WASM_PAGE_SIZE,

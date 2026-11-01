@@ -53,18 +53,12 @@ fn imported_non_zero_memory_is_rejected() {
 }
 
 #[test]
-fn memory64_defined_memory_is_rejected() {
-    // 64-bit memory (memory64 proposal) parses but is not supported. Shared
-    // memory, by contrast, is now accepted (see tests/atomics.rs).
-    assert_unsupported(r#"(module (memory i64 1))"#, "64-bit memory");
-}
-
-#[test]
-fn memory64_imported_memory_is_rejected() {
-    // Same rule on the import path (classify_import), a distinct branch.
+fn shared_memory64_is_rejected() {
+    // Shared memory is backed by a `u32`-addressed `SharedMemory`, so a shared
+    // 64-bit memory is not supported (a plain 64-bit memory is; see memory64.rs).
     assert_unsupported(
-        r#"(module (import "e" "m" (memory i64 1)))"#,
-        "64-bit memory",
+        r#"(module (memory i64 1 1 shared))"#,
+        "shared 64-bit memory",
     );
 }
 

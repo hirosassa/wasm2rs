@@ -28,6 +28,9 @@ pub(crate) struct MemInfo {
     /// defined shared memory is backed by a thread-shareable `SharedMemory`
     /// (Mutex-based) so its atomics are genuinely atomic across OS threads.
     pub shared: bool,
+    /// Whether the memory is declared `i64` (memory64 proposal): its addresses,
+    /// `memory.size`/`grow` operands and bulk-operation lengths are `i64`.
+    pub memory64: bool,
 }
 
 /// Metadata about the module's function table (a single `funcref` table). The
@@ -61,7 +64,7 @@ pub(crate) struct ElemSegment {
 /// linear memory the (active) segment initialises; it is 0 for a passive
 /// segment (which names no memory until a `memory.init` selects one).
 pub(crate) struct DataSegment {
-    pub offset: Option<u32>,
+    pub offset: Option<u64>,
     pub mem_index: u32,
     pub bytes: Vec<u8>,
 }

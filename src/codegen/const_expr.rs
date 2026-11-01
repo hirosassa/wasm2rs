@@ -26,6 +26,37 @@ pub(crate) fn const_expr_u32(expr: &ConstExpr<'_>) -> Result<u32, TranspileError
     value.ok_or_else(|| TranspileError::Unsupported("empty element offset".into()))
 }
 
+/// Evaluate an active data segment's constant offset (an `i32.const`, or an
+/// `i64.const` for a 64-bit memory) to a `u64`. A negative `i32` or `i64` is the
+/// unsigned address above `i32::MAX`/`i64::MAX`, which no in-memory segment can
+/// reach, so it is rejected.
+pub(crate) fn const_expr_u64(expr: &ConstExpr<'_>) -> Result<u64, TranspileError> {
+    let mut value: Option<u64> = None;
+    for op in expr.get_operators_reader() {
+        match op? {
+            Operator::I32Const { value: v } => {
+                value = Some(
+                    u64::try_from(v)
+                        .map_err(|_| TranspileError::Unsupported("negative data offset".into()))?,
+                );
+            }
+            Operator::I64Const { value: v } => {
+                value = Some(
+                    u64::try_from(v)
+                        .map_err(|_| TranspileError::Unsupported("negative data offset".into()))?,
+                );
+            }
+            Operator::End => {}
+            other => {
+                return Err(TranspileError::Unsupported(format!(
+                    "data offset: {other:?}"
+                )));
+            }
+        }
+    }
+    value.ok_or_else(|| TranspileError::Unsupported("empty data offset".into()))
+}
+
 /// Translate a global's constant initializer expression to a Rust expression.
 /// `type_kinds` classifies concrete heap types so a `ref.null` picks the null
 /// value matching the reference's lowering.

@@ -57,6 +57,7 @@ mod layout;
 mod local_batching;
 mod loop_params;
 mod manifest;
+mod memory64;
 mod memory_load;
 mod module_linking;
 mod multi_memory;

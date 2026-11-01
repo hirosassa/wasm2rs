@@ -1,6 +1,6 @@
 use wasmparser::{MemArg, MemArgTarget, ValType};
 
-use super::super::helpers::{helper_method_name, mem_accessor};
+use super::super::helpers::{helper_method_name, index_expr64, mem_accessor};
 use super::super::{Helper, Val, WASM_PAGE_SIZE, memarg_offset, rust_type};
 use crate::TranspileError;
 
@@ -190,6 +190,53 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
+    /// Whether linear memory `mem` is 64-bit (memory64 proposal).
+    pub(super) fn is_memory64(&self, mem: u32) -> bool {
+        self.ctx
+            .memory64
+            .get(mem as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// The Rust type of a wasm address into memory `mem`: `i64` for a 64-bit
+    /// memory, `i32` otherwise.
+    pub(super) fn addr_rust_ty(&self, mem: u32) -> &'static str {
+        if self.is_memory64(mem) { "i64" } else { "i32" }
+    }
+
+    /// The wasm value type of an address into memory `mem`.
+    pub(super) fn addr_val_ty(&self, mem: u32) -> ValType {
+        if self.is_memory64(mem) {
+            ValType::I64
+        } else {
+            ValType::I32
+        }
+    }
+
+    /// The static offset as a `u32`, for the shared-memory atomics (a shared
+    /// memory is always 32-bit). A non-shared memory is lowered through the
+    /// typed [`Self::offset_lit`] instead, and may legitimately carry a 64-bit
+    /// offset, so it must not be forced through `u32` here (the value is `0` and
+    /// unused on that path).
+    pub(super) fn shared_offset(&self, memarg: MemArg) -> Result<u32, TranspileError> {
+        if self.ctx.memory_shared {
+            memarg_offset(memarg)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// The static offset of `memarg` as a typed literal for a memory-access
+    /// helper: `u64` for a 64-bit memory, `u32` otherwise.
+    pub(super) fn offset_lit(&self, memarg: MemArg, mem: u32) -> Result<String, TranspileError> {
+        if self.is_memory64(mem) {
+            Ok(format!("{}u64", memarg.offset))
+        } else {
+            Ok(format!("{}u32", memarg_offset(memarg)?))
+        }
+    }
+
     pub(super) fn load(
         &mut self,
         helper: Helper,
@@ -198,14 +245,14 @@ impl<'a> super::FuncGen<'a> {
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
         let mem = self.memarg_memory(memarg)?;
-        let offset = memarg_offset(memarg)?;
+        let offset = self.offset_lit(memarg, mem)?;
         let addr = self.pop()?;
         self.used_helpers.insert((helper, mem));
         // The result depends on memory contents, which a store can change, so
         // it is never stable.
         self.push_combined(
             format!(
-                "self.{}({}, {offset}u32)",
+                "self.{}({}, {offset})",
                 helper_method_name(helper, mem),
                 addr.code
             ),
@@ -217,7 +264,7 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn store(&mut self, helper: Helper, memarg: MemArg) -> Result<(), TranspileError> {
         self.require_memory()?;
         let mem = self.memarg_memory(memarg)?;
-        let offset = memarg_offset(memarg)?;
+        let offset = self.offset_lit(memarg, mem)?;
         // Memory is about to change; fix any operand that reads from it. The
         // address and value are consumed here, so inline them and freeze only
         // the survivors below.
@@ -226,7 +273,7 @@ impl<'a> super::FuncGen<'a> {
         let addr = self.pop()?;
         self.used_helpers.insert((helper, mem));
         self.line(format!(
-            "self.{}({}, {offset}u32, {});",
+            "self.{}({}, {offset}, {});",
             helper_method_name(helper, mem),
             addr.code,
             value.code
@@ -245,14 +292,14 @@ impl<'a> super::FuncGen<'a> {
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
         let mem = self.memarg_memory(memarg)?;
-        let offset = memarg_offset(memarg)?;
+        let offset = self.offset_lit(memarg, mem)?;
         let value = self.pop()?;
         let addr = self.pop()?;
         self.used_helpers.insert((helper, mem));
         // The result reads memory, which a store can change, so it is never stable.
         self.push_combined(
             format!(
-                "self.{}({}, {offset}u32, {}, {lane})",
+                "self.{}({}, {offset}, {}, {lane})",
                 helper_method_name(helper, mem),
                 addr.code,
                 value.code
@@ -272,7 +319,7 @@ impl<'a> super::FuncGen<'a> {
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
         let mem = self.memarg_memory(memarg)?;
-        let offset = memarg_offset(memarg)?;
+        let offset = self.offset_lit(memarg, mem)?;
         // Memory is about to change; fix any operand that reads from it. The
         // address and value are consumed here, so inline them and freeze only
         // the survivors below.
@@ -281,7 +328,7 @@ impl<'a> super::FuncGen<'a> {
         let addr = self.pop()?;
         self.used_helpers.insert((helper, mem));
         self.line(format!(
-            "self.{}({}, {offset}u32, {}, {lane});",
+            "self.{}({}, {offset}, {}, {lane});",
             helper_method_name(helper, mem),
             addr.code,
             value.code
@@ -302,7 +349,9 @@ impl<'a> super::FuncGen<'a> {
         self.require_memory()?;
         let mem = self.memarg_memory(memarg)?;
         let (load, store, ty, _mask) = width.parts();
-        let offset = memarg_offset(memarg)?;
+        let offset = self.shared_offset(memarg)?;
+        let off_lit = self.offset_lit(memarg, mem)?;
+        let addr_ty = self.addr_rust_ty(mem);
         // Memory is about to change; fix any operand that reads from it.
         self.spill_nonstable()?;
         let value = self.pop()?;
@@ -331,15 +380,15 @@ impl<'a> super::FuncGen<'a> {
         self.used_helpers.insert((store, mem));
         // `addr` feeds both the load and the store, so bind it once.
         let addr_tmp = self.fresh_temp();
-        self.line(format!("let {addr_tmp}: i32 = {};", addr.code));
+        self.line(format!("let {addr_tmp}: {addr_ty} = {};", addr.code));
         let old = self.fresh_temp();
         self.line(format!(
-            "let {old} = self.{}({addr_tmp}, {offset}u32);",
+            "let {old} = self.{}({addr_tmp}, {off_lit});",
             helper_method_name(load, mem)
         ));
         let new = op.combine(&old, &value.code);
         self.line(format!(
-            "self.{}({addr_tmp}, {offset}u32, {new});",
+            "self.{}({addr_tmp}, {off_lit}, {new});",
             helper_method_name(store, mem)
         ));
         // `old` is a snapshot, so it never changes once bound.
@@ -364,7 +413,9 @@ impl<'a> super::FuncGen<'a> {
         self.require_memory()?;
         let mem = self.memarg_memory(memarg)?;
         let (load, store, ty, mask) = width.parts();
-        let offset = memarg_offset(memarg)?;
+        let offset = self.shared_offset(memarg)?;
+        let off_lit = self.offset_lit(memarg, mem)?;
+        let addr_ty = self.addr_rust_ty(mem);
         // Memory may change; fix any operand that reads from it.
         self.spill_nonstable()?;
         let replacement = self.pop()?;
@@ -391,10 +442,10 @@ impl<'a> super::FuncGen<'a> {
         self.used_helpers.insert((load, mem));
         self.used_helpers.insert((store, mem));
         let addr_tmp = self.fresh_temp();
-        self.line(format!("let {addr_tmp}: i32 = {};", addr.code));
+        self.line(format!("let {addr_tmp}: {addr_ty} = {};", addr.code));
         let old = self.fresh_temp();
         self.line(format!(
-            "let {old} = self.{}({addr_tmp}, {offset}u32);",
+            "let {old} = self.{}({addr_tmp}, {off_lit});",
             helper_method_name(load, mem)
         ));
         let cmp = match mask {
@@ -402,7 +453,7 @@ impl<'a> super::FuncGen<'a> {
             None => format!("{old} == ({})", expected.code),
         };
         self.line(format!(
-            "if {cmp} {{ self.{}({addr_tmp}, {offset}u32, {}); }}",
+            "if {cmp} {{ self.{}({addr_tmp}, {off_lit}, {}); }}",
             helper_method_name(store, mem),
             replacement.code
         ));
@@ -420,7 +471,7 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn atomic_notify(&mut self, memarg: MemArg) -> Result<(), TranspileError> {
         self.require_memory()?;
         self.memarg_memory(memarg)?;
-        let offset = memarg_offset(memarg)?;
+        let offset = self.shared_offset(memarg)?;
         if self.ctx.memory_shared {
             // Wake up to `count` waiters parked on the effective byte address
             // (base + static memarg offset), matching the address a waiter
@@ -462,7 +513,8 @@ impl<'a> super::FuncGen<'a> {
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
         let mem = self.memarg_memory(memarg)?;
-        let offset = memarg_offset(memarg)?;
+        let offset = self.shared_offset(memarg)?;
+        let off_lit = self.offset_lit(memarg, mem)?;
         if self.ctx.memory_shared {
             // A real blocking wait: park until notified or the timeout elapses.
             // `wait32` compares a 4-byte cell, `wait64` an 8-byte one. Returns 0
@@ -495,7 +547,7 @@ impl<'a> super::FuncGen<'a> {
         self.used_helpers.insert((load, mem));
         let name = self.fresh_temp();
         self.line(format!(
-            "let {name}: i32 = if self.{}({}, {offset}u32) != ({}) {{ 1 }} \
+            "let {name}: i32 = if self.{}({}, {off_lit}) != ({}) {{ 1 }} \
              else {{ panic!(\"atomic.wait on a single-threaded instance would block forever\") }};",
             helper_method_name(load, mem),
             addr.code,
@@ -517,20 +569,21 @@ impl<'a> super::FuncGen<'a> {
         // enclosing expression (e.g. imported memory, where `mem()` routes
         // through the host).
         let name = self.fresh_temp();
+        let addr_ty = self.addr_rust_ty(mem);
         if self.ctx.memory_shared {
             // A shared memory has no `mem()` accessor; measure the locked bytes.
             self.line(format!(
-                "let {name}: i32 = (self.memory.bytes().len() / {WASM_PAGE_SIZE}) as i32;"
+                "let {name}: {addr_ty} = (self.memory.bytes().len() / {WASM_PAGE_SIZE}) as {addr_ty};"
             ));
         } else {
             let (get, _) = mem_accessor(mem);
             self.line(format!(
-                "let {name}: i32 = (self.{get}().len() / {WASM_PAGE_SIZE}) as i32;"
+                "let {name}: {addr_ty} = (self.{get}().len() / {WASM_PAGE_SIZE}) as {addr_ty};"
             ));
         }
         self.push(Val {
             code: name,
-            ty: ValType::I32,
+            ty: self.addr_val_ty(mem),
             stable: true,
         });
         Ok(())
@@ -544,13 +597,14 @@ impl<'a> super::FuncGen<'a> {
         self.used_helpers.insert((Helper::Grow, mem));
         let name = self.fresh_temp();
         self.line(format!(
-            "let {name}: i32 = self.{}({});",
+            "let {name}: {} = self.{}({});",
+            self.addr_rust_ty(mem),
             helper_method_name(Helper::Grow, mem),
             delta.code
         ));
         self.push(Val {
             code: name,
-            ty: ValType::I32,
+            ty: self.addr_val_ty(mem),
             stable: true,
         });
         Ok(())
@@ -572,12 +626,19 @@ impl<'a> super::FuncGen<'a> {
         let mem = self.require_memory_index(mem)?;
         let (dest, val, len) = self.pop_bulk_operands()?;
         self.used_helpers.insert((Helper::MemoryFill, mem));
+        // A 64-bit memory's helper takes its `i64` operands as they are.
+        let (dest, len) = if self.is_memory64(mem) {
+            (dest.code, len.code)
+        } else {
+            (
+                format!("({}) as u32", dest.code),
+                format!("({}) as u32", len.code),
+            )
+        };
         self.line(format!(
-            "self.{}(({}) as u32, {}, ({}) as u32);",
+            "self.{}({dest}, {}, {len});",
             helper_method_name(Helper::MemoryFill, mem),
-            dest.code,
-            val.code,
-            len.code
+            val.code
         ));
         Ok(())
     }
@@ -592,12 +653,18 @@ impl<'a> super::FuncGen<'a> {
             // memmove, so overlapping ranges copy correctly. Memory 0 keeps the
             // historic `memory_copy` name and body.
             self.used_helpers.insert((Helper::MemoryCopy, dst_mem));
+            // A 64-bit memory's helper takes its `i64` operands as they are.
+            let args = if self.is_memory64(dst_mem) {
+                format!("{}, {}, {}", dest.code, src.code, len.code)
+            } else {
+                format!(
+                    "({}) as u32, ({}) as u32, ({}) as u32",
+                    dest.code, src.code, len.code
+                )
+            };
             self.line(format!(
-                "self.{}(({}) as u32, ({}) as u32, ({}) as u32);",
-                helper_method_name(Helper::MemoryCopy, dst_mem),
-                dest.code,
-                src.code,
-                len.code
+                "self.{}({args});",
+                helper_method_name(Helper::MemoryCopy, dst_mem)
             ));
         } else {
             // Cross-memory copy: the source and destination are distinct fields,
@@ -609,11 +676,25 @@ impl<'a> super::FuncGen<'a> {
             // source range traps before any write. No helper method is needed.
             let (src_get, _) = mem_accessor(src_mem);
             let (_, dst_get_mut) = mem_accessor(dst_mem);
+            // Each operand is as wide as its memory's addresses; the length is
+            // `i64` only when both memories are 64-bit.
+            let index = |code: &str, is64: bool| {
+                if is64 {
+                    index_expr64(code)
+                } else {
+                    format!("({code}) as usize")
+                }
+            };
+            let s = index(&src.code, self.is_memory64(src_mem));
+            let d = index(&dest.code, self.is_memory64(dst_mem));
+            let n = index(
+                &len.code,
+                self.is_memory64(src_mem) && self.is_memory64(dst_mem),
+            );
             self.line(format!(
-                "{{ let s = ({}) as usize; let d = ({}) as usize; let n = ({}) as usize; \
+                "{{ let s = {s}; let d = {d}; let n = {n}; \
                  let seg = self.{src_get}()[s..s + n].to_vec(); \
-                 self.{dst_get_mut}()[d..d + n].copy_from_slice(&seg); }}",
-                src.code, dest.code, len.code
+                 self.{dst_get_mut}()[d..d + n].copy_from_slice(&seg); }}"
             ));
         }
         Ok(())
