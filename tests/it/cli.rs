@@ -277,3 +277,26 @@ fn rejects_a_non_numeric_split_dispatch_value() {
         "no output should be written on a usage error"
     );
 }
+
+/// A chunk path that is already a directory makes the write fail: the CLI must
+/// exit nonzero and say which file it could not write, not report success.
+#[test]
+fn a_failed_chunk_write_exits_nonzero_with_the_path() {
+    let (dir, input) = write_sample_wasm("write_failure");
+    let out_dir = dir.join("out_write_failure");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(out_dir.join("lib.rs")).unwrap();
+
+    let out = Command::new(wasm2rs_bin())
+        .arg(&input)
+        .arg(&out_dir)
+        .arg("1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("lib.rs"),
+        "{stderr}"
+    );
+}

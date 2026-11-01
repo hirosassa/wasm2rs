@@ -118,3 +118,33 @@ fn active_data_segment_round_trips_bytes_that_need_escaping() {
          }",
     );
 }
+
+fn transpile_err(wat: &str) -> String {
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    wasm2rs::transpile(&wasm)
+        .expect_err("transpile should be rejected")
+        .to_string()
+}
+
+#[test]
+fn a_negative_i32_data_offset_is_rejected() {
+    let err = transpile_err(r#"(module (memory 1) (data (i32.const -1) "x"))"#);
+    assert!(err.contains("negative data offset"), "{err}");
+}
+
+#[test]
+fn a_negative_i64_data_offset_is_rejected() {
+    let err = transpile_err(r#"(module (memory i64 1) (data (i64.const -1) "x"))"#);
+    assert!(err.contains("negative data offset"), "{err}");
+}
+
+#[test]
+fn a_global_derived_data_offset_is_rejected() {
+    let err = transpile_err(
+        r#"(module
+            (import "env" "base" (global $base i32))
+            (memory 1)
+            (data (global.get $base) "x"))"#,
+    );
+    assert!(err.contains("data offset"), "{err}");
+}
