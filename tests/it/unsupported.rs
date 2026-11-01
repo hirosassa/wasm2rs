@@ -490,3 +490,30 @@ fn ref_test_on_a_func_heaptype_is_rejected() {
         "func/extern heap type",
     );
 }
+
+#[test]
+fn multiple_supertypes_are_rejected() {
+    assert_unsupported(
+        r#"(module
+            (rec
+              (type $a (sub (struct)))
+              (type $b (sub (struct)))
+              (type $c (sub $a $b (struct))))
+        )"#,
+        "multiple supertypes",
+    );
+}
+
+#[test]
+fn memory_access_targeting_a_gc_array_is_rejected() {
+    assert_unsupported(
+        r#"(module
+            (memory 1)
+            (type $arr (array (mut i8)))
+            (func (param (ref $arr)) (result i32)
+              local.get 0
+              i32.const 0
+              i32.load (type $arr)))"#,
+        "GC array payload",
+    );
+}

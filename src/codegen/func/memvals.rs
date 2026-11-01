@@ -1,4 +1,4 @@
-use wasmparser::{MemArg, ValType};
+use wasmparser::{MemArg, MemArgTarget, ValType};
 
 use super::super::helpers::{helper_method_name, mem_accessor};
 use super::super::{Helper, Val, WASM_PAGE_SIZE, memarg_offset, rust_type};
@@ -179,6 +179,17 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
+    /// The linear memory a `MemArg` addresses; GC-array-payload targets (the
+    /// array-memory proposal) are not supported.
+    pub(super) fn memarg_memory(&self, memarg: MemArg) -> Result<u32, TranspileError> {
+        match memarg.target {
+            MemArgTarget::Memory(mem) => self.require_memory_index(mem),
+            MemArgTarget::Array(_) => Err(TranspileError::Unsupported(
+                "memory instruction targeting a GC array payload".into(),
+            )),
+        }
+    }
+
     pub(super) fn load(
         &mut self,
         helper: Helper,
@@ -186,7 +197,7 @@ impl<'a> super::FuncGen<'a> {
         memarg: MemArg,
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
-        let mem = self.require_memory_index(memarg.memory)?;
+        let mem = self.memarg_memory(memarg)?;
         let offset = memarg_offset(memarg)?;
         let addr = self.pop()?;
         self.used_helpers.insert((helper, mem));
@@ -205,7 +216,7 @@ impl<'a> super::FuncGen<'a> {
 
     pub(super) fn store(&mut self, helper: Helper, memarg: MemArg) -> Result<(), TranspileError> {
         self.require_memory()?;
-        let mem = self.require_memory_index(memarg.memory)?;
+        let mem = self.memarg_memory(memarg)?;
         let offset = memarg_offset(memarg)?;
         // Memory is about to change; fix any operand that reads from it. The
         // address and value are consumed here, so inline them and freeze only
@@ -233,7 +244,7 @@ impl<'a> super::FuncGen<'a> {
         lane: u8,
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
-        let mem = self.require_memory_index(memarg.memory)?;
+        let mem = self.memarg_memory(memarg)?;
         let offset = memarg_offset(memarg)?;
         let value = self.pop()?;
         let addr = self.pop()?;
@@ -260,7 +271,7 @@ impl<'a> super::FuncGen<'a> {
         lane: u8,
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
-        let mem = self.require_memory_index(memarg.memory)?;
+        let mem = self.memarg_memory(memarg)?;
         let offset = memarg_offset(memarg)?;
         // Memory is about to change; fix any operand that reads from it. The
         // address and value are consumed here, so inline them and freeze only
@@ -289,7 +300,7 @@ impl<'a> super::FuncGen<'a> {
         memarg: MemArg,
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
-        let mem = self.require_memory_index(memarg.memory)?;
+        let mem = self.memarg_memory(memarg)?;
         let (load, store, ty, _mask) = width.parts();
         let offset = memarg_offset(memarg)?;
         // Memory is about to change; fix any operand that reads from it.
@@ -351,7 +362,7 @@ impl<'a> super::FuncGen<'a> {
         memarg: MemArg,
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
-        let mem = self.require_memory_index(memarg.memory)?;
+        let mem = self.memarg_memory(memarg)?;
         let (load, store, ty, mask) = width.parts();
         let offset = memarg_offset(memarg)?;
         // Memory may change; fix any operand that reads from it.
@@ -408,7 +419,7 @@ impl<'a> super::FuncGen<'a> {
     /// of woken waiters — always 0 on a single instance, which has no waiters.
     pub(super) fn atomic_notify(&mut self, memarg: MemArg) -> Result<(), TranspileError> {
         self.require_memory()?;
-        self.require_memory_index(memarg.memory)?;
+        self.memarg_memory(memarg)?;
         let offset = memarg_offset(memarg)?;
         if self.ctx.memory_shared {
             // Wake up to `count` waiters parked on the effective byte address
@@ -450,7 +461,7 @@ impl<'a> super::FuncGen<'a> {
         memarg: MemArg,
     ) -> Result<(), TranspileError> {
         self.require_memory()?;
-        let mem = self.require_memory_index(memarg.memory)?;
+        let mem = self.memarg_memory(memarg)?;
         let offset = memarg_offset(memarg)?;
         if self.ctx.memory_shared {
             // A real blocking wait: park until notified or the timeout elapses.
