@@ -129,8 +129,8 @@ pub(super) fn render_module(
         lines.extend(shared_memory_runtime_lines());
         lines.push(String::new());
     }
-    // Module-scope statics backing the retained passive segments.
-    lines.extend(passive_segment_statics(parts.data, parts.elements));
+    // Module-scope statics backing the data and element segments.
+    lines.extend(segment_statics(parts.data, parts.elements));
     // Typed-continuations runtime: the step result, the per-continuation frame
     // structs and the tagged object stored in the instance's `conts` table.
     if !ctx.cont.bodies.is_empty() {
@@ -216,7 +216,7 @@ fn push_function_source(out: &mut String, src: &str) {
 /// instance is built, a passive one is kept as a `&'static` slice of it so
 /// `memory.init` can copy from it on demand. Passive element segments likewise
 /// back `table.init`.
-fn passive_segment_statics(data: &[DataSegment], elements: &[ElemSegment]) -> Vec<String> {
+fn segment_statics(data: &[DataSegment], elements: &[ElemSegment]) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for (d, seg) in data.iter().enumerate() {
         lines.push(data_static_line(d, &seg.bytes));
@@ -376,8 +376,12 @@ fn constructor_lines(
         .collect();
     let active_elem: Vec<&ElemSegment> = elements.iter().filter(|e| e.offset.is_some()).collect();
     // The active data segments that target a given memory index, in order.
-    let active_for = |mem: u32| -> Vec<&(usize, &DataSegment)> {
-        active.iter().filter(|(_, d)| d.mem_index == mem).collect()
+    let active_for = |mem: u32| -> Vec<(usize, &DataSegment)> {
+        active
+            .iter()
+            .copied()
+            .filter(|(_, d)| d.mem_index == mem)
+            .collect()
     };
     // Imported memory/table are host-owned, so their active data/elements cannot
     // be written into a `memory`/`table` field literal; instead the instance is
@@ -398,7 +402,7 @@ fn constructor_lines(
     // host buffer accessor (`instance.mem_mut()`), and `indent` matches the
     // surrounding block.
     let copy_active_data = |lines: &mut Vec<String>, mem: u32, target: &str, indent: &str| {
-        for &&(d, seg) in &active_for(mem) {
+        for (d, seg) in active_for(mem) {
             let off = seg.offset.unwrap_or(0) as usize;
             let end = off + seg.bytes.len();
             lines.push(format!(

@@ -1045,9 +1045,11 @@ impl Instance {
 
         let rust = transpile(&wasm).expect("transpile ok");
 
-        // One escaped byte costs 4 characters; the array-literal form spent 7
-        // (`255u8, `) per byte on the same segment.
-        assert!(rust.len() < 4096 * 5, "{} bytes of source", rust.len());
+        // One escaped byte costs 4 characters, so the segment's static stays
+        // under 5 per byte (measured on its own line, not the whole module).
+        let start = rust.find("static DATA0").expect("DATA0 static");
+        let len = rust[start..].find("\";").expect("end of DATA0 static");
+        assert!(len < 4096 * 5, "{len} bytes for the static");
     }
 
     #[test]

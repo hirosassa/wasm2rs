@@ -269,37 +269,40 @@ fn memarg_offset(memarg: MemArg) -> Result<u32, TranspileError> {
     u32::try_from(memarg.offset)
         .map_err(|_| TranspileError::Unsupported("memory offset too large".into()))
 }
-/// Render bytes as the body of a byte-string literal (without the `b"` quotes).
+/// Append bytes to `out` as the body of a byte-string literal (without the
+/// `b"` quotes).
 ///
 /// A segment is one string literal rather than an array of per-byte
 /// expressions, which keeps the source small and spares rustc one AST node per
 /// byte. The literal is broken with `\` line continuations every `PER_LINE`
 /// bytes so no source line grows to megabytes. A continuation skips the next
-/// line's leading whitespace, so the first byte of each line is always escaped.
-fn byte_string_literal(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
+/// line's leading whitespace, so a space at the start of a line is escaped.
+fn byte_string_literal(out: &mut String, bytes: &[u8]) {
     const PER_LINE: usize = 64;
-    let mut out = String::new();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     for (i, &b) in bytes.iter().enumerate() {
         let line_start = i % PER_LINE == 0;
         if line_start && i > 0 {
             out.push_str("\\\n");
         }
-        if b.is_ascii_graphic() && b != b'"' && b != b'\\' || b == b' ' && !line_start {
+        let plain = b.is_ascii_graphic() && b != b'"' && b != b'\\';
+        if plain || (b == b' ' && !line_start) {
             out.push(char::from(b));
         } else {
-            let _ = write!(out, "\\x{b:02x}");
+            out.push_str("\\x");
+            out.push(char::from(HEX[usize::from(b >> 4)]));
+            out.push(char::from(HEX[usize::from(b & 15)]));
         }
     }
-    out
 }
 /// A module-scope `static DATA{d}` holding one data segment's bytes.
 fn data_static_line(d: usize, bytes: &[u8]) -> String {
-    format!(
-        "static DATA{d}: [u8; {}] = *b\"{}\";",
-        bytes.len(),
-        byte_string_literal(bytes)
-    )
+    // Worst case: 4 characters per byte plus a continuation per line.
+    let mut line = String::with_capacity(bytes.len().saturating_mul(4).saturating_add(64));
+    line.push_str(&format!("static DATA{d}: [u8; {}] = *b\"", bytes.len()));
+    byte_string_literal(&mut line, bytes);
+    line.push_str("\";");
+    line
 }
 /// Indent each non-empty line by four spaces.
 fn indent(lines: &[String]) -> Vec<String> {

@@ -95,9 +95,10 @@ fn multiple_segments_and_offsets() {
 
 #[test]
 fn active_data_segment_round_trips_bytes_that_need_escaping() {
-    // 31 filler bytes put a space at a wrapped-line boundary; the rest cover
-    // quote, backslash, whitespace controls, NUL and high bytes.
-    let filler = "A".repeat(31);
+    // 64 filler bytes (one full wrapped line) put a space at the start of the
+    // second line, where a `\` continuation would swallow it if unescaped; the
+    // rest cover quote, backslash, whitespace controls, NUL and high bytes.
+    let filler = "A".repeat(64);
     transpile_compile_run(
         "escaping",
         &format!(
@@ -110,10 +111,10 @@ fn active_data_segment_round_trips_bytes_that_need_escaping() {
         ),
         "let mut inst = Instance::new();\n    \
          let expect: [u8; 9] = [0x22, 0x5c, 0x0a, 0x0d, 0x09, 0x00, 0xff, 0x7f, 0x7e];\n    \
-         assert_eq!(inst.func0(30), 0x41);\n    \
-         assert_eq!(inst.func0(31), 0x20);\n    \
+         assert_eq!(inst.func0(63), 0x41);\n    \
+         assert_eq!(inst.func0(64), 0x20);\n    \
          for (i, b) in expect.iter().enumerate() {\n        \
-             assert_eq!(inst.func0(32 + i as i32), *b as i32, \"byte {i}\");\n    \
+             assert_eq!(inst.func0(65 + i as i32), *b as i32, \"byte {i}\");\n    \
          }",
     );
 }
