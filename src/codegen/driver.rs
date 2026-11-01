@@ -51,6 +51,8 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) imports: &'a [ImportInfo],
     /// Locally-defined functions, occupying the indices after the imports.
     pub(crate) funcs: &'a [FuncInput<'a>],
+    /// Per defined function (parallel to `funcs`): the locals it writes.
+    pub(crate) mutated_locals: Vec<LocalFlags>,
     /// Function indices (imports then defined, ascending) grouped by exact
     /// `(params, results)` signature: the set of functions a `call_indirect`
     /// of that signature can reach. Built once so each call site and dispatch
@@ -353,6 +355,7 @@ pub(crate) fn build_ctx<'a>(
     let ctx = ModuleCtx {
         imports,
         funcs,
+        mutated_locals: scan.mutated,
         funcs_by_sig,
         types,
         type_kinds,
@@ -675,7 +678,13 @@ pub(crate) fn generate_function_into(
     line_prefix: &str,
     out: &mut String,
 ) -> Result<GenMeta, TranspileError> {
-    let mut func = FuncGen::new(input.params, input.results, input.body, ctx)?;
+    let mutated = index
+        .checked_sub(ctx.imports.len())
+        .and_then(|defined| ctx.mutated_locals.get(defined))
+        .ok_or_else(|| {
+            TranspileError::Unsupported(format!("function {index} has no scanned body"))
+        })?;
+    let mut func = FuncGen::new(input.params, input.results, input.body, ctx, mutated)?;
     // A step function (a continuation body, or a function reached from one
     // through a suspend-crossing call) is emitted as a resumable
     // `cont_step_func{N}` state machine instead of an ordinary `func{N}`.

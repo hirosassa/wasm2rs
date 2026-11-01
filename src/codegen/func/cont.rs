@@ -775,7 +775,7 @@ impl super::FuncGen<'_> {
         // reading `__frame.lN` by value would move out of a field behind `&mut`
         // and fail to compile. `u32` handles and scalars are `Copy`.
         for (i, ty) in self.local_types.iter().enumerate() {
-            let keyword = if self.mutable_locals.contains(&index_u32(i)?) {
+            let keyword = if self.mutable_locals.contains(index_u32(i)?) {
                 "let mut"
             } else {
                 "let"
@@ -878,7 +878,7 @@ impl super::FuncGen<'_> {
     fn save_mutated_locals(&self) -> Result<String, TranspileError> {
         let mut out = String::new();
         for i in 0..self.local_types.len() {
-            if self.mutable_locals.contains(&index_u32(i)?) {
+            if self.mutable_locals.contains(index_u32(i)?) {
                 out.push_str(&format!("__frame.l{i} = l{i}; "));
             }
         }
