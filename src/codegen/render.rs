@@ -417,7 +417,13 @@ fn constructor_lines(
     // imported, so only its segments need post-construction copying.
     let post_init_data = mem_imported && !active_for(0).is_empty();
     let post_init_elem = table_imported && !active_elem.is_empty();
-    let post_init = post_init_data || post_init_elem;
+    // The start function runs as the last step of every instantiation, on the
+    // fully built instance.
+    let start_call = parts.start.map(|f| {
+        ctx.call_expr(f as usize, "")
+            .replacen("self.", "instance.", 1)
+    });
+    let post_init = post_init_data || post_init_elem || start_call.is_some();
     let (open, close) = if post_init {
         ("    let mut instance = Self {", "    };")
     } else {
@@ -518,6 +524,21 @@ fn constructor_lines(
         Ok(())
     };
 
+    // Shared-memory constructors build the struct directly, or bind it first when
+    // a start function must run on it; `push_start` appends that call and the
+    // returned instance.
+    let (shared_open, shared_close) = if start_call.is_some() {
+        ("    let mut instance = Self {", "    };")
+    } else {
+        ("    Self {", "    }")
+    };
+    let push_start = |lines: &mut Vec<String>| {
+        if let Some(call) = &start_call {
+            lines.push(format!("    {call};"));
+            lines.push("    instance".to_string());
+        }
+    };
+
     if ctx.memory_shared {
         // A single defined shared memory. `new` creates a fresh `SharedMemory`,
         // applies this module's active data segments into it *once*, and inits
@@ -551,13 +572,14 @@ fn constructor_lines(
             copy_active_data(&mut inner, 0, "__m", "        ");
             inner.push("    }".to_string());
         }
-        inner.push("    Self {".to_string());
+        inner.push(shared_open.to_string());
         if has_imports {
             inner.push("        imports,".to_string());
         }
         inner.push("        memory,".to_string());
         push_common_fields(&mut inner)?;
-        inner.push("    }".to_string());
+        inner.push(shared_close.to_string());
+        push_start(&mut inner);
         inner.push("}".to_string());
 
         let with_param = if has_imports {
@@ -567,13 +589,14 @@ fn constructor_lines(
         };
         inner.push(String::new());
         inner.push(format!("pub fn with_memory({with_param}) -> Self {{"));
-        inner.push("    Self {".to_string());
+        inner.push(shared_open.to_string());
         if has_imports {
             inner.push("        imports,".to_string());
         }
         inner.push("        memory: mem,".to_string());
         push_common_fields(&mut inner)?;
-        inner.push("    }".to_string());
+        inner.push(shared_close.to_string());
+        push_start(&mut inner);
         inner.push("}".to_string());
 
         inner.push(String::new());
@@ -628,7 +651,10 @@ fn constructor_lines(
             if post_init_elem {
                 copy_active_elems(&mut inner, "instance.table_mut()", "    ");
             }
-            inner.push("    instance".to_string());
+            push_start(&mut inner);
+            if start_call.is_none() {
+                inner.push("    instance".to_string());
+            }
         }
         inner.push("}".to_string());
     }
