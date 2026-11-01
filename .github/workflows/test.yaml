@@ -96,8 +96,8 @@ jobs:
     name: E2E with emsdk
     runs-on: ubuntu-latest
     env:
-      # To bump emsdk, change both: the tag of the emsdk checkout (which also
-      # keys the cache) and the SDK version it installs are the same string.
+      # To bump emsdk, change this one value: it is the emsdk git tag, the SDK
+      # version to install, and the cache key.
       EMSDK_VERSION: 6.0.13
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
