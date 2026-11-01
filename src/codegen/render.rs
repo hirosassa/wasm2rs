@@ -761,11 +761,11 @@ struct SharedMemInner {
 
 #[derive(Default)]
 struct SharedPark {
-    // addr -> number of parked waiters
-    waiters: std::collections::HashMap<u32, u32>,
-    // addr -> notification generation; a waiter wakes when its address's
-    // generation advances past the value captured on entry.
-    generation: std::collections::HashMap<u32, u64>,
+    // addr -> FIFO of tickets of the waiters still parked there
+    queues: std::collections::HashMap<u32, std::collections::VecDeque<u64>>,
+    // tickets a `notify` has chosen to wake but whose waiter has not yet resumed
+    woken: std::collections::HashSet<u64>,
+    next_ticket: u64,
 }
 
 fn shared_width_mask(width: usize) -> u64 {
@@ -839,13 +839,19 @@ impl SharedMemory {
         old
     }
 
+    // Wakes the `count` longest-parked waiters on `addr` (at most), by ticket.
     fn notify(&self, addr: u32, count: u32) -> u32 {
         let mut park = self.0.park.lock().unwrap();
-        let waiting = park.waiters.get(&addr).copied().unwrap_or(0);
-        let n = waiting.min(count);
+        let mut n = 0;
+        while n < count {
+            let ticket = match park.queues.get_mut(&addr).and_then(|q| q.pop_front()) {
+                Some(t) => t,
+                None => break,
+            };
+            park.woken.insert(ticket);
+            n += 1;
+        }
         if n > 0 {
-            let g = park.generation.get(&addr).copied().unwrap_or(0).wrapping_add(1);
-            park.generation.insert(addr, g);
             drop(park);
             self.0.cvar.notify_all();
         }
@@ -865,42 +871,33 @@ impl SharedMemory {
                 return 1;
             }
         }
-        let start = park.generation.get(&addr).copied().unwrap_or(0);
-        *park.waiters.entry(addr).or_insert(0) += 1;
-        let result;
-        if timeout_ns < 0 {
-            loop {
-                if park.generation.get(&addr).copied().unwrap_or(0) != start {
-                    result = 0;
-                    break;
-                }
-                park = self.0.cvar.wait(park).unwrap();
-            }
+        let ticket = park.next_ticket;
+        park.next_ticket = ticket.wrapping_add(1);
+        park.queues.entry(addr).or_default().push_back(ticket);
+        let deadline = if timeout_ns < 0 {
+            None
         } else {
-            let deadline = std::time::Instant::now()
-                + std::time::Duration::from_nanos(timeout_ns as u64);
-            loop {
-                if park.generation.get(&addr).copied().unwrap_or(0) != start {
-                    result = 0;
-                    break;
-                }
-                let now = std::time::Instant::now();
-                if now >= deadline {
-                    result = 2;
-                    break;
-                }
-                let (g, to) = self.0.cvar.wait_timeout(park, deadline - now).unwrap();
-                park = g;
-                if to.timed_out() && park.generation.get(&addr).copied().unwrap_or(0) == start {
-                    result = 2;
-                    break;
+            Some(std::time::Instant::now() + std::time::Duration::from_nanos(timeout_ns as u64))
+        };
+        loop {
+            if park.woken.remove(&ticket) {
+                return 0;
+            }
+            match deadline {
+                None => park = self.0.cvar.wait(park).unwrap(),
+                Some(d) => {
+                    let now = std::time::Instant::now();
+                    if now >= d {
+                        // Timed out and not chosen by any `notify`: leave the queue.
+                        if let Some(q) = park.queues.get_mut(&addr) {
+                            q.retain(|t| *t != ticket);
+                        }
+                        return 2;
+                    }
+                    park = self.0.cvar.wait_timeout(park, d - now).unwrap().0;
                 }
             }
         }
-        if let Some(c) = park.waiters.get_mut(&addr) {
-            *c = c.saturating_sub(1);
-        }
-        result
     }
 }"#;
     RUNTIME.lines().map(|l| l.to_string()).collect()

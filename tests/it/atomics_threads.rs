@@ -136,3 +136,40 @@ fn wait_blocks_until_notified() {
         }"#,
     );
 }
+
+#[test]
+fn notify_one_wakes_exactly_one_of_two_waiters() {
+    // Two waiters park on the same address; `notify(1)` must wake exactly one
+    // (returning 1). The other stays parked until its 1s timeout (returns 2).
+    // Waking both would yield [0, 0].
+    compile_run_raw(
+        "atomics_threads_notify_one_of_two",
+        r#"(module
+            (memory 1 1 shared)
+            (func (export "wait_1s") (result i32)
+              i32.const 0
+              i32.const 0
+              i64.const 1000000000   ;; 1s timeout in ns
+              memory.atomic.wait32)
+            (func (export "notify1") (result i32)
+              i32.const 0 i32.const 1 memory.atomic.notify))"#,
+        r#"fn main() {
+            let inst = Instance::new();
+            let handle = inst.shared_memory();
+            let mut joins = Vec::new();
+            for _ in 0..2 {
+                let m = handle.clone();
+                joins.push(std::thread::spawn(move || {
+                    let mut t = Instance::with_memory(m);
+                    t.func0()
+                }));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let mut w = Instance::with_memory(handle);
+            assert_eq!(w.func1(), 1, "notify(1) reports one woken waiter");
+            let mut results: Vec<i32> = joins.into_iter().map(|j| j.join().unwrap()).collect();
+            results.sort();
+            assert_eq!(results, vec![0, 2], "exactly one waiter woken, the other times out");
+        }"#,
+    );
+}
