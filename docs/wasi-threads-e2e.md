@@ -8,9 +8,10 @@ check that binaries produced by real compilers work too.
 | Test | Toolchain | What it covers |
 |---|---|---|
 | `a_wasi_sdk_pthread_reactor_runs_after_initialize` | wasi-sdk `clang` | A C reactor with a constructor and four pthreads. The test calls `_initialize`, then `run` twice on one instance. |
+| `a_wasi_sdk_pthread_command_counts_across_threads` | wasi-sdk `clang` | A C command (`_start`, no `-mexec-model`) with four pthreads; `main` returns non-zero on a wrong count, which exits the process non-zero. |
 | `a_rust_wasi_threads_command_counts_across_threads` | `rustc --target wasm32-wasip1-threads` | A Rust command (`_start`) that spawns four `std::thread`s on a shared atomic counter and asserts the total itself. |
 
-Both exercise the `start` section (`__wasm_init_memory`), `wasi::thread-spawn`,
+All of them exercise the `start` section (`__wasm_init_memory`), `wasi::thread-spawn`,
 the shared memory, and WASI on shared memory.
 
 ## Skipping
