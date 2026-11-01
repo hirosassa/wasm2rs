@@ -79,10 +79,43 @@ fn imported_memory_pages(wasm: &[u8]) -> Option<u64> {
     None
 }
 
+/// Whether `WASM2RS_REQUIRE_E2E` (its value is `flag`) makes `tool` mandatory:
+/// `1` requires every tool, otherwise it is a comma-separated list of tool names
+/// (`rust`, `wasi-sdk`).
+fn tool_required(flag: Option<&str>, tool: &str) -> bool {
+    flag.is_some_and(|f| f.trim() == "1" || f.split(',').any(|t| t.trim() == tool))
+}
+
+/// Called when `tool` is missing: skip with a message, or fail when the tool is
+/// required (so CI cannot go green without running the test).
+fn skip_missing_tool(tool: &str, how_to_get_it: &str) {
+    let flag = std::env::var("WASM2RS_REQUIRE_E2E").ok();
+    assert!(
+        !tool_required(flag.as_deref(), tool),
+        "WASM2RS_REQUIRE_E2E requires {tool}, but it is missing: {how_to_get_it}"
+    );
+    eprintln!("skipped: {how_to_get_it}");
+}
+
+#[test]
+fn the_require_flag_names_the_tools_that_must_not_be_skipped() {
+    assert!(!tool_required(None, "rust"));
+    assert!(!tool_required(Some(""), "rust"));
+    assert!(tool_required(Some("1"), "rust"));
+    assert!(tool_required(Some("1"), "wasi-sdk"));
+    assert!(tool_required(Some("rust"), "rust"));
+    assert!(!tool_required(Some("rust"), "wasi-sdk"));
+    assert!(tool_required(Some("rust, wasi-sdk"), "wasi-sdk"));
+    assert!(!tool_required(Some("rustc"), "rust"));
+}
+
 #[test]
 fn a_wasi_sdk_pthread_reactor_runs_after_initialize() {
     let Some(clang) = wasi_sdk_clang() else {
-        eprintln!("skipped: set WASI_SDK_PATH to a wasi-sdk to run this test");
+        skip_missing_tool(
+            "wasi-sdk",
+            "set WASI_SDK_PATH to a wasi-sdk to run this test",
+        );
         return;
     };
     let dir = work_dir("c_reactor");
@@ -146,7 +179,10 @@ __attribute__((export_name("run"))) int run(int n) {
 #[test]
 fn a_rust_wasi_threads_command_counts_across_threads() {
     if !has_rust_wasi_threads_target() {
-        eprintln!("skipped: run `rustup target add wasm32-wasip1-threads` to run this test");
+        skip_missing_tool(
+            "rust",
+            "run `rustup target add wasm32-wasip1-threads` to run this test",
+        );
         return;
     }
     let dir = work_dir("rust_command");
@@ -197,7 +233,10 @@ fn main() {
 #[test]
 fn a_wasi_sdk_pthread_command_counts_across_threads() {
     let Some(clang) = wasi_sdk_clang() else {
-        eprintln!("skipped: set WASI_SDK_PATH to a wasi-sdk to run this test");
+        skip_missing_tool(
+            "wasi-sdk",
+            "set WASI_SDK_PATH to a wasi-sdk to run this test",
+        );
         return;
     };
     let dir = work_dir("c_command");
