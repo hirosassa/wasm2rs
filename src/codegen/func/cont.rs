@@ -156,7 +156,8 @@ impl super::FuncGen<'_> {
         // A body whose `suspend` or `switch` crosses a nested region cannot render
         // each region as one straight-line arm; it needs the `pc` state machine
         // woven through the nesting, which the flat path does by lowering the whole
-        // body through the continuation flattener.
+        // body through the continuation flattener. Past this point every `suspend`
+        // and `switch` is therefore at control depth 0 (`self.frames` is empty).
         if Self::transfer_crosses_region(body)? {
             return self.emit_cont_step_flat(index, params, body, line_prefix, out);
         }
@@ -178,13 +179,6 @@ impl super::FuncGen<'_> {
         for op in body.get_operators_reader()? {
             match op? {
                 Operator::Suspend { tag_index } => {
-                    if !self.frames.is_empty() {
-                        return Err(TranspileError::Unsupported(
-                            "suspend inside nested control flow in a continuation body (phase \
-                             5b-2b: a suspend crossing a region is not yet lowered)"
-                                .into(),
-                        ));
-                    }
                     if checkpoint.is_some() {
                         return Err(TranspileError::Unsupported(
                             "suspend after a cross-call checkpoint (a checkpoint must be \
@@ -318,13 +312,6 @@ impl super::FuncGen<'_> {
                     cont_type_index,
                     tag_index,
                 } => {
-                    if !self.frames.is_empty() {
-                        return Err(TranspileError::Unsupported(
-                            "switch inside nested control flow in a continuation body (phase \
-                             8-2: a switch crossing a region is not yet lowered)"
-                                .into(),
-                        ));
-                    }
                     if checkpoint.is_some() {
                         return Err(TranspileError::Unsupported(
                             "switch after a cross-call checkpoint".into(),
