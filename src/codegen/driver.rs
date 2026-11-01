@@ -210,6 +210,9 @@ pub(crate) struct ModuleParts<'a> {
     /// Cap on match arms per flattened-dispatch part function; `0` disables the
     /// split (see [`ModuleCtx::split_dispatch`]).
     pub(crate) split_dispatch: usize,
+    /// Threads generating function bodies (`0` = auto; see
+    /// `TranspileOptions::jobs`).
+    pub(crate) jobs: usize,
 }
 /// Derive the translation context from a module's raw parts.
 ///
@@ -435,25 +438,15 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     let mut funcs_buf = String::new();
     let mut ends = Vec::with_capacity(parts.funcs.len());
     let mut deps = ModuleDeps::default();
-    for (index, f) in parts.funcs.iter().enumerate() {
-        if !parts.live[index] {
-            continue;
-        }
+    super::parallel::for_each_function(parts, &ctx, line_prefix, |src, meta| {
         if stateful {
             funcs_buf.push('\n');
         }
-        // Defined functions are named by their full function index, i.e. after
-        // the imported functions in the shared index space.
-        let meta = generate_function_into(
-            parts.imports.len() + index,
-            f,
-            &ctx,
-            line_prefix,
-            &mut funcs_buf,
-        )?;
+        funcs_buf.push_str(src);
         deps.merge(meta);
         ends.push(funcs_buf.len());
-    }
+        Ok(())
+    })?;
     // Every rendered dispatch method (`call_ref_t{ti}`) carries the type-mismatch
     // trap, so its cold helper must exist whenever any dispatch method is emitted.
     if !deps.dispatch_sigs.is_empty() {
@@ -572,8 +565,6 @@ pub(crate) fn generate_module_split(
     }
 
     let (ctx, stateful) = build_ctx(parts)?;
-    let base = parts.imports.len();
-
     // Aggregated across every function: needed only to render the `lib.rs` root
     // (helper methods, dispatch methods and runtime helpers). Each chunk file is
     // otherwise self-contained, so it can be emitted and dropped immediately.
@@ -584,24 +575,21 @@ pub(crate) fn generate_module_split(
     // at column zero.
     let line_prefix = if stateful { "    " } else { "" };
     // The current chunk is built in place: its prelude is written when the first
-    // function joins it, each function's source is streamed straight in (never
-    // buffered as a separate `String`), and the whole buffer is handed to `emit`
-    // and reset at a flush. Peak memory is therefore about one chunk, not the
-    // whole program.
+    // function joins it, each function's source is appended
+    // as `for_each_function` hands it over (in index order), and the whole buffer
+    // is handed to `emit` and reset at a flush. Peak memory is therefore about
+    // one chunk (plus the few functions in flight), not the whole program.
     let mut chunk = String::new();
     let mut funcs_in_chunk = 0usize;
     let mut chunk_index = 0usize;
-    for (index, f) in parts.funcs.iter().enumerate() {
-        if !parts.live[index] {
-            continue;
-        }
+    super::parallel::for_each_function(parts, &ctx, line_prefix, |src, meta| {
         if funcs_in_chunk == 0 {
             chunk.push_str(&chunk_prelude(parts, stateful));
         }
         // A blank line separates each function from the prelude or its
         // predecessor, matching the single-file rendering.
         chunk.push('\n');
-        let meta = generate_function_into(base + index, f, &ctx, line_prefix, &mut chunk)?;
+        chunk.push_str(src);
         deps.merge(meta);
         funcs_in_chunk += 1;
 
@@ -618,7 +606,8 @@ pub(crate) fn generate_module_split(
             chunk_index += 1;
             funcs_in_chunk = 0;
         }
-    }
+        Ok(())
+    })?;
     if funcs_in_chunk > 0 {
         if stateful {
             chunk.push_str("}\n");

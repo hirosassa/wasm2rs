@@ -30,6 +30,7 @@ mod const_expr;
 mod func;
 mod helpers;
 mod info;
+mod parallel;
 mod render;
 mod render_cont;
 mod runtime;

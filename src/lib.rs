@@ -128,6 +128,15 @@ pub struct TranspileOptions {
     /// the table (`call_indirect`, `table.get/copy/init`) from reachable code
     /// keeps every element-segment function.
     pub entry_exports: Option<Vec<String>>,
+
+    /// How many threads generate function bodies. The output is byte-identical
+    /// for every value: the per-function pieces are joined in function-index
+    /// order. `1` stays on the calling thread; `0` (the default) picks the
+    /// available parallelism (at most 8), but only for modules large enough to
+    /// repay the threads. Any other value is used as given (capped at the function
+    /// count). Worker threads get a large stack of their own, since lowering
+    /// recurses on control-flow nesting.
+    pub jobs: usize,
 }
 
 /// The recommended `Cargo.toml` for a split crate, named `package_name`.
@@ -596,6 +605,7 @@ where
         start,
         unsafe_memory: topts.unsafe_memory,
         split_dispatch: topts.split_dispatch,
+        jobs: topts.jobs,
     };
     codegen::generate_module_split(
         &parts,
