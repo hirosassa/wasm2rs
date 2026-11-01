@@ -13,7 +13,7 @@
 
 use crate::common;
 
-use common::{compile_run, compile_run_raw, expect_trap_with};
+use common::{compile_run, compile_run_raw, compile_run_split, expect_trap_with};
 use wasm2rs::{TranspileError, transpile};
 
 const SPAWN_IMPORT: &str = r#"
@@ -360,5 +360,132 @@ fn every_descriptor_table_function_compiles_with_thread_spawn() {
               (func (export "wasi_thread_start") (param i32 i32)))"#
         ),
         "let _inst = Instance::new(SharedMemory::new(65536));",
+    );
+}
+
+#[test]
+fn a_child_does_not_reapply_the_parents_data_segments() {
+    // The data segment puts 7 at address 8. The parent overwrites it with 99
+    // before spawning; a child instance must not re-run the segment, so it sees
+    // 99 and copies it to address 0.
+    compile_run(
+        "wasi_threads_data_not_reapplied",
+        &format!(
+            r#"(module {SPAWN_IMPORT}
+              (data (i32.const 8) "\07\00\00\00")
+              (func (export "wasi_thread_start") (param i32 i32)
+                i32.const 0
+                i32.const 8
+                i32.atomic.load
+                i32.atomic.store
+                i32.const 0
+                i32.const 1
+                memory.atomic.notify
+                drop)
+              (func (export "run") (result i32)
+                i32.const 8 i32.const 99 i32.atomic.store
+                i32.const 0
+                call $spawn
+                drop
+                i32.const 0 i32.const 0 i64.const 5000000000
+                memory.atomic.wait32
+                drop
+                i32.const 0
+                i32.atomic.load))"#
+        ),
+        "let mut inst = Instance::new(SharedMemory::new(65536)); assert_eq!(inst.func2(), 99);",
+    );
+}
+
+#[test]
+fn a_child_runs_nested_loops_and_branches() {
+    // The child sums i*j for i, j in 1..=20 with nested loops, blocks and a
+    // conditional skip, then publishes the total (2 * 210 * 210 - skipped).
+    compile_run(
+        "wasi_threads_loops",
+        &format!(
+            r#"(module {SPAWN_IMPORT}
+              (func $sum (result i32)
+                (local $i i32) (local $j i32) (local $acc i32)
+                i32.const 1 local.set $i
+                block $done
+                  loop $outer
+                    local.get $i i32.const 20 i32.gt_s br_if $done
+                    i32.const 1 local.set $j
+                    block $inner_done
+                      loop $inner
+                        local.get $j i32.const 20 i32.gt_s br_if $inner_done
+                        local.get $j i32.const 5 i32.rem_s
+                        if
+                        else
+                          local.get $acc local.get $i local.get $j i32.mul i32.add local.set $acc
+                        end
+                        local.get $j i32.const 1 i32.add local.set $j
+                        br $inner
+                      end
+                    end
+                    local.get $i i32.const 1 i32.add local.set $i
+                    br $outer
+                  end
+                end
+                local.get $acc)
+              (func (export "wasi_thread_start") (param i32 i32)
+                i32.const 0 call $sum i32.atomic.store
+                i32.const 0 i32.const 1 memory.atomic.notify drop)
+              (func (export "run") (result i32)
+                i32.const 0 call $spawn drop
+                i32.const 0 i32.const 0 i64.const 5000000000
+                memory.atomic.wait32 drop
+                i32.const 0 i32.atomic.load))"#
+        ),
+        // multiples of 5 for j: 5,10,15,20 sum 50; times sum(i)=210.
+        "let mut inst = Instance::new(SharedMemory::new(65536)); assert_eq!(inst.func3(), 50 * 210);",
+    );
+}
+
+#[test]
+fn a_child_can_resume_a_continuation() {
+    compile_run(
+        "wasi_threads_cont",
+        &format!(
+            r#"(module {SPAWN_IMPORT}
+              (type $ft (func (result i32)))
+              (type $ct (cont $ft))
+              (func $gen (result i32) i32.const 42)
+              (func (export "wasi_thread_start") (param i32 i32)
+                i32.const 0
+                ref.func $gen cont.new $ct resume $ct
+                i32.atomic.store
+                i32.const 0 i32.const 1 memory.atomic.notify drop)
+              (func (export "run") (result i32)
+                i32.const 0 call $spawn drop
+                i32.const 0 i32.const 0 i64.const 5000000000
+                memory.atomic.wait32 drop
+                i32.const 0 i32.atomic.load))"#
+        ),
+        "let mut inst = Instance::new(SharedMemory::new(65536)); assert_eq!(inst.func3(), 42);",
+    );
+}
+
+#[test]
+fn thread_spawn_works_when_the_module_is_split_across_files() {
+    // With one function per file, the spawn method and the child's entry point
+    // live in different files of the crate.
+    compile_run_split(
+        "wasi_threads_split",
+        &format!(
+            r#"(module {SPAWN_IMPORT}
+              (func $twice (param i32) (result i32) local.get 0 i32.const 2 i32.mul)
+              (func (export "wasi_thread_start") (param i32 i32)
+                i32.const 0 local.get 1 call $twice i32.atomic.store
+                i32.const 0 i32.const 1 memory.atomic.notify drop)
+              (func (export "run") (result i32)
+                i32.const 21 call $spawn drop
+                i32.const 0 i32.const 0 i64.const 5000000000
+                memory.atomic.wait32 drop
+                i32.const 0 i32.atomic.load))"#
+        ),
+        1,
+        "let mut inst = Instance::new(SharedMemory::new(65536)); assert_eq!(inst.func3(), 42);",
     );
 }
