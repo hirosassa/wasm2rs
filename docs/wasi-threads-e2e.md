@@ -24,10 +24,16 @@ does not prove the test ran. Use `--nocapture` to see the messages:
 cargo test --test it wasi_sdk_e2e -- --nocapture
 ```
 
-CI installs the Rust target and sets `WASM2RS_REQUIRE_E2E=rust`, so the Rust
-command test must run there. CI has no wasi-sdk, so the two wasi-sdk tests are
-skipped in CI: run them locally when you change thread, start-section,
-shared-memory or WASI code.
+CI runs these tests in two places, and both make a missing tool an error:
+
+- The `build` job installs the Rust target and sets `WASM2RS_REQUIRE_E2E=rust`,
+  so the Rust command test must run on every toolchain of the matrix. It has
+  no wasi-sdk, so the two wasi-sdk tests skip there.
+- The `E2E with wasi-sdk` job downloads wasi-sdk (cached, sha256-verified) and
+  runs this module with `WASM2RS_REQUIRE_E2E=1`, so all three tests must run.
+  To bump wasi-sdk, update `WASI_SDK_TARBALL`, `WASI_SDK_SHA256` and the
+  release tag in the download URL together in `.github/workflows/test.yaml`
+  (the sha256 also keys the cache).
 
 ### Making a missing tool an error
 
