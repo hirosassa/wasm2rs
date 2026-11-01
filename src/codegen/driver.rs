@@ -195,6 +195,8 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) table: Option<&'a TableInfo>,
     pub(crate) elements: &'a [ElemSegment],
     pub(crate) tags: &'a [TagInfo],
+    /// The module's function exports, in declaration order.
+    pub(crate) exports: &'a [ExportInfo],
     /// Opt-in unchecked linear-memory access (see [`ModuleCtx::unsafe_memory`]).
     pub(crate) unsafe_memory: bool,
     /// Cap on match arms per flattened-dispatch part function; `0` disables the
@@ -431,6 +433,10 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
                 out.push('\n');
             }
             out.push_str(src);
+        }
+        for line in render::entry_point_lines(parts, &ctx)? {
+            out.push('\n');
+            out.push_str(&line);
         }
     } else {
         render_module(

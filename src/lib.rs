@@ -7,6 +7,7 @@
 
 mod codegen;
 
+use wasmparser::ExternalKind;
 use wasmparser::{
     CompositeInnerType, DataKind, ElementItems, ElementKind, FuncType, Parser, Payload, TableInit,
     TypeRef, ValType,
@@ -236,6 +237,7 @@ where
     // Exception tags, imported ones first (classified alongside other imports)
     // then locally-defined ones, matching the wasm tag index space.
     let mut tags: Vec<codegen::TagInfo> = Vec::new();
+    let mut exports: Vec<codegen::ExportInfo> = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
@@ -491,6 +493,17 @@ where
                     });
                 }
             }
+            Payload::ExportSection(reader) => {
+                for export in reader {
+                    let export = export?;
+                    if export.kind == ExternalKind::Func {
+                        exports.push(codegen::ExportInfo {
+                            name: export.name.to_string(),
+                            func_index: export.index,
+                        });
+                    }
+                }
+            }
             Payload::CodeSectionEntry(body) => {
                 bodies.push(body);
             }
@@ -538,6 +551,7 @@ where
         table: table.as_ref(),
         elements: &elements,
         tags: &tags,
+        exports: &exports,
         unsafe_memory: topts.unsafe_memory,
         split_dispatch: topts.split_dispatch,
     };
