@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fd_fdstat_set_rights` and `fd_renumber`. Requests `std` cannot honour (changing
   descriptor flags, renumbering stdio, setting times on a symlink itself) return
   `ENOTSUP` rather than being silently ignored.
+- **`poll_oneoff`, `sock_*` and `proc_raise` are generated natively.**
+  `poll_oneoff` supports clock subscriptions (relative and absolute, sleeping until
+  the earliest) and `fd_read`/`fd_write` subscriptions (stdio and open files are
+  always ready, an unopened fd is an `EBADF` event); no memory or fd-table lock is
+  held while sleeping. `sock_accept/recv/send/shutdown` return `EBADF` or
+  `ENOTSOCK` (no socket descriptors exist), and `proc_raise` returns `EINVAL` or
+  `ENOSYS`. A host that implemented any of these through the `Imports` trait no
+  longer receives those calls.
 
 ## [0.1.1] - 2026-08-17
 
