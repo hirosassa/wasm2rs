@@ -118,14 +118,14 @@ impl<'a> super::FuncGen<'a> {
             .get(type_index as usize)
             .ok_or_else(|| TranspileError::Unsupported("call_indirect: unknown type".into()))?;
         let results = sig.results.clone();
-        // The functions any table entry could resolve to: exactly those whose
-        // signature equals the declared type (no subtyping, so a structural
-        // match is a type match). This spans the whole index space, so a table
-        // entry may resolve to an imported function.
-        let want = Some((sig.params.as_slice(), sig.results.as_slice()));
-        let targets: Vec<usize> = (0..self.ctx.func_count())
-            .filter(|&fidx| self.ctx.full_sig(fidx) == want)
-            .collect();
+        // Whether any function in the index space (imports included, since a
+        // table entry may resolve to an imported function) has exactly the
+        // declared signature; there is no subtyping, so a structural match is
+        // a type match.
+        let has_targets = !self
+            .ctx
+            .funcs_with_sig(&sig.params, &sig.results)
+            .is_empty();
 
         // The table index (top of stack) is consumed into the `entry` binding
         // below, which is emitted *before* the dispatch call — so only the index
@@ -152,7 +152,7 @@ impl<'a> super::FuncGen<'a> {
         // it. With a host, a table entry may still be an external handle the
         // host resolves, so fall through to the shared dispatch method (which
         // has only the null/external/catch-all arms).
-        if targets.is_empty() && !self.ctx.has_imports {
+        if !has_targets && !self.ctx.has_imports {
             self.used_rt.insert(Rt::TrapIndirectTypeMismatch);
             self.term("trap_indirect_type_mismatch();".to_string());
             self.reachable = false;

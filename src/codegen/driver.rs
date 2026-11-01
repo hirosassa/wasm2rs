@@ -51,6 +51,11 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) imports: &'a [ImportInfo],
     /// Locally-defined functions, occupying the indices after the imports.
     pub(crate) funcs: &'a [FuncInput<'a>],
+    /// Function indices (imports then defined, ascending) grouped by exact
+    /// `(params, results)` signature: the set of functions a `call_indirect`
+    /// of that signature can reach. Built once so each call site and dispatch
+    /// method looks it up instead of rescanning the whole function space.
+    funcs_by_sig: SigIndex,
     /// Every function type, so `call_indirect` can resolve its declared type
     /// index back to a signature.
     pub(crate) types: &'a [TypeSig],
@@ -144,12 +149,6 @@ impl ModuleCtx<'_> {
             .collect()
     }
 
-    /// The number of functions in the shared index space (imports then defined),
-    /// i.e. the range of valid full indices.
-    pub(crate) fn func_count(&self) -> usize {
-        self.imports.len() + self.funcs.len()
-    }
-
     /// The signature `(params, results)` of the function at full index `fidx`,
     /// spanning imports then defined functions.
     pub(crate) fn full_sig(&self, fidx: usize) -> Option<(&[ValType], &[ValType])> {
@@ -161,6 +160,14 @@ impl ModuleCtx<'_> {
             let f = self.funcs.get(fidx - n_imports)?;
             Some((f.params, f.results))
         }
+    }
+
+    /// The full indices of every function whose signature is exactly
+    /// `(params, results)`, ascending. Empty when none matches.
+    pub(crate) fn funcs_with_sig(&self, params: &[ValType], results: &[ValType]) -> &[usize] {
+        self.funcs_by_sig
+            .get(&(params.to_vec(), results.to_vec()))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// The Rust call expression for invoking the function at full index `fidx`
@@ -304,9 +311,16 @@ pub(crate) fn build_ctx<'a>(
         || uses_extern_box
         || !cont_bodies.is_empty();
 
+    let funcs_by_sig = index_by_signature(
+        imports
+            .iter()
+            .map(|im| (im.params.as_slice(), im.results.as_slice()))
+            .chain(funcs.iter().map(|f| (f.params, f.results))),
+    );
     let ctx = ModuleCtx {
         imports,
         funcs,
+        funcs_by_sig,
         types,
         type_kinds,
         supers,
@@ -613,4 +627,41 @@ pub(crate) fn generate_function_into(
     }
     func.run(input.body)?;
     func.finish(index, input.params, input.results, line_prefix, out)
+}
+
+/// Function indices keyed by exact `(params, results)` signature.
+type SigIndex = HashMap<(Vec<ValType>, Vec<ValType>), Vec<usize>>;
+
+/// Groups function indices (in iteration order, so ascending) by their exact
+/// `(params, results)` signature.
+fn index_by_signature<'a>(
+    sigs: impl IntoIterator<Item = (&'a [ValType], &'a [ValType])>,
+) -> SigIndex {
+    let mut index = SigIndex::new();
+    for (fidx, (params, results)) in sigs.into_iter().enumerate() {
+        index
+            .entry((params.to_vec(), results.to_vec()))
+            .or_default()
+            .push(fidx);
+    }
+    index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_by_signature_groups_function_indices_in_ascending_order() {
+        let i32_to_i32: (&[ValType], &[ValType]) = (&[ValType::I32], &[ValType::I32]);
+        let i64_to_i64: (&[ValType], &[ValType]) = (&[ValType::I64], &[ValType::I64]);
+        let nullary: (&[ValType], &[ValType]) = (&[], &[]);
+        let index = index_by_signature([i32_to_i32, i64_to_i64, i32_to_i32, nullary, i32_to_i32]);
+
+        let key = |(p, r): (&[ValType], &[ValType])| (p.to_vec(), r.to_vec());
+        assert_eq!(index.get(&key(i32_to_i32)), Some(&vec![0, 2, 4]));
+        assert_eq!(index.get(&key(i64_to_i64)), Some(&vec![1]));
+        assert_eq!(index.get(&key(nullary)), Some(&vec![3]));
+        assert_eq!(index.get(&key((&[ValType::F32], &[]))), None);
+    }
 }
