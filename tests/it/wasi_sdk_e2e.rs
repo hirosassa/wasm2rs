@@ -33,6 +33,15 @@ fn wasi_sdk_clang() -> Option<PathBuf> {
     clang.is_file().then_some(clang)
 }
 
+/// The `emcc` of the emsdk named by `EMSDK` (set by `emsdk_env.sh`).
+fn emcc() -> Option<PathBuf> {
+    let emcc = Path::new(&std::env::var_os("EMSDK")?)
+        .join("upstream")
+        .join("emscripten")
+        .join("emcc");
+    emcc.is_file().then_some(emcc)
+}
+
 /// Whether rustc can target `wasm32-wasip1-threads` (its std is installed).
 fn has_rust_wasi_threads_target() -> bool {
     let out = Command::new("rustc")
@@ -62,6 +71,26 @@ fn export_index(wasm: &[u8], name: &str) -> u32 {
     panic!("no function export named {name}");
 }
 
+/// The function index of the imported function `module.name`.
+fn import_index(wasm: &[u8], module: &str, name: &str) -> u32 {
+    let mut index = 0;
+    for payload in Parser::new(0).parse_all(wasm) {
+        if let Payload::ImportSection(reader) = payload.unwrap() {
+            for import in reader {
+                if let Imports::Single(_, import) = import.unwrap()
+                    && let TypeRef::Func(_) | TypeRef::FuncExact(_) = import.ty
+                {
+                    if import.module == module && import.name == name {
+                        return index;
+                    }
+                    index += 1;
+                }
+            }
+        }
+    }
+    panic!("no function import named {module}.{name}");
+}
+
 /// The initial size, in pages, of the imported memory (the host provides it).
 fn imported_memory_pages(wasm: &[u8]) -> Option<u64> {
     for payload in Parser::new(0).parse_all(wasm) {
@@ -81,7 +110,7 @@ fn imported_memory_pages(wasm: &[u8]) -> Option<u64> {
 
 /// Whether `WASM2RS_REQUIRE_E2E` (its value is `flag`) makes `tool` mandatory:
 /// `1` requires every tool, otherwise it is a comma-separated list of tool names
-/// (`rust`, `wasi-sdk`).
+/// (`rust`, `wasi-sdk`, `emsdk`).
 fn tool_required(flag: Option<&str>, tool: &str) -> bool {
     flag.is_some_and(|f| f.trim() == "1" || f.split(',').any(|t| t.trim() == tool))
 }
@@ -283,6 +312,75 @@ int main(void) {
         &wasm,
         &format!(
             "let mut inst = Instance::new();\n\
+             inst.func{start}();"
+        ),
+    );
+}
+
+#[test]
+fn an_emscripten_pthread_command_counts_across_threads() {
+    let Some(emcc) = emcc() else {
+        skip_missing_tool(
+            "emsdk",
+            "source an emsdk's emsdk_env.sh (sets EMSDK) to run this test",
+        );
+        return;
+    };
+    let dir = work_dir("emscripten_command");
+    // Emscripten starts a pthread by asking its JS host for a Worker
+    // (`__pthread_create_js`); wasm2rs answers with a native thread. A wrong
+    // count makes `main` return non-zero, which exits the process non-zero.
+    std::fs::write(
+        dir.join("command.c"),
+        r#"
+#include <pthread.h>
+#include <stdatomic.h>
+static atomic_int counter;
+static void *work(void *arg) {
+  for (int i = 0; i < 1000; i++) atomic_fetch_add(&counter, 1);
+  return 0;
+}
+int main(void) {
+  pthread_t t[4];
+  for (int i = 0; i < 4; i++) pthread_create(&t[i], 0, work, 0);
+  for (int i = 0; i < 4; i++) pthread_join(t[i], 0);
+  return atomic_load(&counter) == 4000 ? 0 : 1;
+}
+"#,
+    )
+    .unwrap();
+    let status = Command::new(emcc)
+        .current_dir(&dir)
+        .args([
+            "-O1",
+            "-pthread",
+            "-sSTANDALONE_WASM",
+            "command.c",
+            "-o",
+            "command.wasm",
+        ])
+        .status()
+        .expect("run emcc");
+    assert!(status.success(), "emcc failed");
+    let wasm = std::fs::read(dir.join("command.wasm")).unwrap();
+
+    let start = export_index(&wasm, "_start");
+    let pages = imported_memory_pages(&wasm).expect("imported memory");
+    // The only imports left to the host proxy a call to the main thread, which
+    // this program never does.
+    let proxy = import_index(&wasm, "env", "_emscripten_receive_on_main_thread_js");
+    compile_run_wasm(
+        "emscripten_c_command",
+        &wasm,
+        &format!(
+            "#[derive(Clone)]\n\
+             struct Host;\n\
+             impl Imports for Host {{\n\
+                 fn import{proxy}(&mut self, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32) -> f64 {{\n\
+                     panic!(\"unexpected proxy to the main thread\")\n\
+                 }}\n\
+             }}\n\
+             let mut inst = Instance::new(SharedMemory::new({pages} * 65536), Host);\n\
              inst.func{start}();"
         ),
     );
