@@ -82,13 +82,53 @@ jobs:
           tar xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$HOME/wasi-sdk" --strip-components=1
 
       # Both tools are required, so a missing one fails instead of skipping. emsdk is
-      # not installed here, so its test skips (it is not named in the list).
+      # not installed here (the e2e-emsdk job has it), so its tests skip.
       - name: Run the E2E tests
         run: |
           export WASI_SDK_PATH="$HOME/wasi-sdk"
           cargo test --release --test it wasi_sdk_e2e -- --nocapture
         env:
           WASM2RS_REQUIRE_E2E: "rust,wasi-sdk"
+
+  # The emscripten E2E tests need an emsdk (several hundred MB), so they also get
+  # their own cached job. Only they run here; the wasi-sdk ones run above.
+  e2e-emsdk:
+    name: E2E with emsdk
+    runs-on: ubuntu-latest
+    env:
+      # To bump emsdk, change both: the tag of the emsdk checkout (which also
+      # keys the cache) and the SDK version it installs are the same string.
+      EMSDK_VERSION: 6.0.13
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-wasip1-threads
+
+      - name: Cache emsdk
+        id: emsdk-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/emsdk
+          key: emsdk-${{ env.EMSDK_VERSION }}
+
+      - name: Install emsdk
+        if: steps.emsdk-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$EMSDK_VERSION" https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          "$HOME/emsdk/emsdk" install "$EMSDK_VERSION"
+          "$HOME/emsdk/emsdk" activate "$EMSDK_VERSION"
+
+      # emsdk is required, so a missing one fails instead of skipping. The
+      # filter picks the emscripten tests, which all start with `an_emscripten`.
+      - name: Run the emscripten E2E tests
+        run: |
+          export EMSDK="$HOME/emsdk"
+          cargo test --release --test it an_emscripten -- --nocapture
+        env:
+          WASM2RS_REQUIRE_E2E: emsdk
 
   coverage:
     runs-on: ubuntu-latest
