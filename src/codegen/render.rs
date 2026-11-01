@@ -590,7 +590,18 @@ fn constructor_lines(
             inner.push(format!("pub fn new({params}) -> Self {{"));
         } else {
             inner.push(format!("pub fn new({new_param}) -> Self {{"));
-            inner.push(format!("    let memory = SharedMemory::new({bytes});"));
+            // Reserve up to the declared maximum (a shared memory must declare
+            // one); without it, the wasm32 limit that `new` reserves.
+            let ctor = match mem0.max_pages {
+                Some(max) => {
+                    let max_bytes = max
+                        .checked_mul(WASM_PAGE_SIZE)
+                        .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
+                    format!("SharedMemory::with_max({bytes}, {max_bytes})")
+                }
+                None => format!("SharedMemory::new({bytes})"),
+            };
+            inner.push(format!("    let memory = {ctor};"));
         }
         if !active_for(0).is_empty() {
             inner.push("    {".to_string());
@@ -705,7 +716,7 @@ fn constructor_lines(
 /// The uniform memory accessors (`mem`/`mem_mut`/`memory` for memory 0, then
 /// `mem{i}`/`mem{i}_mut`/`memory{i}`), so the load/store/bulk helpers read the
 /// same regardless of whether a memory is defined (a field) or imported (lent by
-/// the host). A shared module emits none of these — its helpers lock
+/// the host). A shared module emits none of these — its helpers use
 /// `self.memory.bytes()` directly — so the accessor set is empty there.
 fn memory_accessor_lines(parts: &ModuleParts<'_>, ctx: &ModuleCtx<'_>) -> Vec<String> {
     let mut inner: Vec<String> = Vec::new();
@@ -943,8 +954,8 @@ fn helper_method_lines(
             if used.contains(&(helper, mem)) {
                 inner.push(String::new());
                 if memory_shared {
-                    // The shared-memory backend locks `self.memory.bytes()` per
-                    // body; unchecked access is not wired through that guard, so
+                    // The shared-memory backend reads `self.memory.bytes()` per
+                    // body; unchecked access is not wired through it, so
                     // `unsafe_memory` does not apply to a shared memory.
                     inner.extend(shared_helper_lines(helper));
                 } else {
@@ -1116,19 +1127,41 @@ fn dispatch_method_block(
 }
 
 /// The module-scope runtime for a `shared` memory: the thread-shareable
-/// `SharedMemory` handle (a `#[derive(Clone)]` `Arc` of a `Mutex`-bearing inner,
-/// so it is `Send + Sync`), the little-endian read/write/combine helpers, and
-/// the atomic RMW/cmpxchg/wait/notify methods. Emitted verbatim (warning-clean
-/// under `-D warnings`) and used only when the module has a single defined
-/// shared memory.
+/// `SharedMemory` handle (a `#[derive(Clone)]` `Arc`, so it is `Send + Sync`),
+/// the combine helper, and the atomic load/store/RMW/cmpxchg/wait/notify
+/// methods. Emitted verbatim (warning-clean under `-D warnings`) and used only
+/// when the module has a single defined shared memory.
+///
+/// The bytes are reserved once, up to the memory's maximum, and never move, so
+/// threads read and write them without a lock (`memory.grow` only raises the
+/// current length). A plain access is an ordinary, non-atomic slice access: as
+/// in wasm, two threads racing on the same bytes see unspecified values, which
+/// Rust formally calls a data race. Atomic operations are real atomic
+/// instructions (sequentially consistent) and trap on a misaligned address.
 fn shared_memory_runtime_lines() -> Vec<String> {
     const RUNTIME: &str = r#"#[derive(Clone)]
 pub struct SharedMemory(std::sync::Arc<SharedMemInner>);
 
 struct SharedMemInner {
-    bytes: std::sync::Mutex<Vec<u8>>,
+    // `cap` zeroed bytes reserved up front (lazily backed by the OS) and never
+    // reallocated; `len` is the current size, raised by `memory.grow`.
+    base: *mut u8,
+    cap: usize,
+    len: std::sync::atomic::AtomicUsize,
     park: std::sync::Mutex<SharedPark>,
     cvar: std::sync::Condvar,
+}
+
+// SAFETY: `base` points at a heap block owned by this value and never moved or
+// freed before drop; concurrent access to it is the shared-memory contract above.
+unsafe impl Send for SharedMemInner {}
+unsafe impl Sync for SharedMemInner {}
+
+impl Drop for SharedMemInner {
+    fn drop(&mut self) {
+        // SAFETY: `base`/`cap` came from `Box::<[u8]>::into_raw` in `with_max`.
+        unsafe { drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(self.base, self.cap))) }
+    }
 }
 
 #[derive(Default)]
@@ -1142,24 +1175,6 @@ struct SharedPark {
 
 fn shared_width_mask(width: usize) -> u64 {
     if width >= 8 { u64::MAX } else { (1u64 << (width * 8)) - 1 }
-}
-
-fn shared_read_le(b: &[u8], addr: usize, width: usize) -> u64 {
-    let mut v: u64 = 0;
-    let mut i = 0;
-    while i < width {
-        v |= (b[addr + i] as u64) << (8 * i);
-        i += 1;
-    }
-    v
-}
-
-fn shared_write_le(b: &mut [u8], addr: usize, width: usize, val: u64) {
-    let mut i = 0;
-    while i < width {
-        b[addr + i] = (val >> (8 * i)) as u8;
-        i += 1;
-    }
 }
 
 // RMW op codes: 0=add 1=sub 2=and 3=or 4=xor 5=xchg
@@ -1178,37 +1193,148 @@ fn shared_combine(op: u8, old: u64, val: u64, width: usize) -> u64 {
 
 #[allow(dead_code)]
 impl SharedMemory {
+    // The host-created handle: room to grow to the wasm32 limit (4 GiB of
+    // address space, only touched pages are backed).
     pub fn new(min_bytes: usize) -> Self {
+        Self::with_max(min_bytes, 65536 * 65536)
+    }
+
+    pub fn with_max(min_bytes: usize, max_bytes: usize) -> Self {
+        let cap = max_bytes.max(min_bytes);
+        let base = Box::into_raw(vec![0u8; cap].into_boxed_slice()) as *mut u8;
         SharedMemory(std::sync::Arc::new(SharedMemInner {
-            bytes: std::sync::Mutex::new(vec![0u8; min_bytes]),
+            base,
+            cap,
+            len: std::sync::atomic::AtomicUsize::new(min_bytes),
             park: std::sync::Mutex::new(SharedPark::default()),
             cvar: std::sync::Condvar::new(),
         }))
     }
 
-    fn bytes(&self) -> std::sync::MutexGuard<'_, Vec<u8>> {
-        self.0.bytes.lock().unwrap()
+    // The current contents. Callers index it with a bounds check, which is the
+    // wasm out-of-bounds trap; the slice is not synchronised (see above).
+    #[allow(clippy::mut_from_ref)]
+    fn bytes(&self) -> &mut [u8] {
+        let len = self.0.len.load(std::sync::atomic::Ordering::Acquire);
+        // SAFETY: `base` is valid for `cap >= len` bytes for the life of `self`.
+        unsafe { std::slice::from_raw_parts_mut(self.0.base, len) }
     }
 
-    // One critical section, so the whole read-modify-write is atomic across
-    // threads. Returns the (zero-extended) old value.
+    // Raises the length by `delta` pages; returns the old page count, or -1 if
+    // that would pass the maximum. The new bytes are already zero.
+    fn grow(&self, delta: u32) -> i32 {
+        let mut cur = self.0.len.load(std::sync::atomic::Ordering::Acquire);
+        loop {
+            let new = match (delta as usize).checked_mul(65536).and_then(|d| cur.checked_add(d)) {
+                Some(n) if n <= self.0.cap => n,
+                _ => return -1,
+            };
+            match self.0.len.compare_exchange(
+                cur,
+                new,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => return (cur / 65536) as i32,
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
+    // The cell of an atomic access: traps (panics) when out of bounds or not
+    // aligned to its width, as the threads proposal requires.
+    fn atomic_cell(&self, addr: usize, width: usize) -> *mut u8 {
+        let len = self.0.len.load(std::sync::atomic::Ordering::Acquire);
+        if addr % width != 0 {
+            panic!("unaligned atomic access");
+        }
+        if addr.checked_add(width).is_none_or(|end| end > len) {
+            panic!("out of bounds atomic access");
+        }
+        // SAFETY: `addr + width <= len <= cap`.
+        unsafe { self.0.base.add(addr) }
+    }
+
+    // Sequentially consistent atomic load of `width` bytes, zero-extended.
+    fn atomic_load(&self, addr: usize, width: usize) -> u64 {
+        use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::SeqCst};
+        let p = self.atomic_cell(addr, width);
+        // SAFETY: `p` is in bounds and aligned for `width` (checked above).
+        unsafe {
+            match width {
+                1 => (*(p as *const AtomicU8)).load(SeqCst) as u64,
+                2 => (*(p as *const AtomicU16)).load(SeqCst) as u64,
+                4 => (*(p as *const AtomicU32)).load(SeqCst) as u64,
+                _ => (*(p as *const AtomicU64)).load(SeqCst),
+            }
+        }
+    }
+
+    // Sequentially consistent atomic store of the low `width` bytes of `val`.
+    fn atomic_store(&self, addr: usize, width: usize, val: u64) {
+        use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::SeqCst};
+        let p = self.atomic_cell(addr, width);
+        // SAFETY: `p` is in bounds and aligned for `width` (checked above).
+        unsafe {
+            match width {
+                1 => (*(p as *const AtomicU8)).store(val as u8, SeqCst),
+                2 => (*(p as *const AtomicU16)).store(val as u16, SeqCst),
+                4 => (*(p as *const AtomicU32)).store(val as u32, SeqCst),
+                _ => (*(p as *const AtomicU64)).store(val, SeqCst),
+            }
+        }
+    }
+
+    // Atomic read-modify-write (a compare-exchange loop, so one routine serves
+    // every width and op). Returns the (zero-extended) old value.
     fn atomic_rmw(&self, addr: usize, width: usize, op: u8, val: u64) -> u64 {
-        let mut b = self.0.bytes.lock().unwrap();
-        let old = shared_read_le(&b, addr, width);
-        let new = shared_combine(op, old, val & shared_width_mask(width), width);
-        shared_write_le(&mut b, addr, width, new);
-        old
+        use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::SeqCst};
+        let p = self.atomic_cell(addr, width);
+        let val = val & shared_width_mask(width);
+        macro_rules! rmw {
+            ($atomic:ty, $int:ty) => {{
+                // SAFETY: `p` is in bounds and aligned for `width` (checked above).
+                let cell = unsafe { &*(p as *const $atomic) };
+                let mut old = cell.load(SeqCst);
+                loop {
+                    let new = shared_combine(op, old as u64, val, width) as $int;
+                    match cell.compare_exchange_weak(old, new, SeqCst, SeqCst) {
+                        Ok(_) => break old as u64,
+                        Err(actual) => old = actual,
+                    }
+                }
+            }};
+        }
+        match width {
+            1 => rmw!(AtomicU8, u8),
+            2 => rmw!(AtomicU16, u16),
+            4 => rmw!(AtomicU32, u32),
+            _ => rmw!(AtomicU64, u64),
+        }
     }
 
     // Stores `replacement` only if the (masked) current value equals `expected`.
     // Returns the (zero-extended) old value either way.
     fn atomic_cmpxchg(&self, addr: usize, width: usize, expected: u64, replacement: u64) -> u64 {
-        let mut b = self.0.bytes.lock().unwrap();
-        let old = shared_read_le(&b, addr, width);
-        if old == (expected & shared_width_mask(width)) {
-            shared_write_le(&mut b, addr, width, replacement & shared_width_mask(width));
+        use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::SeqCst};
+        let p = self.atomic_cell(addr, width);
+        let expected = expected & shared_width_mask(width);
+        let replacement = replacement & shared_width_mask(width);
+        macro_rules! cas {
+            ($atomic:ty, $int:ty) => {{
+                // SAFETY: `p` is in bounds and aligned for `width` (checked above).
+                let cell = unsafe { &*(p as *const $atomic) };
+                match cell.compare_exchange(expected as $int, replacement as $int, SeqCst, SeqCst) {
+                    Ok(old) | Err(old) => old as u64,
+                }
+            }};
         }
-        old
+        match width {
+            1 => cas!(AtomicU8, u8),
+            2 => cas!(AtomicU16, u16),
+            4 => cas!(AtomicU32, u32),
+            _ => cas!(AtomicU64, u64),
+        }
     }
 
     // Wakes the `count` longest-parked waiters on `addr` (at most), by ticket.
@@ -1235,13 +1361,10 @@ impl SharedMemory {
     fn wait(&self, addr: u32, expected: u64, width: usize, timeout_ns: i64) -> i32 {
         // Hold `park` across the value check so a concurrent `notify` (which also
         // takes `park`) cannot slip between the check and our registration -
-        // closing the lost-wakeup window. Lock order is always park-then-bytes.
+        // closing the lost-wakeup window.
         let mut park = self.0.park.lock().unwrap();
-        {
-            let b = self.0.bytes.lock().unwrap();
-            if shared_read_le(&b, addr as usize, width) != (expected & shared_width_mask(width)) {
-                return 1;
-            }
+        if self.atomic_load(addr as usize, width) != (expected & shared_width_mask(width)) {
+            return 1;
         }
         let ticket = park.next_ticket;
         park.next_ticket = ticket.wrapping_add(1);

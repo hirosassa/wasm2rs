@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A `shared` memory no longer sits behind a `Mutex`.** Its bytes are reserved once
+  (up to the declared maximum) and accessed without a lock, so threads that touch
+  disjoint memory now scale instead of serialising (8 threads of load/store work:
+  6.4 s -> 19 ms; one thread: 261 ms -> 18 ms). Plain loads/stores are ordinary
+  non-atomic accesses (racing on the same bytes gives unspecified values, as in
+  wasm); atomic loads/stores/RMW/cmpxchg and `atomic.fence` are real sequentially
+  consistent atomics and now trap on a misaligned address; `memory.grow` on a shared
+  memory stops at its declared maximum. `SharedMemory::with_max(min, max)` is new;
+  `SharedMemory::new(min)` still works and reserves the wasm32 limit.
 - **`TranspileOptions` is no longer `Copy`** (it now owns `entry_exports`); it is
   still `Clone` and `Default`. Pass it by reference or `.clone()` it.
 

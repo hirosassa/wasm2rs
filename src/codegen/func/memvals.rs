@@ -293,6 +293,75 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    /// The byte width an atomic load/store helper accesses.
+    fn atomic_access_width(helper: Helper) -> usize {
+        match helper {
+            Helper::Load8U | Helper::Load8UI64 | Helper::Store8 | Helper::Store8I64 => 1,
+            Helper::Load16U | Helper::Load16UI64 | Helper::Store16 | Helper::Store16I64 => 2,
+            Helper::LoadI32 | Helper::Load32UI64 | Helper::StoreI32 | Helper::Store32I64 => 4,
+            _ => 8,
+        }
+    }
+
+    /// An atomic load. On a shared memory it is a real (sequentially consistent)
+    /// atomic access that traps when misaligned; otherwise the instance owns its
+    /// memory and it is the plain load.
+    pub(super) fn atomic_load(
+        &mut self,
+        helper: Helper,
+        ty: ValType,
+        memarg: MemArg,
+    ) -> Result<(), TranspileError> {
+        if !self.ctx.memory_shared {
+            return self.load(helper, ty, memarg);
+        }
+        self.require_memory()?;
+        self.memarg_memory(memarg)?;
+        let offset = self.shared_offset(memarg)?;
+        let addr = self.pop()?;
+        self.push_trapping(
+            format!(
+                "(self.memory.atomic_load(({}) as u32 as usize + {offset}usize, {}) as {})",
+                addr.code,
+                Self::atomic_access_width(helper),
+                shared_result_ty(ty)
+            ),
+            ty,
+        )
+    }
+
+    /// An atomic store (see [`Self::atomic_load`]).
+    pub(super) fn atomic_store(
+        &mut self,
+        helper: Helper,
+        memarg: MemArg,
+    ) -> Result<(), TranspileError> {
+        if !self.ctx.memory_shared {
+            return self.store(helper, memarg);
+        }
+        self.require_memory()?;
+        self.memarg_memory(memarg)?;
+        let offset = self.shared_offset(memarg)?;
+        self.freeze_survivors(2)?;
+        let value = self.pop()?;
+        let addr = self.pop()?;
+        self.line(format!(
+            "self.memory.atomic_store(({}) as u32 as usize + {offset}usize, {}, ({}) as u64);",
+            addr.code,
+            Self::atomic_access_width(helper),
+            value.code
+        ));
+        Ok(())
+    }
+
+    /// `atomic.fence`: a sequentially consistent fence on a shared memory; a
+    /// no-op when the instance owns its memory.
+    pub(super) fn atomic_fence(&mut self) {
+        if self.ctx.memory_shared {
+            self.line("std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);".to_string());
+        }
+    }
+
     /// `v128.load*_lane`: read one element from memory into lane `lane` of the
     /// v128 on the stack, leaving the other lanes intact. Pops the vector (on
     /// top) then the address, and pushes the updated vector.

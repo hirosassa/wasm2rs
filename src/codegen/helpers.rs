@@ -355,35 +355,36 @@ fn specialise_helper_lines(helper: Helper, mem: u32, base: Vec<String>) -> Vec<S
 
 /// The lines of one memory helper method for a `shared` module (single defined
 /// memory 0 backed by a `SharedMemory`). The historic body references
-/// `self.mem()` / `self.mem_mut()`; here the whole body must lock the shared
-/// bytes exactly once (a per-access re-lock would deadlock the non-reentrant
-/// `Mutex`), so we bind one guard right after the signature and replace every
-/// `self.mem()` / `self.mem_mut()` with it. A body that writes (`mem_mut()`
-/// appears) binds a `mut` guard; a read-only body binds an immutable one. The
-/// method name and signature are unchanged (`fn r32(&self, ...)`, …); a store
-/// helper keeps its `&mut self` even though `bytes()` needs only `&self`.
+/// `self.mem()` / `self.mem_mut()`; here a slice of the shared bytes is bound
+/// once right after the signature (`SharedMemory::bytes`, no lock) and every
+/// `self.mem()` / `self.mem_mut()` is replaced with it. The method name and
+/// signature are unchanged (`fn r32(&self, ...)`, …); a store helper keeps its
+/// `&mut self`. `memory.grow` raises the shared length instead of resizing, and
 /// `table_*` helpers touch no memory, so they are emitted verbatim.
 pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
     let base = base_helper_lines(helper);
     if matches!(helper, Helper::TableCopy | Helper::TableFill) {
         return base;
     }
-    let writes = base.iter().any(|line| line.contains("self.mem_mut()"));
-    let guard = if writes {
-        "    let mut __m = self.memory.bytes();"
-    } else {
-        "    let __m = self.memory.bytes();"
-    };
+    // The length is shared state raised atomically, bounded by the reservation.
+    if helper == Helper::Grow {
+        return vec![
+            "fn memory_grow(&mut self, delta: i32) -> i32 {".to_string(),
+            "    self.memory.grow(delta as u32)".to_string(),
+            "}".to_string(),
+        ];
+    }
+    let binding = "    let __m = self.memory.bytes();";
     let mut out = Vec::with_capacity(base.len() + 1);
     for (i, line) in base.into_iter().enumerate() {
-        // The signature line is first; the guard is bound immediately after it,
-        // before any memory access, so the lock is held for the whole body.
+        // The signature line is first; the slice is bound immediately after it,
+        // before any memory access.
         let line = line
             .replace("self.mem_mut()", "__m")
             .replace("self.mem()", "__m");
         out.push(line);
         if i == 0 {
-            out.push(guard.to_string());
+            out.push(binding.to_string());
         }
     }
     out
