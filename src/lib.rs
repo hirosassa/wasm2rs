@@ -237,6 +237,7 @@ where
     // then locally-defined ones, matching the wasm tag index space.
     let mut tags: Vec<codegen::TagInfo> = Vec::new();
     let mut exports: Vec<codegen::ExportInfo> = Vec::new();
+    let mut start: Option<u32> = None;
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
@@ -503,6 +504,9 @@ where
                     }
                 }
             }
+            Payload::StartSection { func, .. } => {
+                start = Some(func);
+            }
             Payload::CodeSectionEntry(body) => {
                 bodies.push(body);
             }
@@ -551,6 +555,7 @@ where
         elements: &elements,
         tags: &tags,
         exports: &exports,
+        start,
         unsafe_memory: topts.unsafe_memory,
         split_dispatch: topts.split_dispatch,
     };

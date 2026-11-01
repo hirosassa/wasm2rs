@@ -19,16 +19,12 @@
 
 use crate::common;
 
-use common::{compile_run, compile_run_raw};
+use common::{compile_run, compile_run_raw, expect_trap_with};
 
 #[test]
-fn start_function_is_currently_not_run() {
-    // KNOWN LIMITATION: the `start` section is not implemented — a module's
-    // start function is silently ignored, so state it would set up is never
-    // applied. This test pins that behaviour: `$init` would set the global to
-    // 99, but after instantiation the getter still returns the initial 7.
-    //
-    // When `start` support lands, this test SHOULD fail; update it to expect 99.
+fn start_function_runs_at_instantiation() {
+    // `$init` sets the global to 99; the start function runs as part of
+    // `Instance::new`, so the getter sees 99 rather than the initial 7.
     compile_run(
         "scen_start",
         r#"
@@ -39,8 +35,53 @@ fn start_function_is_currently_not_run() {
           (start $init))
         "#,
         // func0 = $init, func1 = get.
-        "let mut inst = Instance::new();\n    \
-         assert_eq!(inst.func1(), 7, \"start is not yet run; see KNOWN LIMITATION\");",
+        "let mut inst = Instance::new();\n    assert_eq!(inst.func1(), 99);",
+    );
+}
+
+#[test]
+fn start_function_runs_for_every_sibling_instance_on_a_shared_memory() {
+    // Each instance's start function adds 1 to the shared counter at address 0,
+    // so after `new` plus one `with_memory` the counter is 2.
+    compile_run(
+        "scen_start_shared",
+        r#"
+        (module
+          (memory 1 1 shared)
+          (func $init (drop (i32.atomic.rmw.add (i32.const 0) (i32.const 1))))
+          (func (export "count") (result i32) (i32.atomic.load (i32.const 0)))
+          (start $init))
+        "#,
+        "let mut a = Instance::new();\n    \
+         let mut b = Instance::with_memory(a.shared_memory());\n    \
+         assert_eq!(a.func1(), 2);\n    assert_eq!(b.func1(), 2);",
+    );
+}
+
+#[test]
+fn a_trapping_start_function_fails_instantiation() {
+    expect_trap_with(
+        "scen_start_trap",
+        r#"
+        (module
+          (memory 1)
+          (func $init unreachable)
+          (start $init))
+        "#,
+        "let _inst = Instance::new();",
+        "unreachable",
+    );
+}
+
+#[test]
+fn a_trapping_start_function_fails_instantiation_even_without_other_state() {
+    // Nothing but the start function makes this module stateful; it still gets
+    // an `Instance` whose `new` runs the start function.
+    expect_trap_with(
+        "scen_start_trap_stateless",
+        "(module (func $init unreachable) (start $init))",
+        "let _inst = Instance::new();",
+        "unreachable",
     );
 }
 

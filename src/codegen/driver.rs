@@ -197,6 +197,8 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) tags: &'a [TagInfo],
     /// The module's function exports, in declaration order.
     pub(crate) exports: &'a [ExportInfo],
+    /// The module's `start` function index, run at the end of every instantiation.
+    pub(crate) start: Option<u32>,
     /// Opt-in unchecked linear-memory access (see [`ModuleCtx::unsafe_memory`]).
     pub(crate) unsafe_memory: bool,
     /// Cap on match arms per flattened-dispatch part function; `0` disables the
@@ -311,7 +313,8 @@ pub(crate) fn build_ctx<'a>(
         || scan.uses_call_ref
         || scan.uses_array_segment_ops
         || uses_extern_box
-        || !cont_bodies.is_empty();
+        || !cont_bodies.is_empty()
+        || parts.start.is_some();
 
     let funcs_by_sig = index_by_signature(
         imports
