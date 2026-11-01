@@ -225,10 +225,9 @@ impl WasiFn {
         )
     }
 
-    /// The Rust source for this WASI method's inherent-method definition. When
-    /// `files` is set the module also imports the preopen/`path_open` functions,
-    /// so `fd_read`/`fd_write`/`fd_seek`/`fd_close` route descriptors >= 4 to the
-    /// instance's `wasi_fds` table instead of handling stdio alone.
+    /// The same definition as [`Self::lines`], rewritten for a shared linear
+    /// memory: guest memory is reached through the `SharedMemory` guard
+    /// (`self.memory.bytes()`) instead of `self.mem()` / `self.mem_mut()`.
     pub(super) fn lines_shared(self, files: bool) -> Vec<String> {
         self.lines(files)
             .into_iter()
@@ -236,6 +235,10 @@ impl WasiFn {
             .collect()
     }
 
+    /// The Rust source for this WASI method's inherent-method definition. When
+    /// `files` is set the module also imports the preopen/`path_open` functions,
+    /// so `fd_read`/`fd_write`/`fd_seek`/`fd_close` route descriptors >= 4 to the
+    /// instance's `wasi_fds` table instead of handling stdio alone.
     pub(super) fn lines(self, files: bool) -> Vec<String> {
         let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
         match self {
