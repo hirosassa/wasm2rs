@@ -400,7 +400,7 @@ fn a_child_does_not_reapply_the_parents_data_segments() {
 #[test]
 fn a_child_runs_nested_loops_and_branches() {
     // The child sums i*j for i, j in 1..=20 with nested loops, blocks and a
-    // conditional skip, then publishes the total (2 * 210 * 210 - skipped).
+    // conditional skip, then publishes the total (210 * 50: sum(i) times the j that are multiples of 5).
     compile_run(
         "wasi_threads_loops",
         &format!(
