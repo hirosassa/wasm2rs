@@ -37,9 +37,15 @@ impl<'a> super::FuncGen<'a> {
     /// is not, so a later mutation forces it to be spilled first.
     pub(super) fn local_get(&mut self, local_index: u32) -> Result<(), TranspileError> {
         let ty = self.local_ty(local_index)?;
-        let stable = !self.mutable_locals.contains(&local_index);
+        let stable = !self.mutable_locals.contains(local_index);
+        // `local_ty` succeeded, so the index is in range of `local_names` too.
+        let code = self
+            .local_names
+            .get(local_index as usize)
+            .cloned()
+            .ok_or_else(|| TranspileError::Unsupported("local index out of range".into()))?;
         self.push(Val {
-            code: format!("l{local_index}"),
+            code,
             ty,
             stable,
             may_trap: false,

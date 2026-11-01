@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use wasmparser::{FunctionBody, Operator, ValType};
 
 use super::{
-    Frame, FrameKind, Helper, ModuleCtx, Node, Rt, Val, collect_mutated_locals, default_value,
-    index_u32, rust_type,
+    Frame, FrameKind, Helper, LocalFlags, ModuleCtx, Node, Rt, Val, default_value, index_u32,
+    rust_type,
 };
 use crate::TranspileError;
 
@@ -148,7 +148,11 @@ pub(super) struct TryBarrier {
 /// State threaded through the translation of a single function body.
 pub(super) struct FuncGen<'a> {
     local_types: Vec<ValType>,
-    mutable_locals: HashSet<u32>,
+    /// `l{i}` for every local, formatted once: `local.get` is the most frequent
+    /// operator and would otherwise run the formatter on every read.
+    local_names: Vec<String>,
+    /// The locals this function writes (from the module-wide body scan).
+    mutable_locals: &'a LocalFlags,
     /// Module-wide context (functions, types, globals, stateful flags).
     ctx: &'a ModuleCtx<'a>,
     /// The function's result types (0, 1 or more — a tuple when more than one).
@@ -198,6 +202,7 @@ impl<'a> FuncGen<'a> {
         results: &[ValType],
         body: &FunctionBody<'_>,
         ctx: &'a ModuleCtx<'a>,
+        mutable_locals: &'a LocalFlags,
     ) -> Result<Self, TranspileError> {
         let mut local_types = params.to_vec();
         for local in body.get_locals_reader()? {
@@ -206,8 +211,6 @@ impl<'a> FuncGen<'a> {
                 local_types.push(ty);
             }
         }
-
-        let mutable_locals = collect_mutated_locals(body)?;
 
         let mut cur = Vec::new();
         // Declared locals default to zero; parameters arrive already bound.
@@ -226,7 +229,7 @@ impl<'a> FuncGen<'a> {
             let rty = rust_type(ty, ctx.type_kinds)?;
             let default = default_value(ty, ctx.type_kinds);
             if run_end - i == 1 {
-                let keyword = if mutable_locals.contains(&index_u32(i)?) {
+                let keyword = if mutable_locals.contains(index_u32(i)?) {
                     "let mut"
                 } else {
                     "let"
@@ -235,7 +238,7 @@ impl<'a> FuncGen<'a> {
             } else {
                 let mut names = Vec::with_capacity(run_end - i);
                 for j in i..run_end {
-                    let mutp = if mutable_locals.contains(&index_u32(j)?) {
+                    let mutp = if mutable_locals.contains(index_u32(j)?) {
                         "mut "
                     } else {
                         ""
@@ -253,8 +256,11 @@ impl<'a> FuncGen<'a> {
             i = run_end;
         }
 
+        let local_names = (0..local_types.len()).map(|i| format!("l{i}")).collect();
+
         Ok(Self {
             local_types,
+            local_names,
             mutable_locals,
             ctx,
             results: results.to_vec(),

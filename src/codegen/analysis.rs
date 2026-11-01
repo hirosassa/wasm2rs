@@ -2,7 +2,7 @@ use super::*;
 
 use std::collections::{HashMap, HashSet};
 
-use wasmparser::{AbstractHeapType, FunctionBody, HeapType, Operator, ValType};
+use wasmparser::{AbstractHeapType, HeapType, Operator, ValType};
 
 use crate::TranspileError;
 
@@ -63,6 +63,10 @@ pub(crate) fn uses_abstract_gc(funcs: &[FuncInput<'_>]) -> Result<bool, Transpil
 /// into one traversal; the booleans and per-function tables it returns feed the
 /// statefulness decision and the continuation fixpoints downstream.
 pub(crate) struct BodyScan {
+    /// Per defined function (0-based): the locals it writes with `local.set`/
+    /// `local.tee`. A written local is unstable (a read of it cannot be reordered
+    /// past a write) and needs a `mut` binding.
+    pub(crate) mutated: Vec<LocalFlags>,
     /// Continuation bodies: the target of a `ref.func` immediately followed by
     /// `cont.new` (the phase-4 pattern), sorted and deduplicated.
     pub(crate) cont_bodies: Vec<u32>,
@@ -84,12 +88,35 @@ pub(crate) struct BodyScan {
     pub(crate) uses_array_segment_ops: bool,
 }
 
+/// A per-function flag for each local index, a dense replacement for a
+/// `HashSet<u32>` (it is queried on every `local.get`). Indices past the
+/// function's local count are never set and read as unset.
+#[derive(Clone, Default)]
+pub(crate) struct LocalFlags(Vec<bool>);
+
+impl LocalFlags {
+    fn with_len(n: usize) -> Self {
+        Self(vec![false; n])
+    }
+
+    fn insert(&mut self, index: u32) {
+        if let Some(flag) = self.0.get_mut(index as usize) {
+            *flag = true;
+        }
+    }
+
+    pub(crate) fn contains(&self, index: u32) -> bool {
+        self.0.get(index as usize).copied().unwrap_or(false)
+    }
+}
+
 /// Scan every function body exactly once, collecting all the whole-module
 /// operator facts `build_ctx` needs (see [`BodyScan`]). Each of the flagged
 /// operators forces the module to be emitted as a `struct Instance` because it
 /// reaches per-instance state that free functions cannot.
 pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, TranspileError> {
     let mut scan = BodyScan {
+        mutated: Vec::with_capacity(funcs.len()),
         cont_bodies: Vec::new(),
         suspends: vec![false; funcs.len()],
         calls: vec![Vec::new(); funcs.len()],
@@ -98,6 +125,12 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
         uses_array_segment_ops: false,
     };
     for (i, input) in funcs.iter().enumerate() {
+        let mut n_locals = input.params.len();
+        for local in input.body.get_locals_reader()? {
+            let (count, _) = local?;
+            n_locals = n_locals.saturating_add(count as usize);
+        }
+        let mut mutated = LocalFlags::with_len(n_locals);
         // `ref.func` immediately followed by `cont.new` names a continuation
         // body; any other operator breaks the adjacency, so every non-matching
         // arm clears `last_ref_func`.
@@ -112,6 +145,9 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
                     if let Some(f) = last_ref_func {
                         scan.cont_bodies.push(f);
                     }
+                }
+                Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
+                    mutated.insert(local_index);
                 }
                 Operator::Suspend { .. } | Operator::Switch { .. } => scan.suspends[i] = true,
                 Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
@@ -131,6 +167,7 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
             }
             last_ref_func = None;
         }
+        scan.mutated.push(mutated);
     }
     scan.cont_bodies.sort_unstable();
     scan.cont_bodies.dedup();
@@ -314,21 +351,6 @@ pub(crate) fn reject_dual_use_continuations(
     }
     Ok(())
 }
-/// Collect the indices of locals written by `local.set`/`local.tee`.
-pub(crate) fn collect_mutated_locals(
-    body: &FunctionBody<'_>,
-) -> Result<HashSet<u32>, TranspileError> {
-    let mut mutated = HashSet::new();
-    for op in body.get_operators_reader()? {
-        match op? {
-            Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
-                mutated.insert(local_index);
-            }
-            _ => {}
-        }
-    }
-    Ok(mutated)
-}
 pub(crate) fn rust_type(
     ty: ValType,
     kinds: &[CompositeKind],
@@ -433,5 +455,57 @@ pub(crate) fn default_value(ty: ValType, kinds: &[CompositeKind]) -> &'static st
             "u32::MAX"
         }
         _ => "0",
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "test code")]
+mod tests {
+    use super::*;
+    use wasmparser::{FunctionBody, Parser, Payload};
+
+    /// The bodies of every function in the module `wat`, in order.
+    fn bodies(wasm: &[u8]) -> Vec<FunctionBody<'_>> {
+        Parser::new(0)
+            .parse_all(wasm)
+            .filter_map(|p| match p.unwrap() {
+                Payload::CodeSectionEntry(b) => Some(b),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scan_records_the_locals_each_function_writes() {
+        let wasm = wat::parse_str(
+            r#"(module
+                (func (param i32) (local i32 i32)
+                  (local.set 1 (i32.const 1))
+                  (drop (local.tee 0 (i32.const 2))))
+                (func (param i32) (local i32)
+                  (drop (local.get 0)) (drop (local.get 1)))
+                (func (local i32 i32 i32)
+                  (block (loop (local.set 2 (i32.const 7)) (br 1)))))"#,
+        )
+        .unwrap();
+        let bodies = bodies(&wasm);
+        let inputs: Vec<FuncInput<'_>> = bodies
+            .iter()
+            .map(|body| FuncInput {
+                params: &[],
+                results: &[],
+                body,
+            })
+            .collect();
+
+        let scan = scan_bodies(&inputs).unwrap();
+
+        let written =
+            |f: usize| -> Vec<u32> { (0..8).filter(|&l| scan.mutated[f].contains(l)).collect() };
+        assert_eq!(written(0), vec![0, 1]);
+        assert_eq!(written(1), Vec::<u32>::new());
+        assert_eq!(written(2), vec![2]);
+        // A local index past anything the function writes is simply not mutated.
+        assert!(!scan.mutated[2].contains(1_000_000));
     }
 }

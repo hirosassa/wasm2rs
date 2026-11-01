@@ -387,7 +387,7 @@ impl<'a> super::FuncGen<'a> {
             if self.ctx.is_method || i > 0 {
                 params_src.push_str(", ");
             }
-            let keyword = if self.mutable_locals.contains(&index_u32(i)?) {
+            let keyword = if self.mutable_locals.contains(index_u32(i)?) {
                 "mut "
             } else {
                 ""
