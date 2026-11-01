@@ -375,18 +375,21 @@ impl ModuleDeps {
 pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, TranspileError> {
     let (ctx, stateful) = build_ctx(parts)?;
 
-    let mut sources = Vec::with_capacity(parts.funcs.len());
+    // Every function is rendered back to back into one buffer; `ends` marks
+    // where each one stops so the pieces can be re-sliced without per-function
+    // allocations.
+    let mut funcs_buf = String::new();
+    let mut ends = Vec::with_capacity(parts.funcs.len());
     let mut deps = ModuleDeps::default();
     for (index, f) in parts.funcs.iter().enumerate() {
         // Defined functions are named by their full function index, i.e. after
-        // the imported functions in the shared index space. The single-file
-        // path is not memory-critical, so each function is rendered into its own
-        // `String` and the pieces are joined/wrapped exactly as before.
-        let mut src = String::new();
-        let meta = generate_function_into(parts.imports.len() + index, f, &ctx, "", &mut src)?;
+        // the imported functions in the shared index space.
+        let meta =
+            generate_function_into(parts.imports.len() + index, f, &ctx, "", &mut funcs_buf)?;
         deps.merge(meta);
-        sources.push(src);
+        ends.push(funcs_buf.len());
     }
+    let sources = split_at_ends(&funcs_buf, &ends);
     // Every rendered dispatch method (`call_ref_t{ti}`) carries the type-mismatch
     // trap, so its cold helper must exist whenever any dispatch method is emitted.
     if !deps.dispatch_sigs.is_empty() {
@@ -398,36 +401,62 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     let rt_helpers = render_rt_helpers(&deps.rt);
     let simd_helpers = render_simd_helpers(&deps.simd);
 
-    let body = if !stateful {
-        sources.join("\n")
-    } else {
-        render_module(parts, &ctx, &sources, &deps.helpers, &deps.dispatch_sigs)?
-    };
-
     // The exception type, then the runtime helpers, precede the module body.
-    let mut prelude = String::new();
+    let mut out = String::new();
     if deps.uses_eh {
-        prelude.push_str(EXC_DEF);
-        prelude.push('\n');
+        out.push_str(EXC_DEF);
+        out.push('\n');
     }
     if needs_gc_types(parts)? {
-        prelude.push_str(GCREF_DEF);
-        prelude.push('\n');
+        out.push_str(GCREF_DEF);
+        out.push('\n');
     }
     // Shared state structs from split flattened methods, at module scope ahead of
     // the `struct Instance`/functions that reference them (a field may be a
     // `GcRef`, so after its definition above).
     for state_struct in &deps.state_structs {
-        prelude.push_str(state_struct);
-        prelude.push('\n');
+        out.push_str(state_struct);
+        out.push('\n');
     }
-    prelude.push_str(&rt_helpers);
-    prelude.push_str(&simd_helpers);
-    Ok(if prelude.is_empty() {
-        body
+    out.push_str(&rt_helpers);
+    out.push_str(&simd_helpers);
+    if !out.is_empty() {
+        out.push('\n');
+    }
+
+    // The body is written straight after the prelude: no separate body string
+    // and no final `prelude + body` copy.
+    if !stateful {
+        out.reserve(funcs_buf.len() + sources.len());
+        for (i, src) in sources.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            out.push_str(src);
+        }
     } else {
-        format!("{prelude}\n{body}")
-    })
+        render_module(
+            &mut out,
+            parts,
+            &ctx,
+            &sources,
+            &deps.helpers,
+            &deps.dispatch_sigs,
+        )?;
+    }
+    Ok(out)
+}
+
+/// Slice `buf` into consecutive pieces ending at each offset in `ends`.
+fn split_at_ends<'a>(buf: &'a str, ends: &[usize]) -> Vec<&'a str> {
+    let mut start = 0;
+    ends.iter()
+        .map(|&end| {
+            let piece = &buf[start..end];
+            start = end;
+            piece
+        })
+        .collect()
 }
 /// Translate a module, emitting its Rust source across one or more files.
 ///

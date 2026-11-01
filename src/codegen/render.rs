@@ -83,12 +83,13 @@ impl Layout {
 /// dispatch/continuation methods), and finally each function's own source
 /// streamed in.
 pub(super) fn render_module(
+    out: &mut String,
     parts: &ModuleParts<'_>,
     ctx: &ModuleCtx<'_>,
-    sources: &[String],
+    sources: &[&str],
     used: &HashSet<(Helper, u32)>,
     dispatch_sigs: &HashSet<u32>,
-) -> Result<String, TranspileError> {
+) -> Result<(), TranspileError> {
     let layout = Layout::of(parts);
 
     let mut lines: Vec<String> = Vec::new();
@@ -172,33 +173,42 @@ pub(super) fn render_module(
     for line in indent(&inner) {
         lines.push(line);
     }
-    // Stream each function's source straight into the (already indented) body,
-    // skipping the intermediate `inner` buffer: a source line goes from `&str`
-    // to its final indented `String` in one allocation instead of being cloned
-    // once into `inner` and again by `indent`. The result is byte-identical —
-    // both paths blank-line-separate the functions and prefix each body line by
-    // four spaces.
+    push_lines(out, &lines);
+    // Stream each function's source straight into `out`, indenting as it is
+    // written: no per-line `String`, no intermediate line vector and no final
+    // `join` copy of the whole module.
     for src in sources {
-        lines.push(String::new());
-        for line in src.lines() {
-            lines.push(if line.is_empty() {
-                String::new()
-            } else {
-                format!("    {line}")
-            });
-        }
+        push_function_source(out, src);
     }
-    lines.push("}".to_string());
+    out.push_str("}\n");
 
     // Module-scope external-funcref registries (the Linker helper), one per
     // `call_indirect` signature, for modules that can receive external handles.
     if layout.has_imports && !dispatch_sigs.is_empty() {
-        lines.extend(extern_registry_lines(ctx, dispatch_sigs)?);
+        push_lines(out, &extern_registry_lines(ctx, dispatch_sigs)?);
     }
+    Ok(())
+}
 
-    let mut out = lines.join("\n");
+/// Append `lines` to `out`, each newline-terminated.
+fn push_lines(out: &mut String, lines: &[String]) {
+    for line in lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+/// Append one function's source to `out` as a blank-line-separated block
+/// indented by four spaces (blank lines stay empty).
+fn push_function_source(out: &mut String, src: &str) {
     out.push('\n');
-    Ok(out)
+    for line in src.lines() {
+        if !line.is_empty() {
+            out.push_str("    ");
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
 }
 
 /// Module-scope `static`s backing the retained passive segments: each passive
@@ -977,13 +987,7 @@ pub(super) fn render_lib_root(
     if stateful {
         // The header impl carries no function bodies; those are added by the
         // chunk files' own `impl Instance` blocks.
-        out.push_str(&render_module(
-            parts,
-            ctx,
-            &[],
-            deps.helpers,
-            deps.dispatch_sigs,
-        )?);
+        render_module(&mut out, parts, ctx, &[], deps.helpers, deps.dispatch_sigs)?;
         out.push('\n');
     }
 
@@ -1203,4 +1207,20 @@ fn import_trait_lines(
     }
     lines.push("}".to_string());
     Ok(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::push_function_source;
+
+    #[test]
+    fn function_source_is_blank_line_separated_and_indented_in_place() {
+        let mut out = String::from("impl Instance {\n");
+        push_function_source(&mut out, "fn a() {\n\n    1\n}\n");
+        push_function_source(&mut out, "fn b() {}");
+        assert_eq!(
+            out,
+            "impl Instance {\n\n    fn a() {\n\n        1\n    }\n\n    fn b() {}\n"
+        );
+    }
 }
