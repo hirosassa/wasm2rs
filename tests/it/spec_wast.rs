@@ -83,13 +83,62 @@ fn return_assertion(call: &str, ret: &WastRet<'_>) -> Result<String, String> {
     match ret {
         WastRet::Core(WastRetCore::I32(v)) => Ok(format!("assert_eq!({call}, {v}i32);")),
         WastRet::Core(WastRetCore::I64(v)) => Ok(format!("assert_eq!({call}, {v}i64);")),
-        WastRet::Core(WastRetCore::F32(NanPattern::Value(v))) => {
-            Ok(format!("assert_eq!({call}.to_bits(), {}u32);", v.bits))
-        }
-        WastRet::Core(WastRetCore::F64(NanPattern::Value(v))) => {
-            Ok(format!("assert_eq!({call}.to_bits(), {}u64);", v.bits))
-        }
+        WastRet::Core(WastRetCore::F32(pattern)) => Ok(nan_assertion(
+            call,
+            "u32",
+            "0x7fff_ffff",
+            "0x7fc0_0000",
+            "0x7fc0_0000",
+            pattern,
+        )),
+        WastRet::Core(WastRetCore::F64(pattern)) => Ok(nan_assertion(
+            call,
+            "u64",
+            "0x7fff_ffff_ffff_ffff",
+            "0x7ff8_0000_0000_0000",
+            "0x7ff8_0000_0000_0000",
+            pattern,
+        )),
         other => Err(format!("unsupported expected value {other:?}")),
+    }
+}
+
+/// Assertion for a NaN pattern: *canonical* is exactly the quiet NaN with a
+/// zero payload (either sign); *arithmetic* is any NaN whose quiet bit is set.
+/// `Value` patterns are compared bit-for-bit by the caller instead.
+fn nan_assertion<T: HasBits>(
+    call: &str,
+    bits_ty: &str,
+    abs_mask: &str,
+    canonical: &str,
+    quiet: &str,
+    pattern: &NanPattern<T>,
+) -> String {
+    match pattern {
+        NanPattern::CanonicalNan => format!(
+            "assert_eq!({call}.to_bits() & {abs_mask}{bits_ty}, {canonical}{bits_ty});"
+        ),
+        NanPattern::ArithmeticNan => format!(
+            "assert_eq!({call}.to_bits() & {quiet}{bits_ty}, {quiet}{bits_ty});"
+        ),
+        NanPattern::Value(v) => format!("assert_eq!({call}.to_bits(), {}{bits_ty});", v.bits()),
+    }
+}
+
+/// The raw bit pattern of a parsed float literal.
+trait HasBits {
+    fn bits(&self) -> u64;
+}
+
+impl HasBits for wast::token::F32 {
+    fn bits(&self) -> u64 {
+        u64::from(self.bits)
+    }
+}
+
+impl HasBits for wast::token::F64 {
+    fn bits(&self) -> u64 {
+        self.bits
     }
 }
 
@@ -214,6 +263,41 @@ fn assert_trap_fails_when_the_call_does_not_trap() {
         r#"
 (module (func (export "id") (param i32) (result i32) local.get 0))
 (assert_trap (invoke "id" (i32.const 1)) "unreachable")
+"#,
+    );
+}
+
+#[test]
+fn float_results_compare_by_bits_and_nan_patterns() {
+    let report = run_wast(
+        "spec_float_nan",
+        r#"
+(module
+  (func (export "neg") (param f32) (result f32) local.get 0 f32.neg)
+  (func (export "div") (param f64 f64) (result f64) local.get 0 local.get 1 f64.div)
+  (func (export "id32") (param f32) (result f32) local.get 0))
+;; -0.0 and +0.0 are different bit patterns
+(assert_return (invoke "neg" (f32.const 0)) (f32.const -0))
+;; a NaN with a payload is preserved bit-for-bit by a move
+(assert_return (invoke "id32" (f32.const nan:0x200000)) (f32.const nan:0x200000))
+;; 0/0 produces the canonical NaN; arithmetic NaN accepts any quiet NaN
+(assert_return (invoke "div" (f64.const 0) (f64.const 0)) (f64.const nan:canonical))
+(assert_return (invoke "div" (f64.const 0) (f64.const 0)) (f64.const nan:arithmetic))
+(assert_return (invoke "id32" (f32.const nan:0x600000)) (f32.const nan:arithmetic))
+"#,
+    );
+    assert_eq!(report.executed, 5);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+#[should_panic(expected = "generated program assertions failed")]
+fn a_non_canonical_nan_does_not_satisfy_nan_canonical() {
+    run_wast(
+        "spec_float_nan_not_canonical",
+        r#"
+(module (func (export "id32") (param f32) (result f32) local.get 0))
+(assert_return (invoke "id32" (f32.const nan:0x200000)) (f32.const nan:canonical))
 "#,
     );
 }
