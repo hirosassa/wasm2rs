@@ -33,6 +33,7 @@ mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
 wat = "1.263.0"
+wast = "263.0.0"
 
 # Hardening gates (rust-hardening skill). This crate is a code generator, so a
 # chunk of the restriction lints below fire on *intentional* index/offset
