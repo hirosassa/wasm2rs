@@ -49,12 +49,12 @@ struct Group {
 /// Emitted at the top of every generated `main`: runs `f` and asserts that it
 /// traps (panics), silencing the expected panic message while it runs.
 const TRAP_HELPER: &str = "#[allow(dead_code)]
-fn expect_trap<R>(f: impl FnOnce() -> R) {
+fn expect_trap<R>(ctx: &str, f: impl FnOnce() -> R) {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     std::panic::set_hook(prev);
-    assert!(r.is_err(), \"expected a trap\");
+    assert!(r.is_err(), \"expected a trap ({})\", ctx);
 }
 ";
 
@@ -95,12 +95,13 @@ fn arg_expr(arg: &WastArg<'_>) -> Result<String, String> {
 }
 
 /// Statement asserting that `call` (an expression) equals the expected result.
-fn return_assertion(call: &str, ret: &WastRet<'_>) -> Result<String, String> {
+fn return_assertion(call: &str, ret: &WastRet<'_>, ctx: &str) -> Result<String, String> {
     match ret {
-        WastRet::Core(WastRetCore::I32(v)) => Ok(format!("assert_eq!({call}, {v}i32);")),
-        WastRet::Core(WastRetCore::I64(v)) => Ok(format!("assert_eq!({call}, {v}i64);")),
+        WastRet::Core(WastRetCore::I32(v)) => Ok(format!("assert_eq!({call}, {v}i32, \"{ctx}\");")),
+        WastRet::Core(WastRetCore::I64(v)) => Ok(format!("assert_eq!({call}, {v}i64, \"{ctx}\");")),
         WastRet::Core(WastRetCore::F32(pattern)) => Ok(nan_assertion(
             call,
+            ctx,
             "u32",
             "0x7fff_ffff",
             "0x7fc0_0000",
@@ -109,6 +110,7 @@ fn return_assertion(call: &str, ret: &WastRet<'_>) -> Result<String, String> {
         )),
         WastRet::Core(WastRetCore::F64(pattern)) => Ok(nan_assertion(
             call,
+            ctx,
             "u64",
             "0x7fff_ffff_ffff_ffff",
             "0x7ff8_0000_0000_0000",
@@ -124,6 +126,7 @@ fn return_assertion(call: &str, ret: &WastRet<'_>) -> Result<String, String> {
 /// `Value` patterns are compared bit-for-bit by the caller instead.
 fn nan_assertion<T: HasBits>(
     call: &str,
+    ctx: &str,
     bits_ty: &str,
     abs_mask: &str,
     canonical: &str,
@@ -132,12 +135,12 @@ fn nan_assertion<T: HasBits>(
 ) -> String {
     match pattern {
         NanPattern::CanonicalNan => format!(
-            "assert_eq!({call}.to_bits() & {abs_mask}{bits_ty}, {canonical}{bits_ty});"
+            "assert_eq!({call}.to_bits() & {abs_mask}{bits_ty}, {canonical}{bits_ty}, \"{ctx}\");"
         ),
         NanPattern::ArithmeticNan => format!(
-            "assert_eq!({call}.to_bits() & {quiet}{bits_ty}, {quiet}{bits_ty});"
+            "assert_eq!({call}.to_bits() & {quiet}{bits_ty}, {quiet}{bits_ty}, \"{ctx}\");"
         ),
-        NanPattern::Value(v) => format!("assert_eq!({call}.to_bits(), {}{bits_ty});", v.bits()),
+        NanPattern::Value(v) => format!("assert_eq!({call}.to_bits(), {}{bits_ty}, \"{ctx}\");", v.bits()),
     }
 }
 
@@ -181,11 +184,13 @@ fn return_stmt(
     group: &Group,
     invoke: &WastInvoke<'_>,
     results: &[WastRet<'_>],
+    ctx: &str,
 ) -> Result<String, String> {
     let call = call_expr(group, invoke)?;
     match results {
-        [ret] => return_assertion(&call, ret),
-        _ => Err("multi-value or empty result list".into()),
+        [] => Ok(format!("let _ = {call};")),
+        [ret] => return_assertion(&call, ret, ctx),
+        _ => Err("multi-value result".into()),
     }
 }
 
@@ -224,6 +229,10 @@ fn run_wast(name: &str, src: &str) -> Report {
     // Whether the latest `module` was accepted (its group is `groups.last()`).
     let mut module_ok = false;
     for directive in &mut wast.directives {
+        let ctx = directive_location(directive, src, name);
+        // For an `assert_return` we cannot verify: still run the call, since
+        // later assertions may observe its side effects.
+        let mut effect_only: Option<String> = None;
         let (kind, outcome): (&str, Result<Option<String>, String>) = match directive {
             WastDirective::Module(module) => {
                 match start_group(module) {
@@ -244,7 +253,10 @@ fn run_wast(name: &str, src: &str) -> Report {
                 ..
             } => (
                 "assert_return",
-                with_group(&groups, module_ok, |g| return_stmt(g, invoke, results)),
+                with_group(&groups, module_ok, |g| {
+                    effect_only = call_expr(g, invoke).ok().map(|c| format!("let _ = {c};"));
+                    return_stmt(g, invoke, results, &ctx)
+                }),
             ),
             WastDirective::AssertTrap {
                 exec: WastExecute::Invoke(invoke),
@@ -252,7 +264,7 @@ fn run_wast(name: &str, src: &str) -> Report {
             } => (
                 "assert_trap",
                 with_group(&groups, module_ok, |g| {
-                    call_expr(g, invoke).map(|c| format!("expect_trap(|| {{ let _ = {c}; }});"))
+                    call_expr(g, invoke).map(|c| format!("expect_trap(\"{ctx}\", || {{ let _ = {c}; }});"))
                 }),
             ),
             WastDirective::Invoke(invoke) => (
@@ -279,18 +291,58 @@ fn run_wast(name: &str, src: &str) -> Report {
                 report.executed += 1;
             }
             Ok(None) => {}
-            Err(why) => report.skip(kind, why),
+            Err(why) => {
+                if let (Some(stmt), Some(group)) = (effect_only, groups.last_mut()) {
+                    group.body.push_str(&stmt);
+                    group.body.push('\n');
+                }
+                report.skip(kind, why);
+            }
         }
     }
     for (i, group) in groups.iter().enumerate() {
-        common::compile_run_wasm(&format!("{name}_{i}"), &group.wasm, &group.body);
+        run_group(&format!("{name}_{i}"), group);
     }
     eprintln!(
         "{name}: {} executed, {} skipped",
         report.executed,
         report.skipped.len()
     );
+    let mut by_reason: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for reason in &report.skipped {
+        *by_reason.entry(reason).or_default() += 1;
+    }
+    for (reason, count) in by_reason {
+        eprintln!("  skipped x{count}: {reason}");
+    }
     report
+}
+
+/// `<file>:<line>` of a directive, embedded in assertion messages so a failing
+/// generated program points back at the `.wast` source.
+fn directive_location(directive: &WastDirective<'_>, src: &str, name: &str) -> String {
+    let (line, _) = directive.span().linecol_in(src);
+    format!("{name}.wast:{}", line + 1)
+}
+
+/// Compile and run one group. A spec file calls only some of a module's
+/// functions, so the harness (not the generator) tolerates unused code; every
+/// other warning in the generated source is still an error.
+fn run_group(name: &str, group: &Group) {
+    let generated = wasm2rs::transpile(&group.wasm).expect("transpile module");
+    let program = format!(
+        "#![allow(dead_code, unused_mut, unused_variables)]\n{generated}\nfn main() {{\n{}\n}}\n",
+        group.body
+    );
+    let bin = common::build(name, &program);
+    let run = std::process::Command::new(&bin)
+        .output()
+        .expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "generated program assertions failed:\n{name}\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 /// Run `f` against the current module's group, or report that it was skipped.
@@ -443,4 +495,87 @@ fn unsupported_directives_are_skipped_with_a_reason() {
     // 2 unsupported assertions + invalid + exhaustion + import module + its
     // assertion + register.
     assert_eq!(report.skipped.len(), 7, "{reasons}");
+}
+
+/// Replay a vendored `tests/spec/<file>.wast`.
+macro_rules! spec_test {
+    ($($name:ident => $file:literal),+ $(,)?) => {$(
+        #[test]
+        fn $name() {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/spec/", $file, ".wast");
+            let src = std::fs::read_to_string(path).expect("read vendored .wast");
+            let report = run_wast(concat!("spec_", $file), &src);
+            assert!(report.executed > 0, "{}: nothing was executed", $file);
+        }
+    )+};
+}
+
+spec_test! {
+    spec_i32 => "i32",
+    spec_i64 => "i64",
+    spec_f32 => "f32",
+    spec_f64 => "f64",
+    spec_conversions => "conversions",
+    spec_f32_cmp => "f32_cmp",
+    spec_f64_cmp => "f64_cmp",
+    spec_f32_bitwise => "f32_bitwise",
+    spec_f64_bitwise => "f64_bitwise",
+    spec_int_literals => "int_literals",
+    spec_float_misc => "float_misc",
+    spec_block => "block",
+    spec_loop => "loop",
+    spec_if_ => "if",
+    spec_br => "br",
+    spec_br_if => "br_if",
+    spec_br_table => "br_table",
+    spec_return => "return",
+    spec_nop => "nop",
+    spec_unreachable => "unreachable",
+    spec_local_get => "local_get",
+    spec_local_set => "local_set",
+    spec_local_tee => "local_tee",
+    spec_load => "load",
+    spec_store => "store",
+    spec_endianness => "endianness",
+    spec_forward => "forward",
+    spec_fac => "fac",
+    spec_left_to_right => "left-to-right",
+    spec_labels => "labels",
+    spec_switch => "switch",
+    spec_call => "call",
+    spec_unwind => "unwind",
+}
+
+#[test]
+fn a_result_less_assert_return_still_runs_its_side_effects() {
+    let report = run_wast(
+        "spec_effect_only",
+        r#"
+(module (memory 1)
+  (func (export "set") (i32.store (i32.const 4) (i32.const 9)))
+  (func (export "get") (result i32) (i32.load (i32.const 4))))
+(assert_return (invoke "set"))
+(assert_return (invoke "get") (i32.const 9))
+"#,
+    );
+    assert_eq!(report.executed, 2);
+}
+
+#[test]
+fn an_unverifiable_assert_return_is_skipped_but_its_call_still_runs() {
+    // `bump` returns two values (not checkable yet) but mutates state that the
+    // next assertion observes.
+    let report = run_wast(
+        "spec_effect_multi_value",
+        r#"
+(module (global $g (mut i32) (i32.const 0))
+  (func (export "bump") (result i32 i32)
+    (global.set $g (i32.const 5)) (i32.const 1) (i32.const 2))
+  (func (export "g") (result i32) (global.get $g)))
+(assert_return (invoke "bump") (i32.const 1) (i32.const 2))
+(assert_return (invoke "g") (i32.const 5))
+"#,
+    );
+    assert_eq!(report.executed, 1);
+    assert_eq!(report.skipped.len(), 1, "{:?}", report.skipped);
 }
