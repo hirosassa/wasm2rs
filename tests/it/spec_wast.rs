@@ -117,7 +117,10 @@ fn return_assertion(call: &str, ret: &WastRet<'_>, ctx: &str) -> Result<String, 
             "0x7ff8_0000_0000_0000",
             pattern,
         )),
-        other => Err(format!("unsupported expected value {}", variant_name(other))),
+        other => Err(format!(
+            "unsupported expected value {}",
+            variant_name(other)
+        )),
     }
 }
 
@@ -137,10 +140,13 @@ fn nan_assertion<T: HasBits>(
         NanPattern::CanonicalNan => format!(
             "assert_eq!({call}.to_bits() & {abs_mask}{bits_ty}, {canonical}{bits_ty}, \"{ctx}\");"
         ),
-        NanPattern::ArithmeticNan => format!(
-            "assert_eq!({call}.to_bits() & {quiet}{bits_ty}, {quiet}{bits_ty}, \"{ctx}\");"
+        NanPattern::ArithmeticNan => {
+            format!("assert_eq!({call}.to_bits() & {quiet}{bits_ty}, {quiet}{bits_ty}, \"{ctx}\");")
+        }
+        NanPattern::Value(v) => format!(
+            "assert_eq!({call}.to_bits(), {}{bits_ty}, \"{ctx}\");",
+            v.bits()
         ),
-        NanPattern::Value(v) => format!("assert_eq!({call}.to_bits(), {}{bits_ty}, \"{ctx}\");", v.bits()),
     }
 }
 
@@ -264,7 +270,8 @@ fn run_wast(name: &str, src: &str) -> Report {
             } => (
                 "assert_trap",
                 with_group(&groups, module_ok, |g| {
-                    call_expr(g, invoke).map(|c| format!("expect_trap(\"{ctx}\", || {{ let _ = {c}; }});"))
+                    call_expr(g, invoke)
+                        .map(|c| format!("expect_trap(\"{ctx}\", || {{ let _ = {c}; }});"))
                 }),
             ),
             WastDirective::Invoke(invoke) => (
@@ -490,7 +497,10 @@ fn unsupported_directives_are_skipped_with_a_reason() {
         "imports",
         "register",
     ] {
-        assert!(reasons.contains(needle), "no skip reason {needle:?} in:\n{reasons}");
+        assert!(
+            reasons.contains(needle),
+            "no skip reason {needle:?} in:\n{reasons}"
+        );
     }
     // 2 unsupported assertions + invalid + exhaustion + import module + its
     // assertion + register.
