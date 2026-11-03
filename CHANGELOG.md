@@ -14,14 +14,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged, which the spec forbids (found by the spec testsuite). The results are
   routed through small `quiet_f32` / `quiet_f64` helpers, emitted only when used;
   ordinary values are unaffected.
+- A `br` / `br_if` / `br_table` that targets the function's own outermost label
+  (equivalent to a `return`) is now supported instead of failing with
+  `branch depth out of range`. Only functions that contain such a branch are wrapped
+  in an extra region, so other output is unchanged. (Not covered: continuation
+  bodies, which have their own lowering.)
 - Generated functions that call themselves unconditionally no longer trigger
   rustc's `unconditional_recursion` warning (found by the spec testsuite).
 
 ### Added
 
 - Tests: a harness that replays vendored WebAssembly spec testsuite `.wast` files
-  (`tests/spec/`, `tests/it/spec_wast.rs`). Known gaps it found are pinned: a branch
-  that targets the function's own label, and tables of a typed function reference.
+  (`tests/spec/`, `tests/it/spec_wast.rs`). A known gap it found is pinned: tables of a
+  typed function reference.
 
 ## [0.2.0] - 2026-11-01
 
