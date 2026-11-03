@@ -86,6 +86,22 @@ make it pass, then refactor.
 - Add the test to the matching module under `tests/it/` (or add a module and register
   it in `tests/it/main.rs`).
 
+### Spec testsuite
+
+`tests/spec/` holds a vendored subset of the official
+[WebAssembly spec testsuite](https://github.com/WebAssembly/testsuite) (`.wast`),
+replayed by `tests/it/spec_wast.rs`: each `module` and the `assert_return` /
+`assert_trap` directives after it become one generated program. Directives the
+harness cannot express yet (imports, `register`, `assert_invalid`, multi-value,
+v128/ref values, ...) are **skipped with a reason**, never dropped; run
+`cargo test --release --test it spec_wast -- --nocapture` to see the counts.
+
+- To add a file, copy it into `tests/spec/` (see its `README.md` for the pinned
+  upstream commit) and add it to `spec_test!`.
+- A file whose module the transpiler rejects goes in `spec_known_gap!` with the
+  expected error. That test fails once the gap is fixed, so the entry gets promoted
+  to `spec_test!`.
+
 ## Pull requests
 
 1. Fork and create a topic branch from the latest `main`
