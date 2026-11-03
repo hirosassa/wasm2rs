@@ -149,3 +149,17 @@ fn void_call_in_stateful_module_dispatches_on_self() {
          assert_eq!(inst.func1(3), 8);",
     );
 }
+
+#[test]
+fn a_directly_recursive_function_compiles_without_warnings() {
+    // `runaway` calls itself unconditionally (it would exhaust the stack if it
+    // were ever called). rustc's `unconditional_recursion` lint must not make
+    // the generated code fail `-D warnings`.
+    crate::common::compile_run(
+        "calls_unconditional_recursion",
+        r#"(module
+          (func $runaway (export "runaway") (call $runaway))
+          (func (export "one") (result i32) i32.const 1))"#,
+        "assert_eq!(func1(), 1);",
+    );
+}

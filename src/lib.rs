@@ -760,8 +760,7 @@ mod tests {
     }
 
     /// The lint-suppression attribute prefixed to every generated function.
-    const ATTR: &str =
-        "#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens)]\n";
+    const ATTR: &str = "#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens, unconditional_recursion)]\n";
 
     #[test]
     fn i32_add_becomes_wrapping_add() {
@@ -1042,7 +1041,7 @@ pub struct Instance {
     g0: i32,
 }
 
-#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens)]
+#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens, unconditional_recursion)]
 impl Instance {
     pub fn new() -> Self {
         Self {
