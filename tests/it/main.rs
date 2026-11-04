@@ -66,6 +66,7 @@ mod memory64;
 mod memory_load;
 mod module_linking;
 mod multi_memory;
+mod multi_table;
 mod multivalue;
 mod nan_rounding;
 mod parallel_codegen;

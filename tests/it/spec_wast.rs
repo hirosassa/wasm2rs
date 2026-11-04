@@ -593,12 +593,9 @@ macro_rules! spec_known_gap {
         }
     )+};
 }
-spec_known_gap! {
-    // The module declares two tables (the typed-funcref table is the second).
-    spec_br_table => ("br_table", "multiple tables"),
-}
 
 spec_test! {
+    spec_br_table => "br_table",
     spec_i32 => "i32",
     spec_i64 => "i64",
     spec_f32 => "f32",

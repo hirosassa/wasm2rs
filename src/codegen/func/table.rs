@@ -1,6 +1,6 @@
 use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, ValType};
 
-use super::super::helpers::mem_accessor;
+use super::super::helpers::{mem_accessor, table_accessor};
 use super::super::{CompositeKind, Helper, Val};
 use crate::TranspileError;
 
@@ -10,14 +10,35 @@ impl<'a> super::FuncGen<'a> {
         dst_table: u32,
         src_table: u32,
     ) -> Result<(), TranspileError> {
-        self.require_table()?;
-        self.require_zero_index(dst_table, "table.copy")?;
-        self.require_zero_index(src_table, "table.copy")?;
+        let dst_table = self.require_table_index(dst_table)?;
+        let src_table = self.require_table_index(src_table)?;
         let (dest, src, len) = self.pop_bulk_operands()?;
-        self.used_helpers.insert((Helper::TableCopy, 0));
+        if dst_table == 0 && src_table == 0 {
+            self.used_helpers.insert((Helper::TableCopy, 0));
+            self.line(format!(
+                "self.table_copy(({}) as u32, ({}) as u32, ({}) as u32);",
+                dest.code, src.code, len.code
+            ));
+            return Ok(());
+        }
+        // Any other table: inline. Both ranges are bounds-checked before the write
+        // (a trap, no partial write). Across tables the source is copied out first
+        // (the two accessors each borrow all of `self`); within one table the
+        // ranges may overlap, so `copy_within` is used.
+        let (_, dst_mut) = table_accessor(dst_table);
+        let (src_get, _) = table_accessor(src_table);
+        let body = if dst_table == src_table {
+            format!("self.{dst_mut}().copy_within(s..s + n, d);")
+        } else {
+            format!(
+                "let tmp: Vec<u32> = self.{src_get}()[s..s + n].to_vec(); \
+                 self.{dst_mut}()[d..d + n].copy_from_slice(&tmp);"
+            )
+        };
         self.line(format!(
-            "self.table_copy(({}) as u32, ({}) as u32, ({}) as u32);",
-            dest.code, src.code, len.code
+            "{{ let n = ({}) as u32 as usize; let s = ({}) as u32 as usize; \
+             let d = ({}) as u32 as usize; {body} }}",
+            len.code, src.code, dest.code
         ));
         Ok(())
     }
@@ -26,12 +47,17 @@ impl<'a> super::FuncGen<'a> {
     /// panics on the slice access (a trap). The value is non-stable because a
     /// later `table.set`/`table.grow` can change it.
     pub(super) fn table_get(&mut self, table: u32) -> Result<(), TranspileError> {
-        self.require_table()?;
-        self.require_zero_index(table, "table.get")?;
+        let table = self.require_table_index(table)?;
         let index = self.pop()?;
-        let element = self.ctx.table_element.unwrap_or(ValType::FUNCREF);
+        let element = self
+            .ctx
+            .table_elements
+            .get(table as usize)
+            .copied()
+            .unwrap_or(ValType::FUNCREF);
+        let (get, _) = table_accessor(table);
         self.push_trapping(
-            format!("self.table()[({}) as u32 as usize]", index.code),
+            format!("self.{get}()[({}) as u32 as usize]", index.code),
             element,
         )
     }
@@ -39,13 +65,13 @@ impl<'a> super::FuncGen<'a> {
     /// `table.set`: write a funcref at the given index. Out-of-bounds panics (a
     /// trap). Spilled first since it mutates the table.
     pub(super) fn table_set(&mut self, table: u32) -> Result<(), TranspileError> {
-        self.require_table()?;
-        self.require_zero_index(table, "table.set")?;
+        let table = self.require_table_index(table)?;
         self.spill_nonstable()?;
         let value = self.pop()?;
         let index = self.pop()?;
+        let (_, get_mut) = table_accessor(table);
         self.line(format!(
-            "self.table_mut()[({}) as u32 as usize] = ({}) as u32;",
+            "self.{get_mut}()[({}) as u32 as usize] = ({}) as u32;",
             index.code, value.code
         ));
         Ok(())
@@ -54,10 +80,10 @@ impl<'a> super::FuncGen<'a> {
     /// `table.size`: push the current table length. Non-stable because
     /// `table.grow` can change it.
     pub(super) fn table_size(&mut self, table: u32) -> Result<(), TranspileError> {
-        self.require_table()?;
-        self.require_zero_index(table, "table.size")?;
+        let table = self.require_table_index(table)?;
+        let (get, _) = table_accessor(table);
         self.push(Val {
-            code: "(self.table().len() as i32)".to_string(),
+            code: format!("(self.{get}().len() as i32)"),
             ty: ValType::I32,
             stable: false,
             may_trap: false,
@@ -72,16 +98,16 @@ impl<'a> super::FuncGen<'a> {
     /// than attempting an impossible allocation. Spilled first since it mutates
     /// the table.
     pub(super) fn table_grow(&mut self, table: u32) -> Result<(), TranspileError> {
-        self.require_table()?;
-        self.require_zero_index(table, "table.grow")?;
+        let table = self.require_table_index(table)?;
+        let (get, get_mut) = table_accessor(table);
         self.spill_nonstable()?;
         let delta = self.pop()?;
         let init = self.pop()?;
         let name = self.fresh_temp();
         self.line(format!(
-            "let {name}: i32 = {{ let n = ({}) as u32 as usize; let old = self.table().len(); \
+            "let {name}: i32 = {{ let n = ({}) as u32 as usize; let old = self.{get}().len(); \
              match old.checked_add(n) {{ \
-             Some(len) if len <= u32::MAX as usize => {{ self.table_mut().resize(len, ({}) as u32); old as i32 }} \
+             Some(len) if len <= u32::MAX as usize => {{ self.{get_mut}().resize(len, ({}) as u32); old as i32 }} \
              _ => -1, }} }};",
             delta.code, init.code
         ));
@@ -97,12 +123,20 @@ impl<'a> super::FuncGen<'a> {
     /// `table.fill`: write the init funcref into `[dest, dest+len)`. The range is
     /// bounds-checked before any write (a trap on overflow, no partial write).
     pub(super) fn table_fill(&mut self, table: u32) -> Result<(), TranspileError> {
-        self.require_table()?;
-        self.require_zero_index(table, "table.fill")?;
+        let table = self.require_table_index(table)?;
         let (dest, val, len) = self.pop_bulk_operands()?;
-        self.used_helpers.insert((Helper::TableFill, 0));
+        if table == 0 {
+            self.used_helpers.insert((Helper::TableFill, 0));
+            self.line(format!(
+                "self.table_fill(({}) as u32, ({}) as u32, ({}) as u32);",
+                dest.code, val.code, len.code
+            ));
+            return Ok(());
+        }
+        let (_, get_mut) = table_accessor(table);
         self.line(format!(
-            "self.table_fill(({}) as u32, ({}) as u32, ({}) as u32);",
+            "{{ let d = ({}) as u32 as usize; let v = ({}) as u32; \
+             let n = ({}) as u32 as usize; self.{get_mut}()[d..d + n].fill(v); }}",
             dest.code, val.code, len.code
         ));
         Ok(())
@@ -196,12 +230,12 @@ impl<'a> super::FuncGen<'a> {
     }
 
     pub(super) fn table_init(&mut self, elem_index: u32, table: u32) -> Result<(), TranspileError> {
-        self.require_table()?;
-        self.require_zero_index(table, "table.init")?;
+        let table = self.require_table_index(table)?;
         self.require_passive(&self.ctx.elem_passive, elem_index, "elem")?;
         let (dest, src, len) = self.pop_bulk_operands()?;
+        let (_, get_mut) = table_accessor(table);
         self.emit_bulk_init(
-            "self.table_mut()",
+            &format!("self.{get_mut}()"),
             &format!("self.elem{elem_index}"),
             &dest,
             &src,

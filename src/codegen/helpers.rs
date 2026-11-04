@@ -11,6 +11,17 @@ pub(super) fn mem_accessor(mem: u32) -> (String, String) {
     }
 }
 
+/// The accessor pair `(table(), table_mut())` naming table `table`: table 0
+/// keeps the historic `table`/`table_mut` names (so single-table output is
+/// unchanged), while table `i > 0` uses `table{i}`/`table{i}_mut`.
+pub(super) fn table_accessor(table: u32) -> (String, String) {
+    if table == 0 {
+        ("table".to_string(), "table_mut".to_string())
+    } else {
+        (format!("table{table}"), format!("table{table}_mut"))
+    }
+}
+
 /// The instance method name of `helper` for linear memory `mem`: memory 0 keeps
 /// the historic name (`r32`, `memory_grow`, …); memory `i > 0` appends `_m{i}`
 /// so each memory owns a distinct set of helper methods (`r32_m1`, …).

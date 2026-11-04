@@ -92,9 +92,9 @@ pub(crate) struct ModuleCtx<'a> {
     /// Whether the module has an injected host (`self.imports`), so an external
     /// funcref handle in a table can be resolved through the host.
     pub(crate) has_imports: bool,
-    /// The table's element type (`funcref` or `externref`), if a table exists;
-    /// `table.get` pushes an operand of this type.
-    pub(crate) table_element: Option<ValType>,
+    /// Each table's element type (`funcref` or `externref`), in table-index
+    /// order; `table.get` pushes an operand of this type.
+    pub(crate) table_elements: Vec<ValType>,
     /// Per-data-segment: whether it is passive (so `memory.init`/`data.drop`
     /// can reference it through a `data{d}` field), indexed by data index.
     pub(crate) data_passive: Vec<bool>,
@@ -200,6 +200,9 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) memories: &'a [MemInfo],
     pub(crate) data: &'a [DataSegment],
     pub(crate) table: Option<&'a TableInfo>,
+    /// Further defined tables (index 1..), after `table`. Only present when
+    /// `table` is itself a defined (not imported) table.
+    pub(crate) extra_tables: &'a [TableInfo],
     pub(crate) elements: &'a [ElemSegment],
     pub(crate) tags: &'a [TagInfo],
     /// The module's function exports, in declaration order.
@@ -236,6 +239,7 @@ pub(crate) fn build_ctx<'a>(
         memories,
         data,
         table,
+        extra_tables,
         elements,
         ..
     } = *parts;
@@ -372,7 +376,11 @@ pub(crate) fn build_ctx<'a>(
         memory_shared,
         has_table,
         has_imports,
-        table_element: table.map(|t| t.element),
+        table_elements: table
+            .into_iter()
+            .chain(extra_tables)
+            .map(|t| t.element)
+            .collect(),
         data_passive: data.iter().map(|d| d.offset.is_none()).collect(),
         elem_passive: elements
             .iter()

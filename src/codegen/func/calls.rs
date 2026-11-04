@@ -1,5 +1,6 @@
 use wasmparser::ValType;
 
+use super::super::helpers::table_accessor;
 use super::super::{
     ALLOW, FLATTEN_DEPTH_THRESHOLD, GenMeta, Node, Rt, SplitPlan, Val, can_flatten, default_value,
     estimate_body_len, flatten_body, index_u32, push_body_line, render_body_into, rust_type,
@@ -107,11 +108,8 @@ impl<'a> super::FuncGen<'a> {
                 "call_indirect without a table".into(),
             ));
         }
-        if table_index != 0 {
-            return Err(TranspileError::Unsupported(
-                "call_indirect on a non-zero table".into(),
-            ));
-        }
+        let table_index = self.require_table_index(table_index)?;
+        let (table_get, _) = table_accessor(table_index);
         let sig = self
             .ctx
             .types
@@ -167,7 +165,7 @@ impl<'a> super::FuncGen<'a> {
         // index panics on this slice access (a trap).
         let entry = self.fresh_temp();
         self.line(format!(
-            "let {entry} = self.table()[({}) as u32 as usize];",
+            "let {entry} = self.{table_get}()[({}) as u32 as usize];",
             index.code
         ));
 
