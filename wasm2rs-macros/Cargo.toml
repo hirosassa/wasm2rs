@@ -1,0 +1,17 @@
+[package]
+name = "wasm2rs-macros"
+version = "0.2.0"
+edition = "2024"
+description = "Procedural macro that embeds a WebAssembly module as Rust source, via wasm2rs."
+license = "MIT"
+repository = "https://github.com/hirosassa/wasm2rs"
+keywords = ["webassembly", "wasm", "macro"]
+categories = ["compilers", "development-tools", "wasm"]
+# The build script only writes a tiny wasm module for this crate's own tests.
+build = "build.rs"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+wasm2rs = { version = "0.2.0", path = "..", default-features = false }

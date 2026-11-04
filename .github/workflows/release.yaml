@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check tag matches Cargo.toml version
         run: |
-          crate_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          crate_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wasm2rs") | .version')
           tag_version=${GITHUB_REF_NAME#v}
           echo "tag=$tag_version crate=$crate_version"
           if [ "$crate_version" != "$tag_version" ]; then

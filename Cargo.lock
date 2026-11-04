@@ -198,6 +198,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm2rs-macros"
+version = "0.2.0"
+dependencies = [
+ "wasm2rs",
+]
+
+[[package]]
 name = "wasmparser"
 version = "0.263.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

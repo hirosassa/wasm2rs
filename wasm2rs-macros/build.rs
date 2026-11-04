@@ -1,0 +1,17 @@
+//! Writes a tiny hand-assembled wasm module (`add`) into `OUT_DIR` for the tests.
+//!
+//! `(module (func (export "add") (param i32 i32) (result i32)
+//!    local.get 0 local.get 1 i32.add))`
+
+fn main() {
+    let wasm: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+        0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // type (i32,i32)->i32
+        0x03, 0x02, 0x01, 0x00, // function
+        0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00, // export "add"
+        0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b, // code
+    ];
+    let out = std::env::var_os("OUT_DIR").expect("OUT_DIR");
+    std::fs::write(std::path::Path::new(&out).join("add.wasm"), wasm).expect("write add.wasm");
+    println!("cargo:rerun-if-changed=build.rs");
+}

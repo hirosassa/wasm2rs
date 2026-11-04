@@ -27,6 +27,9 @@ path = "tests/it/main.rs"
 default = ["cli"]
 cli = ["dep:mimalloc"]
 
+[workspace]
+members = ["wasm2rs-macros"]
+
 [dependencies]
 wasmparser = "0.263.0"
 mimalloc = { version = "0.1", optional = true }
