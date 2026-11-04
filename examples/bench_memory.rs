@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use wasm2rs::{TranspileOptions, transpile_with_options};
 
-/// (name, wat, `run` argument sized for roughly a second of work).
-const WORKLOADS: [(&str, &str, u32); 3] = [
+/// (name, wat, `run` argument sized for roughly a second of work). `i32`, like the
+/// generated `run` parameter, so an oversized count fails here rather than in rustc.
+const WORKLOADS: [(&str, &str, i32); 3] = [
     ("hash", include_str!("../benches/memory/hash.wat"), 15_000),
     (
         "matmul",
@@ -27,7 +28,7 @@ const WORKLOADS: [(&str, &str, u32); 3] = [
     ),
 ];
 
-fn build(dir: &Path, name: &str, wat: &str, n: u32, unsafe_memory: bool) -> std::path::PathBuf {
+fn build(dir: &Path, name: &str, wat: &str, n: i32, unsafe_memory: bool) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let opts = TranspileOptions {
         named_exports: true,
