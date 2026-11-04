@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bodies, which have their own lowering.)
 - Generated functions that call themselves unconditionally no longer trigger
   rustc's `unconditional_recursion` warning (found by the spec testsuite).
+- Constant operands such as `i32.const MIN; i32.const -1; i32.div_s` or a constant
+  divisor of zero no longer make rustc reject the generated program
+  (`unconditional_panic`); they still trap at run time (found by the spec testsuite).
 
 ### Added
 

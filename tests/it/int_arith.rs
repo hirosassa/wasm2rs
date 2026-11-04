@@ -146,3 +146,73 @@ fn i64_div_shift_rotate_widths() {
          assert_eq!(func3(i64::MIN, -1), 0);",
     );
 }
+
+/// Constant operands must still compile (rustc's deny-by-default
+/// `unconditional_panic` would otherwise reject the generated program) and
+/// trap at run time exactly like the non-constant case.
+#[test]
+fn constant_operand_traps_compile_and_trap_at_runtime() {
+    let cases = [
+        (
+            "div_s_overflow_i32",
+            "i32",
+            "div_s",
+            "i32.const -2147483648",
+            "i32.const -1",
+            "overflow",
+        ),
+        (
+            "div_s_overflow_i64",
+            "i64",
+            "div_s",
+            "i64.const -9223372036854775808",
+            "i64.const -1",
+            "overflow",
+        ),
+        (
+            "div_s_zero",
+            "i32",
+            "div_s",
+            "i32.const 7",
+            "i32.const 0",
+            "divide by zero",
+        ),
+        (
+            "div_u_zero",
+            "i64",
+            "div_u",
+            "i64.const 7",
+            "i64.const 0",
+            "divide by zero",
+        ),
+        (
+            "rem_s_zero",
+            "i32",
+            "rem_s",
+            "i32.const 7",
+            "i32.const 0",
+            "remainder",
+        ),
+        (
+            "rem_u_zero",
+            "i64",
+            "rem_u",
+            "i64.const 7",
+            "i64.const 0",
+            "remainder",
+        ),
+    ];
+    for (name, ty, op, a, b, needle) in cases {
+        let wat = format!(r#"(module (func (export "f") (result {ty}) {a} {b} {ty}.{op}))"#);
+        crate::common::expect_trap_with(&format!("constdiv_{name}"), &wat, "func0();", needle);
+    }
+}
+
+#[test]
+fn constant_signed_remainder_of_min_by_minus_one_is_zero() {
+    crate::common::compile_run(
+        "constdiv_rem_min",
+        r#"(module (func (export "f") (result i32) i32.const -2147483648 i32.const -1 i32.rem_s))"#,
+        "assert_eq!(func0(), 0);",
+    );
+}
