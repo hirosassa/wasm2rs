@@ -12,6 +12,9 @@ categories = ["compilers", "development-tools", "wasm"]
 # so the suite links once instead of once per file; disable auto-discovery so
 # the sole target below is the only integration-test crate.
 autotests = false
+# The differential fuzzer is a separate crate (heavy wasmtime dependency); keep it
+# out of the published package.
+exclude = ["fuzz-diff"]
 
 # One integration-test crate that bundles every former `tests/<name>.rs` as a
 # submodule. Run a subset with `cargo test --test it <name>`.
