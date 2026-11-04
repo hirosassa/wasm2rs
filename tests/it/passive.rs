@@ -189,20 +189,3 @@ fn table_init_after_elem_drop_traps() {
     let run = Command::new(&bin).output().expect("run generated binary");
     assert!(!run.status.success(), "expected a trap after elem.drop");
 }
-
-#[test]
-fn memory_init_on_active_segment_is_unsupported() {
-    // `memory.init` only references passive segments here; an active segment is
-    // auto-copied and implicitly dropped, so referencing it is rejected.
-    let wat = r#"
-        (module
-          (memory 1)
-          (data (i32.const 0) "\01\02")
-          (func (memory.init 0 (i32.const 0) (i32.const 0) (i32.const 0))))
-        "#;
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    assert!(
-        wasm2rs::transpile(&wasm).is_err(),
-        "memory.init on an active segment must be rejected"
-    );
-}

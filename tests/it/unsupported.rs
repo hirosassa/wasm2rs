@@ -161,16 +161,6 @@ fn unsupported_operator_is_rejected_with_the_operator_named() {
 }
 
 #[test]
-fn negative_element_offset_is_rejected() {
-    // An active element segment whose `i32.const` offset is negative cannot be a
-    // `u32` table index.
-    assert_unsupported(
-        r#"(module (table 1 funcref) (func $f) (elem (i32.const -1) $f))"#,
-        "negative table offset",
-    );
-}
-
-#[test]
 fn non_constant_element_offset_is_rejected() {
     // The element offset must be a plain `i32.const`; a `global.get` offset
     // (permitted by wasm) is not supported.

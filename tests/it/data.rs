@@ -127,12 +127,6 @@ fn transpile_err(wat: &str) -> String {
 }
 
 #[test]
-fn a_negative_i32_data_offset_is_rejected() {
-    let err = transpile_err(r#"(module (memory 1) (data (i32.const -1) "x"))"#);
-    assert!(err.contains("negative data offset"), "{err}");
-}
-
-#[test]
 fn a_negative_i64_data_offset_is_rejected() {
     let err = transpile_err(r#"(module (memory i64 1) (data (i64.const -1) "x"))"#);
     assert!(err.contains("negative data offset"), "{err}");
