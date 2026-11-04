@@ -1395,7 +1395,7 @@ impl<'a> FuncGen<'a> {
 
 /// Whether any branch in `body` targets the function's own outermost label (a
 /// relative depth equal to the number of enclosing regions at that point).
-fn branches_to_function_label(body: &FunctionBody<'_>) -> Result<bool, TranspileError> {
+pub(super) fn branches_to_function_label(body: &FunctionBody<'_>) -> Result<bool, TranspileError> {
     let mut depth: u32 = 0;
     for op in body.get_operators_reader()? {
         match op? {
