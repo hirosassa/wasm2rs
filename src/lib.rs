@@ -762,7 +762,7 @@ mod tests {
     /// The lint-suppression attribute prefixed to every generated function. It is a
     /// literal because the tests below splice it into `format!` strings by name;
     /// `attr_matches_the_generators_lint_list` keeps it in sync with the generator.
-    const ATTR: &str = "#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens, unconditional_recursion)]\n";
+    const ATTR: &str = "#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens, unconditional_recursion, unconditional_panic)]\n";
 
     #[test]
     fn attr_matches_the_generators_lint_list() {
