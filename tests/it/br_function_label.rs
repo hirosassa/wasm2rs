@@ -67,16 +67,21 @@ fn br_out_of_a_loop_to_the_function_label() {
 
 #[test]
 fn functions_without_such_a_branch_are_unchanged() {
-    // No implicit function frame is introduced for ordinary control flow.
+    // Ordinary control flow gets no implicit function frame: the output is the
+    // same as before this feature (one region, `'l0`, for the explicit block).
     let wasm = wat::parse_str(
         r#"(module (func (export "f") (param i32) (result i32)
              (block (result i32) (br_if 0 (i32.const 1) (local.get 0)) (drop) (i32.const 2))))"#,
     )
     .unwrap();
     let out = wasm2rs::transpile(&wasm).unwrap();
-    assert!(
-        !out.contains("'l1"),
-        "unexpected extra region label:\n{out}"
+    // Skip the lint-suppression attribute line; compare the function itself.
+    let function = out.split_once('\n').unwrap().1.trim();
+    assert_eq!(
+        function,
+        "pub fn func0(l0: i32) -> i32 {\n    let mut v0: i32 = 0;\n    'l0: {\n        \
+         if l0 != 0 {\n            v0 = 1i32;\n            break 'l0;\n        }\n        \
+         v0 = 2i32;\n    }\n    v0\n}"
     );
 }
 
@@ -134,5 +139,25 @@ fn br_to_the_function_label_from_a_catch_handler() {
                drop
                i32.const 9))"#,
         "assert_eq!(func0(), 8);",
+    );
+}
+
+#[test]
+fn a_resume_handler_label_may_target_the_function_label() {
+    // `(on $yield 0)` at region depth 0 branches to the function's own label, so
+    // the suspended continuation and its yielded value are the function's results.
+    common::compile_run(
+        "brfn_resume_label",
+        r#"(module
+             (type $ft (func (result i32)))
+             (type $ct (cont $ft))
+             (tag $yield (param i32))
+             (func $gen (result i32) i32.const 10 suspend $yield i32.const 30)
+             (func (export "f") (result i32 (ref null $ct))
+               ref.func $gen cont.new $ct
+               resume $ct (on $yield 0)
+               ref.null $ct))"#,
+        "let mut inst = Instance::new();\n let (v, k) = inst.func1();\n \
+         assert_eq!(v, 10);\n assert_ne!(k, u32::MAX);",
     );
 }

@@ -1425,6 +1425,14 @@ fn branches_to_function_label(body: &FunctionBody<'_>) -> Result<bool, Transpile
                     return Ok(true);
                 }
             }
+            // A `(on $tag $label)` handler branches to its label like `br` does.
+            Operator::Resume { resume_table, .. } | Operator::ResumeThrow { resume_table, .. }
+                if resume_table.handlers.iter().any(|handler| {
+                    matches!(handler, wasmparser::Handle::OnLabel { label, .. } if *label == depth)
+                }) =>
+            {
+                return Ok(true);
+            }
             _ => {}
         }
     }
