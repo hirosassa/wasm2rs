@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use super::helpers::{HELPER_ORDER, helper_name};
-use super::runtime::rt_names;
+use super::runtime::is_rt_name;
 
 /// Rust keywords (strict, reserved and `self`-like) that cannot be used as a
 /// plain identifier.
@@ -63,6 +63,13 @@ pub(super) fn sanitize(name: &str) -> String {
     out
 }
 
+/// Whether `name` starts with a prefix the generated code reserves.
+fn has_reserved_prefix(name: &str) -> bool {
+    ["wasi_", "cont_", "call_ref_t"]
+        .iter()
+        .any(|p| name.starts_with(p))
+}
+
 /// Whether `name` is already a member the generated code defines (an inherent
 /// method or a module-scope function), so a wrapper of that name would clash.
 pub(super) fn is_reserved(name: &str) -> bool {
@@ -82,10 +89,7 @@ pub(super) fn is_reserved(name: &str) -> bool {
     {
         return true;
     }
-    if ["wasi_", "cont_", "call_ref_t"]
-        .iter()
-        .any(|p| name.starts_with(p))
-    {
+    if has_reserved_prefix(name) {
         return true;
     }
     // A memory helper (`r32`, `memory_grow`, …), possibly specialised to memory
@@ -94,11 +98,12 @@ pub(super) fn is_reserved(name: &str) -> bool {
         .rsplit_once("_m")
         .filter(|(_, d)| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
         .map_or(name, |(b, _)| b);
-    HELPER_ORDER.iter().any(|h| helper_name(*h) == base) || rt_names().contains(&name)
+    HELPER_ORDER.iter().any(|h| helper_name(*h) == base) || is_rt_name(name)
 }
 
 /// Assigns each export (name, function index) a unique, valid, non-clashing
-/// identifier, in order. A keyword or generated-member clash appends `_`; a name
+/// identifier, in order. A keyword or generated-member clash appends `_` (or, for
+/// a reserved prefix, prepends `export_`); a name
 /// already handed out appends `_{function index}`.
 pub(super) fn assign<'a>(exports: impl IntoIterator<Item = (&'a str, u32)>) -> Vec<String> {
     let mut used: HashSet<String> = HashSet::new();
@@ -106,9 +111,14 @@ pub(super) fn assign<'a>(exports: impl IntoIterator<Item = (&'a str, u32)>) -> V
     for (name, func_index) in exports {
         let mut ident = sanitize(name);
         if is_reserved(&ident) {
-            ident.push('_');
+            // A reserved prefix survives a trailing `_`, so move the name out of it.
+            if has_reserved_prefix(&ident) {
+                ident.insert_str(0, "export_");
+            } else {
+                ident.push('_');
+            }
         }
-        while used.contains(&ident) || is_reserved(&ident) {
+        while used.contains(&ident) {
             ident = format!("{ident}_{func_index}");
         }
         used.insert(ident.clone());
@@ -151,6 +161,26 @@ mod tests {
         for name in ["add", "func", "funcs", "table_x", "run"] {
             assert!(!is_reserved(name), "{name}");
         }
+    }
+
+    #[test]
+    fn assign_terminates_for_prefix_reserved_names() {
+        let got = assign([
+            ("wasi_x", 1),
+            ("cont_y", 2),
+            ("call_ref_t3", 3),
+            ("wasi_x", 4),
+        ]);
+        assert_eq!(
+            got,
+            [
+                "export_wasi_x",
+                "export_cont_y",
+                "export_call_ref_t3",
+                "export_wasi_x_4"
+            ]
+        );
+        assert!(got.iter().all(|n| !is_reserved(n)));
     }
 
     #[test]

@@ -30,9 +30,9 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
     }
 }
 
-/// The names of every runtime helper, for reserving them against export names.
-pub(super) fn rt_names() -> Vec<&'static str> {
-    RT_ORDER.iter().map(|rt| rt_name(*rt)).collect()
+/// Whether `name` is a runtime helper, for reserving it against export names.
+pub(super) fn is_rt_name(name: &str) -> bool {
+    RT_ORDER.iter().any(|rt| rt_name(*rt) == name)
 }
 
 /// All runtime helpers (free functions and support types), in a deterministic
