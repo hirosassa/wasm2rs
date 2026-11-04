@@ -5,11 +5,11 @@ fn main() {
     let (exports, mem, _) = wasm2rs_fuzz_diff::inspect(&wasm).expect("inspect");
     println!(
         "--- wasmtime\n{:?}",
-        wasm2rs_fuzz_diff::run_wasmtime(&wasm, &exports, mem)
+        wasm2rs_fuzz_diff::run_wasmtime(&wasm, &exports, mem.as_deref())
     );
-    let work = std::env::temp_dir().join("wasm2rs-fuzz-one");
+    let work = std::env::temp_dir().join(format!("wasm2rs-fuzz-one-{}", std::process::id()));
     println!(
         "--- wasm2rs\n{:?}",
-        wasm2rs_fuzz_diff::run_wasm2rs(&wasm, &exports, mem, &work)
+        wasm2rs_fuzz_diff::run_wasm2rs(&wasm, &exports, mem.is_some(), &work)
     );
 }

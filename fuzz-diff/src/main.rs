@@ -37,13 +37,19 @@ fn main() {
                     };
                     *counts.lock().unwrap().entry(kind).or_default() += 1;
                     if matches!(kind, "MISMATCH" | "BROKEN" | "unsupported") {
-                        std::fs::create_dir_all("findings").ok();
-                        std::fs::write(format!("findings/seed-{seed}.wasm"), &wasm).ok();
-                        std::fs::write(
-                            format!("findings/seed-{seed}.txt"),
-                            format!("{verdict:#?}"),
-                        )
-                        .ok();
+                        let save = std::fs::create_dir_all("findings")
+                            .and_then(|()| {
+                                std::fs::write(format!("findings/seed-{seed}.wasm"), &wasm)
+                            })
+                            .and_then(|()| {
+                                std::fs::write(
+                                    format!("findings/seed-{seed}.txt"),
+                                    format!("{verdict:#?}"),
+                                )
+                            });
+                        if let Err(e) = save {
+                            eprintln!("seed {seed}: cannot save the reproducer: {e}");
+                        }
                         eprintln!("seed {seed}: {kind}");
                     }
                 }

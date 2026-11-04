@@ -76,11 +76,12 @@ fn numeric(t: ValType) -> bool {
 
 /// The module's exported functions that take and return only numbers, whether it
 /// has an exported memory 0, and whether it imports anything (such modules are skipped).
-pub fn inspect(wasm: &[u8]) -> Result<(Vec<Export>, bool, bool), String> {
+pub fn inspect(wasm: &[u8]) -> Result<(Vec<Export>, Option<String>, bool), String> {
     let mut types = Vec::new();
     let mut funcs = Vec::new();
     let mut exports = Vec::new();
-    let (mut has_memory, mut imports) = (false, false);
+    let mut memory: Option<String> = None;
+    let mut imports = false;
     for payload in Parser::new(0).parse_all(wasm) {
         match payload.map_err(|e| e.to_string())? {
             Payload::TypeSection(r) => {
@@ -107,7 +108,7 @@ pub fn inspect(wasm: &[u8]) -> Result<(Vec<Export>, bool, bool), String> {
                     match e.kind {
                         ExternalKind::Func => exports.push((e.name.to_string(), e.index)),
                         // Only memory 0 can be hashed on both sides, and only if exported.
-                        ExternalKind::Memory if e.index == 0 => has_memory = true,
+                        ExternalKind::Memory if e.index == 0 => memory = Some(e.name.to_string()),
                         _ => {}
                     }
                 }
@@ -132,7 +133,7 @@ pub fn inspect(wasm: &[u8]) -> Result<(Vec<Export>, bool, bool), String> {
             });
         }
     }
-    Ok((out, has_memory, imports))
+    Ok((out, memory, imports))
 }
 
 /// The `n`th argument value for parameter `p` of call `c`, as raw bits.
@@ -168,7 +169,11 @@ const ROUNDS: usize = 2;
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Run `wasm` under wasmtime and build the report; `Err` means "cannot compare".
-pub fn run_wasmtime(wasm: &[u8], exports: &[Export], has_memory: bool) -> Result<String, String> {
+pub fn run_wasmtime(
+    wasm: &[u8],
+    exports: &[Export],
+    memory: Option<&str>,
+) -> Result<String, String> {
     use wasmtime::{Engine, Instance, Memory, Module, Store, Trap, Val};
     let mut cfg = wasmtime::Config::new();
     cfg.consume_fuel(true);
@@ -234,24 +239,13 @@ pub fn run_wasmtime(wasm: &[u8], exports: &[Export], has_memory: bool) -> Result
             }
         }
     }
-    if has_memory {
-        let mem: Memory = find_memory(&mut store, &instance).ok_or("memory 0 is not exported")?;
+    if let Some(name) = memory {
+        let mem: Memory = instance
+            .get_memory(&mut store, name)
+            .ok_or("memory 0 is not exported")?;
         let _ = writeln!(out, "memory {}", fnv(mem.data(&store)));
     }
     Ok(out)
-}
-
-fn find_memory(
-    store: &mut wasmtime::Store<()>,
-    instance: &wasmtime::Instance,
-) -> Option<wasmtime::Memory> {
-    let names: Vec<String> = instance
-        .exports(&mut *store)
-        .map(|e| e.name().to_string())
-        .collect();
-    names
-        .iter()
-        .find_map(|n| instance.get_memory(&mut *store, n))
 }
 
 fn fnv(bytes: &[u8]) -> String {
@@ -406,18 +400,18 @@ pub fn run_wasm2rs(
 
 /// Run `wasm` through both implementations and compare. `work` is a scratch dir.
 pub fn differential(wasm: &[u8], work: &Path) -> Verdict {
-    let (exports, has_memory, imports) = match inspect(wasm) {
+    let (exports, memory, imports) = match inspect(wasm) {
         Ok(x) => x,
         Err(e) => return Verdict::Skip(format!("parse: {e}")),
     };
     if imports {
         return Verdict::Skip("imports".into());
     }
-    let reference = match run_wasmtime(wasm, &exports, has_memory) {
+    let reference = match run_wasmtime(wasm, &exports, memory.as_deref()) {
         Ok(r) => r,
         Err(e) => return Verdict::Skip(e),
     };
-    match run_wasm2rs(wasm, &exports, has_memory, work) {
+    match run_wasm2rs(wasm, &exports, memory.is_some(), work) {
         Ok(actual) => compare(&reference, &actual),
         Err(v) => v,
     }
@@ -515,7 +509,7 @@ mod tests {
         )
         .unwrap();
         let (exports, mem, _) = inspect(&wasm).unwrap();
-        let report = run_wasmtime(&wasm, &exports, mem).unwrap();
+        let report = run_wasmtime(&wasm, &exports, mem.as_deref()).unwrap();
         assert!(report.contains("0.0 ok i32:0"), "{report}");
         assert!(report.contains("0.1 trap"), "{report}");
     }
