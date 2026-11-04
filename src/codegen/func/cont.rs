@@ -161,7 +161,8 @@ impl super::FuncGen<'_> {
         // A body that branches to its own label is wrapped in a synthetic block
         // frame (as in `FuncGen::run`), which makes the whole body a region, so it
         // takes the flat path too.
-        let wrap = super::branches_to_function_label(body)?;
+        // `return` is such a branch too: it is lowered to a `br` to that block.
+        let wrap = super::branches_to_function_label(body)? || Self::has_return(body)?;
         if wrap || Self::transfer_crosses_region(body)? {
             return self.emit_cont_step_flat(index, params, body, line_prefix, out, wrap);
         }
@@ -385,6 +386,16 @@ impl super::FuncGen<'_> {
         })
     }
 
+    /// Whether `body` contains a `return`.
+    fn has_return(body: &FunctionBody<'_>) -> Result<bool, TranspileError> {
+        for op in body.get_operators_reader()? {
+            if matches!(op?, Operator::Return) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Whether any control-transfer point (`suspend` or `switch`) in `body` occurs
     /// inside a nested region (control depth > 0). Such a body cannot render each
     /// region as a single straight-line arm — the `pc` machine must thread through
@@ -489,9 +500,17 @@ impl super::FuncGen<'_> {
                         return_payload = Some(self.encode_stack_tail(&results)?);
                     }
                 }
+                // `return` leaves through the synthetic function block (`wrap` is
+                // always set when a body contains one): a branch to its outermost
+                // frame carrying the results.
+                Operator::Return => {
+                    let outermost = index_u32(self.frames.len().saturating_sub(1))?;
+                    self.emit_op(Operator::Br {
+                        relative_depth: outermost,
+                    })?;
+                }
                 other @ (Operator::Try { .. }
                 | Operator::TryTable { .. }
-                | Operator::Return
                 | Operator::Resume { .. }) => {
                     return Err(TranspileError::Unsupported(format!(
                         "operator {other:?} not yet supported in a continuation body"

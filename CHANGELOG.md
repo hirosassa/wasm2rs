@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `return` is now supported inside a continuation body. It is lowered like a branch
+  to the function's own label, so such a body goes through the flat state machine
+  (and a cross-call checkpoint in it is rejected explicitly).
 - A continuation body (`cont.new`/`resume`/`suspend`) can now `br`/`br_if`/`br_table`
   to the function's own label, which returns its results. Such a body is lowered
   through the flat state machine; a cross-call checkpoint in it is rejected with an
