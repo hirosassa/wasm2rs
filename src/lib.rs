@@ -8,6 +8,7 @@
 //! wasi-threads. Entry points: [`transpile`], [`transpile_with_options`],
 //! [`transpile_split`] and [`transpile_split_with_options`].
 
+pub mod build;
 mod codegen;
 mod dump;
 
