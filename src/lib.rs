@@ -11,8 +11,10 @@
 pub mod build;
 mod codegen;
 mod dump;
+mod extract;
 
 pub use dump::{ModuleSummary, dump};
+pub use extract::extract_core_modules;
 
 use wasmparser::{
     CompositeInnerType, DataKind, ElementItems, ElementKind, ExternalKind, FuncType, Parser,
@@ -200,7 +202,7 @@ pub(crate) fn reject_component(encoding: wasmparser::Encoding) -> Result<(), Tra
         wasmparser::Encoding::Module => Ok(()),
         wasmparser::Encoding::Component => Err(TranspileError::Unsupported(
             "WebAssembly components are not supported; give wasm2rs a core module \
-             (for example extract it with `wasm-tools component unbundle`)"
+             (for example extract it with `wasm2rs --extract-core`)"
                 .into(),
         )),
     }

@@ -1,7 +1,9 @@
 //! Command-line entry point:
 //! `wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports]
 //! <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
-//! `wasm2rs --dump <input.wasm>` to summarize a module.
+//! `wasm2rs --dump <input.wasm>` to summarize a module, or
+//! `wasm2rs --extract-core <component.wasm> <dir>` to write a component's core
+//! modules to `<dir>/module{n}.wasm`.
 //!
 //! Reads a WebAssembly binary and writes the transpiled Rust source. With no
 //! `funcs_per_file`/`max_bytes_per_file`, the whole module is one file, written
@@ -34,7 +36,7 @@ use wasm2rs::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -60,11 +62,25 @@ fn main() -> ExitCode {
     }
 }
 
+/// Write each core module of the component to `dir/module{n}.wasm` and list them.
+fn extract_core_modules(wasm: &[u8], dir: &str) -> Result<(), String> {
+    let modules = wasm2rs::extract_core_modules(wasm).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
+    for (i, module) in modules.iter().enumerate() {
+        let path = std::path::Path::new(dir).join(format!("module{i}.wasm"));
+        std::fs::write(&path, module)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        println!("{}: {} bytes", path.display(), module.len());
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     // Flags may appear anywhere; the remaining positional arguments keep their
     // order. `--unsafe-memory` opts into unchecked linear-memory access.
     let mut unsafe_memory = false;
     let mut dump = false;
+    let mut extract_core = false;
     let mut named_exports = false;
     let mut named_imports = false;
     let mut entry_exports: Option<Vec<String>> = None;
@@ -96,6 +112,7 @@ fn run() -> Result<(), String> {
         match arg.as_str() {
             "--unsafe-memory" => unsafe_memory = true,
             "--dump" => dump = true,
+            "--extract-core" => extract_core = true,
             "--named-exports" => named_exports = true,
             "--named-imports" => named_imports = true,
             _ => positional.push(arg),
@@ -108,6 +125,15 @@ fn run() -> Result<(), String> {
     let max_bytes_per_file = parse_usize_arg(args.next(), "max_bytes_per_file")?;
 
     let wasm = std::fs::read(&input).map_err(|e| format!("cannot read {input}: {e}"))?;
+    if extract_core {
+        let dir = output.ok_or("--extract-core takes <input.wasm> <output dir>")?;
+        if funcs_per_file > 0 || max_bytes_per_file > 0 {
+            return Err(
+                "--extract-core takes only the input file and the output directory".to_string(),
+            );
+        }
+        return extract_core_modules(&wasm, &dir);
+    }
     if dump {
         if output.is_some() || funcs_per_file > 0 || max_bytes_per_file > 0 {
             return Err("--dump takes only the input file".to_string());

@@ -80,7 +80,7 @@ Not exercised by this program, and harder: `wasi:sockets`, `wasi:http`, the rest
 
 1. **Extract core modules** (small): a `wasmparser`-based extraction (the nested
    `ModuleSection` ranges) so users do not need `wasm-tools` just for this. Does not
-   by itself run a program. Could be a flag or a documented recipe.
+   by itself run a program. *Done: `extract_core_modules` / `--extract-core`.*
 2. **Name-preserving imports** (small/medium): carry the import module/field name
    into the `Imports` trait (like `named_exports` did for exports). Prerequisite for
    everything below. *Done: `named_imports` / `--named-imports`.*

@@ -68,6 +68,7 @@ cargo build --release
 ```
 wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]
 wasm2rs --dump <input.wasm>
+wasm2rs --extract-core <component.wasm> <output dir>
 ```
 
 | Argument | Description |
@@ -85,6 +86,7 @@ wasm2rs --dump <input.wasm>
 | `--entry-exports=a,b` | Emit only the functions reachable from the listed exported functions, plus the start function and the entry points the generated code itself calls (`wasi_thread_start`, the emscripten thread exports). Shortens the generated source and the Rust build; surviving functions keep their `func{N}` names. Reachable `call_indirect`/`table.*` keeps every table-element function. An empty list (`--entry-exports=`) keeps no export as a root; an unknown name is an error. Off by default. |
 | `--named-exports` | Also emit a method (or free function, for a stateless module) named after each exported function, e.g. `inst.add(1, 2)`, forwarding to `func{N}`. The name is the export name as a snake_case identifier; a clash with a Rust keyword or a generated member appends `_`, and a duplicate appends `_{function index}`. Off by default. |
 | `--named-imports` | Name the `Imports` trait methods after the imports — `env_log` for `(import "env" "log" …)` — instead of `import{j}`. The name is the module (without a `@version` suffix) and field as snake_case, joined with `_`; a clash with a keyword or another trait member appends `_`, a duplicate appends `_{function index}`. WASI preview1 imports handled natively get no method. Off by default, since renaming breaks existing host implementations. |
+| `--extract-core` | Write the core modules of a WebAssembly component to `<output dir>/module{n}.wasm` (in order, nested components included) and list their sizes; each one is a plain module that wasm2rs can transpile. Takes the input and the directory. A component is not transpiled directly. |
 | `--dump` | Print a summary of the module (function/import/export counts, how each import resolves — native WASI or host trait —, memory limits, proposals in use, whether a host `Imports` implementation is needed) and generate no code. Takes only the input file. Works for modules the transpiler would reject. |
 
 ### Examples
@@ -134,6 +136,7 @@ let rust = transpile_with_options(&wasm, &TranspileOptions::default())?;
 ```
 
 `wasm2rs::dump(&wasm)` returns the same summary as `--dump` (a `ModuleSummary` that implements `Display`).
+`wasm2rs::extract_core_modules(&component)` returns a component's core modules as `Vec<Vec<u8>>`.
 
 Code generation is configured through `TranspileOptions` (`unsafe_memory`, `split_dispatch`, `entry_exports`, `jobs`). It is `Clone` and `Default` but not `Copy`, so pass it by reference.
 `transpile(&wasm)` is the shortcut for the default options.

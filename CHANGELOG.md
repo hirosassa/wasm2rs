@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `extract_core_modules` and `--extract-core`: pull the core modules out of a
+  WebAssembly component as plain module binaries (nested components included), so
+  `wasm-tools component unbundle` is no longer needed for that step.
 - `named_imports` option (`--named-imports`): the `Imports` trait methods are named
   after the import (`env_log`) instead of its index (`import0`). Off by default.
 - `examples/bench_memory.rs` and `benches/memory/*.wat`: a benchmark of the cost of
