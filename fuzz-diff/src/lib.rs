@@ -527,7 +527,7 @@ mod tests {
     }
 
     /// Found by seed 162: a trapping load whose value is discarded by a function-level
-    /// `br 0` is dropped by wasm2rs, so the trap never happens. Enable once fixed.
+    /// `br 0` is dropped by wasm2rs, so the trap never happens.
     #[test]
     fn a_trapping_load_before_a_function_level_br_still_traps() {
         let v = check(
