@@ -167,7 +167,7 @@ mod foo {
 }
 ```
 
-The path is relative to `CARGO_MANIFEST_DIR` (a leading `$OUT_DIR/` refers to a file a build script wrote). The options are `named_exports` and `unsafe_memory`. The generated source is parsed into tokens at compile time, so for very large modules prefer `build.rs` with `include!`.
+The path (a plain or raw string literal) is relative to `CARGO_MANIFEST_DIR` (a leading `$OUT_DIR/` refers to a file a build script wrote). The options are `named_exports` and `unsafe_memory`. The generated source is parsed into tokens at compile time, so for very large modules prefer `build.rs` with `include!`.
 
 The `mimalloc` allocator is behind the default `cli` feature. Depend on the crate with `default-features = false` to use it as a library without compiling mimalloc.
 

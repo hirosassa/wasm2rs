@@ -6,7 +6,7 @@
 //! wasm2rs_macros::include_wasm!("assets/foo.wasm", named_exports);
 //! ```
 //!
-//! The path is relative to the crate's `CARGO_MANIFEST_DIR`; a leading
+//! The path is a plain or raw string literal, relative to the crate's `CARGO_MANIFEST_DIR`; a leading
 //! `$OUT_DIR/` is replaced by the `OUT_DIR` of the crate being compiled, for a
 //! wasm file a build script produced. The options are `named_exports` and
 //! `unsafe_memory` (see `wasm2rs::TranspileOptions`). The invocation expands to
@@ -76,8 +76,17 @@ fn parse_args(input: TokenStream) -> Result<(String, Vec<String>), String> {
     Ok((path, options))
 }
 
-/// The contents of a plain `"..."` literal with no escapes.
+/// The contents of a plain `"..."` literal with no escapes, or of a raw string
+/// literal (`r"..."`, `r#"..."#`), which needs no unescaping.
 fn string_literal(lit: &str) -> Option<String> {
+    if let Some(raw) = lit.strip_prefix('r') {
+        let hashes = raw.len() - raw.trim_start_matches('#').len();
+        let inner = raw
+            .get(hashes..)?
+            .strip_prefix('"')?
+            .strip_suffix(&format!("\"{}", "#".repeat(hashes)))?;
+        return Some(inner.to_string());
+    }
     let inner = lit.strip_prefix('"')?.strip_suffix('"')?;
     (!inner.contains('\\')).then(|| inner.to_string())
 }
@@ -114,10 +123,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn string_literal_accepts_plain_strings_only() {
+    fn string_literal_accepts_plain_and_raw_strings() {
         assert_eq!(string_literal("\"a/b.wasm\""), Some("a/b.wasm".into()));
         assert_eq!(string_literal("\"a\\\\b\""), None);
-        assert_eq!(string_literal("r\"a\""), None);
+        assert_eq!(
+            string_literal("r\"C:\\a\\b.wasm\""),
+            Some("C:\\a\\b.wasm".into())
+        );
+        assert_eq!(string_literal("r#\"a\"b\"#"), Some("a\"b".into()));
+        assert_eq!(string_literal("r#\"a\""), None);
         assert_eq!(string_literal("12"), None);
     }
 
