@@ -157,6 +157,18 @@ mod foo {
 
 `transpile_to_out_dir` also prints `cargo:rerun-if-changed` for the wasm file. `transpile_to_out_dir_with_options` takes a `TranspileOptions` (e.g. `named_exports`), and `transpile_to_dir` writes to an explicit directory.
 
+### Using the proc macro
+
+For a one-line embed without a build script, use the `wasm2rs-macros` crate:
+
+```rust
+mod foo {
+    wasm2rs_macros::include_wasm!("assets/foo.wasm", named_exports);
+}
+```
+
+The path (a plain or raw string literal) is relative to `CARGO_MANIFEST_DIR` (a leading `$OUT_DIR/` refers to a file a build script wrote). The options are `named_exports` and `unsafe_memory`. The generated source is parsed into tokens at compile time, so for very large modules prefer `build.rs` with `include!`.
+
 The `mimalloc` allocator is behind the default `cli` feature. Depend on the crate with `default-features = false` to use it as a library without compiling mimalloc.
 
 ## Testing

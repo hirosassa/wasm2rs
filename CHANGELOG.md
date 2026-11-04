@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New workspace member `wasm2rs-macros` with the `include_wasm!` proc macro, which
+  transpiles a `.wasm` file at compile time and expands to the generated Rust
+  (options `named_exports` and `unsafe_memory`).
 - `wasm2rs::build`: `transpile_to_out_dir` (and `_with_options`, `transpile_to_dir`)
   transpile a `.wasm` file into `OUT_DIR` from a `build.rs`, to be pulled in with
   `include!`. It emits `cargo:rerun-if-changed` for the input.

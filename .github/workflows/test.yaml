@@ -37,13 +37,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # The Rust wasi-threads E2E test must run here, not skip (see
       # docs/wasi-threads-e2e.md). The wasi-sdk tests skip here; the
       # e2e-wasi-sdk job runs them.
       - name: Run cargo test
-        run: cargo test --release
+        run: cargo test --release --workspace
         env:
           WASM2RS_REQUIRE_E2E: rust
 
