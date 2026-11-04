@@ -9,6 +9,7 @@
 
 mod common;
 
+mod active_segment_init;
 mod atomics;
 mod atomics_threads;
 mod bit_count;

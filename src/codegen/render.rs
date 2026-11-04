@@ -482,6 +482,12 @@ fn constructor_lines(
     let copy_active_elems =
         |lines: &mut Vec<String>, table_idx: u32, target: &str, indent: &str| {
             for seg in active_elem.iter().filter(|seg| seg.table == table_idx) {
+                // An empty segment writes nothing, but an offset past the end of the
+                // table still traps at instantiation: check it with an empty slice.
+                if seg.funcs.is_empty() {
+                    let off = seg.offset.unwrap_or(0) as usize;
+                    lines.push(format!("{indent}let _ = &{target}[{off}..{off}];"));
+                }
                 for (k, f) in seg.funcs.iter().enumerate() {
                     let idx = seg.offset.unwrap_or(0) as usize + k;
                     lines.push(format!("{indent}{target}[{idx}] = {f}u32;"));

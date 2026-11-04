@@ -44,6 +44,8 @@ About 1500 modules compared equal. Findings:
    yet reduced, possibly related to 1.
 4. `unsupported` (about 5%): active element/data segments used by
    `table.init`/`memory.init`/`*.drop` ("not passive"), and negative data offsets.
+   Both are now supported (an active segment reads as empty after instantiation,
+   and an `i32` offset is unsigned).
 
 1 and 2 are reproduced by `#[ignore]`d tests in `fuzz-diff/src/lib.rs`; remove the
 `ignore` when each is fixed.

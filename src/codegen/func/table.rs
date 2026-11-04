@@ -142,6 +142,13 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    /// Whether segment `index` is still retained at run time. An active or
+    /// declared segment is dropped at instantiation, so `*.init` reads it as empty
+    /// and `*.drop` has nothing left to drop.
+    fn is_passive(&self, passive: &[bool], index: u32) -> bool {
+        passive.get(index as usize).copied().unwrap_or(false)
+    }
+
     /// Require that segment `index` (named by `kind`, e.g. "data") is passive;
     /// the init/drop instructions only reference passive segments here (active
     /// ones are auto-copied then implicitly dropped at instantiation).
@@ -198,7 +205,6 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn memory_init(&mut self, data_index: u32, mem: u32) -> Result<(), TranspileError> {
         self.require_memory()?;
         let mem = self.require_memory_index(mem)?;
-        self.require_passive(&self.ctx.data_passive, data_index, "data")?;
         let (dest, src, len) = self.pop_bulk_operands()?;
         // `memory.init` copies into the memory named by `mem`; memory 0 keeps the
         // `mem_mut()` accessor, higher memories use their `mem{i}_mut()`. A shared
@@ -212,31 +218,38 @@ impl<'a> super::FuncGen<'a> {
         // Unchecked memory access is opt-in and not wired through the shared
         // memory's lock, so it applies only to a non-shared memory.
         let unchecked = self.ctx.unsafe_memory && !self.ctx.memory_shared;
-        self.emit_bulk_init(
-            &dst,
-            &format!("self.data{data_index}"),
-            &dest,
-            &src,
-            &len,
-            unchecked,
-        );
+        // An active segment is already dropped, so it reads as an empty slice.
+        let seg = if self.is_passive(&self.ctx.data_passive, data_index) {
+            format!("self.data{data_index}")
+        } else {
+            "{ let empty: &[u8] = &[]; empty }".to_string()
+        };
+        self.emit_bulk_init(&dst, &seg, &dest, &src, &len, unchecked);
         Ok(())
     }
 
     pub(super) fn data_drop(&mut self, data_index: u32) -> Result<(), TranspileError> {
-        self.require_passive(&self.ctx.data_passive, data_index, "data")?;
-        self.line(format!("self.data{data_index} = &[];"));
+        // An active segment is dropped at instantiation, so dropping it again does
+        // nothing.
+        if self.is_passive(&self.ctx.data_passive, data_index) {
+            self.line(format!("self.data{data_index} = &[];"));
+        }
         Ok(())
     }
 
     pub(super) fn table_init(&mut self, elem_index: u32, table: u32) -> Result<(), TranspileError> {
         let table = self.require_table_index(table)?;
-        self.require_passive(&self.ctx.elem_passive, elem_index, "elem")?;
         let (dest, src, len) = self.pop_bulk_operands()?;
         let (_, get_mut) = table_accessor(table);
+        // An active or declared segment is already dropped: an empty slice.
+        let seg = if self.is_passive(&self.ctx.elem_passive, elem_index) {
+            format!("self.elem{elem_index}")
+        } else {
+            "{ let empty: &[u32] = &[]; empty }".to_string()
+        };
         self.emit_bulk_init(
             &format!("self.{get_mut}()"),
-            &format!("self.elem{elem_index}"),
+            &seg,
             &dest,
             &src,
             &len,
@@ -247,8 +260,9 @@ impl<'a> super::FuncGen<'a> {
     }
 
     pub(super) fn elem_drop(&mut self, elem_index: u32) -> Result<(), TranspileError> {
-        self.require_passive(&self.ctx.elem_passive, elem_index, "elem")?;
-        self.line(format!("self.elem{elem_index} = &[];"));
+        if self.is_passive(&self.ctx.elem_passive, elem_index) {
+            self.line(format!("self.elem{elem_index} = &[];"));
+        }
         Ok(())
     }
 
