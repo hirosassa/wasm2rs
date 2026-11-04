@@ -1,5 +1,5 @@
 //! Command-line entry point:
-//! `wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports]
+//! `wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports]
 //! <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
 //! `wasm2rs --dump <input.wasm>` to summarize a module.
 //!
@@ -34,7 +34,7 @@ use wasm2rs::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -66,6 +66,7 @@ fn run() -> Result<(), String> {
     let mut unsafe_memory = false;
     let mut dump = false;
     let mut named_exports = false;
+    let mut named_imports = false;
     let mut entry_exports: Option<Vec<String>> = None;
     let mut split_dispatch = 0usize;
     let mut jobs = 0usize;
@@ -96,6 +97,7 @@ fn run() -> Result<(), String> {
             "--unsafe-memory" => unsafe_memory = true,
             "--dump" => dump = true,
             "--named-exports" => named_exports = true,
+            "--named-imports" => named_imports = true,
             _ => positional.push(arg),
         }
     }
@@ -120,6 +122,7 @@ fn run() -> Result<(), String> {
         entry_exports,
         jobs,
         named_exports,
+        named_imports,
     };
 
     // Splitting into files requires a target directory to write them into.

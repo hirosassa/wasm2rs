@@ -331,3 +331,50 @@ fn named_exports_flag_adds_wrappers_single_and_split() {
         assert!(root.contains(&format!("pub fn {name}() -> i32")), "{root}");
     }
 }
+
+/// `--named-imports` names the `Imports` trait methods after the imports, in a
+/// single file and in a split crate (where the trait lives in the root).
+#[test]
+fn named_imports_flag_names_the_trait_methods_single_and_split() {
+    let wasm = wat::parse_str(
+        r#"(module
+            (import "env" "log" (func (param i32)))
+            (func (export "f") (call 0 (i32.const 1))))"#,
+    )
+    .expect("valid wat");
+    let dir = std::env::temp_dir().join("wasm2rs_cli_named_imports");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let input = dir.join("in.wasm");
+    std::fs::write(&input, wasm).expect("write wasm");
+
+    let single = dir.join("out.rs");
+    let status = Command::new(wasm2rs_bin())
+        .arg("--named-imports")
+        .arg(&input)
+        .arg(&single)
+        .status()
+        .expect("run wasm2rs");
+    assert!(status.success());
+    let code = std::fs::read_to_string(&single).expect("read output");
+    assert!(code.contains("fn env_log(&mut self, a0: i32);"), "{code}");
+    assert!(!code.contains("fn import0("), "{code}");
+
+    let out_dir = dir.join("split");
+    let status = Command::new(wasm2rs_bin())
+        .arg("--named-imports")
+        .arg(&input)
+        .arg(&out_dir)
+        .arg("1")
+        .status()
+        .expect("run wasm2rs");
+    assert!(status.success());
+    let mut all = String::new();
+    for entry in std::fs::read_dir(&out_dir).expect("read split dir") {
+        let path = entry.expect("entry").path();
+        if path.extension().is_some_and(|e| e == "rs") {
+            all.push_str(&std::fs::read_to_string(path).expect("read chunk"));
+        }
+    }
+    assert!(all.contains("fn env_log(&mut self, a0: i32);"), "{all}");
+    assert!(all.contains("self.imports.env_log("), "{all}");
+}

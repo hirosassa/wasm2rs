@@ -123,6 +123,11 @@ pub(crate) struct ImportInfo {
     /// that is emitted as an inherent `Instance` method (`self.mem()`-backed)
     /// instead of being dispatched through the host trait.
     pub wasi: Option<WasiFn>,
+    /// The module and field name of the import.
+    pub module: String,
+    pub field: String,
+    /// The `Imports` method name under `named_imports`; `None` keeps `import{j}`.
+    pub ident: Option<String>,
 }
 
 /// An imported global: its type and mutability. Imported globals occupy the low

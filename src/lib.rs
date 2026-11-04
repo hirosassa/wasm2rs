@@ -149,6 +149,15 @@ pub struct TranspileOptions {
     /// duplicate appends `_{function index}`. `func{N}` is kept either way. Off by
     /// default, so existing output is unchanged.
     pub named_exports: bool,
+
+    /// Name the `Imports` trait methods after the import — `env_log` for
+    /// `(import "env" "log" ...)` — instead of its function index (`import0`).
+    /// The name is the module (without a `@version` suffix) and field made
+    /// snake_case and joined with `_`; a clash with a keyword or another trait
+    /// member appends `_`, and a duplicate appends `_{function index}`. Imports
+    /// recognised as WASI preview1 stay native and get no trait method. Off by
+    /// default, because renaming the methods breaks existing host implementations.
+    pub named_imports: bool,
 }
 
 /// The recommended `Cargo.toml` for a split crate, named `package_name`.
@@ -641,6 +650,25 @@ where
         })
         .collect();
 
+    if topts.named_imports {
+        let hosted: Vec<usize> = (0..imports.len())
+            .filter(|&i| imports.get(i).is_some_and(|im| im.wasi.is_none()))
+            .collect();
+        let names = codegen::assign_import_names(hosted.iter().filter_map(|&i| {
+            let im = imports.get(i)?;
+            Some((
+                im.module.as_str(),
+                im.field.as_str(),
+                u32::try_from(i).ok()?,
+            ))
+        }));
+        for (i, name) in hosted.into_iter().zip(names) {
+            if let Some(im) = imports.get_mut(i) {
+                im.ident = Some(name);
+            }
+        }
+    }
+
     let live = match &topts.entry_exports {
         Some(entries) => codegen::live_functions(
             &codegen::ReachInput {
@@ -755,6 +783,9 @@ fn classify_import(
                 params: sig.params.clone(),
                 results: sig.results.clone(),
                 wasi,
+                module: module.to_string(),
+                field: name.to_string(),
+                ident: None,
             });
             Ok(())
         }

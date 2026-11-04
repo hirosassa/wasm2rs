@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `named_imports` option (`--named-imports`): the `Imports` trait methods are named
+  after the import (`env_log`) instead of its index (`import0`). Off by default.
 - `examples/bench_memory.rs` and `benches/memory/*.wat`: a benchmark of the cost of
   bounds checks (default vs `unsafe_memory`) on memory-heavy workloads; results in
   `docs/bounds-check-bench.md`. The harness keeps the memory length opaque to the

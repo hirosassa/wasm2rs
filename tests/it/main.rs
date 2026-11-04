@@ -72,6 +72,7 @@ mod multi_memory;
 mod multi_table;
 mod multivalue;
 mod named_exports;
+mod named_imports;
 mod nan_rounding;
 mod parallel_codegen;
 mod passive;

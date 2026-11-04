@@ -1732,7 +1732,8 @@ fn extern_registry_lines(
     Ok(lines)
 }
 
-/// The `pub trait Imports` declaration: one `import{j}` method per imported
+/// The `pub trait Imports` declaration: one `import{j}` (or, with `named_imports`,
+/// name-derived) method per imported
 /// function, taking `&mut self` since a host call may have side effects.
 fn import_trait_lines(
     ctx: &ModuleCtx<'_>,
@@ -1774,7 +1775,8 @@ fn import_trait_lines(
                 ));
             }
         };
-        lines.push(format!("    fn import{j}({params}){ret};"));
+        let name = im.ident.clone().unwrap_or_else(|| format!("import{j}"));
+        lines.push(format!("    fn {name}({params}){ret};"));
     }
     // Each imported global gets a getter; a mutable one also gets a setter.
     for (k, g) in imported_globals.iter().enumerate() {
