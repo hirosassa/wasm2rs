@@ -424,14 +424,22 @@ pub enum Profile {
     Memory64,
     MultiMemory,
     MultiTable,
+    Simd,
+    TailCall,
+    ExtendedConst,
+    Exceptions,
 }
 
 impl Profile {
-    pub const ALL: [Profile; 4] = [
+    pub const ALL: [Profile; 8] = [
         Profile::Base,
         Profile::Memory64,
         Profile::MultiMemory,
         Profile::MultiTable,
+        Profile::Simd,
+        Profile::TailCall,
+        Profile::ExtendedConst,
+        Profile::Exceptions,
     ];
 
     pub fn name(self) -> &'static str {
@@ -440,6 +448,10 @@ impl Profile {
             Profile::Memory64 => "memory64",
             Profile::MultiMemory => "multi-memory",
             Profile::MultiTable => "multi-table",
+            Profile::Simd => "simd",
+            Profile::TailCall => "tail-call",
+            Profile::ExtendedConst => "extended-const",
+            Profile::Exceptions => "exceptions",
         }
     }
 }
@@ -487,15 +499,15 @@ fn generate_inner(seed: u64, profile: Profile) -> Option<Vec<u8>> {
         export_everything: true,
         memory_max_size_required: true,
         table_max_size_required: true,
-        simd_enabled: false,
+        simd_enabled: profile == Profile::Simd,
         relaxed_simd_enabled: false,
         threads_enabled: false,
-        exceptions_enabled: false,
+        exceptions_enabled: profile == Profile::Exceptions,
         gc_enabled: false,
         memory64_enabled: profile == Profile::Memory64,
-        tail_call_enabled: false,
+        tail_call_enabled: profile == Profile::TailCall,
         wide_arithmetic_enabled: false,
-        extended_const_enabled: false,
+        extended_const_enabled: profile == Profile::ExtendedConst,
         max_memories: if profile == Profile::MultiMemory {
             3
         } else {
@@ -574,6 +586,114 @@ mod tests {
         }
     }
 
+    /// Whether any function body uses an operator for which `pred` holds.
+    fn uses_op(wasm: &[u8], pred: impl Fn(&wasmparser::Operator) -> bool) -> bool {
+        Parser::new(0).parse_all(wasm).any(|payload| {
+            let Ok(Payload::CodeSectionEntry(body)) = payload else {
+                return false;
+            };
+            body.get_operators_reader()
+                .unwrap()
+                .into_iter()
+                .any(|op| op.is_ok_and(|op| pred(&op)))
+        })
+    }
+
+    /// Whether a global initialiser or data offset uses an operator `pred` accepts.
+    fn uses_const_op(wasm: &[u8], pred: impl Fn(&wasmparser::Operator) -> bool) -> bool {
+        let mut found = false;
+        for payload in Parser::new(0).parse_all(wasm) {
+            match payload.unwrap() {
+                Payload::GlobalSection(r) => {
+                    for g in r {
+                        found |= g
+                            .unwrap()
+                            .init_expr
+                            .get_operators_reader()
+                            .into_iter()
+                            .any(|op| op.is_ok_and(|op| pred(&op)));
+                    }
+                }
+                Payload::DataSection(r) => {
+                    for d in r {
+                        if let wasmparser::DataKind::Active { offset_expr, .. } = d.unwrap().kind {
+                            found |= offset_expr
+                                .get_operators_reader()
+                                .into_iter()
+                                .any(|op| op.is_ok_and(|op| pred(&op)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    fn any_seed(profile: Profile, pred: impl Fn(&[u8]) -> bool) -> bool {
+        (0..300).any(|seed| generate_with(seed, profile).is_some_and(|w| pred(&w)))
+    }
+
+    fn is_simd(op: &wasmparser::Operator) -> bool {
+        let name = format!("{op:?}");
+        ["V128", "I8x16", "I16x8", "I32x4", "I64x2", "F32x4", "F64x2"]
+            .iter()
+            .any(|p| name.starts_with(p))
+    }
+
+    fn is_tail_call(op: &wasmparser::Operator) -> bool {
+        matches!(
+            op,
+            wasmparser::Operator::ReturnCall { .. }
+                | wasmparser::Operator::ReturnCallIndirect { .. }
+        )
+    }
+
+    fn is_exception(op: &wasmparser::Operator) -> bool {
+        matches!(
+            op,
+            wasmparser::Operator::TryTable { .. } | wasmparser::Operator::Throw { .. }
+        )
+    }
+
+    fn is_const_arith(op: &wasmparser::Operator) -> bool {
+        use wasmparser::Operator::{I32Add, I32Mul, I32Sub, I64Add, I64Mul, I64Sub};
+        matches!(op, I32Add | I32Sub | I32Mul | I64Add | I64Sub | I64Mul)
+    }
+
+    #[test]
+    fn the_simd_profile_generates_simd_operators() {
+        assert!(any_seed(Profile::Simd, |w| uses_op(w, is_simd)));
+    }
+
+    #[test]
+    fn the_tail_call_profile_generates_tail_calls() {
+        assert!(any_seed(Profile::TailCall, |w| uses_op(w, is_tail_call)));
+    }
+
+    #[test]
+    fn the_exceptions_profile_generates_exception_operators() {
+        assert!(any_seed(Profile::Exceptions, |w| uses_op(w, is_exception)));
+    }
+
+    #[test]
+    fn the_extended_const_profile_generates_constant_arithmetic() {
+        assert!(any_seed(Profile::ExtendedConst, |w| uses_const_op(
+            w,
+            is_const_arith
+        )));
+    }
+
+    #[test]
+    fn the_base_profile_has_none_of_the_extra_features() {
+        for seed in 0..300 {
+            if let Some(w) = generate(seed) {
+                assert!(!uses_op(&w, is_simd) && !uses_op(&w, is_tail_call));
+                assert!(!uses_op(&w, is_exception) && !uses_const_op(&w, is_const_arith));
+            }
+        }
+    }
+
     #[test]
     fn a_profile_name_round_trips() {
         for p in [
@@ -581,6 +701,10 @@ mod tests {
             Profile::Memory64,
             Profile::MultiMemory,
             Profile::MultiTable,
+            Profile::Simd,
+            Profile::TailCall,
+            Profile::ExtendedConst,
+            Profile::Exceptions,
         ] {
             assert_eq!(p.name().parse::<Profile>(), Ok(p));
         }
