@@ -10,7 +10,7 @@ pub(crate) fn const_expr_u32(expr: &ConstExpr<'_>) -> Result<u32, TranspileError
     for op in expr.get_operators_reader() {
         match op? {
             Operator::I32Const { value: v } => {
-                // The offset is unsigned: a "negative" one is past any table.
+                // The offset is unsigned: a "negative" one is a huge index.
                 value = Some(v.cast_unsigned());
             }
             Operator::End => {}
@@ -26,14 +26,14 @@ pub(crate) fn const_expr_u32(expr: &ConstExpr<'_>) -> Result<u32, TranspileError
 
 /// Evaluate an active data segment's constant offset (an `i32.const`, or an
 /// `i64.const` for a 64-bit memory) to a `u64`. An `i32` offset is unsigned, so a
-/// "negative" one is an address past any memory and the segment traps at
-/// instantiation. A negative `i64` offset is rejected: its sum with the length
+/// "negative" one is a huge address, and the segment traps at instantiation
+/// when it lies past the end of the memory. A negative `i64` offset is rejected: its sum with the length
 /// would wrap `usize`.
 pub(crate) fn const_expr_u64(expr: &ConstExpr<'_>) -> Result<u64, TranspileError> {
     let mut value: Option<u64> = None;
     for op in expr.get_operators_reader() {
         match op? {
-            // An `i32` offset is unsigned: a "negative" one is past any memory.
+            // An `i32` offset is unsigned: a "negative" one is a huge address.
             Operator::I32Const { value: v } => value = Some(u64::from(v.cast_unsigned())),
             Operator::I64Const { value: v } => {
                 value = Some(

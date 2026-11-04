@@ -1,8 +1,8 @@
 //! An active (or declared) segment is dropped right after instantiation, so a
 //! later `memory.init`/`table.init` copies from an empty segment and
 //! `data.drop`/`elem.drop` do nothing. An `i32` segment offset is unsigned: a
-//! "negative" one lies past the end of any memory or table and traps at
-//! instantiation.
+//! "negative" one is a huge address and traps at instantiation whenever it lies
+//! past the end of the memory or table (any realistic one).
 
 use crate::common;
 
@@ -113,4 +113,26 @@ fn an_empty_elem_segment_at_the_end_does_not_trap() {
         r#"(module (table 4 funcref) (elem (i32.const 4) func) (func (export "f")))"#,
         BODY,
     );
+}
+
+fn transpile_err(wat: &str) -> String {
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    wasm2rs::transpile(&wasm)
+        .expect_err("must be rejected")
+        .to_string()
+}
+
+#[test]
+fn a_segment_index_out_of_range_is_rejected_not_read_as_empty() {
+    for body in [
+        "(memory.init 5 (i32.const 0) (i32.const 0) (i32.const 0))",
+        "(data.drop 5)",
+        "(table.init 5 (i32.const 0) (i32.const 0) (i32.const 0))",
+        "(elem.drop 5)",
+    ] {
+        let err = transpile_err(&format!(
+            "(module (memory 1) (table 1 funcref) (data (i32.const 0) \"a\") (func {body}))"
+        ));
+        assert!(err.contains("segment 5"), "{body}: {err}");
+    }
 }

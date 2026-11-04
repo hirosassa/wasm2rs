@@ -144,9 +144,12 @@ impl<'a> super::FuncGen<'a> {
 
     /// Whether segment `index` is still retained at run time. An active or
     /// declared segment is dropped at instantiation, so `*.init` reads it as empty
-    /// and `*.drop` has nothing left to drop.
-    fn is_passive(&self, passive: &[bool], index: u32) -> bool {
-        passive.get(index as usize).copied().unwrap_or(false)
+    /// and `*.drop` has nothing left to drop. An index outside the segment section
+    /// is an error, not an empty segment.
+    fn is_passive(&self, passive: &[bool], index: u32, kind: &str) -> Result<bool, TranspileError> {
+        passive.get(index as usize).copied().ok_or_else(|| {
+            TranspileError::Unsupported(format!("{kind} segment {index} does not exist"))
+        })
     }
 
     /// Require that segment `index` (named by `kind`, e.g. "data") is passive;
@@ -219,7 +222,7 @@ impl<'a> super::FuncGen<'a> {
         // memory's lock, so it applies only to a non-shared memory.
         let unchecked = self.ctx.unsafe_memory && !self.ctx.memory_shared;
         // An active segment is already dropped, so it reads as an empty slice.
-        let seg = if self.is_passive(&self.ctx.data_passive, data_index) {
+        let seg = if self.is_passive(&self.ctx.data_passive, data_index, "data")? {
             format!("self.data{data_index}")
         } else {
             "{ let empty: &[u8] = &[]; empty }".to_string()
@@ -231,7 +234,7 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn data_drop(&mut self, data_index: u32) -> Result<(), TranspileError> {
         // An active segment is dropped at instantiation, so dropping it again does
         // nothing.
-        if self.is_passive(&self.ctx.data_passive, data_index) {
+        if self.is_passive(&self.ctx.data_passive, data_index, "data")? {
             self.line(format!("self.data{data_index} = &[];"));
         }
         Ok(())
@@ -242,7 +245,7 @@ impl<'a> super::FuncGen<'a> {
         let (dest, src, len) = self.pop_bulk_operands()?;
         let (_, get_mut) = table_accessor(table);
         // An active or declared segment is already dropped: an empty slice.
-        let seg = if self.is_passive(&self.ctx.elem_passive, elem_index) {
+        let seg = if self.is_passive(&self.ctx.elem_passive, elem_index, "elem")? {
             format!("self.elem{elem_index}")
         } else {
             "{ let empty: &[u32] = &[]; empty }".to_string()
@@ -260,7 +263,7 @@ impl<'a> super::FuncGen<'a> {
     }
 
     pub(super) fn elem_drop(&mut self, elem_index: u32) -> Result<(), TranspileError> {
-        if self.is_passive(&self.ctx.elem_passive, elem_index) {
+        if self.is_passive(&self.ctx.elem_passive, elem_index, "elem")? {
             self.line(format!("self.elem{elem_index} = &[];"));
         }
         Ok(())
