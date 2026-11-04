@@ -65,7 +65,7 @@ base feature set. Findings of a non-base profile are saved as
 | `simd` | SIMD | 188 match, 19 skip, 93 unsupported |
 | `tail-call` | `return_call`, `return_call_indirect` | 271 match, 29 skip |
 | `extended-const` | arithmetic in constant expressions | 242 match, 22 skip, 36 unsupported |
-| `exceptions` | `try_table`, `throw`, `exnref` | 174 match, 19 skip, 98 unsupported, 9 broken |
+| `exceptions` | `try_table`, `throw`, `exnref` | 180 match, 19 skip, 101 unsupported (was 9 broken, fixed) |
 
 Only memory 0 is hashed, so a bug confined to another memory shows up only through
 a call's result or trap.
@@ -86,6 +86,6 @@ New-profile findings (seeds 0–299):
   in a global initializer.
 - `exceptions`: `unsupported` are `try_table` (the exception-handling `try_table`
   form is not implemented), `exnref` values and tables, and `ref.null exn`. 9 modules
-  are `BROKEN` with `transpile: operand stack underflow`, an unreduced transpiler
-  failure worth a look.
+  were `BROKEN` with `transpile: operand stack underflow`: a `try_table` in unreachable
+  code was not counted as a nested region. Fixed; the profile now has no broken modules.
 - `tail-call`: no findings.
