@@ -149,10 +149,11 @@ fn assign_with(
 fn import_ident(module: &str, field: &str) -> String {
     let module = module.split('@').next().unwrap_or(module);
     let part = |s: &str| {
-        if s.is_empty() {
-            String::new()
-        } else {
+        // `sanitize` maps a symbol-only name to `export`; here it is just empty.
+        if s.chars().any(|c| c.is_ascii_alphanumeric()) {
             sanitize(s)
+        } else {
+            String::new()
         }
     };
     let joined = format!("{}_{}", part(module), part(field));
@@ -254,6 +255,12 @@ mod tests {
             ]
         );
         assert!(got.iter().all(|n| !is_reserved(n)));
+    }
+
+    #[test]
+    fn import_names_of_symbol_only_parts_never_say_export() {
+        let got = assign_import_names([("env", "--", 0), ("..", "f", 1), ("-", "-", 2)]);
+        assert_eq!(got, ["env", "f", "import"]);
     }
 
     #[test]
