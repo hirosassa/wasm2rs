@@ -381,11 +381,11 @@ impl<'a> FuncGen<'a> {
             Operator::F32Ge | Operator::F64Ge => self.compare_signed(">=")?,
             Operator::F32Abs | Operator::F64Abs => self.unop_method("abs")?,
             Operator::F32Neg | Operator::F64Neg => self.unop_neg()?,
-            Operator::F32Ceil | Operator::F64Ceil => self.unop_method("ceil")?,
-            Operator::F32Floor | Operator::F64Floor => self.unop_method("floor")?,
-            Operator::F32Trunc | Operator::F64Trunc => self.unop_method("trunc")?,
+            Operator::F32Ceil | Operator::F64Ceil => self.unop_round("ceil")?,
+            Operator::F32Floor | Operator::F64Floor => self.unop_round("floor")?,
+            Operator::F32Trunc | Operator::F64Trunc => self.unop_round("trunc")?,
             // wasm `nearest` rounds halves to even, i.e. `round_ties_even`.
-            Operator::F32Nearest | Operator::F64Nearest => self.unop_method("round_ties_even")?,
+            Operator::F32Nearest | Operator::F64Nearest => self.unop_round("round_ties_even")?,
             Operator::F32Sqrt | Operator::F64Sqrt => self.unop_method("sqrt")?,
             Operator::F32Copysign | Operator::F64Copysign => self.binop_method("copysign")?,
             // `min`/`max` differ from Rust's built-ins: wasm propagates NaN and

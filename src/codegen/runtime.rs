@@ -8,6 +8,8 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::F32Max => "f32_max",
         Rt::F64Min => "f64_min",
         Rt::F64Max => "f64_max",
+        Rt::QuietF32 => "quiet_f32",
+        Rt::QuietF64 => "quiet_f64",
         Rt::I32TruncF32S => "i32_trunc_f32_s",
         Rt::I32TruncF32U => "i32_trunc_f32_u",
         Rt::I32TruncF64S => "i32_trunc_f64_s",
@@ -30,7 +32,7 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
 
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
-const RT_ORDER: [Rt; 21] = [
+const RT_ORDER: [Rt; 23] = [
     Rt::DelegateExc,
     Rt::TrapUnreachable,
     Rt::TrapIndirectTypeMismatch,
@@ -38,6 +40,8 @@ const RT_ORDER: [Rt; 21] = [
     Rt::F32Max,
     Rt::F64Min,
     Rt::F64Max,
+    Rt::QuietF32,
+    Rt::QuietF64,
     Rt::I32TruncF32S,
     Rt::I32TruncF32U,
     Rt::I32TruncF64S,
@@ -96,6 +100,8 @@ fn rt_lines(rt: Rt) -> Vec<String> {
             "}".to_string(),
         ],
         Rt::F32Min | Rt::F32Max | Rt::F64Min | Rt::F64Max => rt_minmax_lines(rt),
+        Rt::QuietF32 => rt_quiet_lines("f32"),
+        Rt::QuietF64 => rt_quiet_lines("f64"),
         Rt::I32TruncF32S => {
             trunc_lines("i32_trunc_f32_s", "f32", "i32", TRUNC_I32_S_F32, "x as i32")
         }
@@ -190,6 +196,18 @@ fn trunc_lines(name: &str, ft: &str, it: &str, range: &str, cast: &str) -> Vec<S
         "        panic!(\"integer overflow\");".to_string(),
         "    }".to_string(),
         format!("    {cast}"),
+        "}".to_string(),
+    ]
+}
+
+/// A NaN result of `floor`/`ceil`/`trunc`/`nearest` must be quiet, but a host
+/// without hardware rounding instructions (baseline x86_64) returns a signaling
+/// NaN input unchanged. `r + r` quiets a NaN (keeping sign and payload) and only
+/// runs for NaN, so ordinary results are untouched.
+fn rt_quiet_lines(ty: &str) -> Vec<String> {
+    vec![
+        format!("fn quiet_{ty}(r: {ty}) -> {ty} {{"),
+        "    if r.is_nan() { r + r } else { r }".to_string(),
         "}".to_string(),
     ]
 }

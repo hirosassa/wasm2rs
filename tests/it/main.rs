@@ -66,6 +66,7 @@ mod memory_load;
 mod module_linking;
 mod multi_memory;
 mod multivalue;
+mod nan_rounding;
 mod parallel_codegen;
 mod passive;
 mod programs;

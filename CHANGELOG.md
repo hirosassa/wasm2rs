@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `floor` / `ceil` / `trunc` / `nearest` now return a quiet NaN for a NaN input on
+  every host. On baseline x86_64 Linux the host's rounding returned a signaling NaN
+  unchanged, which the spec forbids (found by the spec testsuite). The results are
+  routed through small `quiet_f32` / `quiet_f64` helpers, emitted only when used;
+  ordinary values are unaffected.
+
 ## [0.2.0] - 2026-11-01
 
 ### Fixed

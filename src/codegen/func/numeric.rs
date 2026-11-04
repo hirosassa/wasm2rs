@@ -234,6 +234,24 @@ impl<'a> super::FuncGen<'a> {
         self.materialize(format!("{}({})", rt_name(rt), a.code), ty)
     }
 
+    /// A float rounding op (`floor`/`ceil`/`trunc`/`round_ties_even`): the
+    /// method call wrapped in the quieting helper, so a NaN result is always
+    /// quiet regardless of the host's rounding implementation.
+    pub(super) fn unop_round(&mut self, method: &str) -> Result<(), TranspileError> {
+        let a = self.pop()?;
+        let rt = if a.ty == ValType::F32 {
+            Rt::QuietF32
+        } else {
+            Rt::QuietF64
+        };
+        self.used_rt.insert(rt);
+        self.push_combined(
+            format!("{}(({}).{method}())", rt_name(rt), a.code),
+            a.ty,
+            &[&a],
+        )
+    }
+
     /// A unary method call `(operand).method()` (float math like `abs`, `sqrt`).
     /// The receiver is parenthesised so a negative-constant operand does not bind
     /// as `-(lit.method())` (a method call outranks unary minus in Rust).
