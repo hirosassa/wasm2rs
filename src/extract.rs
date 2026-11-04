@@ -14,13 +14,12 @@ use crate::TranspileError;
 pub fn extract_core_modules(wasm: &[u8]) -> Result<Vec<Vec<u8>>, TranspileError> {
     let mut modules = Vec::new();
     let mut first = true;
+    let mut is_module = false;
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
             Payload::Version { encoding, .. } if first => {
                 first = false;
-                if encoding == Encoding::Module {
-                    return Ok(vec![wasm.to_vec()]);
-                }
+                is_module = encoding == Encoding::Module;
             }
             Payload::ModuleSection {
                 unchecked_range, ..
@@ -36,6 +35,10 @@ pub fn extract_core_modules(wasm: &[u8]) -> Result<Vec<Vec<u8>>, TranspileError>
             }
             _ => {}
         }
+    }
+    // Parsed to the end first so a damaged module is an error, not a pass-through.
+    if is_module {
+        return Ok(vec![wasm.to_vec()]);
     }
     Ok(modules)
 }

@@ -41,6 +41,33 @@ fn malformed_input_is_an_error() {
 }
 
 #[test]
+fn a_truncated_core_module_is_an_error() {
+    let mut wasm = wat::parse_str("(module (func (export \"f\")))").unwrap();
+    wasm.truncate(wasm.len() - 1);
+    assert!(extract_core_modules(&wasm).is_err());
+}
+
+#[test]
+fn the_cli_rejects_a_missing_directory_and_extra_arguments() {
+    let dir = std::env::temp_dir().join(format!("wasm2rs_extract_args_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("c.wasm");
+    std::fs::write(&input, wat::parse_str(COMPONENT).unwrap()).unwrap();
+    let run = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_wasm2rs"))
+            .arg("--extract-core")
+            .arg(&input)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    assert!(!run(&[]).status.success());
+    let out = dir.join("out");
+    assert!(!run(&[out.to_str().unwrap(), "10"]).status.success());
+    assert!(!out.exists());
+}
+
+#[test]
 fn an_extracted_module_transpiles_and_runs() {
     let wasm = wat::parse_str(COMPONENT).unwrap();
     let modules = extract_core_modules(&wasm).unwrap();
