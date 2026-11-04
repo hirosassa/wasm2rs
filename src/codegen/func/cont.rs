@@ -25,7 +25,7 @@
 use wasmparser::{FunctionBody, HeapType, Operator, ValType};
 
 use super::super::{
-    ALLOW, CompositeKind, GenMeta, Node, TypeSig, Val, flatten_cont_body, index_u32,
+    ALLOW, CompositeKind, FrameKind, GenMeta, Node, TypeSig, Val, flatten_cont_body, index_u32,
     render_body_into, render_nodes_into, rust_type,
 };
 use crate::TranspileError;
@@ -158,8 +158,12 @@ impl super::FuncGen<'_> {
         // woven through the nesting, which the flat path does by lowering the whole
         // body through the continuation flattener. Past this point every `suspend`
         // and `switch` is therefore at control depth 0 (`self.frames` is empty).
-        if Self::transfer_crosses_region(body)? {
-            return self.emit_cont_step_flat(index, params, body, line_prefix, out);
+        // A body that branches to its own label is wrapped in a synthetic block
+        // frame (as in `FuncGen::run`), which makes the whole body a region, so it
+        // takes the flat path too.
+        let wrap = super::branches_to_function_label(body)?;
+        if wrap || Self::transfer_crosses_region(body)? {
+            return self.emit_cont_step_flat(index, params, body, line_prefix, out, wrap);
         }
 
         // Locals now live in the frame (loaded at entry, saved at every suspend),
@@ -418,6 +422,7 @@ impl super::FuncGen<'_> {
         body: &FunctionBody<'_>,
         line_prefix: &str,
         out: &mut String,
+        wrap: bool,
     ) -> Result<GenMeta, TranspileError> {
         // Locals live in the frame (see `emit_cont_step`); drop the default-init
         // bindings and reload from `__frame` in the entry prologue instead.
@@ -430,6 +435,12 @@ impl super::FuncGen<'_> {
         // A cross-call checkpoint in the flat lowering: at most one per body, so
         // the single nested `sub` frame is enough (matching `begin_checkpoint`).
         let mut checkpoint: Option<u32> = None;
+        // A branch to the function's own label targets this synthetic block, whose
+        // results are the function's; the body's final `end` closes it.
+        if wrap {
+            let results = self.results.clone();
+            self.push_frame_typed(FrameKind::Block, &[], &results, None)?;
+        }
         for op in body.get_operators_reader()? {
             match op? {
                 Operator::Suspend { tag_index } => self.emit_suspend_node(tag_index)?,
@@ -461,7 +472,14 @@ impl super::FuncGen<'_> {
                 }
                 // A nested region's `end` closes it into a `Node::Region` in
                 // `self.cur` via the ordinary lowering.
-                Operator::End if !self.frames.is_empty() => self.emit_op(Operator::End)?,
+                Operator::End if !self.frames.is_empty() => {
+                    self.emit_op(Operator::End)?;
+                    // Closing the synthetic function block is the outermost `end`.
+                    if wrap && self.frames.is_empty() && self.reachable {
+                        let results = self.results.clone();
+                        return_payload = Some(self.encode_stack_tail(&results)?);
+                    }
+                }
                 // The outermost `end`: the remaining operands are the function's
                 // results. Capture them as the fall-through return; the body tree
                 // stays in `self.cur` for the flattener below.

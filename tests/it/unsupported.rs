@@ -664,3 +664,22 @@ fn error_display_names_the_failure_kind() {
         "operand stack underflow",
     );
 }
+
+#[test]
+fn checkpoint_in_a_body_that_branches_to_its_function_label_is_rejected() {
+    // A body that branches to its own label is wrapped in a synthetic block, so a
+    // cross-call checkpoint in it is no longer at region depth 0. Fail loudly.
+    assert_unsupported(
+        r#"(module
+            (type $ft (func (result i32)))
+            (tag $y (param i32))
+            (func $c (type $ft) i32.const 1 suspend $y i32.const 2)
+            (type $ct (cont $ft))
+            (func $a (type $ft) call $c br 0)
+            (func (export "run") (result i32)
+              ref.func $a cont.new $ct
+              drop
+              i32.const 0))"#,
+        "cross-call checkpoint inside nested control flow",
+    );
+}

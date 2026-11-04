@@ -1265,3 +1265,74 @@ fn f64_nan_payload_survives_the_erased_continuation_slot() {
         "let mut inst = Instance::new(); assert_eq!(inst.func1().to_bits(), 0x7ff8_0000_0000_0001);",
     );
 }
+
+/// A driver that resumes `$gen` until it returns, summing every yielded value and
+/// the final result. `$gen` is func0, the exported `run` func1.
+fn summing_driver_module(gen_body: &str) -> String {
+    format!(
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32) {gen_body})
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#
+    )
+}
+
+#[test]
+fn br_to_the_function_label_after_a_suspend() {
+    // `br 0` at the body's top level targets the function's own label, i.e. it
+    // returns the value on top. 10 is yielded, then the body returns 7.
+    compile_run(
+        "cont_br_function_label",
+        &summing_driver_module("i32.const 10 suspend $yield i32.const 7 br 0 i32.const 99"),
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 17);",
+    );
+}
+
+#[test]
+fn br_if_to_the_function_label_taken_and_not_taken() {
+    // Taken: the body returns 5 before reaching the suspend. Not taken: it
+    // yields 3, then falls through to return 9.
+    for (name, cond, expected) in [("taken", 1, 5), ("not_taken", 0, 12)] {
+        compile_run(
+            &format!("cont_br_if_function_label_{name}"),
+            &summing_driver_module(&format!(
+                "i32.const 5 i32.const {cond} br_if 0 drop \
+                 i32.const 3 suspend $yield i32.const 9"
+            )),
+            &format!("let mut inst = Instance::new(); assert_eq!(inst.func1(), {expected});"),
+        );
+    }
+}
+
+#[test]
+fn br_to_the_function_label_from_inside_a_suspending_loop() {
+    // The loop suspends each iteration (so it takes the flat path) and leaves the
+    // body through a `br_if` to the function label once `$i` reaches 2.
+    // 1 + 2 yielded, then 100 returned.
+    compile_run(
+        "cont_br_function_label_in_loop",
+        &summing_driver_module(
+            "(local $i i32)
+             (loop $l
+               local.get $i i32.const 1 i32.add local.tee $i
+               suspend $yield
+               i32.const 100 local.get $i i32.const 2 i32.ge_s br_if 1
+               drop
+               br $l)
+             i32.const 0",
+        ),
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 103);",
+    );
+}

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A continuation body (`cont.new`/`resume`/`suspend`) can now `br`/`br_if`/`br_table`
+  to the function's own label, which returns its results. Such a body is lowered
+  through the flat state machine; a cross-call checkpoint in it is rejected with an
+  explicit `Unsupported`.
 - `ref.as_non_null`, `br_on_null` and `br_on_non_null` on a function or extern
   reference no longer generate code that assumes a managed GC handle.
 - `floor` / `ceil` / `trunc` / `nearest` now return a quiet NaN for a NaN input on
