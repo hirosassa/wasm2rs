@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transpile a `.wasm` file into `OUT_DIR` from a `build.rs`, to be pulled in with
   `include!`. It emits `cargo:rerun-if-changed` for the input.
 
+### Changed
+
+- `docs/component-model-poc.md`: what a wasip2 component contains, that its core module
+  already transpiles, and how far its preview2 imports are from the preview1 support.
+
 ### Fixed
 
 - A WebAssembly component (Component Model binary) is now rejected with a clear
