@@ -38,6 +38,7 @@ mod export_names;
 mod extern_registry;
 mod external_funcref;
 mod externref;
+mod extract_core;
 mod flatten;
 mod float;
 mod funcref_dispatch;
