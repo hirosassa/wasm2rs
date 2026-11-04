@@ -30,8 +30,9 @@ use crate::common;
 
 use common::transpile_files;
 
-const ALLOW: &str =
-    "#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens)]";
+/// Byte-exact copy of the generator's lint-suppression attribute (this test pins
+/// exact output, so it deliberately does not derive the string from the crate).
+const ALLOW: &str = "#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens, unconditional_recursion)]";
 
 /// The first chunk of a stateless two-function module, split one function per
 /// file. A stateless chunk emits free `pub fn`s directly (each carrying its own

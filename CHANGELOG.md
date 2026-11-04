@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged, which the spec forbids (found by the spec testsuite). The results are
   routed through small `quiet_f32` / `quiet_f64` helpers, emitted only when used;
   ordinary values are unaffected.
+- Generated functions that call themselves unconditionally no longer trigger
+  rustc's `unconditional_recursion` warning (found by the spec testsuite).
+
+### Added
+
+- Tests: a harness that replays vendored WebAssembly spec testsuite `.wast` files
+  (`tests/spec/`, `tests/it/spec_wast.rs`). Known gaps it found are pinned: a branch
+  that targets the function's own label, and tables of a typed function reference.
 
 ## [0.2.0] - 2026-11-01
 
