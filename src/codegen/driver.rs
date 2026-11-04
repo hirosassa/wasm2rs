@@ -166,7 +166,10 @@ impl ModuleCtx<'_> {
             // import is dispatched through the injected host trait.
             return match im.wasi {
                 Some(w) => format!("self.{}({arg_list})", w.method()),
-                None => format!("self.imports.import{fidx}({arg_list})"),
+                None => match &im.ident {
+                    Some(name) => format!("self.imports.{name}({arg_list})"),
+                    None => format!("self.imports.import{fidx}({arg_list})"),
+                },
             };
         }
         if self.is_method {

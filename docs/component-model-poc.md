@@ -83,7 +83,7 @@ Not exercised by this program, and harder: `wasi:sockets`, `wasi:http`, the rest
    by itself run a program. Could be a flag or a documented recipe.
 2. **Name-preserving imports** (small/medium): carry the import module/field name
    into the `Imports` trait (like `named_exports` did for exports). Prerequisite for
-   everything below.
+   everything below. *Done: `named_imports` / `--named-imports`.*
 3. **A preview2 host shim over `Imports`** (large): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks` subset (args, env, exit, stdio, clocks) as an opt-in
    generated or companion module, with a handle table. Filesystem is a further large

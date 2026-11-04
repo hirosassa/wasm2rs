@@ -103,28 +103,102 @@ pub(super) fn is_reserved(name: &str) -> bool {
 
 /// Assigns each export (name, function index) a unique, valid, non-clashing
 /// identifier, in order. A keyword or generated-member clash appends `_` (or, for
-/// a reserved prefix, prepends `export_`); a name
-/// already handed out appends `_{function index}`.
+/// a reserved prefix, prepends `export_`); a name already handed out appends
+/// `_{function index}`.
 pub(super) fn assign<'a>(exports: impl IntoIterator<Item = (&'a str, u32)>) -> Vec<String> {
+    assign_with(
+        exports.into_iter().map(|(n, i)| (sanitize(n), i)),
+        is_reserved,
+        has_reserved_prefix,
+        "export_",
+    )
+}
+
+/// Unique identifiers for already-sanitised names: a name `reserved` rejects gets
+/// `_` appended (or `moved_prefix` prepended when a trailing `_` would not help,
+/// i.e. a reserved prefix), and a name already handed out appends `_{index}`.
+fn assign_with(
+    names: impl IntoIterator<Item = (String, u32)>,
+    reserved: impl Fn(&str) -> bool,
+    prefix_reserved: impl Fn(&str) -> bool,
+    moved_prefix: &str,
+) -> Vec<String> {
     let mut used: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
-    for (name, func_index) in exports {
-        let mut ident = sanitize(name);
-        if is_reserved(&ident) {
+    for (mut ident, index) in names {
+        if reserved(&ident) {
             // A reserved prefix survives a trailing `_`, so move the name out of it.
-            if has_reserved_prefix(&ident) {
-                ident.insert_str(0, "export_");
+            if prefix_reserved(&ident) {
+                ident.insert_str(0, moved_prefix);
             } else {
                 ident.push('_');
             }
         }
         while used.contains(&ident) {
-            ident = format!("{ident}_{func_index}");
+            ident = format!("{ident}_{index}");
         }
         used.insert(ident.clone());
         out.push(ident);
     }
     out
+}
+
+/// An import's `Imports` method name: `{module}_{field}` with a version suffix
+/// (`@0.2.0`) dropped from the module, snake_cased, runs of `_` collapsed and the
+/// ends trimmed; `import` when nothing is left.
+fn import_ident(module: &str, field: &str) -> String {
+    let module = module.split('@').next().unwrap_or(module);
+    let part = |s: &str| {
+        // `sanitize` maps a symbol-only name to `export`; here it is just empty.
+        if s.chars().any(|c| c.is_ascii_alphanumeric()) {
+            sanitize(s)
+        } else {
+            String::new()
+        }
+    };
+    let joined = format!("{}_{}", part(module), part(field));
+    let mut out = String::with_capacity(joined.len());
+    for c in joined.chars() {
+        if c != '_' || !out.ends_with('_') {
+            out.push(c);
+        }
+    }
+    let out = out.trim_matches('_');
+    if out.is_empty() {
+        "import".to_string()
+    } else if out.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("_{out}")
+    } else {
+        out.to_string()
+    }
+}
+
+/// Whether `name` is `{prefix}{digits}`, e.g. the generated `get_global0`.
+fn numbered(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `Imports` method names for `(module, field, function index)` imports, in order
+/// (`TranspileOptions::named_imports`). Kept clear of keywords, the other trait
+/// members (`memory`, `table`, `get_global{k}`, `call_ref_t{n}`, ...; the `Instance`'s own
+/// members are in another namespace and cannot clash) and each
+/// other.
+pub(crate) fn assign_import_names<'a>(
+    imports: impl IntoIterator<Item = (&'a str, &'a str, u32)>,
+) -> Vec<String> {
+    assign_with(
+        imports.into_iter().map(|(m, f, i)| (import_ident(m, f), i)),
+        |n| {
+            KEYWORDS.contains(&n)
+                || ["memory", "memory_mut", "table", "table_mut"].contains(&n)
+                || numbered(n, "get_global")
+                || numbered(n, "set_global")
+                || n.starts_with("call_ref_t")
+        },
+        |n| n.starts_with("call_ref_t"),
+        "import_",
+    )
 }
 
 #[cfg(test)]
@@ -181,6 +255,37 @@ mod tests {
             ]
         );
         assert!(got.iter().all(|n| !is_reserved(n)));
+    }
+
+    #[test]
+    fn import_names_of_symbol_only_parts_never_say_export() {
+        let got = assign_import_names([("env", "--", 0), ("..", "f", 1), ("-", "-", 2)]);
+        assert_eq!(got, ["env", "f", "import"]);
+    }
+
+    #[test]
+    fn import_names_are_collapsed_versionless_and_unique() {
+        let got = assign_import_names([
+            ("wasi:io/streams@0.2.0", "[method]output-stream.write", 0),
+            ("env", "log", 1),
+            ("", "memory", 2),
+            ("x", "get_global0", 3),
+            ("a", "b", 4),
+            ("a_b", "", 5),
+            ("", "", 6),
+        ]);
+        assert_eq!(
+            got,
+            [
+                "wasi_io_streams_method_output_stream_write",
+                "env_log",
+                "memory_",
+                "x_get_global0",
+                "a_b",
+                "a_b_5",
+                "import"
+            ]
+        );
     }
 
     #[test]
