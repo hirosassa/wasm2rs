@@ -35,11 +35,15 @@ fn build(dir: &Path, name: &str, wat: &str, n: u32, unsafe_memory: bool) -> std:
         ..TranspileOptions::default()
     };
     let generated = transpile_with_options(&wasm, &opts).expect("transpile");
+    // `drive` is never inlined and the instance is opaque to the optimizer: with
+    // the memory's length a visible constant, LLVM proves every access in bounds
+    // and the safe and unsafe builds compile to identical code.
     let program = format!(
-        "{generated}\nfn main() {{\n\
-         \x20   let mut m = Instance::new();\n\
+        "{generated}\n#[inline(never)]\nfn drive(m: &mut Instance, n: i32) -> i32 {{ m.run(n) }}\n\
+         fn main() {{\n\
+         \x20   let mut m = std::hint::black_box(Instance::new());\n\
          \x20   let t = std::time::Instant::now();\n\
-         \x20   let r = std::hint::black_box(m.run(std::hint::black_box({n})));\n\
+         \x20   let r = std::hint::black_box(drive(&mut m, std::hint::black_box({n})));\n\
          \x20   println!(\"{{}} {{}}\", t.elapsed().as_nanos(), r);\n\
          }}\n"
     );

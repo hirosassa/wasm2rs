@@ -18,32 +18,40 @@ cargo run --release --example bench_memory [runs]
 | `matmul` | two i32 loads per inner step (64x64 product) |
 | `random` | one load + one store at an LCG-chosen address |
 
+## Pitfall: keep the memory length opaque
+
+If the instance is built and driven in the same function, its memory length is a
+compile-time constant, LLVM proves every access in bounds, and the safe and unsafe
+builds compile to *identical* machine code (an earlier version of this benchmark
+measured exactly that and wrongly reported "no cost"). The harness therefore calls
+`run` through an `#[inline(never)]` function on a `black_box`ed instance, as a real
+embedder that grows memory or loads it at runtime would. Checking the generated
+assembly (`rustc -O --emit asm`): with the instance opaque the safe builds keep
+their `slice_index` panic paths and extra compares (matmul inner loop: 10 `cmp` vs
+4 in the unsafe build), without it neither build has any panic reference.
+
 ## Result (Apple M4 Max, rustc 1.99.1)
 
 | workload | safe (ms) | unsafe (ms) | safe / unsafe |
 |---|---|---|---|
-| hash | 1002.2 | 1005.7 | 0.997 |
-| matmul | 742.3 | 746.4 | 0.995 |
-| random | 860.6 | 865.0 | 0.995 |
+| hash | 992.4 | 985.7 | 1.007 |
+| matmul | 1068.3 | 721.0 | 1.482 |
+| random | 866.7 | 856.5 | 1.012 |
 
 ## Reading it
 
-On these workloads the checks cost nothing measurable: the ratio is within noise
-(±1%). In the generated code the address is a plain `u32`-derived index into a
-`Vec<u8>`, and the checks are well-predicted branches that LLVM either hoists or
-the core retires for free on this machine.
+- `matmul` pays about **48%** for its checks: two loads per inner step, each a
+  bounds-checked 4-byte slice on an address computed from loop counters. This is
+  the shape a loop-invariant / range analysis (roadmap 6b) or base reuse (6a) could
+  attack, since the addresses are affine in the induction variables.
+- `hash` and `random` pay about 1%: the loop is bound by a multiply chain or by
+  memory latency, and the well-predicted check branches are hidden behind it.
+- For scale, `unsafe_memory` was about 17% faster end to end on googlesql. So
+  checks matter on arithmetic-dense, load-heavy loops and barely at all on
+  latency-bound ones; matmul is the upper end of that range, not a typical case.
 
-This is **not** the whole picture. An earlier end-to-end measurement on a large
-real program (googlesql, ~40K functions) showed `unsafe_memory` about 17% faster,
-so checks do matter once code is branchy and register-starved. Synthetic loops
-over a fixed small memory are the best case for the checked variant, so they only
-bound the *easy* part.
+Machine code is not vectorised in either matmul build (no `.4s` operations), so the
+gap is the checks themselves, not a lost vectorisation.
 
-Consequences for the roadmap:
-
-- Optimisations that remove checks in simple loops (basic-block base reuse,
-  loop-invariant ranges) have little to gain on code like the above; do not
-  expect them to explain the googlesql gap.
-- The next useful measurement is on a real module (per-function profile of where
-  the checked variant loses), not more synthetic loops. It is also worth running
-  this benchmark on x86_64, where the result may differ.
+Next: confirm on x86_64, and look at which real-module functions resemble
+`matmul` before designing an analysis.
