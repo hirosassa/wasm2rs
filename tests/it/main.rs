@@ -13,6 +13,7 @@ mod atomics;
 mod atomics_threads;
 mod bit_count;
 mod block_type;
+mod br_function_label;
 mod br_table_values;
 mod build_cache;
 mod bulk;

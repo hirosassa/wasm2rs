@@ -284,8 +284,19 @@ impl<'a> FuncGen<'a> {
     }
 
     pub(super) fn run(&mut self, body: &FunctionBody<'_>) -> Result<(), TranspileError> {
+        // A branch to the function's own label is a `return` of its results. Only
+        // a function that has one is wrapped in a synthetic block frame (which the
+        // body's final `end` then closes), so ordinary functions are unchanged.
+        let wrap = branches_to_function_label(body)?;
+        if wrap {
+            let results = self.results.clone();
+            self.push_frame_typed(FrameKind::Block, &[], &results, None)?;
+        }
         for op in body.get_operators_reader()? {
             self.emit_op(op?)?;
+        }
+        if wrap {
+            self.end_function()?;
         }
         Ok(())
     }
@@ -1380,4 +1391,50 @@ impl<'a> FuncGen<'a> {
         }
         Ok(())
     }
+}
+
+/// Whether any branch in `body` targets the function's own outermost label (a
+/// relative depth equal to the number of enclosing regions at that point).
+fn branches_to_function_label(body: &FunctionBody<'_>) -> Result<bool, TranspileError> {
+    let mut depth: u32 = 0;
+    for op in body.get_operators_reader()? {
+        match op? {
+            Operator::Block { .. }
+            | Operator::Loop { .. }
+            | Operator::If { .. }
+            | Operator::Try { .. }
+            | Operator::TryTable { .. } => depth = depth.saturating_add(1),
+            Operator::End | Operator::Delegate { .. } => depth = depth.saturating_sub(1),
+            Operator::Br { relative_depth }
+            | Operator::BrIf { relative_depth }
+            | Operator::BrOnNull { relative_depth }
+            | Operator::BrOnNonNull { relative_depth }
+            | Operator::BrOnCast { relative_depth, .. }
+            | Operator::BrOnCastFail { relative_depth, .. }
+                if relative_depth == depth =>
+            {
+                return Ok(true);
+            }
+            Operator::BrTable { targets } => {
+                for target in targets.targets() {
+                    if target? == depth {
+                        return Ok(true);
+                    }
+                }
+                if targets.default() == depth {
+                    return Ok(true);
+                }
+            }
+            // A `(on $tag $label)` handler branches to its label like `br` does.
+            Operator::Resume { resume_table, .. } | Operator::ResumeThrow { resume_table, .. }
+                if resume_table.handlers.iter().any(|handler| {
+                    matches!(handler, wasmparser::Handle::OnLabel { label, .. } if *label == depth)
+                }) =>
+            {
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }

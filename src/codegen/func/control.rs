@@ -102,6 +102,17 @@ impl<'a> super::FuncGen<'a> {
         cond: Option<String>,
     ) -> Result<(), TranspileError> {
         let (param_types, result_types) = self.block_signature(blockty)?;
+        self.push_frame_typed(kind, &param_types, &result_types, cond)
+    }
+
+    /// [`push_frame`](Self::push_frame) with an already-resolved signature.
+    pub(super) fn push_frame_typed(
+        &mut self,
+        kind: FrameKind,
+        param_types: &[ValType],
+        result_types: &[ValType],
+        cond: Option<String>,
+    ) -> Result<(), TranspileError> {
         self.spill_nonstable()?;
         // The parameters are the top operands; they stay on the stack as the
         // region's initial values, so the enclosing scope ends below them.
@@ -115,13 +126,13 @@ impl<'a> super::FuncGen<'a> {
         // that a `br` back to the header can reassign. A block's/`if`'s
         // parameters are read-only and stay as their entry expressions.
         let loop_params = if kind == FrameKind::Loop {
-            self.materialize_loop_params(parent_height, &param_types)?
+            self.materialize_loop_params(parent_height, param_types)?
         } else {
             Vec::new()
         };
         // Result variables are declared in the enclosing buffer, before the
         // region, so a `br` out of it (or its fall-through) can assign them.
-        let results = self.alloc_results(&result_types)?;
+        let results = self.alloc_results(result_types)?;
         let label = self.label_counter;
         self.label_counter += 1;
         let parent_buffer = mem::take(&mut self.cur);

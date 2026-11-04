@@ -587,9 +587,6 @@ macro_rules! spec_known_gap {
 }
 
 spec_known_gap! {
-    // A `br`/`br_if`/`br_table` that targets the function's own label.
-    spec_br_if => ("br_if", "branch depth out of range"),
-    spec_unwind => ("unwind", "branch depth out of range"),
     // A table of a typed function reference (function-references proposal).
     spec_br_table => ("br_table", "table of a non-funcref/externref type"),
 }
@@ -610,6 +607,8 @@ spec_test! {
     spec_loop => "loop",
     spec_if_ => "if",
     spec_br => "br",
+    spec_br_if => "br_if",
+    spec_unwind => "unwind",
     spec_return => "return",
     spec_nop => "nop",
     spec_unreachable => "unreachable",
