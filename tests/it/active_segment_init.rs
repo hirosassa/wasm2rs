@@ -80,6 +80,33 @@ fn a_negative_data_offset_traps_at_instantiation() {
 }
 
 #[test]
+fn a_negative_i64_data_offset_traps_at_instantiation() {
+    common::expect_trap(
+        "asi_neg_i64_data",
+        r#"(module (memory i64 1) (data (i64.const -1) "x") (func (export "f")))"#,
+        BODY,
+    );
+}
+
+#[test]
+fn an_empty_i64_data_segment_past_the_end_traps_at_instantiation() {
+    common::expect_trap(
+        "asi_empty_i64_past_end",
+        r#"(module (memory i64 1) (data (i64.const -65536) "") (func (export "f")))"#,
+        BODY,
+    );
+}
+
+#[test]
+fn an_in_bounds_i64_data_offset_does_not_trap() {
+    common::compile_run(
+        "asi_i64_in_bounds",
+        r#"(module (memory i64 1) (data (i64.const 65535) "x") (func (export "f")))"#,
+        BODY,
+    );
+}
+
+#[test]
 fn a_negative_elem_offset_traps_at_instantiation() {
     common::expect_trap(
         "asi_neg_elem",

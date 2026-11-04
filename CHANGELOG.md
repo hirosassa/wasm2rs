@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "negative" one is a huge address, so the segment traps at instantiation when it lies past
   the end of its memory or table, instead of being rejected. An empty active element
   segment placed past the end of its table now traps at instantiation too.
+- A "negative" `i64` data offset in a 64-bit memory is likewise a huge address and traps at
+  instantiation, instead of being rejected as `negative data offset`.
 - A trapping operand that a `br`, `br_if` or `return` discards (for example an out-of-bounds
   load left on the stack) is now evaluated instead of dropped, so the trap is no longer lost.
 - A WebAssembly component (Component Model binary) is now rejected with a clear
