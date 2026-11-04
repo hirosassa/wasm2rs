@@ -56,6 +56,8 @@ pub(crate) struct TableInfo {
 /// so that `table.init`/`elem.drop` indices stay aligned with the wasm element
 /// index space.
 pub(crate) struct ElemSegment {
+    /// The table an active segment initialises (0 for a passive or declared one).
+    pub table: u32,
     pub offset: Option<u32>,
     pub declared: bool,
     pub funcs: Vec<u32>,

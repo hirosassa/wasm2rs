@@ -256,6 +256,8 @@ where
     // proposal allows more than one.
     let mut memories: Vec<codegen::MemInfo> = Vec::new();
     let mut table: Option<codegen::TableInfo> = None;
+    // Further defined tables (index 1..), after table 0.
+    let mut extra_tables: Vec<codegen::TableInfo> = Vec::new();
     let mut elements: Vec<codegen::ElemSegment> = Vec::new();
     let mut data: Vec<codegen::DataSegment> = Vec::new();
     let mut imports: Vec<codegen::ImportInfo> = Vec::new();
@@ -434,8 +436,13 @@ where
                     if ty.table64 || ty.shared {
                         return Err(TranspileError::Unsupported("64-bit or shared table".into()));
                     }
-                    if table.is_some() {
-                        return Err(TranspileError::Unsupported("multiple tables".into()));
+                    // An imported table is host-lent storage addressed through the
+                    // `Imports` trait; combining it with other tables is not
+                    // supported yet.
+                    if table.as_ref().is_some_and(|t| t.imported) {
+                        return Err(TranspileError::Unsupported(
+                            "multiple tables with an imported table".into(),
+                        ));
                     }
                     // Only a null-initialised table is supported; its entries
                     // come from active element segments.
@@ -446,26 +453,35 @@ where
                     }
                     let min = u32::try_from(ty.initial)
                         .map_err(|_| TranspileError::Unsupported("table too large".into()))?;
-                    table = Some(codegen::TableInfo {
+                    let info = codegen::TableInfo {
                         min,
                         imported: false,
                         element: ValType::Ref(ty.element_type),
-                    });
+                    };
+                    if table.is_none() {
+                        table = Some(info);
+                    } else {
+                        extra_tables.push(info);
+                    }
                 }
             }
             Payload::ElementSection(reader) => {
                 for element in reader {
                     let element = element?;
+                    let mut seg_table: u32 = 0;
                     let offset = match &element.kind {
                         ElementKind::Active {
                             table_index,
                             offset_expr,
                         } => {
-                            if table_index.unwrap_or(0) != 0 {
+                            let index = table_index.unwrap_or(0);
+                            let n_tables = usize::from(table.is_some()) + extra_tables.len();
+                            if usize::try_from(index).is_ok_and(|i| i >= n_tables) {
                                 return Err(TranspileError::Unsupported(
-                                    "element segment for a non-zero table".into(),
+                                    "element segment for an unknown table".into(),
                                 ));
                             }
+                            seg_table = index;
                             Some(codegen::const_expr_u32(offset_expr)?)
                         }
                         ElementKind::Passive => None,
@@ -475,6 +491,7 @@ where
                         // `table.init`/`elem.drop` indices aligned.
                         ElementKind::Declared => {
                             elements.push(codegen::ElemSegment {
+                                table: 0,
                                 offset: None,
                                 declared: true,
                                 funcs: Vec::new(),
@@ -512,6 +529,7 @@ where
                         }
                     };
                     elements.push(codegen::ElemSegment {
+                        table: seg_table,
                         offset,
                         declared: false,
                         funcs,
@@ -626,6 +644,7 @@ where
         memories: &memories,
         data: &data,
         table: table.as_ref(),
+        extra_tables: &extra_tables,
         elements: &elements,
         tags: &tags,
         exports: &exports,

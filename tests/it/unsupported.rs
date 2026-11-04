@@ -63,14 +63,6 @@ fn shared_memory64_is_rejected() {
 }
 
 #[test]
-fn multiple_tables_are_rejected() {
-    assert_unsupported(
-        r#"(module (table 1 funcref) (table 1 funcref))"#,
-        "multiple tables",
-    );
-}
-
-#[test]
 fn table_with_initializer_expression_is_rejected() {
     // Only a null-initialised table is supported; an explicit init expr is not.
     assert_unsupported(

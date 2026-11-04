@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::helpers::{HELPER_ORDER, helper_lines, shared_helper_lines};
+use super::helpers::{HELPER_ORDER, helper_lines, shared_helper_lines, table_accessor};
 use super::render_cont::{continuation_method_lines, continuation_runtime_lines};
 use super::runtime::render_rt_helpers;
 use super::wasi::share_fd_table;
@@ -330,6 +330,9 @@ fn instance_field_lines(
         // A table entry is a function index; `u32::MAX` marks a null funcref.
         lines.push("    table: Vec<u32>,".to_string());
     }
+    for i in 1..=parts.extra_tables.len() {
+        lines.push(format!("    table{i}: Vec<u32>,"));
+    }
     for (i, g) in globals.iter().enumerate() {
         lines.push(format!(
             "    g{}: {},",
@@ -476,14 +479,15 @@ fn constructor_lines(
     // Emit `<target>[idx] = fu32;` for each active element segment entry;
     // `target` is a defined table (`t`) or the host storage accessor
     // (`instance.table_mut()`).
-    let copy_active_elems = |lines: &mut Vec<String>, target: &str, indent: &str| {
-        for seg in &active_elem {
-            for (k, f) in seg.funcs.iter().enumerate() {
-                let idx = seg.offset.unwrap_or(0) as usize + k;
-                lines.push(format!("{indent}{target}[{idx}] = {f}u32;"));
+    let copy_active_elems =
+        |lines: &mut Vec<String>, table_idx: u32, target: &str, indent: &str| {
+            for seg in active_elem.iter().filter(|seg| seg.table == table_idx) {
+                for (k, f) in seg.funcs.iter().enumerate() {
+                    let idx = seg.offset.unwrap_or(0) as usize + k;
+                    lines.push(format!("{indent}{target}[{idx}] = {f}u32;"));
+                }
             }
-        }
-    };
+        };
 
     // The non-memory field initialisers (imports, table, globals, wasi_fds, and
     // the retained passive segments), pushed identically by both `Instance::new`
@@ -492,17 +496,24 @@ fn constructor_lines(
     let push_common_fields = |inner: &mut Vec<String>| -> Result<(), TranspileError> {
         // An imported table is host-owned (see the post-construction elem copy);
         // only a defined table gets a `table` field.
-        if let Some(t) = table.filter(|_| !table_imported) {
-            if active_elem.is_empty() {
-                inner.push(format!("        table: vec![u32::MAX; {}],", t.min));
+        // Table 0 keeps the `table` field; table `i > 0` is `table{i}`.
+        let defined = table
+            .filter(|_| !table_imported)
+            .into_iter()
+            .chain(parts.extra_tables);
+        for (i, t) in defined.enumerate() {
+            let i = index_u32(i)?;
+            let (field, _) = table_accessor(i);
+            if !active_elem.iter().any(|seg| seg.table == i) {
+                inner.push(format!("        {field}: vec![u32::MAX; {}],", t.min));
             } else {
                 // Start every slot null, then apply each active element segment.
-                inner.push("        table: {".to_string());
+                inner.push(format!("        {field}: {{"));
                 inner.push(format!(
                     "            let mut t: Vec<u32> = vec![u32::MAX; {}];",
                     t.min
                 ));
-                copy_active_elems(inner, "t", "            ");
+                copy_active_elems(inner, i, "t", "            ");
                 inner.push("            t".to_string());
                 inner.push("        },".to_string());
             }
@@ -686,7 +697,7 @@ fn constructor_lines(
                 copy_active_data(&mut inner, 0, "instance.mem_mut()", "    ");
             }
             if post_init_elem {
-                copy_active_elems(&mut inner, "instance.table_mut()", "    ");
+                copy_active_elems(&mut inner, 0, "instance.table_mut()", "    ");
             }
             push_start(&mut inner);
             if start_call.is_none() {
@@ -783,6 +794,13 @@ fn table_accessor_lines(parts: &ModuleParts<'_>) -> Vec<String> {
         inner.push(format!("fn table(&self) -> &[u32] {{ {borrow} }}"));
         inner.push(format!(
             "fn table_mut(&mut self) -> &mut Vec<u32> {{ {borrow_mut} }}"
+        ));
+    }
+    for i in 1..=parts.extra_tables.len() {
+        let (get, get_mut) = table_accessor(u32::try_from(i).unwrap_or(u32::MAX));
+        inner.push(format!("fn {get}(&self) -> &[u32] {{ &self.{get} }}"));
+        inner.push(format!(
+            "fn {get_mut}(&mut self) -> &mut Vec<u32> {{ &mut self.{get} }}"
         ));
     }
     inner

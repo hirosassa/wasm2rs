@@ -36,9 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Modules may define several tables. Table 0 keeps the `table` field and accessors
+  (single-table output is unchanged); table `i > 0` gets `table{i}`. `table.get/set/
+  size/grow/fill/copy/init`, `call_indirect` and active element segments address the
+  named table. An imported table combined with other tables is still unsupported.
 - Tests: a harness that replays vendored WebAssembly spec testsuite `.wast` files
-  (`tests/spec/`, `tests/it/spec_wast.rs`). A known gap it found is pinned: a module
-  with multiple tables.
+  (`tests/spec/`, `tests/it/spec_wast.rs`).
 - Tables of a typed function reference (`(table 3 (ref null $ft))`) are supported;
   they are stored like a `funcref` table. Element segments may use `ref.func`
   expression items.

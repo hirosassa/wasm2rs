@@ -165,16 +165,16 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
-    /// Require that a bulk-table operand references table 0, the only one
-    /// supported until multi-table lands. (Memory operands are validated by
-    /// [`Self::require_memory_index`] instead, since multi-memory is supported.)
-    pub(super) fn require_zero_index(&self, index: u32, what: &str) -> Result<(), TranspileError> {
-        if index == 0 {
-            Ok(())
+    /// Require that `table` names a declared table, returning it so a caller can
+    /// select the table-specific accessor.
+    pub(super) fn require_table_index(&self, table: u32) -> Result<u32, TranspileError> {
+        self.require_table()?;
+        if (table as usize) < self.ctx.table_elements.len() {
+            Ok(table)
         } else {
-            Err(TranspileError::Unsupported(format!(
-                "{what} on a non-zero index"
-            )))
+            Err(TranspileError::Unsupported(
+                "table instruction with an out-of-range table index".into(),
+            ))
         }
     }
 
