@@ -337,12 +337,16 @@ impl<'a> super::FuncGen<'a> {
     ) -> Result<(), TranspileError> {
         match cond {
             None => {
+                self.run_discarded_trapping(vars.len());
                 self.assign_results(vars)?;
                 self.node(Node::Br { label, is_loop });
                 self.reachable = false;
                 self.dead_nesting = 0;
             }
             Some(cond) if vars.is_empty() => {
+                // The operands below stay for the fall-through path; evaluate any
+                // that may trap before the branch can skip them.
+                self.freeze_trapping()?;
                 self.node(Node::BrIf {
                     cond: condition_code(&cond.code),
                     label,
@@ -380,6 +384,7 @@ impl<'a> super::FuncGen<'a> {
     ) -> Result<(), TranspileError> {
         match cond {
             None => {
+                self.run_discarded_trapping(vars.len());
                 self.assign_results(vars)?;
                 let (code, out_var) = self.record_branch_escape(target_idx, is_loop, label)?;
                 self.line(format!("{out_var} = {code}u32;"));
@@ -874,6 +879,7 @@ impl<'a> super::FuncGen<'a> {
     /// Each enclosing try's dispatch re-issues it until the real function return.
     pub(super) fn emit_return_escape(&mut self) -> Result<(), TranspileError> {
         self.uses_ret_escape = true;
+        self.run_discarded_trapping(self.results.len());
         // Pop the results highest-index first (as `assign_results` does) so holder
         // `__rv{i}` receives the i-th source-order operand.
         for i in (0..self.results.len()).rev() {

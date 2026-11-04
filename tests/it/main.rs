@@ -92,6 +92,7 @@ mod streaming;
 mod table_ops;
 mod tail_call;
 mod tier2;
+mod trap_before_branch;
 mod traps;
 mod typed_funcref_table;
 mod unreachable;

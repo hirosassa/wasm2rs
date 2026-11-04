@@ -1355,6 +1355,44 @@ impl<'a> FuncGen<'a> {
         self.freeze_survivors(0)
     }
 
+    /// Run the deferred, possibly trapping operands below the top `keep` ones, in
+    /// push order, as `let _ = ..;` statements. A branch or `return` that leaves
+    /// them behind would otherwise drop the expression, and its trap, unevaluated.
+    fn run_discarded_trapping(&mut self, keep: usize) {
+        let discarded = self.stack.len().saturating_sub(keep);
+        for i in 0..discarded {
+            let val = &self.stack[i];
+            if !val.stable && val.may_trap {
+                let code = val.code.clone();
+                self.line(format!("let _ = {code};"));
+            }
+        }
+    }
+
+    /// Freeze only the deferred operands that may trap into stable temporaries,
+    /// so a conditional branch that skips them still evaluates them first.
+    fn freeze_trapping(&mut self) -> Result<(), TranspileError> {
+        for i in 0..self.stack.len() {
+            if self.stack[i].stable || !self.stack[i].may_trap {
+                continue;
+            }
+            let ty = self.stack[i].ty;
+            let code = self.stack[i].code.clone();
+            let name = self.fresh_temp();
+            self.line(format!(
+                "let {name}: {} = {code};",
+                rust_type(ty, self.ctx.type_kinds)?
+            ));
+            self.stack[i] = Val {
+                code: name,
+                ty,
+                stable: true,
+                may_trap: false,
+            };
+        }
+        Ok(())
+    }
+
     /// Freeze the non-stable operands that *survive* an upcoming boundary into
     /// `let` temporaries, leaving the top `keep` operands — the ones the
     /// boundary consumes in place, in program order — as inline expressions.
