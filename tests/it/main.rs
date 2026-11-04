@@ -86,6 +86,7 @@ mod table_ops;
 mod tail_call;
 mod tier2;
 mod traps;
+mod typed_funcref_table;
 mod unreachable;
 mod unsafe_memory;
 mod unsupported;

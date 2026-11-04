@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ref.as_non_null`, `br_on_null` and `br_on_non_null` on a function or extern
+  reference no longer generate code that assumes a managed GC handle.
 - `floor` / `ceil` / `trunc` / `nearest` now return a quiet NaN for a NaN input on
   every host. On baseline x86_64 Linux the host's rounding returned a signaling NaN
   unchanged, which the spec forbids (found by the spec testsuite). The results are
@@ -28,8 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Tests: a harness that replays vendored WebAssembly spec testsuite `.wast` files
-  (`tests/spec/`, `tests/it/spec_wast.rs`). A known gap it found is pinned: tables of a
-  typed function reference.
+  (`tests/spec/`, `tests/it/spec_wast.rs`). A known gap it found is pinned: a module
+  with multiple tables.
+- Tables of a typed function reference (`(table 3 (ref null $ft))`) are supported;
+  they are stored like a `funcref` table. Element segments may use `ref.func`
+  expression items.
 
 ## [0.2.0] - 2026-11-01
 
