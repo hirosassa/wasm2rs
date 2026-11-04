@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `wasm2rs::build`: `transpile_to_out_dir` (and `_with_options`, `transpile_to_dir`)
+  transpile a `.wasm` file into `OUT_DIR` from a `build.rs`, to be pulled in with
+  `include!`. It emits `cargo:rerun-if-changed` for the input.
+
 ### Fixed
 
 - `return` is now supported inside a continuation body. It is lowered like a branch

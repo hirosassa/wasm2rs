@@ -139,6 +139,24 @@ Code generation is configured through `TranspileOptions` (`unsafe_memory`, `spli
 
 Streaming/split transpilation is available via `transpile_split` / `transpile_split_with_options`, which take a `SplitOptions` (`SplitOptions::single_file()` for one file) and call a sink with each `SourceFile`. Errors are reported as `TranspileError`. `cargo_manifest` produces the recommended `Cargo.toml` for split output.
 
+### Using from `build.rs`
+
+Add `wasm2rs` as a build-dependency (`default-features = false`), transpile in `build.rs`, and `include!` the result:
+
+```rust
+// build.rs
+fn main() {
+    wasm2rs::build::transpile_to_out_dir("assets/foo.wasm", "foo.rs").unwrap();
+}
+
+// src/lib.rs
+mod foo {
+    include!(concat!(env!("OUT_DIR"), "/foo.rs"));
+}
+```
+
+`transpile_to_out_dir` also prints `cargo:rerun-if-changed` for the wasm file. `transpile_to_out_dir_with_options` takes a `TranspileOptions` (e.g. `named_exports`), and `transpile_to_dir` writes to an explicit directory.
+
 The `mimalloc` allocator is behind the default `cli` feature. Depend on the crate with `default-features = false` to use it as a library without compiling mimalloc.
 
 ## Testing

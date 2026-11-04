@@ -16,6 +16,7 @@ mod block_type;
 mod br_function_label;
 mod br_table_values;
 mod build_cache;
+mod build_helper;
 mod bulk;
 mod call_indirect;
 mod calls;
