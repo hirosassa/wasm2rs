@@ -1,0 +1,161 @@
+//! Rust identifiers for `TranspileOptions::named_exports`: an export name is
+//! sanitised into a snake_case identifier, then kept clear of Rust keywords and of
+//! every name the generated code already defines, and made unique.
+
+use std::collections::HashSet;
+
+use super::helpers::{HELPER_ORDER, helper_name};
+use super::runtime::rt_names;
+
+/// Rust keywords (strict, reserved and `self`-like) that cannot be used as a
+/// plain identifier.
+const KEYWORDS: &[&str] = &[
+    "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+    "self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
+    "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final", "macro",
+    "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "gen",
+];
+
+/// Names defined by the generated code itself, besides the pattern-based ones
+/// handled in [`is_reserved`].
+const FIXED: &[&str] = &[
+    "new",
+    "with_memory",
+    "memory",
+    "imports",
+    "main",
+    "mem",
+    "mem_mut",
+    "table",
+    "table_mut",
+    "emscripten_call_start",
+    "wasi_thread_start",
+    "_emscripten_thread_init",
+    "_emscripten_tls_init",
+    "_emscripten_thread_exit",
+];
+
+/// `name` as a snake_case Rust identifier: camelCase words are split, anything
+/// that is not alphanumeric becomes `_`, a leading digit gets a `_` prefix and an
+/// empty or all-underscore result becomes `export`.
+pub(super) fn sanitize(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_lower_or_digit = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            if c.is_ascii_uppercase() && prev_lower_or_digit {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+            prev_lower_or_digit = c.is_ascii_lowercase() || c.is_ascii_digit();
+        } else {
+            out.push('_');
+            prev_lower_or_digit = false;
+        }
+    }
+    if out.chars().all(|c| c == '_') {
+        return "export".to_string();
+    }
+    if out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
+}
+
+/// Whether `name` is already a member the generated code defines (an inherent
+/// method or a module-scope function), so a wrapper of that name would clash.
+pub(super) fn is_reserved(name: &str) -> bool {
+    if KEYWORDS.contains(&name) || FIXED.contains(&name) {
+        return true;
+    }
+    // `func{N}`, `import{N}`, `mem{N}`/`mem{N}_mut`, `table{N}`/`table{N}_mut`.
+    let numbered = |prefix: &str| {
+        name.strip_prefix(prefix).is_some_and(|rest| {
+            let digits = rest.strip_suffix("_mut").unwrap_or(rest);
+            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        })
+    };
+    if ["func", "import", "mem", "table"]
+        .iter()
+        .any(|p| numbered(p))
+    {
+        return true;
+    }
+    if ["wasi_", "cont_", "call_ref_t"]
+        .iter()
+        .any(|p| name.starts_with(p))
+    {
+        return true;
+    }
+    // A memory helper (`r32`, `memory_grow`, …), possibly specialised to memory
+    // `i > 0` (`r32_m1`), or a runtime helper.
+    let base = name
+        .rsplit_once("_m")
+        .filter(|(_, d)| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(name, |(b, _)| b);
+    HELPER_ORDER.iter().any(|h| helper_name(*h) == base) || rt_names().contains(&name)
+}
+
+/// Assigns each export (name, function index) a unique, valid, non-clashing
+/// identifier, in order. A keyword or generated-member clash appends `_`; a name
+/// already handed out appends `_{function index}`.
+pub(super) fn assign<'a>(exports: impl IntoIterator<Item = (&'a str, u32)>) -> Vec<String> {
+    let mut used: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for (name, func_index) in exports {
+        let mut ident = sanitize(name);
+        if is_reserved(&ident) {
+            ident.push('_');
+        }
+        while used.contains(&ident) || is_reserved(&ident) {
+            ident = format!("{ident}_{func_index}");
+        }
+        used.insert(ident.clone());
+        out.push(ident);
+    }
+    out
+}
+
+#[cfg(test)]
+#[allow(clippy::indexing_slicing, reason = "test code")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_makes_snake_case_identifiers() {
+        assert_eq!(sanitize("add"), "add");
+        assert_eq!(sanitize("my-func"), "my_func");
+        assert_eq!(sanitize("myFunc"), "my_func");
+        assert_eq!(sanitize("HTTPServer"), "httpserver");
+        assert_eq!(sanitize("1st"), "_1st");
+        assert_eq!(sanitize(""), "export");
+        assert_eq!(sanitize("--"), "export");
+        assert_eq!(sanitize("a.b"), "a_b");
+    }
+
+    #[test]
+    fn reserved_covers_keywords_members_and_helpers() {
+        for name in [
+            "type",
+            "new",
+            "memory",
+            "func0",
+            "func12",
+            "table1_mut",
+            "r32",
+            "r32_m2",
+        ] {
+            assert!(is_reserved(name), "{name}");
+        }
+        for name in ["add", "func", "funcs", "table_x", "run"] {
+            assert!(!is_reserved(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn assign_keeps_names_unique() {
+        let got = assign([("a.b", 3), ("a_b", 4), ("type", 5), ("a_b", 6)]);
+        assert_eq!(got, ["a_b", "a_b_4", "type_", "a_b_6"]);
+    }
+}

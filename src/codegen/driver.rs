@@ -217,6 +217,9 @@ pub(crate) struct ModuleParts<'a> {
     /// Threads generating function bodies (`0` = auto; see
     /// `TranspileOptions::jobs`).
     pub(crate) jobs: usize,
+    /// Emit a by-name wrapper for every exported function (see
+    /// `TranspileOptions::named_exports`).
+    pub(crate) named_exports: bool,
 }
 /// Derive the translation context from a module's raw parts.
 ///

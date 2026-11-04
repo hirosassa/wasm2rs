@@ -30,6 +30,11 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
     }
 }
 
+/// The names of every runtime helper, for reserving them against export names.
+pub(super) fn rt_names() -> Vec<&'static str> {
+    RT_ORDER.iter().map(|rt| rt_name(*rt)).collect()
+}
+
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
 const RT_ORDER: [Rt; 23] = [
