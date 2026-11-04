@@ -30,6 +30,11 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
     }
 }
 
+/// Whether `name` is a runtime helper, for reserving it against export names.
+pub(super) fn is_rt_name(name: &str) -> bool {
+    RT_ORDER.iter().any(|rt| rt_name(*rt) == name)
+}
+
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
 const RT_ORDER: [Rt; 23] = [

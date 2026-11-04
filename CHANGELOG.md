@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TranspileOptions::named_exports` / `--named-exports`: emit a method or free function
+  named after each exported function, forwarding to `func{N}`, so callers no longer
+  need to know function indices. Off by default; output is unchanged unless set.
 - Modules may define several tables. Table 0 keeps the `table` field and accessors
   (single-table output is unchanged); table `i > 0` gets `table{i}`. `table.get/set/
   size/grow/fill/copy/init`, `call_indirect` and active element segments address the

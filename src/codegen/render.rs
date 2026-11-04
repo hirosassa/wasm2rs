@@ -5,7 +5,7 @@ use super::render_cont::{continuation_method_lines, continuation_runtime_lines};
 use super::runtime::render_rt_helpers;
 use super::wasi::share_fd_table;
 use super::{
-    ALLOW, DataSegment, ElemSegment, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
+    ALLOW, DataSegment, ElemSegment, ExportInfo, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
     ModuleParts, WASM_PAGE_SIZE, WasiFn, data_static_line, indent, index_u32, rust_type,
     rust_types,
 };
@@ -1051,6 +1051,62 @@ pub(super) fn entry_point_lines(
         if imports_wasi(WasiFn::PthreadCreateJs) {
             lines.extend(call_start_lines(ctx)?);
         }
+    }
+    if parts.named_exports {
+        lines.extend(named_export_lines(parts, ctx)?);
+    }
+    Ok(lines)
+}
+
+/// A by-name wrapper forwarding to `func{N}` for every exported function that is
+/// defined (not imported) and emitted, with the same signature. Names come from
+/// [`super::export_names::assign`]; `wasi_thread_start` already has its own entry
+/// point, so it is skipped here.
+fn named_export_lines(
+    parts: &ModuleParts<'_>,
+    ctx: &ModuleCtx<'_>,
+) -> Result<Vec<String>, TranspileError> {
+    let exports: Vec<&ExportInfo> = parts
+        .exports
+        .iter()
+        .filter(|e| e.name != WASI_THREAD_START)
+        .collect();
+    let idents =
+        super::export_names::assign(exports.iter().map(|e| (e.name.as_str(), e.func_index)));
+    let mut lines = Vec::new();
+    for (export, ident) in exports.iter().zip(idents) {
+        let Some(defined) = usize::try_from(export.func_index)
+            .ok()
+            .and_then(|i| i.checked_sub(parts.imports.len()))
+        else {
+            continue;
+        };
+        let (Some(sig), Some(&live)) = (parts.funcs.get(defined), parts.live.get(defined)) else {
+            continue;
+        };
+        if !live {
+            continue;
+        }
+        let mut decls: Vec<String> = Vec::new();
+        if ctx.is_method {
+            decls.push("&mut self".to_string());
+        }
+        let mut args: Vec<String> = Vec::new();
+        for (k, ty) in sig.params.iter().enumerate() {
+            decls.push(format!("a{k}: {}", rust_type(*ty, ctx.type_kinds)?));
+            args.push(format!("a{k}"));
+        }
+        let ret = match sig.results {
+            [] => String::new(),
+            [ty] => format!(" -> {}", rust_type(*ty, ctx.type_kinds)?),
+            many => format!(" -> ({})", rust_types(many, ctx.type_kinds)?.join(", ")),
+        };
+        let call = ctx.call_expr(export.func_index as usize, &args.join(", "));
+        lines.push(String::new());
+        lines.push(format!(
+            "pub fn {ident}({}){ret} {{ {call} }}",
+            decls.join(", ")
+        ));
     }
     Ok(lines)
 }

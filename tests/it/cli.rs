@@ -300,3 +300,34 @@ fn a_failed_chunk_write_exits_nonzero_with_the_path() {
         "{stderr}"
     );
 }
+
+/// `--named-exports` adds by-name wrappers to the CLI output, and also in a split
+/// crate (where they live in the root, which sees every chunk's functions).
+#[test]
+fn named_exports_flag_adds_wrappers_single_and_split() {
+    let (dir, input) = write_sample_wasm("named_exports");
+    let single = dir.join("out.rs");
+    let status = Command::new(wasm2rs_bin())
+        .arg("--named-exports")
+        .arg(&input)
+        .arg(&single)
+        .status()
+        .expect("run wasm2rs");
+    assert!(status.success());
+    let code = std::fs::read_to_string(&single).expect("read output");
+    assert!(code.contains("pub fn a() -> i32 { func0() }"), "{code}");
+
+    let out_dir = dir.join("split");
+    let status = Command::new(wasm2rs_bin())
+        .arg("--named-exports")
+        .arg(&input)
+        .arg(&out_dir)
+        .arg("1")
+        .status()
+        .expect("run wasm2rs");
+    assert!(status.success());
+    let root = std::fs::read_to_string(out_dir.join("lib.rs")).expect("read lib.rs");
+    for name in ["a", "b", "c"] {
+        assert!(root.contains(&format!("pub fn {name}() -> i32")), "{root}");
+    }
+}

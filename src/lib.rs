@@ -140,6 +140,14 @@ pub struct TranspileOptions {
     /// count). Worker threads get a large stack of their own, since lowering
     /// recurses on control-flow nesting.
     pub jobs: usize,
+
+    /// Also emit, for every exported (defined) function, a method or free function
+    /// named after the export — `pub fn add(&mut self, a0: i32, a1: i32) -> i32`
+    /// — that forwards to `func{N}`. The name is the export name made a snake_case
+    /// identifier; a clash with a keyword or a generated member appends `_`, and a
+    /// duplicate appends `_{function index}`. `func{N}` is kept either way. Off by
+    /// default, so existing output is unchanged.
+    pub named_exports: bool,
 }
 
 /// The recommended `Cargo.toml` for a split crate, named `package_name`.
@@ -652,6 +660,7 @@ where
         unsafe_memory: topts.unsafe_memory,
         split_dispatch: topts.split_dispatch,
         jobs: topts.jobs,
+        named_exports: topts.named_exports,
     };
     codegen::generate_module_split(
         &parts,

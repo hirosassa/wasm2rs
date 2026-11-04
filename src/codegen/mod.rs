@@ -27,6 +27,7 @@ use wasmparser::{MemArg, ValType};
 use crate::TranspileError;
 
 mod const_expr;
+mod export_names;
 mod func;
 mod helpers;
 mod info;
