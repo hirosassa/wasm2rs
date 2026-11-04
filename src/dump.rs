@@ -167,6 +167,7 @@ pub fn dump(wasm: &[u8]) -> Result<ModuleSummary, TranspileError> {
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
+            Payload::Version { encoding, .. } => crate::reject_component(encoding)?,
             Payload::TypeSection(reader) => {
                 for group in reader {
                     for sub in group?.types() {

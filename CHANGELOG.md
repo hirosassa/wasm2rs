@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A WebAssembly component (Component Model binary) is now rejected with a clear
+  `Unsupported` error by `transpile` and `--dump`. Previously the parser descended
+  into its nested core modules and silently emitted code for one of them.
 - `return` is now supported inside a continuation body. It is lowered like a branch
   to the function's own label, so such a body goes through the flat state machine
   (and a cross-call checkpoint in it is rejected explicitly).

@@ -24,6 +24,7 @@ mod calls;
 mod cli;
 mod codegen_limits;
 mod compile_and_run;
+mod component_input;
 mod condition_simplify;
 mod cont;
 mod control_flow;
