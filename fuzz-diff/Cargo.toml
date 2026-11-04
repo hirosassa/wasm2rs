@@ -1,0 +1,20 @@
+[package]
+name = "wasm2rs-fuzz-diff"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Differential fuzzing of wasm2rs against wasmtime (not part of the wasm2rs workspace)."
+
+# Detached on purpose: wasmtime is a heavy dependency that the main crate and its
+# CI must not pay for.
+[workspace]
+
+[dependencies]
+wasm2rs = { path = ".." }
+wasmparser = "0.263.0"
+wasm-smith = "0.263.0"
+arbitrary = "1"
+wasmtime = "50"
+
+[dev-dependencies]
+wat = "1.263.0"

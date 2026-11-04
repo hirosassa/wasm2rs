@@ -12,3 +12,6 @@ tmp/
 
 # Emacs undo-tree history
 *.~undo-tree~
+/fuzz-diff/target
+/fuzz-diff/findings
+/fuzz-diff/shrunk

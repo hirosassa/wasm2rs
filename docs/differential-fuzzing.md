@@ -1,0 +1,49 @@
+# Differential fuzzing against wasmtime
+
+`fuzz-diff/` is a separate crate (its own workspace, so wasmtime is not a
+dependency of wasm2rs or of its CI) that runs random modules through both
+wasmtime and the Rust wasm2rs generates, and reports any difference.
+
+```
+cd fuzz-diff
+cargo run --release -- [first_seed] [count]       # default: 100 seeds from 0
+cargo run --release --example one -- file.wasm    # both reports for one module
+wasm-tools shrink ./shrink.sh finding.wasm -o small.wasm   # minimize a finding
+cargo test --release                              # harness tests
+cargo test --release -- --ignored                 # known bugs (they fail until fixed)
+```
+
+## What is compared
+
+`wasm-smith` builds a module from the seed (deterministic): MVP plus multi-value,
+bulk memory, reference types, sign-extension and saturating conversions; no
+imports, no SIMD/threads/exceptions/GC/memory64/tail calls. Every exported function
+with numeric parameters and results is called twice with fixed arguments, then
+memory 0 is hashed. Each side prints one line per call (`ok` plus the values, or
+`trap`), `init-trap` if instantiation fails, and the memory hash. NaNs print as
+`nan` (payloads are not deterministic across implementations).
+
+wasmtime runs with fuel; a module that exhausts it or overflows the stack is
+skipped. The Rust side is compiled with `rustc -C opt-level=0` (overflow checks on,
+so an arithmetic panic shows up as a spurious trap) and killed after 20 s.
+
+Outcomes: `match`, `skip`, `unsupported` (wasm2rs rejected the module),
+`MISMATCH`, `BROKEN` (does not compile, crashes or hangs). Findings are written to
+`fuzz-diff/findings/seed-N.{wasm,txt}`.
+
+## First run (seeds 0–1700)
+
+About 1500 modules compared equal. Findings:
+
+1. **A trapping operation whose value is discarded by a function-level `br` is
+   dropped**, so the trap never happens (`i32.const 1; i32.load; br 0` on an empty
+   memory). Most mismatches (seeds 162, 282, 316, 1046, 1346, 1358) are this.
+2. **`memory.grow` ignores the declared maximum**; it only enforces 65536 pages
+   (seeds 796, 1080).
+3. Two runs hang in wasm2rs after a first call that traps (seeds 973, 1010); not
+   yet reduced, possibly related to 1.
+4. `unsupported` (about 5%): active element/data segments used by
+   `table.init`/`memory.init`/`*.drop` ("not passive"), and negative data offsets.
+
+1 and 2 are reproduced by `#[ignore]`d tests in `fuzz-diff/src/lib.rs`; remove the
+`ignore` when each is fixed.

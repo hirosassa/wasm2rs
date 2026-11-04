@@ -40,6 +40,7 @@ cargo build
 | `tests/it/` | Integration tests, bundled into a single binary (`tests/it/main.rs`) |
 | `docs/` | Design and test-infrastructure notes |
 | `examples/` | Usage examples |
+| `fuzz-diff/` | Differential fuzzer against wasmtime, a separate crate (see [docs/differential-fuzzing.md](docs/differential-fuzzing.md)) |
 
 ## Before you open a pull request
 
