@@ -1336,3 +1336,33 @@ fn br_to_the_function_label_from_inside_a_suspending_loop() {
         "let mut inst = Instance::new(); assert_eq!(inst.func1(), 103);",
     );
 }
+
+#[test]
+fn return_at_the_top_level_of_a_continuation_body() {
+    // `return` ends the continuation with the value on top, skipping the rest.
+    // 10 is yielded, then `return` gives 7 (the trailing 99 is dead code).
+    compile_run(
+        "cont_return_top_level",
+        &summing_driver_module("i32.const 10 suspend $yield i32.const 7 return i32.const 99"),
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 17);",
+    );
+}
+
+#[test]
+fn conditional_return_from_inside_a_suspending_loop() {
+    // The loop suspends every iteration (flat path) and `return`s 100 once `$i`
+    // reaches 2: 1 + 2 yielded, then 100.
+    compile_run(
+        "cont_return_in_loop",
+        &summing_driver_module(
+            "(local $i i32)
+             (loop $l
+               local.get $i i32.const 1 i32.add local.tee $i
+               suspend $yield
+               local.get $i i32.const 2 i32.lt_s br_if $l)
+             i32.const 100 return
+             i32.const 0",
+        ),
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 103);",
+    );
+}
