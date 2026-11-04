@@ -183,6 +183,20 @@ pub fn cargo_manifest(package_name: &str) -> String {
     )
 }
 
+/// Refuse a WebAssembly component: only core modules are transpiled. Without this
+/// the parser would descend into a component's nested modules and emit code for
+/// one of them as if it were the whole program.
+pub(crate) fn reject_component(encoding: wasmparser::Encoding) -> Result<(), TranspileError> {
+    match encoding {
+        wasmparser::Encoding::Module => Ok(()),
+        wasmparser::Encoding::Component => Err(TranspileError::Unsupported(
+            "WebAssembly components are not supported; give wasm2rs a core module \
+             (for example extract it with `wasm-tools component unbundle`)"
+                .into(),
+        )),
+    }
+}
+
 /// Transpile a wasm binary into a single Rust source string.
 ///
 /// Convenience wrapper over [`transpile_split`] with [`SplitOptions::single_file`];
@@ -281,6 +295,7 @@ where
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
+            Payload::Version { encoding, .. } => reject_component(encoding)?,
             Payload::TypeSection(reader) => {
                 for group in reader {
                     for sub in group?.types() {

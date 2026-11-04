@@ -146,8 +146,9 @@ impl fmt::Display for ModuleSummary {
 /// each import would be resolved, memory limits, the proposals in use, and
 /// whether the generated module needs a host `Imports` implementation.
 ///
-/// Only a malformed binary is an error; a module that [`crate::transpile`] would
-/// reject as unsupported can still be summarised.
+/// A malformed binary, or a WebAssembly component (only core modules are handled),
+/// is an error; a core module that [`crate::transpile`] would reject as
+/// unsupported can still be summarised.
 pub fn dump(wasm: &[u8]) -> Result<ModuleSummary, TranspileError> {
     let mut sigs: Vec<(Vec<ValType>, Vec<ValType>)> = Vec::new();
     let mut s = ModuleSummary {
@@ -167,6 +168,7 @@ pub fn dump(wasm: &[u8]) -> Result<ModuleSummary, TranspileError> {
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
+            Payload::Version { encoding, .. } => crate::reject_component(encoding)?,
             Payload::TypeSection(reader) => {
                 for group in reader {
                     for sub in group?.types() {

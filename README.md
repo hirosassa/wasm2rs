@@ -16,7 +16,7 @@ The generated code preserves WebAssembly semantics (wrapping arithmetic, linear-
 - **Memory-efficient** for very large modules: output can be split across many files so no single file (and no peak allocation) balloons.
   The binary uses `mimalloc` to keep peak RSS down while transpiling gigabyte-scale output.
 - Wide **WebAssembly proposal coverage**: SIMD and relaxed SIMD, atomics and shared memory, multi-memory, tail calls, exception handling (including legacy), GC, and stack-switching continuations.
-- **WASI**: preview1 calls are implemented natively; other imports go through a generated host `Imports` trait. wasi-threads, emscripten pthread builds and emscripten JS-glue builds run on native threads (see [docs/wasi-threads-e2e.md](docs/wasi-threads-e2e.md)). The WASI preopen root is configurable in the generated code (default: the current directory).
+- **WASI**: preview1 calls are implemented natively; other imports go through a generated host `Imports` trait. wasi-threads, emscripten pthread builds and emscripten JS-glue builds run on native threads (see [docs/wasi-threads-e2e.md](docs/wasi-threads-e2e.md)). The WASI preopen root is configurable in the generated code (default: the current directory). Only core modules are handled: a WebAssembly *component* (preview2 / the Component Model) is rejected with a clear error.
 - **Parallel code generation**: function bodies are lowered on multiple threads with byte-identical output (`--jobs`).
 
 ## Installation
