@@ -77,3 +77,18 @@ fn an_in_bounds_load_before_a_br_does_not_trap() {
         "let mut inst = Instance::new();\n assert_eq!(inst.func0(), 7);",
     );
 }
+
+#[test]
+fn a_dropped_trap_does_not_let_the_caller_run_into_an_endless_loop() {
+    // The shape of fuzz seed 973: the callee must trap before the caller reaches
+    // its endless loop. When the trap was lost the program never terminated.
+    common::expect_trap(
+        "tbb_hang",
+        &format!(
+            r#"(module {MEM}
+                 (func $f (i32.load (i32.const 1000000)) (br 0))
+                 (func (export "g") (call $f) (loop (br 0))))"#
+        ),
+        "let mut inst = Instance::new();\n inst.func1();",
+    );
+}
