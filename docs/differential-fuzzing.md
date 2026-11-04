@@ -49,3 +49,26 @@ About 1500 modules compared equal. Findings:
 
 1 and 2 are reproduced by `#[ignore]`d tests in `fuzz-diff/src/lib.rs`; remove the
 `ignore` when each is fixed.
+
+## Feature profiles
+
+`cargo run --release -- FIRST COUNT --profile NAME` widens the generator beyond the
+base feature set. Findings of a non-base profile are saved as
+`findings/<profile>-seed-N.{wasm,txt}`.
+
+| Profile | Adds | Seeds 0–299 |
+| --- | --- | --- |
+| `base` | the default set above | (see the runs above) |
+| `multi-memory` | up to 3 memories | 276 match, 24 skip |
+| `multi-table` | up to 3 tables | 277 match, 23 skip |
+| `memory64` | 64-bit memories and tables | 195 match, 23 skip, 81 unsupported, 1 mismatch |
+
+Only memory 0 is hashed, so a bug confined to another memory shows up only through
+a call's result or trap.
+
+`memory64` findings:
+
+- All 81 `unsupported` modules are `64-bit or shared table`: the profile also turns on
+  64-bit tables, which wasm2rs does not support yet.
+- The one mismatch (seed 258) is the declared-maximum bug above: `(memory 3 4)` grows
+  past its maximum.

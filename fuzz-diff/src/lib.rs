@@ -417,10 +417,56 @@ pub fn differential(wasm: &[u8], work: &Path) -> Verdict {
     }
 }
 
+/// Which wasm-smith feature set [`generate_with`] enables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    Base,
+    Memory64,
+    MultiMemory,
+    MultiTable,
+}
+
+impl Profile {
+    pub const ALL: [Profile; 4] = [
+        Profile::Base,
+        Profile::Memory64,
+        Profile::MultiMemory,
+        Profile::MultiTable,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Profile::Base => "base",
+            Profile::Memory64 => "memory64",
+            Profile::MultiMemory => "multi-memory",
+            Profile::MultiTable => "multi-table",
+        }
+    }
+}
+
+impl std::str::FromStr for Profile {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        Profile::ALL
+            .into_iter()
+            .find(|p| p.name() == s)
+            .ok_or_else(|| format!("unknown profile `{s}`"))
+    }
+}
+
+/// A deterministic module for `seed` under the feature set of `profile`.
+pub fn generate_with(seed: u64, profile: Profile) -> Option<Vec<u8>> {
+    generate_inner(seed, profile)
+}
+
 /// A deterministic module for `seed`: MVP plus multi-value, bulk memory, reference
 /// types and the sign-extension / saturating-conversion operators, no imports,
 /// small and without start-function surprises.
 pub fn generate(seed: u64) -> Option<Vec<u8>> {
+    generate_inner(seed, Profile::Base)
+}
+
+fn generate_inner(seed: u64, profile: Profile) -> Option<Vec<u8>> {
     use arbitrary::Unstructured;
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let bytes: Vec<u8> = (0..8192)
@@ -446,12 +492,16 @@ pub fn generate(seed: u64) -> Option<Vec<u8>> {
         threads_enabled: false,
         exceptions_enabled: false,
         gc_enabled: false,
-        memory64_enabled: false,
+        memory64_enabled: profile == Profile::Memory64,
         tail_call_enabled: false,
         wide_arithmetic_enabled: false,
         extended_const_enabled: false,
-        max_memories: 1,
-        max_tables: 1,
+        max_memories: if profile == Profile::MultiMemory {
+            3
+        } else {
+            1
+        },
+        max_tables: if profile == Profile::MultiTable { 3 } else { 1 },
         ..Default::default()
     };
     let module = wasm_smith::Module::new(cfg, &mut u).ok()?;
@@ -468,6 +518,73 @@ mod tests {
 
     fn check(name: &str, wat: &str) -> Verdict {
         differential(&wat::parse_str(wat).unwrap(), &scratch(name))
+    }
+
+    /// Count a generated module's memories, tables and 64-bit memories.
+    fn shape(wasm: &[u8]) -> (usize, usize, usize) {
+        let (mut mems, mut tables, mut wide) = (0, 0, 0);
+        for payload in Parser::new(0).parse_all(wasm) {
+            match payload.unwrap() {
+                Payload::MemorySection(r) => {
+                    for m in r {
+                        mems += 1;
+                        wide += usize::from(m.unwrap().memory64);
+                    }
+                }
+                Payload::TableSection(r) => tables += r.count() as usize,
+                _ => {}
+            }
+        }
+        (mems, tables, wide)
+    }
+
+    fn first_where(profile: Profile, pred: impl Fn((usize, usize, usize)) -> bool) -> bool {
+        (0..200).any(|seed| generate_with(seed, profile).is_some_and(|w| pred(shape(&w))))
+    }
+
+    #[test]
+    fn the_base_profile_is_the_default_generator() {
+        for seed in 0..20 {
+            assert_eq!(generate_with(seed, Profile::Base), generate(seed));
+        }
+    }
+
+    #[test]
+    fn the_memory64_profile_generates_64_bit_memories() {
+        assert!(first_where(Profile::Memory64, |(_, _, wide)| wide > 0));
+    }
+
+    #[test]
+    fn the_multi_memory_profile_generates_several_memories() {
+        assert!(first_where(Profile::MultiMemory, |(m, _, _)| m > 1));
+    }
+
+    #[test]
+    fn the_multi_table_profile_generates_several_tables() {
+        assert!(first_where(Profile::MultiTable, |(_, t, _)| t > 1));
+    }
+
+    #[test]
+    fn the_base_profile_never_generates_them() {
+        for seed in 0..200 {
+            if let Some(w) = generate(seed) {
+                let (m, t, wide) = shape(&w);
+                assert!(m <= 1 && t <= 1 && wide == 0);
+            }
+        }
+    }
+
+    #[test]
+    fn a_profile_name_round_trips() {
+        for p in [
+            Profile::Base,
+            Profile::Memory64,
+            Profile::MultiMemory,
+            Profile::MultiTable,
+        ] {
+            assert_eq!(p.name().parse::<Profile>(), Ok(p));
+        }
+        assert!("nope".parse::<Profile>().is_err());
     }
 
     #[test]

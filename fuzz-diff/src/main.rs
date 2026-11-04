@@ -1,12 +1,27 @@
-//! `cargo run --release -- [first_seed] [count]`: differential-fuzz `count` modules
-//! (default 100 from seed 0). Findings are written to `findings/seed-N.wasm`.
+//! `cargo run --release -- [first_seed] [count] [--profile NAME]`: differential-fuzz
+//! `count` modules (default 100 from seed 0) under a feature profile (`base`,
+//! `memory64`, `multi-memory`, `multi-table`; default `base`). Findings are written to
+//! `findings/seed-N.wasm`, or `findings/<profile>-seed-N.wasm` for a non-base profile.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use wasm2rs_fuzz_diff::{Verdict, differential, generate};
+use wasm2rs_fuzz_diff::{Profile, Verdict, differential, generate_with};
 
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let profile: Profile = match args.iter().position(|a| a == "--profile") {
+        Some(i) => {
+            let name = args.get(i + 1).expect("--profile needs a name").clone();
+            args.drain(i..=i + 1);
+            name.parse().unwrap_or_else(|e| panic!("{e}"))
+        }
+        None => Profile::Base,
+    };
+    let stem = match profile {
+        Profile::Base => String::new(),
+        p => format!("{}-", p.name()),
+    };
+    let mut args = args.into_iter();
     let first: u64 = args.next().map_or(0, |a| a.parse().expect("first_seed"));
     let count: u64 = args.next().map_or(100, |a| a.parse().expect("count"));
     let next = AtomicU64::new(0);
@@ -21,7 +36,7 @@ fn main() {
                         return;
                     }
                     let seed = first + i;
-                    let Some(wasm) = generate(seed) else {
+                    let Some(wasm) = generate_with(seed, profile) else {
                         continue;
                     };
                     let work = std::env::temp_dir()
@@ -39,11 +54,11 @@ fn main() {
                     if matches!(kind, "MISMATCH" | "BROKEN" | "unsupported") {
                         let save = std::fs::create_dir_all("findings")
                             .and_then(|()| {
-                                std::fs::write(format!("findings/seed-{seed}.wasm"), &wasm)
+                                std::fs::write(format!("findings/{stem}seed-{seed}.wasm"), &wasm)
                             })
                             .and_then(|()| {
                                 std::fs::write(
-                                    format!("findings/seed-{seed}.txt"),
+                                    format!("findings/{stem}seed-{seed}.txt"),
                                     format!("{verdict:#?}"),
                                 )
                             });
