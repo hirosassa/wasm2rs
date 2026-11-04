@@ -548,6 +548,10 @@ fn unsupported_directives_are_skipped_with_a_reason() {
 /// A spec file that cannot be replayed yet because the transpiler rejects its
 /// module. The test pins that reason: once the gap is fixed the assertion
 /// fails and the entry must move to the plain list below.
+#[allow(
+    dead_code,
+    reason = "no known gaps at the moment; kept to pin the next one"
+)]
 fn assert_known_gap(file: &str, report: &Report, reason: &str) {
     assert_eq!(
         report.executed, 0,
@@ -574,6 +578,10 @@ macro_rules! spec_test {
 }
 
 /// Files whose module the transpiler rejects today (see `assert_known_gap`).
+#[allow(
+    unused_macros,
+    reason = "no known gaps at the moment; kept to pin the next one"
+)]
 macro_rules! spec_known_gap {
     ($($name:ident => ($file:literal, $reason:literal)),+ $(,)?) => {$(
         #[test]
@@ -585,10 +593,9 @@ macro_rules! spec_known_gap {
         }
     )+};
 }
-
 spec_known_gap! {
-    // A table of a typed function reference (function-references proposal).
-    spec_br_table => ("br_table", "table of a non-funcref/externref type"),
+    // The module declares two tables (the typed-funcref table is the second).
+    spec_br_table => ("br_table", "multiple tables"),
 }
 
 spec_test! {

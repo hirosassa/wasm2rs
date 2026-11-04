@@ -853,12 +853,24 @@ impl super::FuncGen<'_> {
     pub(super) fn ref_as_non_null(&mut self) -> Result<(), TranspileError> {
         let r = self.pop()?;
         let ty = r.ty;
+        let (is_null, _) = self.null_test(ty, "__r")?;
         let code = format!(
             "{{ let __r = ({}); \
-             if matches!(__r, GcRef::Null) {{ panic!(\"ref.as_non_null on null\") }} else {{ __r }} }}",
+             if {is_null} {{ panic!(\"ref.as_non_null on null\") }} else {{ __r }} }}",
             r.code
         );
         self.materialize(code, ty)
+    }
+
+    /// The Rust condition testing that the ref named `name` is null, plus the
+    /// Rust type of the ref: a `funcref`/`externref`/typed funcref is a `u32`
+    /// handle (`u32::MAX` is null), anything else a managed `GcRef`.
+    fn null_test(&self, ty: ValType, name: &str) -> Result<(String, &'static str), TranspileError> {
+        if super::super::rust_type(ty, self.ctx.type_kinds)? == "GcRef" {
+            Ok((format!("matches!({name}, GcRef::Null)"), "GcRef"))
+        } else {
+            Ok((format!("{name} == u32::MAX"), "u32"))
+        }
     }
 
     /// `br_on_null $l`: branch to `$l` when the popped ref is null (the ref is
@@ -870,14 +882,15 @@ impl super::FuncGen<'_> {
         let r = self.pop()?;
         let ty = r.ty;
         let temp = self.fresh_temp();
-        self.line(format!("let {temp}: GcRef = {};", r.code));
+        let (is_null, rust_ty) = self.null_test(ty, &temp)?;
+        self.line(format!("let {temp}: {rust_ty} = {};", r.code));
         // At this point the operand stack top is exactly the block's non-ref
         // results (the ref has been popped), so `branch` carries them on the null
         // path and leaves them for fall-through.
         self.branch(
             depth,
             Some(Val {
-                code: format!("i32::from(matches!({temp}, GcRef::Null))"),
+                code: format!("i32::from({is_null})"),
                 ty: ValType::I32,
                 stable: true,
                 may_trap: false,
@@ -900,7 +913,8 @@ impl super::FuncGen<'_> {
         let r = self.pop()?;
         let ty = r.ty;
         let temp = self.fresh_temp();
-        self.line(format!("let {temp}: GcRef = {};", r.code));
+        let (is_null, rust_ty) = self.null_test(ty, &temp)?;
+        self.line(format!("let {temp}: {rust_ty} = {};", r.code));
         // Push the ref back as the stack-top carried value so `branch` carries it
         // on the (non-null) taken path.
         self.push(Val {
@@ -912,7 +926,7 @@ impl super::FuncGen<'_> {
         self.branch(
             depth,
             Some(Val {
-                code: format!("i32::from(!matches!({temp}, GcRef::Null))"),
+                code: format!("i32::from(!({is_null}))"),
                 ty: ValType::I32,
                 stable: true,
                 may_trap: false,

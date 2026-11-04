@@ -81,10 +81,10 @@ fn table_with_initializer_expression_is_rejected() {
 
 #[test]
 fn element_segment_with_expression_items_is_rejected() {
-    // The expression form `(elem ... funcref (ref.func $f))` (as opposed to the
-    // function-index form `(elem ... $f)`) is not supported.
+    // Expression items other than a plain `ref.func` (here `ref.null`) are not
+    // supported; `(ref.func $f)` items are (see `typed_funcref_table`).
     assert_unsupported(
-        r#"(module (table 1 funcref) (func $f) (elem (i32.const 0) funcref (ref.func $f)))"#,
+        r#"(module (table 1 funcref) (elem (i32.const 0) funcref (ref.null func)))"#,
         "element segment with expression items",
     );
 }

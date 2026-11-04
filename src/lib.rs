@@ -360,6 +360,7 @@ where
                                 (import.module, import.name),
                                 import.ty,
                                 &signatures,
+                                &type_kinds,
                                 &mut sink,
                             )?;
                         }
@@ -370,13 +371,20 @@ where
                                     (module, item.name),
                                     item.ty,
                                     &signatures,
+                                    &type_kinds,
                                     &mut sink,
                                 )?;
                             }
                         }
                         wasmparser::Imports::Compact2 { module, ty, names } => {
                             for name in names {
-                                classify_import((module, name?), ty, &signatures, &mut sink)?;
+                                classify_import(
+                                    (module, name?),
+                                    ty,
+                                    &signatures,
+                                    &type_kinds,
+                                    &mut sink,
+                                )?;
                             }
                         }
                     }
@@ -418,7 +426,7 @@ where
                 for table_entry in reader {
                     let table_entry = table_entry?;
                     let ty = table_entry.ty;
-                    if !(ty.element_type.is_func_ref() || ty.element_type.is_extern_ref()) {
+                    if !is_supported_table_element(ty.element_type, &type_kinds) {
                         return Err(TranspileError::Unsupported(
                             "table of a non-funcref/externref type".into(),
                         ));
@@ -482,10 +490,25 @@ where
                             }
                             indices
                         }
-                        ElementItems::Expressions(..) => {
-                            return Err(TranspileError::Unsupported(
-                                "element segment with expression items".into(),
-                            ));
+                        // Expression items (the form a typed-funcref table uses) are
+                        // supported when each is a plain `ref.func`.
+                        ElementItems::Expressions(_, reader) => {
+                            let mut indices = Vec::new();
+                            for expr in reader {
+                                let mut ops = expr?.get_operators_reader();
+                                match (ops.read()?, ops.read()?) {
+                                    (
+                                        wasmparser::Operator::RefFunc { function_index },
+                                        wasmparser::Operator::End,
+                                    ) => indices.push(function_index),
+                                    _ => {
+                                        return Err(TranspileError::Unsupported(
+                                            "element segment with expression items".into(),
+                                        ));
+                                    }
+                                }
+                            }
+                            indices
                         }
                     };
                     elements.push(codegen::ElemSegment {
@@ -648,10 +671,31 @@ struct ImportSink<'a> {
 /// Classify an import by its type: a function import is pushed onto `imports`, a
 /// global onto `imported_globals`, an imported memory recorded in `memory`, an
 /// imported table in `table`, and an imported exception tag onto `tags`.
+/// A table holds `funcref`, `externref`, or a concrete function reference
+/// `(ref null $ft)`; the latter is stored exactly like a `funcref` (a `u32`
+/// function handle). Tables of GC struct/array/cont references are unsupported.
+fn is_supported_table_element(
+    element: wasmparser::RefType,
+    type_kinds: &[codegen::CompositeKind],
+) -> bool {
+    if element.is_func_ref() || element.is_extern_ref() {
+        return true;
+    }
+    let wasmparser::HeapType::Concrete(idx) = element.heap_type() else {
+        return false;
+    };
+    matches!(
+        idx.as_module_index()
+            .and_then(|i| type_kinds.get(i as usize)),
+        Some(codegen::CompositeKind::Func)
+    )
+}
+
 fn classify_import(
     id: (&str, &str),
     ty: TypeRef,
     signatures: &[Signature],
+    type_kinds: &[codegen::CompositeKind],
     sink: &mut ImportSink<'_>,
 ) -> Result<(), TranspileError> {
     match ty {
@@ -702,7 +746,7 @@ fn classify_import(
             Ok(())
         }
         TypeRef::Table(table_ty) => {
-            if !(table_ty.element_type.is_func_ref() || table_ty.element_type.is_extern_ref()) {
+            if !is_supported_table_element(table_ty.element_type, type_kinds) {
                 return Err(TranspileError::Unsupported(
                     "table of a non-funcref/externref type".into(),
                 ));
