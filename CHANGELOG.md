@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A trapping operand that a `br`, `br_if` or `return` discards (for example an out-of-bounds
+  load left on the stack) is now evaluated instead of dropped, so the trap is no longer lost.
 - A WebAssembly component (Component Model binary) is now rejected with a clear
   `Unsupported` error by `transpile` and `--dump`. Previously the parser descended
   into its nested core modules and silently emitted code for one of them.

@@ -324,6 +324,7 @@ impl<'a> super::FuncGen<'a> {
         {
             return self.emit_return_escape();
         }
+        self.run_discarded_trapping(self.results.len());
         match self.pop_results(self.results.len())? {
             Some(code) => self.term(format!("return {code};")),
             None => self.term("return;".to_string()),
