@@ -126,6 +126,8 @@ pub(crate) enum Rt {
     F32Max,
     F64Min,
     F64Max,
+    QuietF32,
+    QuietF64,
     I32TruncF32S,
     I32TruncF32U,
     I32TruncF64S,
