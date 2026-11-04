@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/bench_memory.rs` and `benches/memory/*.wat`: a benchmark of the cost of
   bounds checks (default vs `unsafe_memory`) on memory-heavy workloads; results in
   `docs/bounds-check-bench.md`. The harness keeps the memory length opaque to the
-  optimizer; otherwise LLVM removes every check and the comparison is vacuous.
+  optimizer; otherwise LLVM removes every check and the comparison is vacuous. The doc also records a survey of how much static check removal could reach on real modules (and the decision not to pursue it for now).
 - New workspace member `wasm2rs-macros` with the `include_wasm!` proc macro, which
   transpiles a `.wasm` file at compile time and expands to the generated Rust
   (options `named_exports` and `unsafe_memory`).
