@@ -46,17 +46,52 @@ struct Group {
     body: String,
 }
 
-/// Emitted at the top of every generated `main`: runs `f` and asserts that it
-/// traps (panics), silencing the expected panic message while it runs.
+/// Emitted at the top of every generated `main`: runs `f`, asserts that it traps
+/// (panics) and, when `needles` is non-empty, that the panic message contains one
+/// of them. The expected panic is silenced while it runs.
 const TRAP_HELPER: &str = "#[allow(dead_code)]
-fn expect_trap<R>(ctx: &str, f: impl FnOnce() -> R) {
+fn expect_trap<R>(ctx: &str, needles: &[&str], f: impl FnOnce() -> R) {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     std::panic::set_hook(prev);
-    assert!(r.is_err(), \"expected a trap ({})\", ctx);
+    let payload = match r {
+        Err(payload) => payload,
+        Ok(_) => panic!(\"expected a trap ({})\", ctx),
+    };
+    let msg = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert!(
+        needles.is_empty() || needles.iter().any(|n| msg.contains(n)),
+        \"trap {:?} is not one of {:?} ({})\",
+        msg,
+        needles,
+        ctx
+    );
 }
 ";
+
+/// Substrings of the generated code's panic message that correspond to a spec
+/// trap message. Rust's own panics cover division and out-of-range memory, and
+/// an out-of-range or null `call_indirect` slot reports a type mismatch, so those
+/// are accepted. An unmapped message is only required to trap.
+fn trap_needles(spec_message: &str) -> &'static [&'static str] {
+    match spec_message {
+        "integer divide by zero" => &["divide by zero", "divisor of zero"],
+        "integer overflow" => &["overflow"],
+        "invalid conversion to integer" => &["invalid conversion to integer"],
+        "unreachable" => &["unreachable"],
+        "out of bounds memory access" => &["out of range for slice", "out of bounds"],
+        "indirect call type mismatch" => &["indirect call type mismatch"],
+        "undefined element" | "uninitialized element" => {
+            &["indirect call type mismatch", "out of bounds"]
+        }
+        _ => &[],
+    }
+}
 
 fn export_funcs(wasm: &[u8]) -> HashMap<String, u32> {
     let mut funcs = HashMap::new();
@@ -266,12 +301,15 @@ fn run_wast(name: &str, src: &str) -> Report {
             ),
             WastDirective::AssertTrap {
                 exec: WastExecute::Invoke(invoke),
+                message,
                 ..
             } => (
                 "assert_trap",
                 with_group(&groups, module_ok, |g| {
-                    call_expr(g, invoke)
-                        .map(|c| format!("expect_trap(\"{ctx}\", || {{ let _ = {c}; }});"))
+                    call_expr(g, invoke).map(|c| {
+                        let needles = format!("{:?}", trap_needles(message));
+                        format!("expect_trap(\"{ctx}\", &{needles}, || {{ let _ = {c}; }});")
+                    })
                 }),
             ),
             WastDirective::Invoke(invoke) => (
@@ -587,4 +625,46 @@ spec_test! {
     spec_labels => "labels",
     spec_switch => "switch",
     spec_call => "call",
+}
+
+#[test]
+fn assert_trap_checks_the_trap_kind() {
+    let report = run_wast(
+        "spec_trap_kind_ok",
+        r#"
+(module
+  (func (export "div") (param i32 i32) (result i32) local.get 0 local.get 1 i32.div_s)
+  (func (export "ovf") (param i32 i32) (result i32) local.get 0 local.get 1 i32.div_s)
+  (func (export "unr") unreachable))
+(assert_trap (invoke "div" (i32.const 1) (i32.const 0)) "integer divide by zero")
+(assert_trap (invoke "ovf" (i32.const 0x80000000) (i32.const -1)) "integer overflow")
+(assert_trap (invoke "unr") "unreachable")
+"#,
+    );
+    assert_eq!(report.executed, 3);
+}
+
+#[test]
+#[should_panic(expected = "generated program assertions failed")]
+fn assert_trap_fails_when_the_trap_kind_differs() {
+    // The call traps, but with `unreachable`, not a division by zero.
+    run_wast(
+        "spec_trap_kind_wrong",
+        r#"
+(module (func (export "unr") unreachable))
+(assert_trap (invoke "unr") "integer divide by zero")
+"#,
+    );
+}
+
+#[test]
+fn an_unmapped_trap_message_only_requires_a_trap() {
+    let report = run_wast(
+        "spec_trap_kind_unmapped",
+        r#"
+(module (func (export "unr") unreachable))
+(assert_trap (invoke "unr") "some message the harness has no mapping for")
+"#,
+    );
+    assert_eq!(report.executed, 1);
 }

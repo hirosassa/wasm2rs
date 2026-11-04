@@ -181,7 +181,7 @@ pub(crate) struct GenMeta {
     pub(crate) state_structs: Vec<String>,
 }
 /// The lint-suppression attribute prefixed to generated functions/impls.
-const ALLOW: &str = "#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens, unconditional_recursion)]";
+pub(crate) const ALLOW: &str = "#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens, unconditional_recursion)]";
 /// The module-scope type name carrying a thrown wasm exception's tag and its
 /// (bit-encoded) payload values.
 const EXC_TYPE: &str = "Wasm2RsException";

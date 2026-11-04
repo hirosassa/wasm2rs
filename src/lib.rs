@@ -759,8 +759,15 @@ mod tests {
         wat::parse_str(wat).expect("valid wat")
     }
 
-    /// The lint-suppression attribute prefixed to every generated function.
+    /// The lint-suppression attribute prefixed to every generated function. It is a
+    /// literal because the tests below splice it into `format!` strings by name;
+    /// `attr_matches_the_generators_lint_list` keeps it in sync with the generator.
     const ATTR: &str = "#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens, unconditional_recursion)]\n";
+
+    #[test]
+    fn attr_matches_the_generators_lint_list() {
+        assert_eq!(ATTR, format!("{}\n", crate::codegen::ALLOW));
+    }
 
     #[test]
     fn i32_add_becomes_wrapping_add() {
@@ -1041,7 +1048,7 @@ pub struct Instance {
     g0: i32,
 }
 
-#[allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_parens, unconditional_recursion)]
+{ALLOW}
 impl Instance {
     pub fn new() -> Self {
         Self {
@@ -1052,7 +1059,8 @@ impl Instance {
     pub fn func0(&mut self) -> i32 {
         self.g0
     }
-}";
+}"
+        .replace("{ALLOW}", crate::codegen::ALLOW);
         assert_eq!(rust.trim(), expected);
     }
 
