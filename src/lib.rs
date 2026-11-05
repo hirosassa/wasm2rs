@@ -502,7 +502,6 @@ where
                         table64: ty.table64,
                         element: ValType::Ref(ty.element_type),
                         init: None,
-                        init_global: None,
                     };
                     let slot = if table.is_none() {
                         None
@@ -590,7 +589,7 @@ where
                         ElementItems::Expressions(_, reader) => {
                             let mut indices = Vec::new();
                             for (k, expr) in reader.into_iter().enumerate() {
-                                match ref_const_handle(
+                                match eval_ref_const(
                                     &expr?,
                                     "element segment item",
                                     &imported_globals,
@@ -647,7 +646,7 @@ where
                     );
                     // A mutable global is not a constant, so no handle is recorded for it.
                     global_handles.push(
-                        ref_const_handle(
+                        eval_ref_const(
                             &global.init_expr,
                             "global",
                             &imported_globals,
@@ -730,7 +729,7 @@ where
     // `ref.func` one is reachable even if the table is never read: it is seeded at
     // instantiation, like a `ref.func` in a global.
     for (slot, expr) in &pending_table_inits {
-        let init = ref_const_handle(
+        let init = eval_ref_const(
             expr,
             "table initializer",
             &imported_globals,
@@ -745,12 +744,12 @@ where
             RefConst::Handle(func) => {
                 global_funcs.push(func);
                 if let Some(target) = target {
-                    target.init = Some(func);
+                    target.init = Some(codegen::TableFill::Func(func));
                 }
             }
             RefConst::Imported(global) => {
                 if let Some(target) = target {
-                    target.init_global = Some(global);
+                    target.init = Some(codegen::TableFill::ImportedGlobal(global));
                 }
             }
         }
@@ -960,7 +959,6 @@ fn classify_import(
                 table64: false,
                 element: ValType::Ref(table_ty.element_type),
                 init: None,
-                init_global: None,
             });
             Ok(())
         }
@@ -999,7 +997,7 @@ impl RefConst {
 /// `u32::MAX` (null) for `ref.null`, or, for `global.get`, the handle of an
 /// earlier defined global (`global_handles`, indexed after the imported ones) or
 /// an immutable imported global. Anything else is unsupported.
-fn ref_const_handle(
+fn eval_ref_const(
     expr: &wasmparser::ConstExpr<'_>,
     what: &str,
     imported_globals: &[codegen::ImportedGlobalInfo],
@@ -1014,21 +1012,23 @@ fn ref_const_handle(
             Ok(RefConst::Handle(u32::MAX))
         }
         (wasmparser::Operator::GlobalGet { global_index }, wasmparser::Operator::End) => {
-            let index = usize::try_from(global_index).ok();
-            let constant = match index {
-                // Only an immutable reference global is a constant.
-                Some(i) if i < imported_globals.len() => imported_globals
-                    .get(i)
-                    .filter(|g| !g.mutable && matches!(g.ty, ValType::Ref(_)))
-                    .map(|_| RefConst::Imported(global_index)),
-                _ => index
-                    .and_then(|i| i.checked_sub(imported_globals.len()))
-                    .and_then(|i| global_handles.get(i).copied().flatten())
-                    .map(RefConst::Handle),
-            };
+            let constant = usize::try_from(global_index).ok().and_then(|i| {
+                match i.checked_sub(imported_globals.len()) {
+                    Some(defined) => global_handles
+                        .get(defined)
+                        .copied()
+                        .flatten()
+                        .map(RefConst::Handle),
+                    // Only an immutable reference global is a constant.
+                    None => imported_globals
+                        .get(i)
+                        .filter(|g| !g.mutable && matches!(g.ty, ValType::Ref(_)))
+                        .map(|_| RefConst::Imported(global_index)),
+                }
+            });
             constant.ok_or_else(|| {
                 TranspileError::Unsupported(format!(
-                    "{what} reading a mutable or non-reference global"
+                    "{what} reading a mutable, non-reference or non-constant global"
                 ))
             })
         }

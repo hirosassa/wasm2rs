@@ -6,7 +6,7 @@ use super::runtime::render_rt_helpers;
 use super::wasi::share_fd_table;
 use super::{
     ALLOW, DataSegment, ElemSegment, ExportInfo, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
-    ModuleParts, WASM_PAGE_SIZE, WasiFn, data_static_line, indent, index_u32, rust_type,
+    ModuleParts, TableFill, WASM_PAGE_SIZE, WasiFn, data_static_line, indent, index_u32, rust_type,
     rust_types,
 };
 use crate::TranspileError;
@@ -529,10 +529,12 @@ fn constructor_lines(
         for (i, t) in defined.enumerate() {
             let i = index_u32(i)?;
             let (field, _) = table_accessor(i);
-            let fill = match (t.init_global, t.init) {
-                (Some(global), _) => format!("imports.get_global{global}()"),
-                (None, Some(f)) => format!("{f}u32"),
-                (None, None) => "u32::MAX".to_string(),
+            let fill = match t.init {
+                Some(TableFill::ImportedGlobal(global)) => {
+                    format!("imports.get_global{global}()")
+                }
+                Some(TableFill::Func(f)) => format!("{f}u32"),
+                None => "u32::MAX".to_string(),
             };
             if !active_elem.iter().any(|seg| seg.table == i) {
                 inner.push(format!("        {field}: vec![{fill}; {}],", t.min));
