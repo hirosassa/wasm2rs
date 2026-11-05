@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Support for `try_table` with `catch $tag $label` and `catch_all $label` clauses
+  (the exception-handling proposal's structured form), lowered through the legacy
+  `try`/`catch` machinery. The `_ref` clauses, `throw_ref` and `exnref` values are
+  still unsupported. The spec harness replays `assert_exception`, and `throw.wast`
+  and `try_table.wast` are vendored.
 - Support for `ref.null` items in element segments (funcref and externref) and for a
   table initializer expression (`(table 2 funcref (ref.func $f))` fills the initial
   entries with `$f`; `(ref.null func)` is the null default).

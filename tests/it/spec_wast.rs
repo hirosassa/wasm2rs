@@ -75,6 +75,24 @@ fn expect_trap<R>(ctx: &str, needles: &[&str], f: impl FnOnce() -> R) {
         ctx
     );
 }
+
+#[allow(dead_code)]
+fn expect_exception<R>(ctx: &str, f: impl FnOnce() -> R) {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    std::panic::set_hook(prev);
+    let payload = match r {
+        Err(payload) => payload,
+        Ok(_) => panic!(\"expected an uncaught exception ({})\", ctx),
+    };
+    // A trap panics with a message; a thrown exception panics with its own payload.
+    assert!(
+        payload.downcast_ref::<&str>().is_none() && payload.downcast_ref::<String>().is_none(),
+        \"expected an uncaught exception, got a trap ({})\",
+        ctx
+    );
+}
 ";
 
 /// Substrings of the generated code's panic message that correspond to a spec
@@ -390,6 +408,16 @@ fn run_wast(name: &str, src: &str) -> Report {
                     })
                 }),
             ),
+            WastDirective::AssertException {
+                exec: WastExecute::Invoke(invoke),
+                ..
+            } => (
+                "assert_exception",
+                with_group(&groups, module_ok, |g| {
+                    call_expr(g, invoke)
+                        .map(|c| format!("expect_exception(\"{ctx}\", || {{ let _ = {c}; }});"))
+                }),
+            ),
             WastDirective::Invoke(invoke) => (
                 "invoke",
                 with_group(&groups, module_ok, |g| {
@@ -591,6 +619,36 @@ fn a_non_print_import_is_still_skipped() {
             .any(|s| s.contains("module has imports")),
         "{:?}",
         report.skipped
+    );
+}
+
+#[test]
+fn assert_exception_expects_an_uncaught_exception_not_a_trap() {
+    let report = run_wast(
+        "spec_assert_exception",
+        r#"
+(module
+  (tag $e)
+  (func (export "throws") (throw $e))
+  (func (export "traps") (unreachable)))
+(assert_exception (invoke "throws"))
+"#,
+    );
+    assert_eq!(report.executed, 1);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+#[should_panic(expected = "expected an uncaught exception")]
+fn assert_exception_fails_when_the_call_traps_instead() {
+    run_wast(
+        "spec_assert_exception_trap",
+        r#"
+(module
+  (tag $e)
+  (func (export "traps") (unreachable)))
+(assert_exception (invoke "traps"))
+"#,
     );
 }
 
@@ -838,6 +896,8 @@ spec_test! {
     spec_traps => "traps",
     spec_return_call => "return_call",
     spec_return_call_indirect => "return_call_indirect",
+    spec_throw => "throw",
+    spec_try_table => "try_table",
 }
 
 #[test]

@@ -873,6 +873,7 @@ impl<'a> FuncGen<'a> {
             // dispatches thrown exceptions to matching `catch`/`catch_all`
             // handlers; `throw` raises one and `rethrow` re-raises a caught one.
             Operator::Try { blockty } => self.open_try(blockty)?,
+            Operator::TryTable { try_table } => self.open_try_table(&try_table)?,
             Operator::Catch { tag_index } => self.handle_catch(Some(tag_index))?,
             Operator::CatchAll => self.handle_catch(None)?,
             Operator::Throw { tag_index } => self.emit_throw(tag_index)?,
@@ -1438,6 +1439,18 @@ pub(super) fn branches_to_function_label(body: &FunctionBody<'_>) -> Result<bool
     let mut depth: u32 = 0;
     for op in body.get_operators_reader()? {
         match op? {
+            // A `try_table` clause's label is counted from outside the region, i.e.
+            // at the depth before this operator opens it.
+            Operator::TryTable { try_table }
+                if try_table.catches.iter().any(|catch| match *catch {
+                    wasmparser::Catch::One { label, .. }
+                    | wasmparser::Catch::OneRef { label, .. }
+                    | wasmparser::Catch::All { label }
+                    | wasmparser::Catch::AllRef { label } => label == depth,
+                }) =>
+            {
+                return Ok(true);
+            }
             Operator::Block { .. }
             | Operator::Loop { .. }
             | Operator::If { .. }

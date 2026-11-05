@@ -232,6 +232,18 @@ impl<'a> super::FuncGen<'a> {
         // A `try` region ends into a `catch_unwind` node, not the generic
         // block/loop/if lowering.
         if self.frames.last().is_some_and(|f| f.try_state.is_some()) {
+            // A `try_table`'s clauses become handlers now; their labels are counted
+            // from outside the `try_table`, so one deeper from inside its handler.
+            let clauses = self
+                .frames
+                .last_mut()
+                .and_then(|f| f.try_state.as_mut())
+                .map(|ts| mem::take(&mut ts.table_catches))
+                .unwrap_or_default();
+            for (tag, label) in clauses {
+                self.handle_catch(tag)?;
+                self.branch(label.saturating_add(1), None)?;
+            }
             return self.handle_try_end();
         }
         let Some(frame) = self.frames.pop() else {
@@ -732,11 +744,10 @@ impl<'a> super::FuncGen<'a> {
         // that try's body loop lives inside its `catch_unwind` closure, which the
         // landing pad (where the handler runs) sits outside of. A branch to any
         // other target from a handler is an ordinary break/continue.
-        if let Some(&TryBarrier {
-            frame_idx: try_idx,
-            phase: CatchPhase::Handler,
-        }) = self.try_barriers.last()
-            && idx == try_idx
+        if self
+            .try_barriers
+            .iter()
+            .any(|b| b.phase == CatchPhase::Handler && b.frame_idx == idx)
         {
             return Err(TranspileError::Unsupported(
                 "branch out of a try handler".into(),
@@ -927,6 +938,16 @@ impl<'a> super::FuncGen<'a> {
         &mut self,
         blockty: wasmparser::BlockType,
     ) -> Result<(), TranspileError> {
+        self.open_try_with(blockty, Vec::new())
+    }
+
+    /// [`Self::open_try`] for a region that also carries a `try_table`'s catch
+    /// clauses (tag, label), which become handlers when it ends.
+    fn open_try_with(
+        &mut self,
+        blockty: wasmparser::BlockType,
+        table_catches: Vec<(Option<u32>, u32)>,
+    ) -> Result<(), TranspileError> {
         self.uses_eh = true;
         self.push_frame(FrameKind::Block, blockty, None)?;
         let idx = self
@@ -943,6 +964,7 @@ impl<'a> super::FuncGen<'a> {
             escapes: Vec::new(),
             has_ret_escape: false,
             unwrap_delegate: false,
+            table_catches,
         });
         // The barrier starts in the body phase; the first catch flips it so the
         // handler no longer counts as inside this try's closure (only a branch to
@@ -952,6 +974,42 @@ impl<'a> super::FuncGen<'a> {
             phase: CatchPhase::Body,
         });
         Ok(())
+    }
+
+    /// `try_table`: opens the same protected region as a legacy `try`, remembering
+    /// the catch clauses. Each becomes a handler that branches to its label when
+    /// the region ends (see [`Self::handle_end`]). A clause that captures the
+    /// exception as an `exnref` is not supported.
+    pub(super) fn open_try_table(
+        &mut self,
+        table: &wasmparser::TryTable,
+    ) -> Result<(), TranspileError> {
+        let clauses = table
+            .catches
+            .iter()
+            .map(|catch| match *catch {
+                wasmparser::Catch::One { tag, label } => Ok((Some(tag), label)),
+                wasmparser::Catch::All { label } => Ok((None, label)),
+                wasmparser::Catch::OneRef { .. } | wasmparser::Catch::AllRef { .. } => {
+                    Err(TranspileError::Unsupported(
+                        "try_table catch_ref / catch_all_ref (exnref)".into(),
+                    ))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // The first matching clause wins, so a clause after a `catch_all`, or one
+        // repeating an earlier tag, can never run. Dropping it keeps the landing
+        // pad's `match` free of unreachable arms.
+        let mut live: Vec<(Option<u32>, u32)> = Vec::new();
+        for (tag, label) in clauses {
+            if live.last().is_some_and(|(last, _)| last.is_none())
+                || live.iter().any(|(seen, _)| tag.is_some() && *seen == tag)
+            {
+                continue;
+            }
+            live.push((tag, label));
+        }
+        self.open_try_with(table.ty, live)
     }
 
     /// Handle a `catch $tag` (`tag` is `Some`) or `catch_all` (`None`): close the
@@ -1060,6 +1118,7 @@ impl<'a> super::FuncGen<'a> {
             escapes,
             has_ret_escape,
             unwrap_delegate,
+            table_catches: _,
         } = ts;
         arms.push(CatchArm {
             kind: cur_kind,
