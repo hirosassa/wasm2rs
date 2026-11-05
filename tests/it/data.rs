@@ -127,12 +127,14 @@ fn transpile_err(wat: &str) -> String {
 }
 
 #[test]
-fn a_global_derived_data_offset_is_rejected() {
+fn a_mutable_imported_global_data_offset_is_rejected() {
+    // An immutable imported global is read from the host at instantiation (see
+    // imports.rs); a mutable one is not a constant.
     let err = transpile_err(
         r#"(module
-            (import "env" "base" (global $base i32))
+            (import "env" "base" (global $base (mut i32)))
             (memory 1)
             (data (global.get $base) "x"))"#,
     );
-    assert!(err.contains("data offset"), "{err}");
+    assert!(err.contains("mutable or later global"), "{err}");
 }

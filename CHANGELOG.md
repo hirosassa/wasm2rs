@@ -34,10 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   built. A table initializer (`(table 2 funcref (global.get $imported))`) and an
   item of an *active* element segment may read an immutable imported reference
   global the same way. An item of a passive segment (its items live in a static)
-  and an offset reading an imported global are still rejected.
+  is still rejected.
 - A data or element segment offset may `global.get` an earlier immutable defined
   integer global (also inside extended-const arithmetic, and `i64` for memory64 and
-  table64). An imported global in an offset is still rejected.
+  table64). An *immutable imported* global may be read too: the offset is then
+  evaluated from the host when the instance is built, and a segment that does not
+  fit traps there, as with a constant offset.
 - Support for 64-bit tables (`table i64`): indices, sizes and lengths are `i64` in
   `call_indirect` and the `table.*` instructions, and an element segment offset may
   be an `i64`. An index above `u32::MAX` traps. An imported or shared table64 is

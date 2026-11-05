@@ -145,15 +145,40 @@ fn multi_value_import_result_is_rejected() {
 }
 
 #[test]
-fn non_constant_element_offset_is_rejected() {
-    // The element offset must be a plain `i32.const`; a `global.get` offset
-    // (permitted by wasm) is not supported.
+fn a_float_imported_global_offset_is_rejected() {
+    assert_unsupported(
+        r#"(module (import "e" "g" (global f32)) (memory 1) (data (global.get 0) "x"))"#,
+        "offset",
+    );
+}
+
+#[test]
+fn an_i64_imported_global_offset_of_a_32_bit_memory_is_rejected() {
+    // The offset's width follows the memory's: an i64 one is not an i32 offset.
+    assert_unsupported(
+        r#"(module (import "e" "g" (global i64)) (memory 1) (data (global.get 0) "x"))"#,
+        "offset",
+    );
+}
+
+#[test]
+fn an_i32_imported_global_offset_of_a_64_bit_memory_is_rejected() {
+    assert_unsupported(
+        r#"(module (import "e" "g" (global i32)) (memory i64 1) (data (global.get 0) "x"))"#,
+        "offset",
+    );
+}
+
+#[test]
+fn a_mutable_imported_global_element_offset_is_rejected() {
+    // An immutable imported global is read from the host at instantiation (see
+    // imports.rs); a mutable one is not a constant.
     assert_unsupported(
         r#"(module
-             (import "e" "g" (global i32))
+             (import "e" "g" (global (mut i32)))
              (table 1 funcref) (func $f)
              (elem (global.get 0) $f))"#,
-        "element offset",
+        "mutable or later global",
     );
 }
 
