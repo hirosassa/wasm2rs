@@ -354,7 +354,11 @@ pub(crate) fn build_ctx<'a>(
         || scan.uses_array_segment_ops
         || uses_extern_box
         || !cont_bodies.is_empty()
-        || parts.start.is_some();
+        || parts.start.is_some()
+        // A retained passive segment lives in the `Instance`, even with no
+        // memory or table around it.
+        || data.iter().any(|d| d.offset.is_none())
+        || elements.iter().any(|e| e.offset.is_none() && !e.declared);
 
     let funcs_by_sig = index_by_signature(
         imports

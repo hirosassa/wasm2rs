@@ -189,3 +189,23 @@ fn table_init_after_elem_drop_traps() {
     let run = Command::new(&bin).output().expect("run generated binary");
     assert!(!run.status.success(), "expected a trap after elem.drop");
 }
+
+#[test]
+fn data_drop_in_a_module_with_no_memory_compiles() {
+    // A passive segment is retained in the `Instance` even when the module has
+    // no memory, table or import that would otherwise make it stateful.
+    crate::common::compile_run(
+        "passive_no_memory_data_drop",
+        r#"(module (data "x") (func (export "f") (data.drop 0)))"#,
+        "let mut inst = Instance::new();\n inst.func0();",
+    );
+}
+
+#[test]
+fn elem_drop_in_a_module_with_no_table_compiles() {
+    crate::common::compile_run(
+        "passive_no_table_elem_drop",
+        r#"(module (func $g) (elem $e func $g) (func (export "f") (elem.drop $e)))"#,
+        "let mut inst = Instance::new();\n inst.func1();",
+    );
+}
