@@ -76,6 +76,42 @@ or hand-written bridge.
 Not exercised by this program, and harder: `wasi:sockets`, `wasi:http`, the rest of
 `filesystem` (readdir, rename, ...), async/streams in WASI 0.3.
 
+## Result 3: a minimal preview2 host runs hello world natively
+
+First finding: an `Imports` method receives only its integer arguments, and a module's
+own memory is private to the `Instance`, so a host could not implement any lowered
+import that takes or returns a pointer (`write`, `check-write`, `get-environment`, ...).
+`TranspileOptions::import_memory` / `--import-memory` fixes that: the module's memory 0
+becomes host-owned, like an imported memory, so the host's methods read and write guest
+memory directly.
+
+With it, `examples/wasip2_host/host.rs` implements the lowered imports of a
+`println!` program (stdout/stderr writes with the canonical-ABI `result` layouts, a
+fixed write budget, an empty environment and argument list, `exit`, no-op resource
+drops) and `examples/wasip2_run.rs` builds and runs a core module with it:
+
+```
+rustc --target wasm32-wasip2 -C opt-level=3 hello.rs -o hello.component.wasm
+wasm2rs --extract-core hello.component.wasm dir       # the program is the largest module
+cargo run --release --example wasip2_run -- dir/module0.wasm
+```
+
+Two programs ran: `println!("hello")` (21 imports) and one using `eprintln!`,
+`print!`, `flush` and `std::env::args` (22; the extra one is `get-arguments`). A small
+WAT with the same imports is covered by `tests/it/wasip2_host.rs`.
+
+What it does not cover, and what the next step needs:
+
+- **`wasi:io/poll.poll`** returns a `list<u32>`, which the host must allocate in guest
+  memory by calling the guest's exported `cabi_realloc`. The host cannot call guest
+  functions yet, so `poll` panics. Real programs that wait on a pollable (sleeping,
+  non-blocking streams) need it; `output-stream` writes and `pollable.block` did not.
+- The same applies to any import returning a string or list (`get-environment` and
+  `get-arguments` are empty lists here, which need no allocation).
+- stdin, clocks, files and directories are not implemented.
+- The `Imports` trait is generated per module, so the host has to match the module's
+  import set; the example marks the methods only some programs need.
+
 ## Options for the next investment
 
 1. **Extract core modules** (small): a `wasmparser`-based extraction (the nested
@@ -84,7 +120,7 @@ Not exercised by this program, and harder: `wasi:sockets`, `wasi:http`, the rest
 2. **Name-preserving imports** (small/medium): carry the import module/field name
    into the `Imports` trait (like `named_exports` did for exports). Prerequisite for
    everything below. *Done: `named_imports` / `--named-imports`.*
-3. **A preview2 host shim over `Imports`** (large): implement the canonical ABI for the
+3. **A preview2 host shim over `Imports`** (large; the hello-world slice is done, see Result 3): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks` subset (args, env, exit, stdio, clocks) as an opt-in
    generated or companion module, with a handle table. Filesystem is a further large
    step. This is what makes a wasip2 hello-world run natively.
