@@ -1,6 +1,8 @@
 use wasmparser::{ConstExpr, Operator};
 
-use super::{CompositeKind, abstract_is_gc, concrete_is_gc, i32_literal, i64_literal};
+use super::{
+    CompositeKind, ImportedGlobalInfo, abstract_is_gc, concrete_is_gc, i32_literal, i64_literal,
+};
 use crate::TranspileError;
 
 /// An integer value on a constant-expression evaluation stack.
@@ -158,13 +160,14 @@ pub(crate) fn const_expr_u64_for(
 /// Translate a global's constant initializer expression to a Rust expression.
 /// `type_kinds` classifies concrete heap types so a `ref.null` picks the null
 /// value matching the reference's lowering. `global.get` reads an earlier
-/// immutable *defined* global: its initializer is inlined. `imported` is the
-/// number of imported globals (they precede the defined ones in the index space,
-/// and reading one needs the host, which is not supported here).
+/// immutable *defined* global, whose initializer is inlined, or an immutable
+/// *imported* one (they precede the defined ones in the index space), which is
+/// read from the host (`imports`, the constructor's parameter) when the instance
+/// is built.
 pub(crate) fn const_expr_to_rust(
     expr: &ConstExpr<'_>,
     type_kinds: &[CompositeKind],
-    imported: usize,
+    imported: &[ImportedGlobalInfo],
     defined: &[crate::codegen::GlobalInfo],
 ) -> Result<String, TranspileError> {
     let mut stack: Vec<String> = Vec::new();
@@ -201,19 +204,24 @@ pub(crate) fn const_expr_to_rust(
                 stack.push(format!("{function_index}u32"));
             }
             Operator::GlobalGet { global_index } => {
-                let source = usize::try_from(global_index)
-                    .ok()
-                    .and_then(|i| i.checked_sub(imported))
-                    .and_then(|i| defined.get(i))
-                    // Only an immutable global is a constant.
-                    .filter(|g| !g.mutable)
-                    .ok_or_else(|| {
-                        TranspileError::Unsupported(
-                            "global.get of an imported, mutable or later global in a constant expression"
-                                .into(),
-                        )
-                    })?;
-                stack.push(format!("({})", source.init));
+                let index = usize::try_from(global_index).ok();
+                // Only an immutable global is a constant.
+                let constant = match index {
+                    Some(i) if i < imported.len() => imported
+                        .get(i)
+                        .filter(|g| !g.mutable)
+                        .map(|_| format!("imports.get_global{i}()")),
+                    _ => index
+                        .and_then(|i| i.checked_sub(imported.len()))
+                        .and_then(|i| defined.get(i))
+                        .filter(|g| !g.mutable)
+                        .map(|g| format!("({})", g.init)),
+                };
+                stack.push(constant.ok_or_else(|| {
+                    TranspileError::Unsupported(
+                        "global.get of a mutable or later global in a constant expression".into(),
+                    )
+                })?);
             }
             Operator::End => {}
             other => {

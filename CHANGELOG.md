@@ -29,7 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries with `$f`; `(ref.null func)` is the null default).
 - `global.get` of an earlier immutable *defined* global in a constant expression: a
   global initializer, a table initializer or an element segment item (for a
-  reference global). Reading an *imported* global there is still rejected.
+  reference global). A *global* initializer may also read an immutable *imported*
+  global: the value is the host's (`get_global{k}`), read when the instance is
+  built. A table initializer, an element item or an offset reading an imported
+  global is still rejected.
 - A data or element segment offset may `global.get` an earlier immutable defined
   integer global (also inside extended-const arithmetic, and `i64` for memory64 and
   table64). An imported global in an offset is still rejected.
