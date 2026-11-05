@@ -170,6 +170,24 @@ fn an_i32_imported_global_offset_of_a_64_bit_memory_is_rejected() {
 }
 
 #[test]
+fn a_32_bit_constant_in_a_64_bit_runtime_offset_is_rejected() {
+    assert_unsupported(
+        r#"(module (import "e" "g" (global i64)) (memory i64 1)
+             (data (i64.add (global.get 0) (i32.const 1)) "x"))"#,
+        "offset",
+    );
+}
+
+#[test]
+fn a_64_bit_constant_in_a_32_bit_runtime_offset_is_rejected() {
+    assert_unsupported(
+        r#"(module (import "e" "g" (global i32)) (memory 1)
+             (data (i32.add (global.get 0) (i64.const 1)) "x"))"#,
+        "offset",
+    );
+}
+
+#[test]
 fn a_mutable_imported_global_element_offset_is_rejected() {
     // An immutable imported global is read from the host at instantiation (see
     // imports.rs); a mutable one is not a constant.
