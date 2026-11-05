@@ -205,26 +205,23 @@ pub(crate) fn const_expr_to_rust(
             }
             Operator::GlobalGet { global_index } => {
                 let index = usize::try_from(global_index).ok();
-                let unsupported = || {
-                    TranspileError::Unsupported(
-                        "global.get of a mutable or later global in a constant expression".into(),
-                    )
-                };
-                let expr = if let Some(i) = index.filter(|&i| i < imported.len()) {
-                    // Only an immutable global is a constant.
-                    if imported.get(i).is_none_or(|g| g.mutable) {
-                        return Err(unsupported());
-                    }
-                    format!("imports.get_global{i}()")
-                } else {
-                    let source = index
+                // Only an immutable global is a constant.
+                let constant = match index {
+                    Some(i) if i < imported.len() => imported
+                        .get(i)
+                        .filter(|g| !g.mutable)
+                        .map(|_| format!("imports.get_global{i}()")),
+                    _ => index
                         .and_then(|i| i.checked_sub(imported.len()))
                         .and_then(|i| defined.get(i))
                         .filter(|g| !g.mutable)
-                        .ok_or_else(unsupported)?;
-                    format!("({})", source.init)
+                        .map(|g| format!("({})", g.init)),
                 };
-                stack.push(expr);
+                stack.push(constant.ok_or_else(|| {
+                    TranspileError::Unsupported(
+                        "global.get of a mutable or later global in a constant expression".into(),
+                    )
+                })?);
             }
             Operator::End => {}
             other => {

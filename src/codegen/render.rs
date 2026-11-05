@@ -504,10 +504,10 @@ fn constructor_lines(
             }
         };
 
-    // The non-memory field initialisers (imports, table, globals, wasi_fds, and
-    // the retained passive segments), pushed identically by both `Instance::new`
-    // and — for a shared module — `with_memory`. Only the memory field differs
-    // between the two, so factoring the rest keeps them in lock-step.
+    // The non-memory field initialisers (table, globals, wasi_fds, the retained
+    // passive segments, and `imports` last), pushed identically by both
+    // `Instance::new` and — for a shared module — `with_memory`. Only the memory
+    // field differs between the two, so factoring the rest keeps them in lock-step.
     let push_common_fields = |inner: &mut Vec<String>| -> Result<(), TranspileError> {
         // An imported table is host-owned (see the post-construction elem copy);
         // only a defined table gets a `table` field.
@@ -577,6 +577,10 @@ fn constructor_lines(
         if !ctx.cont.bodies.is_empty() {
             inner.push("        conts: Vec::new(),".to_string());
         }
+        // Last, so a global initializer above can still read the host.
+        if has_imports {
+            inner.push("        imports,".to_string());
+        }
         Ok(())
     };
 
@@ -642,10 +646,6 @@ fn constructor_lines(
         inner.push(shared_open.to_string());
         inner.push("        memory,".to_string());
         push_common_fields(&mut inner)?;
-        // Last, so a global initializer can still read the host.
-        if has_imports {
-            inner.push("        imports,".to_string());
-        }
         inner.push(shared_close.to_string());
         push_start(&mut inner);
         inner.push("}".to_string());
@@ -660,10 +660,6 @@ fn constructor_lines(
         inner.push(shared_open.to_string());
         inner.push("        memory: mem,".to_string());
         push_common_fields(&mut inner)?;
-        // Last, so a global initializer can still read the host.
-        if has_imports {
-            inner.push("        imports,".to_string());
-        }
         inner.push(shared_close.to_string());
         push_start(&mut inner);
         inner.push("}".to_string());
@@ -706,10 +702,6 @@ fn constructor_lines(
             }
         }
         push_common_fields(&mut inner)?;
-        // Last, so a global initializer can still read the host.
-        if has_imports {
-            inner.push("        imports,".to_string());
-        }
         inner.push(close.to_string());
         if post_init {
             // Copy each active data/element segment into the host-owned storage in
