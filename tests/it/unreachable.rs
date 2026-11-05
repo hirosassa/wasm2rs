@@ -121,3 +121,26 @@ fn unreachable_routed_through_cold_helper() {
         "expected each unreachable site to call the helper, saw {refs} refs:\n{generated}"
     );
 }
+
+/// A `try_table` that sits in unreachable code is skipped like any other region:
+/// its `end` must not close the live frame around it.
+#[test]
+fn a_try_table_in_dead_code_is_skipped() {
+    crate::common::compile_run(
+        "dead_try_table",
+        r#"(module (func (br 0) (try_table (result i32) (i32.const 1)) drop))"#,
+        "func0();",
+    );
+}
+
+#[test]
+fn nested_try_tables_in_dead_code_are_skipped() {
+    crate::common::compile_run(
+        "dead_try_table_nested",
+        r#"(module (func (br 0)
+            (try_table (result i32)
+              (try_table (result i32) (i32.const 1)))
+            drop))"#,
+        "func0();",
+    );
+}

@@ -1237,7 +1237,8 @@ impl<'a> FuncGen<'a> {
             Operator::Block { .. }
             | Operator::Loop { .. }
             | Operator::If { .. }
-            | Operator::Try { .. } => {
+            | Operator::Try { .. }
+            | Operator::TryTable { .. } => {
                 self.dead_nesting += 1;
             }
             Operator::End => {
