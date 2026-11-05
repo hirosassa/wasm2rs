@@ -665,23 +665,29 @@ impl<'a> super::FuncGen<'a> {
         }
         cases.push((None, default));
 
+        // An arm that leaves a `try` body is re-issued from outside the protected
+        // closure, which a `match` arm cannot express: lower the whole table to a
+        // chain of conditional branches instead.
+        if cases.iter().any(|&(_, depth)| self.leaves_try_body(depth)) {
+            return self.branch_table_as_branches(&selector.code, &cases, default);
+        }
+
         // Every `br_table` target has the same arity, so the carried operands
         // are the same top-of-stack values for every arm; each arm just assigns
         // them to its own target's variables. After spilling they are stable, so
         // they can be referenced repeatedly across the arms.
         let mut arms = Vec::with_capacity(cases.len());
         for (case, depth) in cases {
-            // A `br_table` whose arms leave a `try` body (mixing escaping and
-            // non-escaping targets) is not lowered; only plain targets are.
             let (is_loop, label, vars) = match self.resolve_target(depth)? {
                 BranchTarget::Direct {
                     is_loop,
                     label,
                     vars,
                 } => (is_loop, label, vars),
+                // Handled above by `branch_table_as_branches`.
                 BranchTarget::Escape { .. } => {
                     return Err(TranspileError::Unsupported(
-                        "br_table out of a try region".into(),
+                        "br_table: an escaping arm reached the match lowering".into(),
                     ));
                 }
             };
@@ -704,6 +710,56 @@ impl<'a> super::FuncGen<'a> {
         self.reachable = false;
         self.dead_nesting = 0;
         Ok(())
+    }
+
+    /// Whether a branch to relative `depth` leaves the innermost enclosing `try`
+    /// body (an out-of-range depth is reported later by `resolve_target`).
+    fn leaves_try_body(&self, depth: u32) -> bool {
+        self.frames
+            .len()
+            .checked_sub(1 + depth as usize)
+            .is_some_and(|idx| self.branch_escapes_try(idx))
+    }
+
+    /// Lower a `br_table` as one `br_if` per distinct target (matching every
+    /// index that selects it) followed by an unconditional `br` to the default,
+    /// so each arm takes the ordinary direct or try-escaping branch path. The
+    /// selector is bound once, since each condition reads it.
+    fn branch_table_as_branches(
+        &mut self,
+        selector: &str,
+        cases: &[(Option<u32>, u32)],
+        default: u32,
+    ) -> Result<(), TranspileError> {
+        let sel = self.fresh_temp();
+        self.line(format!("let {sel}: u32 = ({selector}) as u32;"));
+        // Indices that already select the default target need no test of their own.
+        let mut groups: Vec<(u32, Vec<u32>)> = Vec::new();
+        for &(case, depth) in cases {
+            let Some(index) = case else { continue };
+            if depth == default {
+                continue;
+            }
+            match groups.iter_mut().find(|(d, _)| *d == depth) {
+                Some((_, indices)) => indices.push(index),
+                None => groups.push((depth, vec![index])),
+            }
+        }
+        for (depth, indices) in groups {
+            let pattern = indices
+                .iter()
+                .map(|i| format!("{i}u32"))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let cond = Val {
+                code: format!("i32::from(matches!({sel}, {pattern}))"),
+                ty: ValType::I32,
+                stable: true,
+                may_trap: false,
+            };
+            self.branch(depth, Some(cond))?;
+        }
+        self.branch(default, None)
     }
 
     /// Pair each carried variable with the operand-stack value it receives (the
