@@ -160,6 +160,17 @@ pub struct TranspileOptions {
     /// recognised as WASI preview1 stay native and get no trait method. Off by
     /// default, because renaming the methods breaks existing host implementations.
     pub named_imports: bool,
+
+    /// Treat the module's own (defined, non-shared) memory 0 as host-owned, like an
+    /// imported memory: the host lends the buffer through `Imports::memory` and
+    /// `memory_mut`, so its own methods can read and write guest memory. Active
+    /// data segments are written into that buffer when the instance is built, and
+    /// `memory.grow` resizes it. The host must lend at least the declared minimum
+    /// number of pages. Needed to implement imports that take pointers into linear
+    /// memory (the lowered functions of a WASI preview2 component). No effect on a
+    /// shared memory, a module that already imports its memory, or one without
+    /// memory. Off by default, since it adds `Imports` methods the host must implement.
+    pub import_memory: bool,
 }
 
 /// The recommended `Cargo.toml` for a split crate, named `package_name`.
@@ -460,7 +471,9 @@ where
                     memories.push(codegen::MemInfo {
                         min_pages: mem.initial,
                         max_pages: mem.maximum,
-                        imported: false,
+                        // Only memory 0 can be host-owned, and only when nothing
+                        // (an imported memory) comes before it.
+                        imported: topts.import_memory && memories.is_empty() && !mem.shared,
                         shared: mem.shared,
                         memory64: mem.memory64,
                     });
