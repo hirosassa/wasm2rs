@@ -56,9 +56,13 @@ About 1500 modules compared equal. Findings:
 base feature set. Findings of a non-base profile are saved as
 `findings/<profile>-seed-N.{wasm,txt}`.
 
-| Profile | Adds | Seeds 0–299 |
+Re-run of every profile with seeds 1–300 after the exception-handling work (`try_table`,
+`exnref`, `br_table` out of a `try`): no `unsupported` module in any profile, and the
+only mismatch is the known declared-maximum one below.
+
+| Profile | Adds | Seeds 1–300 |
 | --- | --- | --- |
-| `base` | the default set above | (see the runs above) |
+| `base` | the default set above | 279 match, 21 skip |
 | `multi-memory` | up to 3 memories | 276 match, 24 skip |
 | `multi-table` | up to 3 tables | 277 match, 23 skip |
 | `memory64` | 64-bit memories and tables | 276 match, 23 skip, 1 mismatch |
