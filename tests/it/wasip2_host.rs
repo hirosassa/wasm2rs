@@ -173,13 +173,10 @@ const ARGS: &str = r#"
 #[test]
 fn a_host_builds_arguments_environment_and_poll_results_in_guest_memory() {
     // A std program also imports `get-arguments`; the host provides it only then.
-    let wat = HELLO
-        .replacen(
-            "(memory (export",
-            "(import \"wasi:cli/environment@0.2.0\" \"get-arguments\" (func $args (param i32)))\n  (memory (export",
-            1,
-        )
-        .replacen("(func (export \"bye\")", &format!("{ARGS}\n  (func (export \"bye\")"), 1);
+    let wat = hello_with(
+        "(import \"wasi:cli/environment@0.2.0\" \"get-arguments\" (func $args (param i32)))",
+        ARGS,
+    );
     let host = r#"P2Host::new(vec!["prog".to_string(), "x".to_string()], vec![("K".to_string(), "VX".to_string())])"#;
     let bin = compile("with_arguments", &wat, host, "inst.args();");
     let run = Command::new(&bin).output().expect("run generated binary");
@@ -250,18 +247,23 @@ const STDIO: &str = r#"
     (if (i32.ge_u (i32.load (i32.const 128)) (i32.const 1000000000)) (then unreachable)))
 "#;
 
-fn stdio_wat() -> String {
+/// `HELLO` with extra imports (before its memory) and functions (before `bye`).
+fn hello_with(imports: &str, funcs: &str) -> String {
     HELLO
         .replacen(
             "(memory (export",
-            &format!("{STDIO_IMPORTS}\n  (memory (export"),
+            &format!("{imports}\n  (memory (export"),
             1,
         )
         .replacen(
             "(func (export \"bye\")",
-            &format!("{STDIO}\n  (func (export \"bye\")"),
+            &format!("{funcs}\n  (func (export \"bye\")"),
             1,
         )
+}
+
+fn stdio_wat() -> String {
+    hello_with(STDIO_IMPORTS, STDIO)
 }
 
 #[test]
@@ -325,13 +327,16 @@ const RANDOM: &str = r#"
     (call $bytes (i64.const 16) (i32.const 200))
     (if (i32.ne (i32.load (i32.const 204)) (i32.const 16)) (then unreachable))
     (local.set $a (i64.load (i32.load (i32.const 200))))
+    (local.set $b (i64.load offset=8 (i32.load (i32.const 200))))
     (call $bytes (i64.const 16) (i32.const 200))
     (if (i64.eq (local.get $a) (i64.load (i32.load (i32.const 200)))) (then unreachable))
+    (if (i64.eq (local.get $b) (i64.load offset=8 (i32.load (i32.const 200)))) (then unreachable))
     ;; no bytes: an empty list
     (call $bytes (i64.const 0) (i32.const 200))
     (if (i32.load (i32.const 204)) (then unreachable))
     (call $ibytes (i64.const 5) (i32.const 200))
     (if (i32.ne (i32.load (i32.const 204)) (i32.const 5)) (then unreachable))
+    (if (i32.lt_u (i32.load (i32.const 200)) (i32.const 1024)) (then unreachable))
     (if (i64.eq (call $u64) (call $u64)) (then unreachable))
     (if (i64.eq (call $iu64) (call $iu64)) (then unreachable))
     ;; the seed: two u64s, both written
@@ -344,17 +349,7 @@ const RANDOM: &str = r#"
 
 #[test]
 fn a_host_serves_random_bytes_numbers_and_the_insecure_seed() {
-    let wat = HELLO
-        .replacen(
-            "(memory (export",
-            &format!("{RANDOM_IMPORTS}\n  (memory (export"),
-            1,
-        )
-        .replacen(
-            "(func (export \"bye\")",
-            &format!("{RANDOM}\n  (func (export \"bye\")"),
-            1,
-        );
+    let wat = hello_with(RANDOM_IMPORTS, RANDOM);
     let bin = compile(
         "random",
         &wat,

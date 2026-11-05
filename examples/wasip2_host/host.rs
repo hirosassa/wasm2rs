@@ -1,5 +1,5 @@
 // A minimal WASI preview2 host for the lowered imports of a `wasm32-wasip2`
-// program (`println!`, arguments, environment, exit, stdin, `poll`, clocks). It is source text appended to
+// program (`println!`, arguments, environment, exit, stdin, `poll`, clocks, random). It is source text appended to
 // the generated code (see `examples/wasip2_run.rs`), not a crate: the `Imports` trait
 // it implements is generated per module. Build the module with `named_imports`,
 // `named_exports` and `reentrant_imports`: the methods are named after the imports,
@@ -58,15 +58,12 @@ impl P2Host {
     #[allow(dead_code)]
     fn random_bytes(&mut self, g: &mut Guest, len: i64, ret: i32) {
         let len = u32::try_from(len as u64).expect("random bytes: length over 4 GiB") as usize;
-        let mut bytes = Vec::with_capacity(len + 8);
-        while bytes.len() < len {
-            bytes.extend_from_slice(&self.next_u64().to_le_bytes());
-        }
-        bytes.truncate(len);
-        let ptr = if len == 0 { 4 } else { alloc(g, 1, len as i32) };
+        let bytes: Vec<u8> = std::iter::repeat_with(|| self.next_u64().to_le_bytes())
+            .flatten()
+            .take(len)
+            .collect();
+        let ptr = guest_list(g, ret, 1, len as i32);
         put(g, ptr, &bytes);
-        put_u32(g, ret, ptr);
-        put_u32(g, ret + 4, len as i32);
     }
 
     /// A new pollable that is ready at `deadline` (always, for `None`).
@@ -89,7 +86,6 @@ impl P2Host {
 }
 
 /// A seed from the OS: `RandomState` is keyed from the system's randomness.
-#[allow(dead_code)]
 fn os_seed() -> u64 {
     use std::hash::BuildHasher;
     std::collections::hash_map::RandomState::new().hash_one(0u8)

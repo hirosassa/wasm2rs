@@ -143,7 +143,7 @@ the host.
 - `tests/it/wasip2_host.rs` covers all of it from WAT (piped stdin, deadline waits, a
   ready pollable returning at once next to a ten-second deadline).
 
-What it does not cover: files and directories, sockets and random; the `Imports` trait
+What it does not cover: files and directories and sockets (random: see Result 6); the `Imports` trait
 is generated per module, so the host has to match the module's import set (the example
 marks the methods only some programs need).
 
@@ -169,7 +169,7 @@ keys or tokens: do not treat `get-random-bytes` here as cryptographically secure
    into the `Imports` trait (like `named_exports` did for exports). Prerequisite for
    everything below. *Done: `named_imports` / `--named-imports`.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks and random are done, see Results 3 to 6): implement the canonical ABI for the
-   `wasi:cli`/`io`/`clocks` subset (args, env, exit, stdio, clocks) as an opt-in
+   `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
    generated or companion module, with a handle table. Filesystem is a further large
    step. This is what makes a wasip2 hello-world run natively.
 4. **Full component support** (very large): parse the component, resolve instances
