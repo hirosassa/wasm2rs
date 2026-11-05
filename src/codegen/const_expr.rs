@@ -124,6 +124,10 @@ pub(crate) fn const_expr_to_rust(
             Operator::F64Const { value: v } => {
                 stack.push(format!("f64::from_bits({}u64)", v.bits()));
             }
+            // A v128 is a `u128` of the vector's little-endian bytes.
+            Operator::V128Const { value } => {
+                stack.push(format!("{}u128", u128::from_le_bytes(*value.bytes())));
+            }
             // The extended-const integer operators wrap, like the runtime ones.
             Operator::I32Add | Operator::I64Add => binary(&mut stack, "wrapping_add")?,
             Operator::I32Sub | Operator::I64Sub => binary(&mut stack, "wrapping_sub")?,

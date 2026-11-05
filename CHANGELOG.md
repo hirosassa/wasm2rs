@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Support for a `v128.const` global initializer. Previously, transpiling a module
+  that declared a `v128` global failed with an `Unsupported` error.
 - `extract_core_modules` and `--extract-core`: pull the core modules out of a
   WebAssembly component as plain module binaries (nested components included), so
   `wasm-tools component unbundle` is no longer needed for that step.

@@ -310,3 +310,31 @@ fn an_i64_element_offset_is_rejected() {
     let err = transpile_err("(module (table 4 funcref) (elem (i64.const 1) $f) (func $f))");
     assert!(err.contains("i64"), "{err}");
 }
+
+#[test]
+fn v128_global_initializer_keeps_the_lane_order() {
+    // i32x4 lanes 1,2,3,4 are the little-endian bytes of this u128.
+    transpile_compile_run(
+        "v128",
+        r#"(module
+          (global $g v128 (v128.const i32x4 1 2 3 4))
+          (func (result v128) (global.get $g)))"#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(), 0x0000_0004_0000_0003_0000_0002_0000_0001u128);",
+    );
+}
+
+#[test]
+fn a_mutable_v128_global_can_be_overwritten() {
+    transpile_compile_run(
+        "v128_mut",
+        r#"(module
+          (global $g (mut v128) (v128.const i64x2 5 6))
+          (func (result v128) (global.get $g))
+          (func (global.set $g (v128.const i64x2 7 8))))"#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(), (6u128 << 64) | 5);\n    \
+         inst.func1();\n    \
+         assert_eq!(inst.func0(), (8u128 << 64) | 7);",
+    );
+}
