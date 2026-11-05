@@ -97,7 +97,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   size/grow/fill/copy/init`, `call_indirect` and active element segments address the
   named table. An imported table combined with other tables is still unsupported.
 - Tests: a harness that replays vendored WebAssembly spec testsuite `.wast` files
-  (`tests/spec/`, `tests/it/spec_wast.rs`).
+  (`tests/spec/`, `tests/it/spec_wast.rs`). Modules whose only imports are
+  `spectest.print*` run against a no-op host; `return_call` and `return_call_indirect`
+  are replayed too.
 - Tables of a typed function reference (`(table 3 (ref null $ft))`) are supported;
   they are stored like a `funcref` table. Element segments may use `ref.func`
   expression items.

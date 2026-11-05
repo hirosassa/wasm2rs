@@ -270,21 +270,51 @@ fn return_stmt(
 
 /// Encode and vet one `module` directive into a [`Group`], or say why it
 /// cannot be replayed.
+/// `struct Host` implementing the generated `Imports` trait with empty bodies:
+/// each `fn importN(..);` declaration of the trait becomes `fn importN(..) {}`.
+/// Only used for `spectest.print*`, which return nothing.
+fn no_op_host(generated: &str) -> String {
+    let start = generated
+        .find("pub trait Imports {")
+        .expect("Imports trait");
+    let trait_body = &generated[start..];
+    let end = trait_body.find("\n}").expect("end of Imports trait");
+    let methods: String = trait_body[..end]
+        .lines()
+        .filter(|line| line.trim_end().ends_with(';'))
+        .map(|line| format!("{} {{}}\n", line.trim_end_matches(';')))
+        .collect();
+    format!("struct Host;\n#[allow(unused_variables)]\nimpl Imports for Host {{\n{methods}}}\n")
+}
+
 fn start_group(module: &mut QuoteWat<'_>) -> Result<Group, String> {
     let wasm = module.encode().map_err(|e| format!("encode failed: {e}"))?;
+    // The spec's `spectest` host prints; only that import shape is replayed, with
+    // a no-op host. Memory, global and table imports (and any other module) need
+    // a real host and are skipped.
     let mut has_imports = false;
+    let mut only_print_imports = true;
     for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
-        if let Ok(wasmparser::Payload::ImportSection(_)) = payload {
-            has_imports = true;
+        if let Ok(wasmparser::Payload::ImportSection(reader)) = payload {
+            for import in reader.into_imports().flatten() {
+                has_imports = true;
+                let is_print = import.module == "spectest"
+                    && import.name.starts_with("print")
+                    && matches!(import.ty, wasmparser::TypeRef::Func(_));
+                only_print_imports &= is_print;
+            }
         }
     }
-    if has_imports {
+    if has_imports && !only_print_imports {
         return Err("module has imports".into());
     }
     let generated = wasm2rs::transpile(&wasm).map_err(|e| format!("transpile failed: {e:?}"))?;
     let stateful = generated.contains("pub struct Instance");
     let mut body = String::from(TRAP_HELPER);
-    if stateful {
+    if has_imports {
+        body.push_str(&no_op_host(&generated));
+        body.push_str("let mut inst = Instance::new(Host);\n");
+    } else if stateful {
         body.push_str("let mut inst = Instance::new();\n");
     }
     Ok(Group {
@@ -420,8 +450,11 @@ fn directive_location(directive: &WastDirective<'_>, src: &str, name: &str) -> S
 /// other warning in the generated source is still an error.
 fn run_group(name: &str, group: &Group) {
     let generated = wasm2rs::transpile(&group.wasm).expect("transpile module");
+    // A tail call is an ordinary Rust call (no constant-stack guarantee), and the
+    // spec recurses a million deep, so the body runs on a thread with a big stack.
     let program = format!(
-        "#![allow(dead_code, unused_mut, unused_variables)]\n{generated}\nfn main() {{\n{}\n}}\n",
+        "#![allow(dead_code, unused_mut, unused_variables)]\n{generated}\nfn main() {{\n\
+         std::thread::Builder::new().stack_size(2 << 30).spawn(|| {{\n{}\n}}).unwrap().join().unwrap();\n}}\n",
         group.body
     );
     let bin = common::build(name, &program);
@@ -474,6 +507,45 @@ fn assert_return_i32_add() {
     );
     assert_eq!(report.executed, 1);
     assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+fn a_spectest_print_import_is_replayed_with_a_no_op_host() {
+    let report = run_wast(
+        "spec_spectest_print_import",
+        r#"
+(module
+  (import "spectest" "print_i32_f32" (func $p (param i32 f32)))
+  (func (export "f") (param i32) (result i32)
+    (call $p (local.get 0) (f32.const 1))
+    (i32.add (local.get 0) (i32.const 1))))
+(assert_return (invoke "f" (i32.const 4)) (i32.const 5))
+"#,
+    );
+    assert_eq!(report.executed, 1);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+fn a_non_print_import_is_still_skipped() {
+    let report = run_wast(
+        "spec_other_import_skipped",
+        r#"
+(module
+  (import "env" "g" (func $g))
+  (func (export "f") (call $g)))
+(assert_return (invoke "f"))
+"#,
+    );
+    assert_eq!(report.executed, 0);
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.contains("module has imports")),
+        "{:?}",
+        report.skipped
+    );
 }
 
 #[test]
@@ -566,7 +638,7 @@ fn unsupported_directives_are_skipped_with_a_reason() {
 (assert_return (invoke "v" (v128.const i32x4 1 2 3 4)) (v128.const i32x4 1 2 3 4))
 (assert_invalid (module (func (result i32))) "type mismatch")
 (assert_exhaustion (invoke "id" (i32.const 0)) "call stack exhausted")
-(module $imp (import "spectest" "print_i32" (func (param i32)))
+(module $imp (import "env" "g" (func (param i32)))
   (func (export "f") (result i32) i32.const 1))
 (assert_return (invoke "f") (i32.const 1))
 (register "imp" $imp)
@@ -718,6 +790,8 @@ spec_test! {
     spec_table_set => "table_set",
     spec_table_set64 => "table_set64",
     spec_traps => "traps",
+    spec_return_call => "return_call",
+    spec_return_call_indirect => "return_call_indirect",
 }
 
 #[test]
