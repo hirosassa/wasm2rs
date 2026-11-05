@@ -702,3 +702,19 @@ fn a_try_table_clause_branching_to_a_try_whose_handler_it_is_in_is_rejected() {
         "branch out of a try handler",
     );
 }
+
+#[test]
+fn a_try_table_catch_ref_clause_is_rejected_by_name() {
+    // The transpiler does not validate, so a `catch_ref` / `catch_all_ref` clause
+    // is reached (and rejected) even when its label has no `exnref` type.
+    for clause in ["(catch_ref $e $b)", "(catch_all_ref $b)"] {
+        assert_unsupported(
+            &format!(
+                r#"(module
+                    (tag $e)
+                    (func (block $b (try_table {clause}))))"#
+            ),
+            "catch_ref",
+        );
+    }
+}
