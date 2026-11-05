@@ -106,18 +106,19 @@ fn a_mutable_global_element_item_is_rejected() {
 }
 
 #[test]
-fn try_table_is_rejected() {
-    // Only the legacy exception-handling proposal is lowered; the newer
-    // `try_table` form has no translation yet.
+fn a_try_table_catch_all_ref_with_an_exnref_result_is_rejected() {
+    // `catch $tag $l` and `catch_all $l` are lowered (see try_table.rs); the
+    // `_ref` forms capture the exception as an `exnref`, which has no lowering yet
+    // (the `exnref` value type is rejected before the clause itself is reached).
     assert_unsupported(
         r#"(module
             (tag $e)
-            (func (result i32)
-              (block $b
-                try_table (result i32) (catch_all $b)
-                  i32.const 1
+            (func (result exnref)
+              (block $b (result exnref)
+                try_table (result exnref) (catch_all_ref $b)
+                  ref.null exn
                 end)))"#,
-        "operator",
+        "exnref",
     );
 }
 
@@ -168,19 +169,15 @@ fn multi_value_import_result_is_rejected() {
 }
 
 #[test]
-fn unsupported_operator_is_rejected_with_the_operator_named() {
-    // A not-yet-implemented operator (here `try_table` from the newer
-    // exception-handling proposal) is rejected with the operator named, so the
-    // gap is diagnosable rather than a generic failure. The SIMD/v128 and
-    // tail-call proposals are now implemented (see tests/simd.rs and
-    // tests/tail_call.rs), so this points at a still-unsupported feature.
+fn throw_ref_is_rejected_with_the_operator_named() {
+    // A not-yet-implemented operator (here `throw_ref`, the exnref half of the
+    // exception-handling proposal) is rejected with the operator named, so the gap
+    // is diagnosable rather than a generic failure.
     assert_unsupported(
         r#"(module
-            (func (result i32)
-              (block $h (result i32)
-                (try_table (result i32) (catch_all $h)
-                  (i32.const 1)))))"#,
-        "TryTable",
+            (func (param exnref)
+              (throw_ref (local.get 0))))"#,
+        "ThrowRef",
     );
 }
 
@@ -683,5 +680,25 @@ fn checkpoint_in_a_body_that_branches_to_its_function_label_is_rejected() {
               drop
               i32.const 0))"#,
         "cross-call checkpoint inside nested control flow",
+    );
+}
+
+#[test]
+fn a_try_table_clause_branching_to_a_try_whose_handler_it_is_in_is_rejected() {
+    // The landing pad of `$t` lies outside its body loop, so a branch to `$t` from
+    // inside its own handler has no lowering, even through a nested region.
+    assert_unsupported(
+        r#"(module
+            (tag $e) (tag $f)
+            (func (result i32)
+              try $t
+                throw $e
+              catch $e
+                try_table (catch $f $t)
+                  throw $f
+                end
+              end
+              i32.const 1))"#,
+        "branch out of a try handler",
     );
 }

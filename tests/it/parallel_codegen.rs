@@ -99,8 +99,8 @@ fn a_failing_function_reports_the_same_error_for_any_job_count() {
     for i in 0..40 {
         if i == 30 {
             wat.push_str(
-                "(func (result i32) (block $b try_table (result i32) (catch_all $b) \
-                 i32.const 1 end))\n",
+                "(func (result i32) (block $b (result exnref) try_table (result exnref) \
+                 (catch_all_ref $b) ref.null exn end) drop i32.const 1)\n",
             );
         } else {
             wat.push_str(&format!("(func (result i32) (i32.const {i}))\n"));
