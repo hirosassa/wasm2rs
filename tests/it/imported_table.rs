@@ -127,6 +127,63 @@ fn an_active_element_item_of_an_imported_table_may_read_an_imported_global() {
 }
 
 #[test]
+fn a_shared_memory_module_applies_active_elements_to_an_imported_table() {
+    // With a shared memory the constructors take a different path; both `new` and
+    // `with_memory` (a sibling instance with its own host table) must still copy
+    // the active element segment into the host-owned table, before the start
+    // function runs.
+    let wat = r#"
+        (module
+          (type $t (func (result i32)))
+          (import "env" "tbl" (table 2 funcref))
+          (memory 1 1 shared)
+          (elem (i32.const 1) $seven)
+          (func $seven (type $t) (i32.const 7))
+          (func (param i32) (result i32) (call_indirect (type $t) (local.get 0))))
+        "#;
+    let extra = format!(
+        "{HOST_TABLE}\n\
+         fn main() {{\n    \
+         let mut a = Instance::new(Host {{ table: vec![u32::MAX; 2] }});\n    \
+         assert_eq!(a.func1(1), 7);\n    \
+         let mut b = Instance::with_memory(a.shared_memory(), Host {{ table: vec![u32::MAX; 2] }});\n    \
+         assert_eq!(b.func1(1), 7);\n    \
+         }}"
+    );
+    let bin = compile("shared_elems", wat, &extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(
+        run.success(),
+        "shared-memory imported-table elements failed"
+    );
+}
+
+#[test]
+fn a_shared_memory_start_function_sees_the_imported_table_elements() {
+    // The start function dispatches through slot 1: it traps unless the active
+    // element was copied into the host table before it ran.
+    let wat = r#"
+        (module
+          (type $t (func))
+          (import "env" "tbl" (table 2 funcref))
+          (memory 1 1 shared)
+          (elem (i32.const 1) $nop)
+          (func $nop (type $t))
+          (func $boot (call_indirect (type $t) (i32.const 1)))
+          (start $boot))
+        "#;
+    let extra = format!(
+        "{HOST_TABLE}\n\
+         fn main() {{\n    \
+         let _a = Instance::new(Host {{ table: vec![u32::MAX; 2] }});\n    \
+         }}"
+    );
+    let bin = compile("shared_start", wat, &extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "the start function ran before the elements");
+}
+
+#[test]
 fn imported_table_call_indirect_out_of_bounds_traps() {
     let extra = format!(
         "{HOST_TABLE}\n\
