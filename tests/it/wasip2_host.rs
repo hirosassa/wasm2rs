@@ -38,7 +38,7 @@ const HELLO: &str = r#"
   (import "wasi:cli/terminal-output@0.2.0" "[resource-drop]terminal-output" (func (param i32)))
   (import "wasi:cli/environment@0.2.0" "get-environment" (func $env (param i32)))
   (import "wasi:cli/exit@0.2.0" "exit" (func $exit (param i32)))
-  (import "wasi:io/poll@0.2.0" "[method]pollable.block" (func (param i32)))
+  (import "wasi:io/poll@0.2.0" "[method]pollable.block" (func $block (param i32)))
   (import "wasi:io/poll@0.2.0" "poll" (func $poll (param i32 i32 i32)))
   (import "wasi:io/streams@0.2.0" "[method]output-stream.check-write" (func $check (param i32 i32)))
   (import "wasi:io/streams@0.2.0" "[method]output-stream.write" (func $write (param i32 i32 i32 i32)))
@@ -50,7 +50,7 @@ const HELLO: &str = r#"
   (import "wasi:cli/terminal-stdin@0.2.0" "get-terminal-stdin" (func (param i32)))
   (import "wasi:cli/terminal-stdout@0.2.0" "get-terminal-stdout" (func $term (param i32)))
   (import "wasi:cli/terminal-stderr@0.2.0" "get-terminal-stderr" (func (param i32)))
-  (import "wasi:clocks/monotonic-clock@0.2.0" "subscribe-duration" (func (param i64) (result i32)))
+  (import "wasi:clocks/monotonic-clock@0.2.0" "subscribe-duration" (func $sub_dur (param i64) (result i32)))
   (memory (export "memory") 1)
   (global $brk (mut i32) (i32.const 1024))
   ;; a bump allocator: the host reaches it as `cabi_realloc` (old pointer and size
@@ -160,8 +160,8 @@ const ARGS: &str = r#"
     (if (i32.ne (i32.load8_u (i32.load (local.get $p))) (i32.const 75)) (then unreachable))
     (if (i32.ne (i32.load offset=12 (local.get $p)) (i32.const 2)) (then unreachable))
     (if (i32.ne (i32.load16_u (i32.load offset=8 (local.get $p))) (i32.const 0x5856)) (then unreachable))
-    (i32.store (i32.const 96) (i32.const 3))
-    (i32.store (i32.const 100) (i32.const 3))
+    (i32.store (i32.const 96) (call $sub_dur (i64.const 0)))
+    (i32.store (i32.const 100) (call $sub_dur (i64.const 0)))
     (i64.store (i32.const 104) (i64.const -1))
     (call $poll (i32.const 96) (i32.const 2) (i32.const 104))
     (if (i32.ne (i32.load (i32.const 108)) (i32.const 2)) (then unreachable))
@@ -188,4 +188,122 @@ fn a_host_builds_arguments_environment_and_poll_results_in_guest_memory() {
         "{}",
         String::from_utf8_lossy(&run.stderr)
     );
+}
+
+/// Imports only some programs have: reading stdin and the clocks.
+const STDIO_IMPORTS: &str = r#"
+  (import "wasi:io/streams@0.2.0" "[method]input-stream.read" (func $read (param i32 i64 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]input-stream.subscribe" (func $sub_in (param i32) (result i32)))
+  (import "wasi:clocks/monotonic-clock@0.2.0" "now" (func $now (result i64)))
+  (import "wasi:clocks/monotonic-clock@0.2.0" "subscribe-instant" (func $sub_at (param i64) (result i32)))
+  (import "wasi:clocks/wall-clock@0.2.0" "now" (func $wall (param i32)))
+"#;
+
+/// `read_stdin` reads `result<list<u8>, stream-error>` (tag at 200; the list at 204,
+/// or for `closed` the error tag at 204) from a stdin that holds "ab\ncd".
+/// `use_clock` sleeps through `poll` and `block` on deadline pollables, and checks
+/// that `poll` returns at once when one pollable is ready and another is far off.
+const STDIO: &str = r#"
+  (func (export "read_stdin")
+    ;; a zero length is an empty list, not the end of input
+    (call $read (i32.const 0) (i64.const 0) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (if (i32.load (i32.const 208)) (then unreachable))
+    (call $read (i32.const 0) (i64.const 4) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (if (i32.ne (i32.load (i32.const 208)) (i32.const 4)) (then unreachable))
+    (if (i32.ne (i32.load (i32.load (i32.const 204))) (i32.const 0x630a6261)) (then unreachable))
+    ;; a length of u64::MAX (-1 as an i64) means "as much as there is"
+    (call $read (i32.const 0) (i64.const -1) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (if (i32.ne (i32.load (i32.const 208)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.load (i32.const 204))) (i32.const 100)) (then unreachable))
+    (call $read (i32.const 0) (i64.const 4) (i32.const 200))
+    (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 204)) (i32.const 1)) (then unreachable)))
+  (func (export "use_clock") (local $t0 i64) (local $t1 i64)
+    (local.set $t0 (call $now))
+    (i32.store (i32.const 96) (call $sub_dur (i64.const 50000000)))
+    (i64.store (i32.const 104) (i64.const -1))
+    (call $poll (i32.const 96) (i32.const 1) (i32.const 104))
+    (if (i32.ne (i32.load (i32.const 108)) (i32.const 1)) (then unreachable))
+    (local.set $t1 (call $now))
+    (if (i64.lt_u (i64.sub (local.get $t1) (local.get $t0)) (i64.const 50000000)) (then unreachable))
+    ;; an instant 30 ms ahead: block waits for it
+    (call $block (call $sub_at (i64.add (local.get $t1) (i64.const 30000000))))
+    (if (i64.lt_u (i64.sub (call $now) (local.get $t1)) (i64.const 30000000)) (then unreachable))
+    ;; an instant already past is ready at once (read as a duration it would wait t1)
+    (local.set $t0 (call $now))
+    (call $block (call $sub_at (local.get $t1)))
+    (if (i64.gt_u (i64.sub (call $now) (local.get $t0)) (i64.const 25000000)) (then unreachable))
+    ;; a ten-second deadline and a ready stream: poll returns [1] without waiting
+    (i32.store (i32.const 96) (call $sub_dur (i64.const 10000000000)))
+    (i32.store (i32.const 100) (call $sub_in (i32.const 0)))
+    (call $poll (i32.const 96) (i32.const 2) (i32.const 104))
+    (if (i32.ne (i32.load (i32.const 108)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load (i32.load (i32.const 104))) (i32.const 1)) (then unreachable))
+    ;; wall-clock now: seconds (u64) at 120, nanoseconds (u32) at 128
+    (i32.store (i32.const 128) (i32.const -1))
+    (call $wall (i32.const 120))
+    (if (i64.lt_u (i64.load (i32.const 120)) (i64.const 1700000000)) (then unreachable))
+    (if (i64.gt_u (i64.load (i32.const 120)) (i64.const 100000000000)) (then unreachable))
+    (if (i32.ge_u (i32.load (i32.const 128)) (i32.const 1000000000)) (then unreachable)))
+"#;
+
+fn stdio_wat() -> String {
+    HELLO
+        .replacen(
+            "(memory (export",
+            &format!("{STDIO_IMPORTS}\n  (memory (export"),
+            1,
+        )
+        .replacen(
+            "(func (export \"bye\")",
+            &format!("{STDIO}\n  (func (export \"bye\")"),
+            1,
+        )
+}
+
+#[test]
+fn a_host_reads_stdin_and_reports_end_of_input_as_closed() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let bin = compile(
+        "stdin",
+        &stdio_wat(),
+        "P2Host::new(vec![], vec![])",
+        "inst.read_stdin();",
+    );
+    let mut child = Command::new(&bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn generated binary");
+    child.stdin.take().unwrap().write_all(b"ab\ncd").unwrap();
+    let run = child.wait_with_output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn polling_deadline_pollables_waits_for_the_clock() {
+    let bin = compile(
+        "clocks",
+        &stdio_wat(),
+        "P2Host::new(vec![], vec![])",
+        "inst.use_clock();",
+    );
+    let started = std::time::Instant::now();
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    // 50 ms + 30 ms of waiting, and not the ten-second deadline.
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }

@@ -113,8 +113,8 @@ then `(ptr, len)` at the return pointer).
 
 - `get-arguments` (`list<string>`, 8-byte elements) and `get-environment`
   (`list<tuple<string, string>>`, 16-byte elements), non-empty;
-- `poll`, a `list<u32>` of the ready pollables' indices (all of them: every pollable
-  is always ready).
+- `poll`, a `list<u32>` of the ready pollables' indices (at this stage every pollable
+  was always ready; Result 5 adds deadlines).
 
 The runner passes its trailing arguments and its environment to the program
 (`wasip2_run -- module0.wasm one "two words"`; the work dir is
@@ -123,12 +123,29 @@ name and the two given). `tests/it/wasip2_host.rs` checks the exact layouts from
 WAT module with a bump-allocator `cabi_realloc`; no real program calls `poll` from
 `println!`, so `poll` is covered by that test only.
 
-What it does not cover:
+## Result 5: stdin and clocks
 
-- stdin, clocks, files and directories are not implemented (`subscribe-duration`
-  returns a placeholder pollable that is always ready).
-- The `Imports` trait is generated per module, so the host has to match the module's
-  import set; the example marks the methods only some programs need.
+Two more programs ran natively: one reading stdin (`read_line`, then `read_to_string`;
+23 imports) and one with `thread::sleep`, `Instant::now` and `SystemTime::now` (24).
+Beyond the hello-world set they add `input-stream.read`/`subscribe`,
+`monotonic-clock.now`/`subscribe-instant` and `wall-clock.now`, all optional blocks in
+the host.
+
+- Pollables are indices into a table: `None` is always ready (streams), `Some(deadline)`
+  is ready once the deadline passes. `poll` returns the ready indices and otherwise
+  sleeps until the earliest deadline; `pollable.block` sleeps until its deadline.
+- `input-stream.read` blocks on the real stdin until at least one byte or end of input
+  (`stream-error::closed`: result tag 1, error tag 1), so an input stream counts as
+  always ready. A non-blocking `read` that returns an empty list would need a reader
+  thread; not done.
+- The monotonic clock counts from the host's creation; `wall-clock.now` writes
+  `datetime { seconds: u64, nanoseconds: u32 }`.
+- `tests/it/wasip2_host.rs` covers all of it from WAT (piped stdin, deadline waits, a
+  ready pollable returning at once next to a ten-second deadline).
+
+What it does not cover: files and directories, sockets and random; the `Imports` trait
+is generated per module, so the host has to match the module's import set (the example
+marks the methods only some programs need).
 
 ## Options for the next investment
 
@@ -138,7 +155,7 @@ What it does not cover:
 2. **Name-preserving imports** (small/medium): carry the import module/field name
    into the `Imports` trait (like `named_exports` did for exports). Prerequisite for
    everything below. *Done: `named_imports` / `--named-imports`.*
-3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment and `poll` are done, see Results 3 and 4): implement the canonical ABI for the
+3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin and clocks are done, see Results 3 to 5): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks` subset (args, env, exit, stdio, clocks) as an opt-in
    generated or companion module, with a handle table. Filesystem is a further large
    step. This is what makes a wasip2 hello-world run natively.
