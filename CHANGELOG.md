@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for `exnref`: the `catch_ref` / `catch_all_ref` clauses of `try_table`,
   `throw_ref`, `ref.null exn`, and `exnref` locals, parameters, results and
   globals. An `exnref` is a `u32` handle into a per-thread store of captured
-  exceptions (entries are never freed); `throw_ref` of a null reference traps. An
+  exceptions (entries are never freed, and a handle is only valid on the thread
+  that captured it); `throw_ref` of a null reference traps. An
   `exnref` table or an exception payload of a reference type is still rejected.
   `throw_ref.wast` is vendored.
 - Support for `ref.null` items in element segments (funcref and externref) and for a

@@ -1049,6 +1049,7 @@ impl<'a> super::FuncGen<'a> {
         let label = frame.label;
 
         // Build the new handler's payload bindings and the operands it pushes.
+        let exc = format!("{exc_var}.downcast_ref::<{EXC_TYPE}>().unwrap()");
         let (new_kind, mut binds, mut pushed) = match tag {
             Some(t) => {
                 let params = self
@@ -1062,8 +1063,7 @@ impl<'a> super::FuncGen<'a> {
                 let mut pushed = Vec::with_capacity(params.len());
                 for (i, ty) in params.iter().enumerate() {
                     let var = format!("__hv{label}_{i}");
-                    let source =
-                        format!("{exc_var}.downcast_ref::<{EXC_TYPE}>().unwrap().values[{i}]");
+                    let source = format!("{exc}.values[{i}]");
                     binds.push(format!(
                         "let {var}: {} = {};",
                         rust_type(*ty, self.ctx.type_kinds)?,
@@ -1083,9 +1083,7 @@ impl<'a> super::FuncGen<'a> {
         if capture {
             // The exception lives on in the store; the handler holds its handle.
             let var = format!("__hx{label}");
-            binds.push(format!(
-                "let {var}: u32 = wasm2rs_exn_store({exc_var}.downcast_ref::<{EXC_TYPE}>().unwrap());"
-            ));
+            binds.push(format!("let {var}: u32 = wasm2rs_exn_store({exc});"));
             pushed.push(Val {
                 code: var,
                 ty: ValType::EXNREF,
@@ -1250,11 +1248,8 @@ impl<'a> super::FuncGen<'a> {
     /// traps.
     pub(super) fn emit_throw_ref(&mut self) -> Result<(), TranspileError> {
         self.uses_eh = true;
-        let exn = self.pop()?;
-        self.term(format!(
-            "::std::panic::panic_any(wasm2rs_exn_load({}));",
-            exn.code
-        ));
+        let exn = self.pop()?.code;
+        self.term(format!("::std::panic::panic_any(wasm2rs_exn_load({exn}));"));
         self.reachable = false;
         self.dead_nesting = 0;
         Ok(())
