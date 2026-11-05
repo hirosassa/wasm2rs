@@ -36,8 +36,8 @@ pub(crate) struct MemInfo {
     pub memory64: bool,
 }
 
-/// Metadata about the module's function table (a single `funcref` table). The
-/// declared maximum is not tracked; growth beyond `min` is not supported yet.
+/// Metadata about one of the module's tables (`funcref` or `externref`). `max` is
+/// the declared maximum, which `table.grow` enforces.
 /// When `imported`, the host owns the `Vec<u32>` storage (lent through the
 /// `Imports` trait) and the instance carries no `table` field of its own; the
 /// entries are still this module's function indices, so dispatch is unchanged.
