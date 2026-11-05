@@ -226,6 +226,7 @@ fn a_trapping_element_leaves_the_imported_memory_untouched() {
 
 #[test]
 fn a_trapping_element_leaves_an_imported_shared_memory_untouched() {
+    // The same, through the shared-memory constructor.
     let wat = r#"
         (module
           (import "env" "mem" (memory 1 1 shared))
@@ -239,13 +240,39 @@ fn a_trapping_element_leaves_an_imported_shared_memory_untouched() {
          fn main() {{\n    \
          let m = SharedMemory::new(65536);\n    \
          let host = Host {{ table: vec![u32::MAX; 1] }};\n    \
-         let m2 = m.clone();\n    \
-         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Instance::new(m2, host)));\n    \
+          let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Instance::new(m.clone(), host)));\n    \
          assert!(r.is_err(), \"the element should trap\");\n    \
          assert_eq!(m.bytes()[0], 0, \"data was written before the trap\");\n    \
          }}"
     );
     let bin = compile("shared_elem_before_data", wat, &extra);
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn a_trapping_defined_table_element_leaves_an_imported_shared_memory_untouched() {
+    // A defined table's elements are applied while the instance is built, which
+    // must still precede the data written into the host's shared memory.
+    let wat = r#"
+        (module
+          (import "env" "mem" (memory 1 1 shared))
+          (table 1 funcref)
+          (elem (i32.const 5) $f)
+          (data (i32.const 0) "\01")
+          (func $f))
+        "#;
+    let extra = "fn main() {\n    \
+         let m = SharedMemory::new(65536);\n    \
+         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Instance::new(m.clone())));\n    \
+         assert!(r.is_err(), \"the element should trap\");\n    \
+         assert_eq!(m.bytes()[0], 0, \"data was written before the trap\");\n    \
+         }";
+    let bin = compile("shared_defined_table_elem_before_data", wat, extra);
     let run = Command::new(&bin).output().expect("run generated binary");
     assert!(
         run.status.success(),

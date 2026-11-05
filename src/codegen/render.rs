@@ -641,11 +641,16 @@ fn constructor_lines(
     };
 
     // Shared-memory constructors build the struct directly, or bind it first when
-    // active elements must be copied into a host-owned table or a start function
-    // must run on it; `push_bound_tail` appends those steps and the returned
-    // instance. The data segments are applied once, to the shared memory, so only
-    // elements repeat per instance (each sibling has its own host table).
-    let shared_bind = start_call.is_some() || post_init_elem;
+    // active elements must be copied into a host-owned table, data must follow
+    // the elements into a host-owned memory, or a start function must run on it;
+    // `push_bound_elems` and `push_bound_end` append the steps and the returned
+    // instance. Data for a memory the module creates is applied once, to the shared
+    // memory, so only elements repeat per instance (each sibling has its own host
+    // table); data for a host-owned memory is applied by `new` after the elements.
+    let data_after_elems = ctx.memory_shared
+        && memories.first().is_some_and(|m| m.imported)
+        && !active_for(0).is_empty();
+    let shared_bind = start_call.is_some() || post_init_elem || data_after_elems;
     let (shared_open, shared_close) = if shared_bind {
         ("    let mut instance = Self {", "    };")
     } else {
@@ -704,9 +709,7 @@ fn constructor_lines(
             };
             inner.push(format!("    let memory = {ctor};"));
         }
-        // A host-owned table the elements are copied into after construction must
-        // receive them before the data reaches the (host-visible) memory.
-        let data_after_elems = mem0.imported && post_init_elem && !active_for(0).is_empty();
+        // Data for a host-owned memory waits until the elements are in place.
         if !active_for(0).is_empty() && !data_after_elems {
             inner.push("    {".to_string());
             inner.push("        let mut __m = memory.bytes();".to_string());
@@ -786,8 +789,9 @@ fn constructor_lines(
         push_common_fields(&mut inner)?;
         inner.push(close.to_string());
         if post_init {
-            // Copy each active element, then data, segment into the host-owned storage. An out-of-bounds write panics here, faithfully reproducing a
-            // wasm instantiation trap when a segment does not fit the host storage.
+            // Copy the active element segments, then the data segments, into the
+            // host-owned storage. An out-of-bounds write panics here, faithfully
+            // reproducing a wasm instantiation trap when a segment does not fit.
             push_bound_elems(&mut inner);
             if post_init_data {
                 copy_active_data(
