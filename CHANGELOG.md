@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Support for `ref.null` items in element segments (funcref and externref) and for a
+  table initializer expression (`(table 2 funcref (ref.func $f))` fills the initial
+  entries with `$f`; `(ref.null func)` is the null default). A `global.get` item or
+  initializer is still rejected.
 - Support for 64-bit tables (`table i64`): indices, sizes and lengths are `i64` in
   `call_indirect` and the `table.*` instructions, and an element segment offset may
   be an `i64`. An index above `u32::MAX` traps. An imported or shared table64 is

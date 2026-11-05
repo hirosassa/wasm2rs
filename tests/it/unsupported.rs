@@ -63,21 +63,21 @@ fn shared_memory64_is_rejected() {
 }
 
 #[test]
-fn table_with_initializer_expression_is_rejected() {
-    // Only a null-initialised table is supported; an explicit init expr is not.
+fn a_global_derived_table_initializer_is_rejected() {
+    // `ref.func` and `ref.null` initializers are supported (see elem_exprs.rs);
+    // reading a global is not.
     assert_unsupported(
-        r#"(module (func $f) (table 1 1 funcref (ref.func $f)))"#,
-        "table with an initializer expression",
+        r#"(module (import "e" "g" (global $g funcref)) (table 1 1 funcref (global.get $g)))"#,
+        "table initializer that is not ref.func or ref.null",
     );
 }
 
 #[test]
-fn element_segment_with_expression_items_is_rejected() {
-    // Expression items other than a plain `ref.func` (here `ref.null`) are not
-    // supported; `(ref.func $f)` items are (see `typed_funcref_table`).
+fn a_global_derived_element_item_is_rejected() {
     assert_unsupported(
-        r#"(module (table 1 funcref) (elem (i32.const 0) funcref (ref.null func)))"#,
-        "element segment with expression items",
+        r#"(module (import "e" "g" (global $g funcref))
+            (table 1 funcref) (elem (i32.const 0) funcref (global.get $g)))"#,
+        "element segment item that is not ref.func or ref.null",
     );
 }
 

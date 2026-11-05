@@ -32,6 +32,7 @@ mod control_flow;
 mod convert;
 mod data;
 mod dump;
+mod elem_exprs;
 mod emscripten_pthread;
 mod entry_exports;
 mod exceptions;
