@@ -21,12 +21,12 @@
 // keys or tokens.
 // Files: a single preopened directory (`with_preopen`, shown to the guest as "/"),
 // read-only. A descriptor is an index into `descriptors` (the preopen is 0), a file's
-// input stream is `3 + index` into `files`. Paths are resolved against the preopen and
+// input stream is `FIRST_FILE_STREAM + index` into `files`. Paths are resolved against the preopen and
 // must stay under it: absolute paths and `..` are refused (`not-permitted`), and so are
 // symlinks that lead out. Anything that would write is refused with `read-only`.
 // Not implemented: `stat`, directory listing, sockets.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 struct P2Host {
@@ -44,7 +44,7 @@ struct P2Host {
     /// The preopened directory (canonical); read only by the optional filesystem blocks.
     #[allow(dead_code)]
     root: Option<PathBuf>,
-    /// Paths behind descriptor handles (the preopen first), all under `root`.
+    /// Paths behind descriptor handles (the preopen first), all under `root`; never freed.
     #[allow(dead_code)]
     descriptors: Vec<PathBuf>,
     /// Open files behind input-stream handles `3..`; `None` once dropped.
@@ -73,14 +73,21 @@ impl P2Host {
         self
     }
 
+    /// The slot of a file's input stream (`None` for stdin, stdout, stderr or an
+    /// unknown handle).
+    #[allow(dead_code)]
+    fn file_stream(&mut self, stream: i32) -> Option<&mut Option<std::fs::File>> {
+        let index = (stream as u32 as usize).checked_sub(FIRST_FILE_STREAM)?;
+        self.files.get_mut(index)
+    }
+
     /// The path `path` names under the directory behind descriptor `dir`, or the
     /// `error-code` to return: `not-permitted` outside the preopen.
     #[allow(dead_code)]
     fn resolve(&self, dir: i32, path: &str) -> Result<PathBuf, u8> {
-        use std::path::Component;
         let root = self.root.as_ref().ok_or(code::NOT_PERMITTED)?;
         let base = self.descriptors.get(dir as u32 as usize).ok_or(code::BAD_DESCRIPTOR)?;
-        let relative = std::path::Path::new(path);
+        let relative = Path::new(path);
         if relative.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
             return Err(code::NOT_PERMITTED);
         }
@@ -128,6 +135,10 @@ impl P2Host {
         }
     }
 }
+
+/// The handle of the first file's input stream (0 to 2 are stdin, stdout, stderr).
+#[allow(dead_code)]
+const FIRST_FILE_STREAM: usize = 3;
 
 /// `wasi:filesystem` error codes; which ones a program's host uses depends on the
 /// optional blocks kept.
@@ -239,7 +250,7 @@ impl Imports for P2Host {
     fn wasi_io_error_resource_drop_error(&mut self, _g: &mut Guest, _handle: i32) {}
     fn wasi_io_poll_resource_drop_pollable(&mut self, _g: &mut Guest, _handle: i32) {}
     fn wasi_io_streams_resource_drop_input_stream(&mut self, _g: &mut Guest, handle: i32) {
-        if let Some(file) = self.files.get_mut((handle as usize).wrapping_sub(3)) {
+        if let Some(file) = self.file_stream(handle) {
             *file = None;
         }
     }
@@ -373,10 +384,11 @@ impl Imports for P2Host {
         } else {
             let read = match stream {
                 0 => std::io::stdin().read(&mut buf),
-                _ => {
-                    let file = &mut self.files[stream as usize - 3];
-                    file.as_mut().expect("read from a dropped stream").read(&mut buf)
-                }
+                _ => self
+                    .file_stream(stream)
+                    .and_then(Option::as_mut)
+                    .expect("read from an unknown or dropped stream")
+                    .read(&mut buf),
             };
             match read {
                 Ok(0) | Err(_) => {
@@ -473,9 +485,9 @@ impl Imports for P2Host {
     /// `list<tuple<descriptor, string>>` at `ret`: 12-byte `(handle, ptr, len)`
     /// elements; the preopen, named "/", if there is one.
     fn wasi_filesystem_preopens_get_directories(&mut self, g: &mut Guest, ret: i32) {
-        let count = self.root.iter().count() as i32;
+        let count = i32::from(self.root.is_some());
         let items = guest_list(g, ret, 12, count);
-        if count == 1 {
+        if self.root.is_some() {
             put_u32(g, items, 0);
             put_string(g, items + 4, "/");
         }
@@ -497,17 +509,17 @@ impl Imports for P2Host {
         descriptor_flags: i32,
         ret: i32,
     ) {
-        const CREATE_EXCLUSIVE_TRUNCATE: i32 = 1 | 4 | 8;
-        const WRITE_MUTATE_DIRECTORY: i32 = 2 | 32;
-        const DIRECTORY: i32 = 2;
-        if open_flags & CREATE_EXCLUSIVE_TRUNCATE != 0 || descriptor_flags & WRITE_MUTATE_DIRECTORY != 0 {
+        const OPEN_CREATE_EXCLUSIVE_TRUNCATE: i32 = 1 | 4 | 8;
+        const DESCRIPTOR_WRITE_MUTATE_DIRECTORY: i32 = 2 | 32;
+        const OPEN_DIRECTORY: i32 = 2;
+        if open_flags & OPEN_CREATE_EXCLUSIVE_TRUNCATE != 0 || descriptor_flags & DESCRIPTOR_WRITE_MUTATE_DIRECTORY != 0 {
             return fs_error(g, ret, 4, code::READ_ONLY);
         }
         let Some(path) = get_str(g, path_ptr, path_len) else {
             return fs_error(g, ret, 4, code::IO);
         };
         match self.resolve(dir, &path) {
-            Ok(full) if open_flags & DIRECTORY != 0 && !full.is_dir() => {
+            Ok(full) if open_flags & OPEN_DIRECTORY != 0 && !full.is_dir() => {
                 fs_error(g, ret, 4, code::NOT_DIRECTORY)
             }
             Ok(full) => {
@@ -543,7 +555,7 @@ impl Imports for P2Host {
         match opened {
             Ok(file) => {
                 self.files.push(Some(file));
-                fs_ok_handle(g, ret, self.files.len() + 2);
+                fs_ok_handle(g, ret, FIRST_FILE_STREAM + self.files.len() - 1);
             }
             Err(e) => fs_error(g, ret, 4, io_error_code(e)),
         }
@@ -575,7 +587,7 @@ impl Imports for P2Host {
 
     // optional: wasi_filesystem_types_method_descriptor_get_flags
     fn wasi_filesystem_types_method_descriptor_get_flags(&mut self, g: &mut Guest, _d: i32, ret: i32) {
-        fs_error(g, ret, 1, code::UNSUPPORTED);
+        fs_error(g, ret, 1, code::UNSUPPORTED); // the flags are one byte: payload at 1
     }
     // end optional
 
@@ -587,7 +599,7 @@ impl Imports for P2Host {
 
     // optional: wasi_filesystem_types_method_descriptor_stat
     fn wasi_filesystem_types_method_descriptor_stat(&mut self, g: &mut Guest, _d: i32, ret: i32) {
-        fs_error(g, ret, 8, code::UNSUPPORTED);
+        fs_error(g, ret, 8, code::UNSUPPORTED); // 8-aligned payload
     }
     // end optional
 
@@ -601,13 +613,13 @@ impl Imports for P2Host {
         _len: i32,
         ret: i32,
     ) {
-        fs_error(g, ret, 8, code::UNSUPPORTED);
+        fs_error(g, ret, 8, code::UNSUPPORTED); // 8-aligned payload
     }
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_metadata_hash
     fn wasi_filesystem_types_method_descriptor_metadata_hash(&mut self, g: &mut Guest, _d: i32, ret: i32) {
-        fs_error(g, ret, 8, code::UNSUPPORTED);
+        fs_error(g, ret, 8, code::UNSUPPORTED); // 8-aligned payload
     }
     // end optional
 
@@ -621,7 +633,7 @@ impl Imports for P2Host {
         _len: i32,
         ret: i32,
     ) {
-        fs_error(g, ret, 8, code::UNSUPPORTED);
+        fs_error(g, ret, 8, code::UNSUPPORTED); // 8-aligned payload
     }
     // end optional
 

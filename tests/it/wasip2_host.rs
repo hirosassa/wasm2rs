@@ -364,7 +364,8 @@ fn a_host_serves_random_bytes_numbers_and_the_insecure_seed() {
     );
 }
 
-/// The `wasi:filesystem` imports a program needs to open a file and read it.
+/// The imports and path strings (at 300 to 400) a program needs to open a file and
+/// read it.
 const FS_IMPORTS: &str = r#"
   (import "wasi:filesystem/types@0.2.0" "[resource-drop]descriptor" (func $drop_fd (param i32)))
   (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
@@ -377,6 +378,7 @@ const FS_IMPORTS: &str = r#"
   (data (i32.const 340) "../wasm2rs_wasip2_fs_secret.txt")
   (data (i32.const 380) "/etc/passwd")
   (data (i32.const 400) "link.txt")
+  (data (i32.const 420) "../wasm2rs_wasip2_fs_root/hello.txt")
 "#;
 
 /// `fs_read` walks the file API on a root holding `hello.txt` ("hello fs") and a
@@ -419,6 +421,9 @@ const FS: &str = r#"
     (call $open (local.get $dir) (i32.const 1) (i32.const 340) (i32.const 31) (i32.const 0) (i32.const 1) (i32.const 220))
     (if (i32.ne (i32.load8_u (i32.const 224)) (i32.const 31)) (then unreachable))
     (call $open (local.get $dir) (i32.const 1) (i32.const 380) (i32.const 11) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.ne (i32.load8_u (i32.const 224)) (i32.const 31)) (then unreachable))
+    ;; `..` is refused even where it would lead back into the root
+    (call $open (local.get $dir) (i32.const 1) (i32.const 420) (i32.const 35) (i32.const 0) (i32.const 1) (i32.const 220))
     (if (i32.ne (i32.load8_u (i32.const 224)) (i32.const 31)) (then unreachable))
     ;; a symlink under the root that leads out of it
     (call $open (local.get $dir) (i32.const 1) (i32.const 400) (i32.const 8) (i32.const 0) (i32.const 1) (i32.const 220))

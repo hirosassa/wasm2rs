@@ -143,7 +143,8 @@ the host.
 - `tests/it/wasip2_host.rs` covers all of it from WAT (piped stdin, deadline waits, a
   ready pollable returning at once next to a ten-second deadline).
 
-What it does not cover: sockets, and file metadata and directory listings (random: see Result 6; reading files: Result 7); the `Imports` trait
+What it does not cover: sockets, file metadata and directory listings (random and reading files:
+Results 6 and 7); the `Imports` trait
 is generated per module, so the host has to match the module's import set (the example
 marks the methods only some programs need).
 
@@ -191,8 +192,8 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
    everything below. *Done: `named_imports` / `--named-imports`.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
-   generated or companion module, with a handle table. Filesystem is a further large
-   step. This is what makes a wasip2 hello-world run natively.
+   generated or companion module, with a handle table. Writing files, metadata and
+   directory listing are a further step. This is what makes a wasip2 hello-world run natively.
 4. **Full component support** (very large): parse the component, resolve instances
    and `canon lift/lower` per the spec, and generate glue for arbitrary WIT worlds.
    Months of work; only worth it if general components are a goal.
