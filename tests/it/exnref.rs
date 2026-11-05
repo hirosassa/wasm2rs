@@ -136,3 +136,137 @@ fn an_exnref_global_holds_a_caught_exception() {
         "let mut i = Instance::new(); assert_eq!(i.func0(3), 1);",
     );
 }
+
+const TABLE_MODULE: &str = r#"(module
+    (tag $e (param i32))
+    (table $t 2 exnref)
+    (func $mk (param i32) (result exnref)
+      (block $h (result exnref)
+        (try_table (catch_all_ref $h) (throw $e (local.get 0)))
+        (unreachable)))
+    (func (export "sizes") (result i32)
+      (i32.add
+        (ref.is_null (table.get $t (i32.const 0)))
+        (i32.add
+          (i32.mul (i32.const 10) (ref.is_null (table.get $t (i32.const 1))))
+          (i32.mul (i32.const 100) (table.size $t)))))
+    (func (export "rethrow") (param i32) (result i32)
+      (table.set $t (i32.const 0) (call $mk (local.get 0)))
+      (block $o (result i32)
+        (try_table (result i32) (catch $e $o)
+          (throw_ref (table.get $t (i32.const 0))))))
+    (func (export "grow") (param i32) (result i32)
+      (drop (table.grow $t (call $mk (local.get 0)) (i32.const 2)))
+      (i32.add (table.size $t) (ref.is_null (table.get $t (i32.const 3)))))
+    (func (export "fill_copy") (param i32) (result i32)
+      (table.fill $t (i32.const 0) (call $mk (local.get 0)) (i32.const 1))
+      (table.copy $t $t (i32.const 1) (i32.const 0) (i32.const 1))
+      (ref.is_null (table.get $t (i32.const 1)))))
+    "#;
+
+#[test]
+fn an_exnref_table_starts_null_and_reports_its_size() {
+    compile_run(
+        "exn_table_size",
+        TABLE_MODULE,
+        "let mut i = Instance::new(); assert_eq!(i.func1(), 211);",
+    );
+}
+
+#[test]
+fn an_exnref_table_slot_holds_a_rethrowable_exception() {
+    compile_run(
+        "exn_table_rethrow",
+        TABLE_MODULE,
+        "let mut i = Instance::new(); assert_eq!(i.func2(7), 7);",
+    );
+}
+
+#[test]
+fn an_exnref_table_grows_fills_and_copies() {
+    compile_run(
+        "exn_table_grow",
+        TABLE_MODULE,
+        "let mut i = Instance::new(); assert_eq!(i.func3(1), 4); \
+         let mut j = Instance::new(); assert_eq!(j.func4(1), 0);",
+    );
+}
+
+#[test]
+fn an_exnref_elem_segment_may_hold_null_items() {
+    compile_run(
+        "exn_table_elem",
+        r#"(module
+            (table $t 2 exnref)
+            (elem (i32.const 0) exnref (ref.null exn) (ref.null exn))
+            (func (export "f") (result i32)
+              (i32.add (ref.is_null (table.get $t (i32.const 0)))
+                       (ref.is_null (table.get $t (i32.const 1))))))"#,
+        "let mut i = Instance::new(); assert_eq!(i.func0(), 2);",
+    );
+}
+
+#[test]
+fn a_funcref_and_an_exnref_ride_in_an_exception_payload() {
+    compile_run(
+        "exn_payload_refs",
+        r#"(module
+            (tag $e (param funcref exnref))
+            (tag $d)
+            (func $f)
+            (elem declare func $f)
+            (func $mk (result exnref)
+              (block $h (result exnref)
+                (try_table (catch_all_ref $h) (throw $d))
+                (unreachable)))
+            (func (export "f") (result funcref)
+              (block $h (result funcref exnref)
+                (try_table (result funcref exnref) (catch $e $h)
+                  (throw $e (ref.func $f) (call $mk))))
+              (drop)))"#,
+        "assert_eq!(func2(), 0);",
+    );
+}
+
+#[test]
+fn an_externref_and_a_typed_funcref_ride_in_an_exception_payload() {
+    compile_run(
+        "exn_payload_typed",
+        r#"(module
+            (type $ft (func))
+            (tag $e (param externref (ref null $ft)))
+            (func $f (type $ft))
+            (elem declare func $f)
+            (func (export "f") (result (ref null $ft))
+              (local $r (ref null $ft)) (local $x externref)
+              (block $h (result externref (ref null $ft))
+                (try_table (result externref (ref null $ft)) (catch $e $h)
+                  (throw $e (ref.null extern) (ref.func $f))))
+              (local.set $r)
+              (local.set $x)
+              (local.get $r)))"#,
+        "assert_eq!(func1(), 0);",
+    );
+}
+
+#[test]
+fn a_caught_exnref_payload_can_be_thrown_again() {
+    compile_run(
+        "exn_payload_exnref",
+        r#"(module
+            (tag $d (param i32))
+            (tag $wrap (param exnref))
+            (func (export "f") (param i32) (result i32)
+              (block $o (result i32)
+                (try_table (result i32) (catch $d $o)
+                  (throw_ref
+                    (block $w (result exnref)
+                      (try_table (catch $wrap $w)
+                        (throw $wrap
+                          (block $h (result exnref)
+                            (try_table (catch_all_ref $h) (throw $d (local.get 0)))
+                            (unreachable))))
+                      (unreachable)))))))"#,
+        "assert_eq!(func0(11), 11);",
+    );
+}

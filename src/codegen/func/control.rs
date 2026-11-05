@@ -1067,7 +1067,7 @@ impl<'a> super::FuncGen<'a> {
                     binds.push(format!(
                         "let {var}: {} = {};",
                         rust_type(*ty, self.ctx.type_kinds)?,
-                        decode_exc_value(*ty, &source)?
+                        decode_exc_value(*ty, &source, self.ctx.type_kinds)?
                     ));
                     pushed.push(Val {
                         code: var,
@@ -1233,7 +1233,7 @@ impl<'a> super::FuncGen<'a> {
         let mut encoded = vec![String::new(); params.len()];
         for i in (0..params.len()).rev() {
             let value = self.pop()?;
-            encoded[i] = encode_exc_value(params[i], &value.code)?;
+            encoded[i] = encode_exc_value(params[i], &value.code, self.ctx.type_kinds)?;
         }
         self.term(format!(
             "::std::panic::panic_any({EXC_TYPE} {{ tag: {tag_index}u32, values: vec![{}] }});",

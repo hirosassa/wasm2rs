@@ -840,7 +840,8 @@ fn is_supported_table_element(
     element: wasmparser::RefType,
     type_kinds: &[codegen::CompositeKind],
 ) -> bool {
-    if element.is_func_ref() || element.is_extern_ref() {
+    if element.is_func_ref() || element.is_extern_ref() || codegen::is_exn_heap(element.heap_type())
+    {
         return true;
     }
     let wasmparser::HeapType::Concrete(idx) = element.heap_type() else {
