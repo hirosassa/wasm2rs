@@ -63,21 +63,45 @@ fn shared_memory64_is_rejected() {
 }
 
 #[test]
-fn a_global_derived_table_initializer_is_rejected() {
-    // `ref.func` and `ref.null` initializers are supported (see elem_exprs.rs);
-    // reading a global is not.
+fn an_imported_global_table_initializer_is_rejected() {
+    // `ref.func`, `ref.null` and `global.get` of a defined global are supported (see
+    // elem_exprs.rs); reading an imported global is not.
     assert_unsupported(
         r#"(module (import "e" "g" (global $g funcref)) (table 1 1 funcref (global.get $g)))"#,
-        "table initializer that is not ref.func or ref.null",
+        "table initializer reading an imported, mutable or non-reference global",
     );
 }
 
 #[test]
-fn a_global_derived_element_item_is_rejected() {
+fn an_imported_global_element_item_is_rejected() {
     assert_unsupported(
         r#"(module (import "e" "g" (global $g funcref))
             (table 1 funcref) (elem (i32.const 0) funcref (global.get $g)))"#,
-        "element segment item that is not ref.func or ref.null",
+        "element segment item reading an imported, mutable or non-reference global",
+    );
+}
+
+#[test]
+fn a_mutable_global_in_a_global_initializer_is_rejected() {
+    // Only an immutable global is a constant: a mutable one's value can change, so
+    // inlining its initializer would be wrong.
+    assert_unsupported(
+        r#"(module
+             (global $a (mut i32) (i32.const 1))
+             (global $b i32 (global.get $a)))"#,
+        "imported, mutable or later global",
+    );
+}
+
+#[test]
+fn a_mutable_global_element_item_is_rejected() {
+    assert_unsupported(
+        r#"(module
+             (func $f)
+             (global $g (mut funcref) (ref.func $f))
+             (table 1 funcref)
+             (elem (i32.const 0) funcref (global.get $g)))"#,
+        "element segment item reading an imported, mutable or non-reference global",
     );
 }
 
@@ -175,14 +199,13 @@ fn non_constant_element_offset_is_rejected() {
 
 #[test]
 fn non_constant_global_initializer_is_rejected() {
-    // A global initialised from another (imported) global via `global.get` is a
-    // valid constant expression in wasm, but wasm2rs only supports literal
-    // initializers.
+    // Reading an *imported* global in a constant expression needs the host at
+    // construction time and is not supported (a defined one is; see elem_exprs.rs).
     assert_unsupported(
         r#"(module
              (import "e" "g" (global i32))
              (global i32 (global.get 0)))"#,
-        "global initializer",
+        "imported, mutable or later global",
     );
 }
 
