@@ -10,7 +10,11 @@ To add a file: copy it here and add one entry to the `spec_test!` list in
 `tests/it/spec_wast.rs`.
 
 The set also covers files from the merged proposals (bulk memory, memory64, multi-memory,
-table64 variants of the `*64.wast` files). The harness skips what it cannot replay and
-reports it: modules with imports, `register`, `assert_invalid`/`assert_malformed`, and
-assertions with reference-typed arguments or results. Files that depend on those (for
-example `table_get`, `table_grow`, `ref_is_null`) are not vendored yet.
+reference types, the `*64.wast` variants). The harness skips what it cannot replay and
+reports it: modules with imports, `register`, `assert_invalid`/`assert_malformed`, multi-value
+results and GC reference types. If a state-changing call is skipped, the rest of that
+module's assertions are skipped too, so a skipped call never causes a false failure.
+
+Not vendored yet: `table_grow` and `table_size` (a table's declared maximum is not honored by
+`table.grow`), `memory_grow64` and `memory_size` (the same for `memory.grow`), and files that
+need imports or `register` (`elem`, `data`, `global`, `table`, `ref_func`, `return_call*`, ...).

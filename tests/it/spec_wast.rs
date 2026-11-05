@@ -44,6 +44,9 @@ struct Group {
     stateful: bool,
     funcs: HashMap<String, u32>,
     body: String,
+    /// A state-changing call was skipped: the module's later assertions would see
+    /// stale state, so they are skipped too.
+    tainted: bool,
 }
 
 /// Emitted at the top of every generated `main`: runs `f`, asserts that it traps
@@ -84,7 +87,7 @@ fn trap_needles(spec_message: &str) -> &'static [&'static str] {
         "integer overflow" => &["overflow"],
         "invalid conversion to integer" => &["invalid conversion to integer"],
         "unreachable" => &["unreachable"],
-        "out of bounds memory access" => &["out of range for slice", "out of bounds"],
+        "out of bounds memory access" => &["out of range for slice", "out of bounds", "overflow"],
         "indirect call type mismatch" => &["indirect call type mismatch"],
         "undefined element" | "uninitialized element" => {
             &["indirect call type mismatch", "out of bounds"]
@@ -118,6 +121,19 @@ fn variant_name(value: &impl std::fmt::Debug) -> String {
         .to_lowercase()
 }
 
+/// Whether a heap type is `func` or `extern`, the two reference types lowered to
+/// a plain `u32` handle (a GC reference is a different Rust type).
+fn is_func_or_extern(ty: &wast::core::HeapType<'_>) -> bool {
+    use wast::core::AbstractHeapType;
+    matches!(
+        ty,
+        wast::core::HeapType::Abstract {
+            ty: AbstractHeapType::Func | AbstractHeapType::Extern,
+            shared: false
+        }
+    )
+}
+
 /// Rust expression for a core argument value.
 fn arg_expr(arg: &WastArg<'_>) -> Result<String, String> {
     match arg {
@@ -125,6 +141,11 @@ fn arg_expr(arg: &WastArg<'_>) -> Result<String, String> {
         WastArg::Core(WastArgCore::I64(v)) => Ok(format!("{v}i64")),
         WastArg::Core(WastArgCore::F32(v)) => Ok(format!("f32::from_bits({}u32)", v.bits)),
         WastArg::Core(WastArgCore::F64(v)) => Ok(format!("f64::from_bits({}u64)", v.bits)),
+        // A `funcref`/`externref` is a `u32` handle and `u32::MAX` is null.
+        WastArg::Core(WastArgCore::RefNull(ty)) if is_func_or_extern(ty) => {
+            Ok("u32::MAX".to_string())
+        }
+        WastArg::Core(WastArgCore::RefExtern(n)) => Ok(format!("{n}u32")),
         other => Err(format!("unsupported argument {}", variant_name(other))),
     }
 }
@@ -152,6 +173,18 @@ fn return_assertion(call: &str, ret: &WastRet<'_>, ctx: &str) -> Result<String, 
             "0x7ff8_0000_0000_0000",
             pattern,
         )),
+        WastRet::Core(WastRetCore::RefNull(Some(ty))) if is_func_or_extern(ty) => {
+            Ok(format!("assert_eq!({call}, u32::MAX, \"{ctx}\");"))
+        }
+        WastRet::Core(WastRetCore::RefExtern(Some(n))) => {
+            Ok(format!("assert_eq!({call}, {n}u32, \"{ctx}\");"))
+        }
+        WastRet::Core(WastRetCore::RefExtern(None)) | WastRet::Core(WastRetCore::RefFunc(None)) => {
+            Ok(format!("assert_ne!({call}, u32::MAX, \"{ctx}\");"))
+        }
+        WastRet::Core(WastRetCore::RefFunc(Some(wast::token::Index::Num(n, _)))) => {
+            Ok(format!("assert_eq!({call}, {n}u32, \"{ctx}\");"))
+        }
         other => Err(format!(
             "unsupported expected value {}",
             variant_name(other)
@@ -259,6 +292,7 @@ fn start_group(module: &mut QuoteWat<'_>) -> Result<Group, String> {
         wasm,
         stateful,
         body,
+        tainted: false,
     })
 }
 
@@ -337,9 +371,20 @@ fn run_wast(name: &str, src: &str) -> Report {
             }
             Ok(None) => {}
             Err(why) => {
-                if let (Some(stmt), Some(group)) = (effect_only, groups.last_mut()) {
-                    group.body.push_str(&stmt);
+                if let (Some(stmt), Some(group)) = (effect_only.as_ref(), groups.last_mut()) {
+                    group.body.push_str(stmt);
                     group.body.push('\n');
+                }
+                // A call that could not be replayed may have changed the state the
+                // module's later assertions observe.
+                let state_call = matches!(kind, "invoke" | "assert_return" | "assert_trap");
+                if state_call
+                    && effect_only.is_none()
+                    && module_ok
+                    && why != SKIPPED_AFTER_TAINT
+                    && let Some(group) = groups.last_mut()
+                {
+                    group.tainted = true;
                 }
                 report.skip(kind, why);
             }
@@ -390,6 +435,8 @@ fn run_group(name: &str, group: &Group) {
     );
 }
 
+const SKIPPED_AFTER_TAINT: &str = "an earlier call was skipped";
+
 /// Run `f` against the current module's group, or report that it was skipped.
 fn with_group(
     groups: &[Group],
@@ -397,6 +444,7 @@ fn with_group(
     f: impl FnOnce(&Group) -> Result<String, String>,
 ) -> Result<Option<String>, String> {
     match groups.last() {
+        Some(group) if module_ok && group.tainted => Err(SKIPPED_AFTER_TAINT.into()),
         Some(group) if module_ok => f(group).map(Some),
         _ => Err("its module was skipped".into()),
     }
@@ -633,6 +681,13 @@ spec_test! {
     spec_align => "align",
     spec_align64 => "align64",
     spec_bulk => "bulk",
+    spec_table_get => "table_get",
+    spec_table_get64 => "table_get64",
+    spec_table_fill => "table_fill",
+    spec_table_fill64 => "table_fill64",
+    spec_ref_is_null => "ref_is_null",
+    spec_memory_init => "memory_init",
+    spec_memory_init64 => "memory_init64",
     spec_bulk64 => "bulk64",
     spec_call_indirect => "call_indirect",
     spec_call_indirect64 => "call_indirect64",
@@ -698,6 +753,120 @@ fn an_unmapped_trap_message_only_requires_a_trap() {
         r#"
 (module (func (export "unr") unreachable))
 (assert_trap (invoke "unr") "some message the harness has no mapping for")
+"#,
+    );
+    assert_eq!(report.executed, 1);
+}
+
+#[test]
+fn assertions_after_a_skipped_state_change_are_skipped_not_replayed() {
+    // `set` takes a v128 argument the harness cannot express, so the call that
+    // would set the global is skipped. Replaying the later assertions against the
+    // stale state would fail for a reason that is no bug in the transpiler.
+    let report = run_wast(
+        "spec_taint",
+        r#"
+(module (global $g (mut i32) (i32.const 0))
+  (func (export "set") (param v128) (global.set $g (i32.const 9)))
+  (func (export "get") (result i32) global.get $g))
+(invoke "set" (v128.const i32x4 0 0 0 0))
+(assert_return (invoke "get") (i32.const 9))
+"#,
+    );
+    assert_eq!(report.executed, 0);
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.contains("an earlier call was skipped")),
+        "{:?}",
+        report.skipped
+    );
+}
+
+#[test]
+fn a_skipped_call_does_not_taint_the_next_module() {
+    let report = run_wast(
+        "spec_taint_next_module",
+        r#"
+(module (func (export "set") (param v128)))
+(invoke "set" (v128.const i32x4 0 0 0 0))
+(module (func (export "one") (result i32) i32.const 1))
+(assert_return (invoke "one") (i32.const 1))
+"#,
+    );
+    assert_eq!(report.executed, 1);
+}
+
+const REF_MODULE: &str = r#"
+(module (table $t 2 externref)
+  (func $f)
+  (elem declare func $f)
+  (func (export "set") (param i32 externref) (table.set $t (local.get 0) (local.get 1)))
+  (func (export "get") (param i32) (result externref) (table.get $t (local.get 0)))
+  (func (export "isnull") (param externref) (result i32) (ref.is_null (local.get 0)))
+  (func (export "fn") (result funcref) (ref.func $f)))
+"#;
+
+#[test]
+fn reference_arguments_and_results_are_replayed() {
+    let report = run_wast(
+        "spec_refs",
+        &format!(
+            r#"{REF_MODULE}
+(invoke "set" (i32.const 0) (ref.extern 7))
+(assert_return (invoke "get" (i32.const 0)) (ref.extern 7))
+(assert_return (invoke "get" (i32.const 0)) (ref.extern))
+(assert_return (invoke "get" (i32.const 1)) (ref.null extern))
+(assert_return (invoke "isnull" (ref.null extern)) (i32.const 1))
+(assert_return (invoke "isnull" (ref.extern 3)) (i32.const 0))
+(assert_return (invoke "fn") (ref.func))
+(assert_return (invoke "fn") (ref.func 0))
+"#
+        ),
+    );
+    assert_eq!(report.executed, 8);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+#[should_panic(expected = "generated program assertions failed")]
+fn a_wrong_reference_result_fails() {
+    run_wast(
+        "spec_refs_wrong",
+        &format!(
+            r#"{REF_MODULE}
+(invoke "set" (i32.const 0) (ref.extern 7))
+(assert_return (invoke "get" (i32.const 0)) (ref.extern 8))
+"#
+        ),
+    );
+}
+
+#[test]
+#[should_panic(expected = "generated program assertions failed")]
+fn a_null_where_a_reference_is_expected_fails() {
+    run_wast(
+        "spec_refs_null_not_ref",
+        &format!(
+            r#"{REF_MODULE}
+(assert_return (invoke "get" (i32.const 0)) (ref.extern))
+"#
+        ),
+    );
+}
+
+#[test]
+fn an_overflowing_bulk_range_counts_as_out_of_bounds() {
+    // The destination is a "negative" i32, a huge address: the range arithmetic
+    // overflows before the slice bounds check, which is still a trap.
+    let report = run_wast(
+        "spec_trap_overflow",
+        r#"
+(module (memory 1) (data $d "ab")
+  (func (export "init") (param i32)
+    (memory.init $d (local.get 0) (i32.const 0) (i32.const 2))))
+(assert_trap (invoke "init" (i32.const -1)) "out of bounds memory access")
 "#,
     );
     assert_eq!(report.executed, 1);
