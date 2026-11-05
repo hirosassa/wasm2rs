@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TranspileOptions::import_memory` / `--import-memory`: treat the module's own memory 0 as
+  host-owned, like an imported memory, so the host's `Imports` methods can read and
+  write guest memory (needed for the lowered imports of a WASI preview2 component).
+  Off by default.
 - Support for `try_table` with `catch $tag $label` and `catch_all $label` clauses
   (the exception-handling proposal's structured form), lowered through the legacy
   `try`/`catch` machinery. The spec harness replays `assert_exception`, and

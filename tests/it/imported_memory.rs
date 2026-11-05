@@ -26,8 +26,17 @@ use std::process::Command;
 /// Compile the transpiled module plus a trailing `extra` block (a `Host`
 /// implementing `Imports`, and `fn main`).
 fn compile(test: &str, wat: &str, extra: &str) -> std::path::PathBuf {
+    compile_with(test, wat, extra, &wasm2rs::TranspileOptions::default())
+}
+
+fn compile_with(
+    test: &str,
+    wat: &str,
+    extra: &str,
+    opts: &wasm2rs::TranspileOptions,
+) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
+    let generated = wasm2rs::transpile_with_options(&wasm, opts).expect("transpile ok");
 
     let dir = std::env::temp_dir().join(format!("wasm2rs_imported_memory_{test}"));
     std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -185,4 +194,109 @@ fn imported_memory_grow_extends_the_host_buffer() {
     let bin = compile("grow", wat, &extra);
     let run = Command::new(&bin).status().expect("run generated binary");
     assert!(run.success(), "imported memory grow failed");
+}
+
+fn import_memory() -> wasm2rs::TranspileOptions {
+    wasm2rs::TranspileOptions {
+        import_memory: true,
+        ..wasm2rs::TranspileOptions::default()
+    }
+}
+
+#[test]
+fn import_memory_makes_a_defined_memory_host_owned() {
+    // The module defines its memory and a data segment; with `import_memory` the
+    // host lends the buffer, the segment lands in it, loads and stores act on it
+    // and the host sees the writes.
+    let wat = r#"
+        (module
+          (memory 1)
+          (data (i32.const 8) "\01\02\03\04")
+          (func (param i32) (result i32) (i32.load8_u (local.get 0)))
+          (func (param i32 i32) (i32.store8 (local.get 0) (local.get 1))))
+        "#;
+    let extra = format!(
+        "{HOST_1_PAGE}\n\
+         fn main() {{\n    \
+         let mut inst = Instance::new(Host {{ mem: vec![0u8; 65536] }});\n    \
+         assert_eq!(inst.func0(8), 1);\n    \
+         assert_eq!(inst.func0(11), 4);\n    \
+         inst.func1(100, 42);\n    \
+         assert_eq!(inst.func0(100), 42);\n    \
+         assert_eq!(inst.imports.mem[100], 42);\n    \
+         }}"
+    );
+    let bin = compile_with("import_memory_defined", wat, &extra, &import_memory());
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "a host-owned defined memory failed");
+}
+
+#[test]
+fn import_memory_grows_the_host_buffer() {
+    let wat = r#"
+        (module
+          (memory 1)
+          (func (result i32) (memory.grow (i32.const 1)))
+          (func (result i32) (memory.size)))
+        "#;
+    let extra = format!(
+        "{HOST_1_PAGE}\n\
+         fn main() {{\n    \
+         let mut inst = Instance::new(Host {{ mem: vec![0u8; 65536] }});\n    \
+         assert_eq!(inst.func0(), 1);\n    \
+         assert_eq!(inst.func1(), 2);\n    \
+         assert_eq!(inst.imports.mem.len(), 2 * 65536);\n    \
+         }}"
+    );
+    let bin = compile_with("import_memory_grow", wat, &extra, &import_memory());
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "growing a host-owned defined memory failed");
+}
+
+#[test]
+fn import_memory_leaves_a_module_without_memory_alone() {
+    let wat = "(module (func (result i32) (i32.const 7)))";
+    let extra = "fn main() { assert_eq!(func0(), 7); }";
+    let bin = compile_with("import_memory_none", wat, extra, &import_memory());
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "a module without memory changed shape");
+}
+
+#[test]
+fn import_memory_leaves_an_imported_memory_alone() {
+    let extra = format!(
+        "{HOST_1_PAGE}\n\
+         fn main() {{\n    \
+         let mut host = Host {{ mem: vec![0u8; 65536] }};\n    \
+         host.mem[20] = 7;\n    \
+         let mut inst = Instance::new(host);\n    \
+         assert_eq!(inst.func0(20), 7);\n    \
+         }}"
+    );
+    let bin = compile_with(
+        "import_memory_already",
+        LOAD_STORE_M,
+        &extra,
+        &import_memory(),
+    );
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "an imported memory changed shape");
+}
+
+#[test]
+fn import_memory_leaves_a_shared_memory_alone() {
+    // A shared memory keeps its thread-shareable backing: no `memory` accessor
+    // is added to the host trait, and `new` still needs no host.
+    let wat = r#"
+        (module
+          (memory 1 1 shared)
+          (func (result i32) (i32.const 7)))
+        "#;
+    let extra = "fn main() {\n    \
+         let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(), 7);\n    \
+         }";
+    let bin = compile_with("import_memory_shared", wat, extra, &import_memory());
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "a shared memory changed shape");
 }

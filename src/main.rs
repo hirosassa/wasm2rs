@@ -36,7 +36,7 @@ use wasm2rs::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -83,6 +83,7 @@ fn run() -> Result<(), String> {
     let mut extract_core = false;
     let mut named_exports = false;
     let mut named_imports = false;
+    let mut import_memory = false;
     let mut entry_exports: Option<Vec<String>> = None;
     let mut split_dispatch = 0usize;
     let mut jobs = 0usize;
@@ -115,6 +116,7 @@ fn run() -> Result<(), String> {
             "--extract-core" => extract_core = true,
             "--named-exports" => named_exports = true,
             "--named-imports" => named_imports = true,
+            "--import-memory" => import_memory = true,
             _ => positional.push(arg),
         }
     }
@@ -149,6 +151,7 @@ fn run() -> Result<(), String> {
         jobs,
         named_exports,
         named_imports,
+        import_memory,
     };
 
     // Splitting into files requires a target directory to write them into.
