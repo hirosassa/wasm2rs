@@ -525,7 +525,8 @@ fn constructor_lines(
             if !active_elem.iter().any(|seg| seg.table == i) {
                 inner.push(format!("        {field}: vec![{fill}; {}],", t.min));
             } else {
-                // Start every slot null, then apply each active element segment.
+                // Start every slot at the table's initializer (null unless it is
+                // `ref.func`), then apply each active element segment.
                 inner.push(format!("        {field}: {{"));
                 inner.push(format!(
                     "            let mut t: Vec<u32> = vec![{fill}; {}];",
