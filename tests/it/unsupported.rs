@@ -403,13 +403,18 @@ fn a_table_of_a_non_funcref_element_type_is_rejected() {
 }
 
 #[test]
-fn a_sixty_four_bit_table_is_rejected() {
-    // The table64 proposal widens table indices to i64. wasm2rs indexes tables
-    // with u32, so it rejects a 64-bit table rather than silently truncating.
+fn an_imported_sixty_four_bit_table_is_rejected() {
+    // A defined table64 is supported; an imported one is host-lent storage
+    // addressed through the `Imports` trait with `u32` indices.
     assert_unsupported(
-        r#"(module (table i64 1 funcref))"#,
-        "64-bit or shared table",
+        r#"(module (import "env" "t" (table i64 1 funcref)))"#,
+        "imported 64-bit or shared table",
     );
+}
+
+#[test]
+fn a_shared_table_is_rejected() {
+    assert_unsupported(r#"(module (table shared 1 1 funcref))"#, "shared table");
 }
 
 #[test]

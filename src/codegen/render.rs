@@ -485,11 +485,14 @@ fn constructor_lines(
                 // An empty segment writes nothing, but an offset past the end of the
                 // table still traps at instantiation: check it with an empty slice.
                 if seg.funcs.is_empty() {
-                    let off = seg.offset.unwrap_or(0) as usize;
+                    let off = seg.offset.unwrap_or(0);
                     lines.push(format!("{indent}let _ = &{target}[{off}..{off}];"));
                 }
                 for (k, f) in seg.funcs.iter().enumerate() {
-                    let idx = seg.offset.unwrap_or(0) as usize + k;
+                    let idx = seg
+                        .offset
+                        .unwrap_or(0)
+                        .saturating_add(u64::try_from(k).unwrap_or(u64::MAX));
                     lines.push(format!("{indent}{target}[{idx}] = {f}u32;"));
                 }
             }
