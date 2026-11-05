@@ -712,12 +712,16 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    /// The index in `frames` of the frame that relative `depth` names, or `None`
+    /// when the depth is out of range.
+    fn frame_index(&self, depth: u32) -> Option<usize> {
+        self.frames.len().checked_sub(1 + depth as usize)
+    }
+
     /// Whether a branch to relative `depth` leaves the innermost enclosing `try`
     /// body (an out-of-range depth is reported later by `resolve_target`).
     fn leaves_try_body(&self, depth: u32) -> bool {
-        self.frames
-            .len()
-            .checked_sub(1 + depth as usize)
+        self.frame_index(depth)
             .is_some_and(|idx| self.branch_escapes_try(idx))
     }
 
@@ -787,9 +791,7 @@ impl<'a> super::FuncGen<'a> {
     /// breakable region) and is rejected.
     fn resolve_target(&mut self, depth: u32) -> Result<BranchTarget, TranspileError> {
         let idx = self
-            .frames
-            .len()
-            .checked_sub(1 + depth as usize)
+            .frame_index(depth)
             .ok_or_else(|| TranspileError::Unsupported("branch depth out of range".into()))?;
         let frame = &self.frames[idx];
         let is_loop = frame.kind == FrameKind::Loop;
@@ -1400,9 +1402,7 @@ impl<'a> super::FuncGen<'a> {
     /// `try`'s handler.
     pub(super) fn emit_rethrow(&mut self, relative_depth: u32) -> Result<(), TranspileError> {
         let idx = self
-            .frames
-            .len()
-            .checked_sub(1 + relative_depth as usize)
+            .frame_index(relative_depth)
             .ok_or_else(|| TranspileError::Unsupported("rethrow depth out of range".into()))?;
         let exc_var = self
             .frames
