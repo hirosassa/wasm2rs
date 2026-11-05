@@ -491,14 +491,14 @@ fn memory_access_targeting_a_gc_array_is_rejected() {
 
 #[test]
 fn exception_payload_with_a_reference_type_is_rejected() {
-    // An exception stores its payload as raw `u64` bits, which cannot hold a
-    // managed reference, so a tag with a reference-typed parameter must be
-    // refused rather than mistranspiled.
+    // An exception stores its payload as raw `u64` bits. A `u32`-backed handle
+    // (`funcref`, `externref`, `exnref`) fits, but a managed GC reference cannot,
+    // so a tag with such a parameter must be refused rather than mistranspiled.
     assert_unsupported(
         r#"(module
-            (tag $e (param funcref))
+            (tag $e (param anyref))
             (func (export "f")
-              ref.null func
+              ref.null any
               throw $e))"#,
         "exception payload with a reference type",
     );
@@ -670,15 +670,5 @@ fn a_try_table_clause_branching_to_a_try_whose_handler_it_is_in_is_rejected() {
               end
               i32.const 1))"#,
         "branch out of a try handler",
-    );
-}
-
-#[test]
-fn an_exnref_table_is_rejected() {
-    // An `exnref` is a handle into a per-thread store, which a table does not
-    // model, so a table of them is rejected by its element type.
-    assert_unsupported(
-        r#"(module (table 1 exnref))"#,
-        "table of a non-funcref/externref type",
     );
 }

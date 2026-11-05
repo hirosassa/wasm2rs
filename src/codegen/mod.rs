@@ -263,12 +263,19 @@ impl GcRef {
 }";
 /// The Rust expression bit-encoding a payload operand of type `ty` (given as the
 /// expression `expr`) into the `u64` stored in an exception's `values`.
-fn encode_exc_value(ty: ValType, expr: &str) -> Result<String, TranspileError> {
+fn encode_exc_value(
+    ty: ValType,
+    expr: &str,
+    kinds: &[CompositeKind],
+) -> Result<String, TranspileError> {
     Ok(match ty {
         ValType::I32 => format!("({expr}) as u32 as u64"),
         ValType::I64 => format!("({expr}) as u64"),
         ValType::F32 => format!("({expr}).to_bits() as u64"),
         ValType::F64 => format!("({expr}).to_bits()"),
+        // A `u32`-backed handle (e.g. `funcref`/`externref`/`exnref`) rides as its
+        // value; a managed `GcRef` cannot.
+        ValType::Ref(_) if rust_type(ty, kinds)? == "u32" => format!("({expr}) as u64"),
         ValType::Ref(_) => {
             return Err(TranspileError::Unsupported(
                 "exception payload with a reference type".into(),
@@ -283,12 +290,17 @@ fn encode_exc_value(ty: ValType, expr: &str) -> Result<String, TranspileError> {
 }
 /// The Rust expression decoding a `u64` (given as `expr`) from an exception's
 /// `values` back into an operand of type `ty`, inverting [`encode_exc_value`].
-fn decode_exc_value(ty: ValType, expr: &str) -> Result<String, TranspileError> {
+fn decode_exc_value(
+    ty: ValType,
+    expr: &str,
+    kinds: &[CompositeKind],
+) -> Result<String, TranspileError> {
     Ok(match ty {
         ValType::I32 => format!("{expr} as u32 as i32"),
         ValType::I64 => format!("{expr} as i64"),
         ValType::F32 => format!("f32::from_bits({expr} as u32)"),
         ValType::F64 => format!("f64::from_bits({expr})"),
+        ValType::Ref(_) if rust_type(ty, kinds)? == "u32" => format!("{expr} as u32"),
         ValType::Ref(_) => {
             return Err(TranspileError::Unsupported(
                 "exception payload with a reference type".into(),
