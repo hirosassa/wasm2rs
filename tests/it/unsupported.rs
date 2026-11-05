@@ -106,25 +106,6 @@ fn a_mutable_global_element_item_is_rejected() {
 }
 
 #[test]
-fn br_table_out_of_try_body_is_rejected() {
-    // A `br` and `br_if` escaping a `try` body are lowered via a closure-outcome
-    // signal, but a `br_table` whose arms leave the body (mixing escaping and
-    // non-escaping targets) is not lowered yet.
-    assert_unsupported(
-        r#"(module
-            (tag $e)
-            (func (param i32)
-              (block $out
-                try
-                  local.get 0
-                  br_table $out $out
-                catch_all
-                end)))"#,
-        "br_table out of a try region",
-    );
-}
-
-#[test]
 fn branch_to_try_from_handler_is_rejected() {
     // A `br` to the try's own label from a catch handler would break out of the
     // landing-pad `match`, which is not a loop.

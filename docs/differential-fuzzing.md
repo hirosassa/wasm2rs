@@ -65,7 +65,7 @@ base feature set. Findings of a non-base profile are saved as
 | `simd` | SIMD | 281 match, 19 skip |
 | `tail-call` | `return_call`, `return_call_indirect` | 271 match, 29 skip |
 | `extended-const` | arithmetic in constant expressions | 278 match, 22 skip (was 36 unsupported, now supported) |
-| `exceptions` | `try_table`, `throw`, `exnref` | 275 match, 19 skip, 6 unsupported (all `br_table` out of a `try`), no mismatch |
+| `exceptions` | `try_table`, `throw`, `exnref` | 281 match, 19 skip, no mismatch (was 6 unsupported: `br_table` out of a `try`) |
 
 Only memory 0 is hashed, so a bug confined to another memory shows up only through
 a call's result or trap.
@@ -85,6 +85,6 @@ New-profile findings (seeds 0–299):
   a global initializer. These are now supported and the profile has no findings.
 - `exceptions`: `try_table` (including `catch_ref` / `catch_all_ref`), `exnref` values,
   tables and globals, `ref.null exn`, `throw_ref`, and `funcref`/`externref`/`exnref`
-  exception payloads are now supported. The remaining 6 `unsupported` modules (of 300
-  seeds) use a `br_table` out of a `try`.
+  exception payloads are now supported, as is a `br_table` whose arms leave a `try`
+  body. The profile has no `unsupported` modules left (seeds 1–300).
 - `tail-call`: no findings.

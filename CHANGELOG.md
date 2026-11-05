@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vendored.
 - Exception payloads may hold a `funcref`, `externref`, `exnref` or typed function
   reference. A GC-reference or `v128` payload is still rejected.
+- A `br_table` inside a legacy `try` body may have arms that leave the body (it was
+  rejected with "br_table out of a try region"). Such a table is lowered to a chain of
+  conditional branches; tables that stay inside the body are unchanged.
 - Support for `ref.null` items in element segments (funcref and externref) and for a
   table initializer expression (`(table 2 funcref (ref.func $f))` fills the initial
   entries with `$f`; `(ref.null func)` is the null default).

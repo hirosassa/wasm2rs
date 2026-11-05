@@ -16,6 +16,7 @@ mod bit_count;
 mod block_type;
 mod bounds_bench;
 mod br_function_label;
+mod br_table_try;
 mod br_table_values;
 mod build_cache;
 mod build_helper;
