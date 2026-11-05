@@ -114,10 +114,15 @@ pub(crate) fn const_expr_u64_for(expr: &ConstExpr<'_>, what: &str) -> Result<u64
 
 /// Translate a global's constant initializer expression to a Rust expression.
 /// `type_kinds` classifies concrete heap types so a `ref.null` picks the null
-/// value matching the reference's lowering.
+/// value matching the reference's lowering. `global.get` reads an earlier
+/// immutable *defined* global: its initializer is inlined. `imported` is the
+/// number of imported globals (they precede the defined ones in the index space,
+/// and reading one needs the host, which is not supported here).
 pub(crate) fn const_expr_to_rust(
     expr: &ConstExpr<'_>,
     type_kinds: &[CompositeKind],
+    imported: usize,
+    defined: &[crate::codegen::GlobalInfo],
 ) -> Result<String, TranspileError> {
     let mut stack: Vec<String> = Vec::new();
     for op in expr.get_operators_reader() {
@@ -151,6 +156,19 @@ pub(crate) fn const_expr_to_rust(
             }
             Operator::RefFunc { function_index } => {
                 stack.push(format!("{function_index}u32"));
+            }
+            Operator::GlobalGet { global_index } => {
+                let source = usize::try_from(global_index)
+                    .ok()
+                    .and_then(|i| i.checked_sub(imported))
+                    .and_then(|i| defined.get(i))
+                    .ok_or_else(|| {
+                        TranspileError::Unsupported(
+                            "global.get of an imported (or later) global in a constant expression"
+                                .into(),
+                        )
+                    })?;
+                stack.push(format!("({})", source.init));
             }
             Operator::End => {}
             other => {

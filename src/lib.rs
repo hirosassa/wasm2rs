@@ -292,6 +292,11 @@ where
     let mut table: Option<codegen::TableInfo> = None;
     // Further defined tables (index 1..), after table 0.
     let mut extra_tables: Vec<codegen::TableInfo> = Vec::new();
+    // Table initializer expressions (`None` = the primary table, `Some(i)` = `extra_tables[i]`),
+    // resolved after the loop because the table section precedes the global section.
+    let mut pending_table_inits: Vec<(Option<usize>, wasmparser::ConstExpr<'_>)> = Vec::new();
+    // For each defined global, the table-slot handle of its `ref.func`/`ref.null` initializer.
+    let mut global_handles: Vec<Option<u32>> = Vec::new();
     let mut elements: Vec<codegen::ElemSegment> = Vec::new();
     let mut data: Vec<codegen::DataSegment> = Vec::new();
     let mut imports: Vec<codegen::ImportInfo> = Vec::new();
@@ -481,18 +486,10 @@ where
                     }
                     // A `ref.null` table starts null (its entries come from active
                     // element segments); a `ref.func` one starts filled with that function.
-                    let init = match &table_entry.init {
+                    // An expression is resolved once the globals it may read are known.
+                    let pending = match &table_entry.init {
                         TableInit::RefNull => None,
-                        TableInit::Expr(expr) => match ref_const_handle(expr, "table initializer")?
-                        {
-                            u32::MAX => None,
-                            func => {
-                                // Reachable even if the table is never read: it is seeded
-                                // at instantiation, like a `ref.func` in a global.
-                                global_funcs.push(func);
-                                Some(func)
-                            }
-                        },
+                        TableInit::Expr(expr) => Some(expr.clone()),
                     };
                     let min = u32::try_from(ty.initial)
                         .map_err(|_| TranspileError::Unsupported("table too large".into()))?;
@@ -502,8 +499,16 @@ where
                         imported: false,
                         table64: ty.table64,
                         element: ValType::Ref(ty.element_type),
-                        init,
+                        init: None,
                     };
+                    let slot = if table.is_none() {
+                        None
+                    } else {
+                        Some(extra_tables.len())
+                    };
+                    if let Some(expr) = pending {
+                        pending_table_inits.push((slot, expr));
+                    }
                     if table.is_none() {
                         table = Some(info);
                     } else {
@@ -570,7 +575,12 @@ where
                         ElementItems::Expressions(_, reader) => {
                             let mut indices = Vec::new();
                             for expr in reader {
-                                indices.push(ref_const_handle(&expr?, "element segment item")?);
+                                indices.push(ref_const_handle(
+                                    &expr?,
+                                    "element segment item",
+                                    imported_globals.len(),
+                                    &global_handles,
+                                )?);
                             }
                             indices
                         }
@@ -591,7 +601,21 @@ where
                             global_funcs.push(function_index);
                         }
                     }
-                    let init = codegen::const_expr_to_rust(&global.init_expr, &type_kinds)?;
+                    let init = codegen::const_expr_to_rust(
+                        &global.init_expr,
+                        &type_kinds,
+                        imported_globals.len(),
+                        &globals,
+                    )?;
+                    global_handles.push(
+                        ref_const_handle(
+                            &global.init_expr,
+                            "global",
+                            imported_globals.len(),
+                            &global_handles,
+                        )
+                        .ok(),
+                    );
                     globals.push(codegen::GlobalInfo {
                         ty: global.ty.content_type,
                         mutable: global.ty.mutable,
@@ -652,6 +676,29 @@ where
             results: &sig.results,
             body,
         });
+    }
+
+    // Table initializers, now that every global they may read is known. A
+    // `ref.func` one is reachable even if the table is never read: it is seeded at
+    // instantiation, like a `ref.func` in a global.
+    for (slot, expr) in &pending_table_inits {
+        let func = ref_const_handle(
+            expr,
+            "table initializer",
+            imported_globals.len(),
+            &global_handles,
+        )?;
+        if func == u32::MAX {
+            continue;
+        }
+        global_funcs.push(func);
+        let target = match slot {
+            None => table.as_mut(),
+            Some(i) => extra_tables.get_mut(*i),
+        };
+        if let Some(target) = target {
+            target.init = Some(func);
+        }
     }
 
     // The module's function types, so `call_indirect` can resolve its declared
@@ -875,17 +922,34 @@ fn signature_from(func_ty: &FuncType) -> Signature {
 }
 
 /// The table-slot handle of a constant reference expression: the function
-/// index for `ref.func`, `u32::MAX` (null) for `ref.null`. Anything else (e.g.
-/// `global.get`) is unsupported.
-fn ref_const_handle(expr: &wasmparser::ConstExpr<'_>, what: &str) -> Result<u32, TranspileError> {
+/// index for `ref.func`, `u32::MAX` (null) for `ref.null`, or, for `global.get`,
+/// the handle of an earlier defined global (`global_handles`, indexed after the
+/// `imported_globals` imported ones). Anything else is unsupported.
+fn ref_const_handle(
+    expr: &wasmparser::ConstExpr<'_>,
+    what: &str,
+    imported_globals: usize,
+    global_handles: &[Option<u32>],
+) -> Result<u32, TranspileError> {
     let mut ops = expr.get_operators_reader();
     match (ops.read()?, ops.read()?) {
         (wasmparser::Operator::RefFunc { function_index }, wasmparser::Operator::End) => {
             Ok(function_index)
         }
         (wasmparser::Operator::RefNull { .. }, wasmparser::Operator::End) => Ok(u32::MAX),
+        (wasmparser::Operator::GlobalGet { global_index }, wasmparser::Operator::End) => {
+            usize::try_from(global_index)
+                .ok()
+                .and_then(|i| i.checked_sub(imported_globals))
+                .and_then(|i| global_handles.get(i).copied().flatten())
+                .ok_or_else(|| {
+                    TranspileError::Unsupported(format!(
+                        "{what} reading an imported (or non-reference) global"
+                    ))
+                })
+        }
         _ => Err(TranspileError::Unsupported(format!(
-            "{what} that is not ref.func or ref.null"
+            "{what} that is not ref.func, ref.null or global.get"
         ))),
     }
 }

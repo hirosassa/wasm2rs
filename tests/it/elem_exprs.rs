@@ -120,3 +120,59 @@ fn a_ref_func_initializer_keeps_its_function_alive() {
         "let mut inst = Instance::new();\n assert_eq!(inst.func1(), 5);",
     );
 }
+
+#[test]
+fn an_element_item_may_read_a_defined_funcref_global() {
+    common::compile_run(
+        "elem_global_get",
+        r#"(module
+             (type $r (func (result i32)))
+             (table 2 funcref)
+             (func $f (result i32) i32.const 6)
+             (global $g funcref (ref.func $f))
+             (elem (i32.const 1) funcref (global.get $g))
+             (func (export "call") (param i32) (result i32)
+               (call_indirect (type $r) (local.get 0))))"#,
+        "let mut inst = Instance::new();\n assert_eq!(inst.func1(1), 6);",
+    );
+}
+
+#[test]
+fn a_table_initializer_may_read_a_defined_funcref_global() {
+    common::compile_run(
+        "table_init_global_get",
+        r#"(module
+             (type $r (func (result i32)))
+             (global $g funcref (ref.func $f))
+             (table 2 funcref (global.get $g))
+             (func $f (result i32) i32.const 8)
+             (func (export "call") (param i32) (result i32)
+               (call_indirect (type $r) (local.get 0))))"#,
+        "let mut inst = Instance::new();\n assert_eq!(inst.func1(1), 8);",
+    );
+}
+
+#[test]
+fn a_null_funcref_global_gives_a_null_element_item() {
+    common::compile_run(
+        "elem_global_get_null",
+        r#"(module
+             (table 2 funcref)
+             (global $g funcref (ref.null func))
+             (elem (i32.const 0) funcref (global.get $g))
+             (func (export "f") (result i32) (ref.is_null (table.get (i32.const 0)))))"#,
+        "let mut inst = Instance::new();\n assert_eq!(inst.func0(), 1);",
+    );
+}
+
+#[test]
+fn a_global_initializer_may_read_an_earlier_immutable_global() {
+    common::compile_run(
+        "global_init_global_get",
+        r#"(module
+             (global $a i32 (i32.const 40))
+             (global $b i32 (i32.add (global.get $a) (i32.const 2)))
+             (func (export "f") (result i32) (global.get $b)))"#,
+        "let mut inst = Instance::new();\n assert_eq!(inst.func0(), 42);",
+    );
+}
