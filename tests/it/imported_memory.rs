@@ -23,12 +23,13 @@
 
 use std::process::Command;
 
-/// Compile the transpiled module plus a trailing `extra` block (a `Host`
-/// implementing `Imports`, and `fn main`).
+/// [`compile_with`] using the default options.
 fn compile(test: &str, wat: &str, extra: &str) -> std::path::PathBuf {
     compile_with(test, wat, extra, &wasm2rs::TranspileOptions::default())
 }
 
+/// Compile the transpiled module plus a trailing `extra` block (a `Host`
+/// implementing `Imports`, and `fn main`).
 fn compile_with(
     test: &str,
     wat: &str,
