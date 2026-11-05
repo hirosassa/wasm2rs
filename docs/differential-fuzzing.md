@@ -62,7 +62,7 @@ base feature set. Findings of a non-base profile are saved as
 | `multi-memory` | up to 3 memories | 276 match, 24 skip |
 | `multi-table` | up to 3 tables | 277 match, 23 skip |
 | `memory64` | 64-bit memories and tables | 195 match, 23 skip, 81 unsupported, 1 mismatch |
-| `simd` | SIMD | 188 match, 19 skip, 93 unsupported |
+| `simd` | SIMD | 281 match, 19 skip |
 | `tail-call` | `return_call`, `return_call_indirect` | 271 match, 29 skip |
 | `extended-const` | arithmetic in constant expressions | 278 match, 22 skip (was 36 unsupported, now supported) |
 | `exceptions` | `try_table`, `throw`, `exnref` | 180 match, 19 skip, 101 unsupported (was 9 broken, fixed) |
@@ -79,9 +79,8 @@ a call's result or trap.
 
 New-profile findings (seeds 0–299):
 
-- `simd`: all 93 `unsupported` modules have a `v128.const` global initializer, so a
-  module that declares a v128 global is rejected whole and few SIMD operators are
-  compared. A `v128` global initializer is the gap to close first.
+- `simd`: 93 modules were `unsupported` because of a `v128.const` global initializer.
+  These are now supported and the profile has no findings.
 - `extended-const`: 36 modules were `unsupported` for `i32`/`i64` `add`, `sub` or `mul` in
   a global initializer. These are now supported and the profile has no findings.
 - `exceptions`: `unsupported` are `try_table` (the exception-handling `try_table`
