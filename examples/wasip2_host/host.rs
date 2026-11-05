@@ -1,5 +1,5 @@
 // A minimal WASI preview2 host for the lowered imports of a `wasm32-wasip2`
-// program (`println!`, arguments, environment, exit). It is source text appended to
+// program (`println!`, arguments, environment, exit, stdin, `poll`, clocks). It is source text appended to
 // the generated code (see `examples/wasip2_run.rs`), not a crate: the `Imports` trait
 // it implements is generated per module. Build the module with `named_imports`,
 // `named_exports` and `reentrant_imports`: the methods are named after the imports,
@@ -44,9 +44,14 @@ impl P2Host {
         self.pollables.len() as i32 - 1
     }
 
+    /// The pollable's deadline: `None` if it is always ready.
+    fn deadline(&self, pollable: u32) -> Option<Instant> {
+        self.pollables[pollable as usize]
+    }
+
     /// Sleeps until the pollable is ready.
     fn block_on(&self, pollable: i32) {
-        if let Some(deadline) = self.pollables[pollable as u32 as usize] {
+        if let Some(deadline) = self.deadline(pollable as u32) {
             std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
         }
     }
@@ -59,6 +64,11 @@ fn put(g: &mut Guest, at: i32, bytes: &[u8]) {
 
 fn put_u32(g: &mut Guest, at: i32, value: i32) {
     put(g, at, &value.to_le_bytes());
+}
+
+fn get_u32(g: &mut Guest, at: i32) -> u32 {
+    let at = at as u32 as usize;
+    u32::from_le_bytes(g.memory()[at..at + 4].try_into().unwrap())
 }
 
 /// Memory the guest owns, from its own allocator (`cabi_realloc(0, 0, align, size)`).
@@ -152,21 +162,16 @@ impl Imports for P2Host {
     /// list traps, as the interface specifies.
     fn wasi_io_poll_poll(&mut self, g: &mut Guest, list: i32, len: i32, ret: i32) {
         assert!(len > 0, "wasi:io/poll.poll: empty list");
-        let handles: Vec<usize> = (0..len)
-            .map(|i| {
-                let at = list as u32 as usize + 4 * i as usize;
-                u32::from_le_bytes(g.memory()[at..at + 4].try_into().unwrap()) as usize
-            })
-            .collect();
+        let handles: Vec<u32> = (0..len).map(|i| get_u32(g, list + 4 * i)).collect();
         let ready = loop {
             let now = Instant::now();
             let ready: Vec<i32> = (0..len)
-                .filter(|&i| self.pollables[handles[i as usize]].is_none_or(|d| d <= now))
+                .filter(|&i| self.deadline(handles[i as usize]).is_none_or(|d| d <= now))
                 .collect();
             if !ready.is_empty() {
                 break ready;
             }
-            let earliest = handles.iter().filter_map(|&h| self.pollables[h]).min().unwrap();
+            let earliest = handles.iter().filter_map(|&h| self.deadline(h)).min().unwrap();
             std::thread::sleep(earliest.saturating_duration_since(now));
         };
         let items = guest_list(g, ret, 4, ready.len() as i32);
@@ -219,8 +224,8 @@ impl Imports for P2Host {
 
     // optional: wasi_io_streams_method_input_stream_read
     /// `result<list<u8>, stream-error>` at `ret`: the tag, then the list or, for the
-    /// `closed` error at end of input, the error's tag byte, both at `ret + 4`. It
-    /// blocks until at least one byte (or end of input) is available.
+    /// `closed` error at end of input (or a read error), the error's tag byte, both
+    /// at `ret + 4`. It blocks until at least one byte (or end of input) is available.
     fn wasi_io_streams_method_input_stream_read(
         &mut self,
         g: &mut Guest,
@@ -229,18 +234,26 @@ impl Imports for P2Host {
         ret: i32,
     ) {
         use std::io::Read;
-        let mut buf = vec![0u8; len.clamp(0, 4096) as usize];
-        let n = std::io::stdin().read(&mut buf).unwrap_or(0);
-        if n == 0 {
-            put(g, ret, &[1]);
-            put(g, ret + 4, &[1]);
+        // `len` is a `u64`: a negative `i64` is a huge length, and 0 is an empty list.
+        let want = (len as u64).min(4096) as usize;
+        let mut buf = vec![0u8; want];
+        let n = if want == 0 {
+            0
         } else {
-            zero_tag(g, ret);
-            let ptr = alloc(g, 1, n as i32);
-            put(g, ptr, &buf[..n]);
-            put_u32(g, ret + 4, ptr);
-            put_u32(g, ret + 8, n as i32);
-        }
+            match std::io::stdin().read(&mut buf) {
+                Ok(0) | Err(_) => {
+                    put(g, ret, &[1]); // result::err
+                    put(g, ret + 4, &[1]); // stream-error::closed
+                    return;
+                }
+                Ok(n) => n,
+            }
+        };
+        zero_tag(g, ret);
+        let ptr = if n == 0 { 4 } else { alloc(g, 1, n as i32) };
+        put(g, ptr, &buf[..n]);
+        put_u32(g, ret + 4, ptr);
+        put_u32(g, ret + 8, n as i32);
     }
     // end optional
 

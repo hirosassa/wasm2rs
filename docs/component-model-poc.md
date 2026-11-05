@@ -113,8 +113,8 @@ then `(ptr, len)` at the return pointer).
 
 - `get-arguments` (`list<string>`, 8-byte elements) and `get-environment`
   (`list<tuple<string, string>>`, 16-byte elements), non-empty;
-- `poll`, a `list<u32>` of the ready pollables' indices (all of them: every pollable
-  is always ready).
+- `poll`, a `list<u32>` of the ready pollables' indices (at this stage every pollable
+  was always ready; Result 5 adds deadlines).
 
 The runner passes its trailing arguments and its environment to the program
 (`wasip2_run -- module0.wasm one "two words"`; the work dir is

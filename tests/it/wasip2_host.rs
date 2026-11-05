@@ -197,19 +197,24 @@ const STDIO_IMPORTS: &str = r#"
   (import "wasi:clocks/monotonic-clock@0.2.0" "now" (func $now (result i64)))
   (import "wasi:clocks/monotonic-clock@0.2.0" "subscribe-instant" (func $sub_at (param i64) (result i32)))
   (import "wasi:clocks/wall-clock@0.2.0" "now" (func $wall (param i32)))
-  (memory (export"#;
+"#;
 
 /// `read_stdin` reads `result<list<u8>, stream-error>` (tag at 200; the list at 204,
 /// or for `closed` the error tag at 204) from a stdin that holds "ab\ncd".
 /// `use_clock` sleeps through `poll` and `block` on deadline pollables, and checks
 /// that `poll` returns at once when one pollable is ready and another is far off.
 const STDIO: &str = r#"
-  (func (export "read_stdin") (local $p i32)
+  (func (export "read_stdin")
+    ;; a zero length is an empty list, not the end of input
+    (call $read (i32.const 0) (i64.const 0) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (if (i32.load (i32.const 208)) (then unreachable))
     (call $read (i32.const 0) (i64.const 4) (i32.const 200))
     (if (i32.load8_u (i32.const 200)) (then unreachable))
     (if (i32.ne (i32.load (i32.const 208)) (i32.const 4)) (then unreachable))
     (if (i32.ne (i32.load (i32.load (i32.const 204))) (i32.const 0x630a6261)) (then unreachable))
-    (call $read (i32.const 0) (i64.const 4) (i32.const 200))
+    ;; a length of u64::MAX (-1 as an i64) means "as much as there is"
+    (call $read (i32.const 0) (i64.const -1) (i32.const 200))
     (if (i32.load8_u (i32.const 200)) (then unreachable))
     (if (i32.ne (i32.load (i32.const 208)) (i32.const 1)) (then unreachable))
     (if (i32.ne (i32.load8_u (i32.load (i32.const 204))) (i32.const 100)) (then unreachable))
@@ -227,6 +232,10 @@ const STDIO: &str = r#"
     ;; an instant 30 ms ahead: block waits for it
     (call $block (call $sub_at (i64.add (local.get $t1) (i64.const 30000000))))
     (if (i64.lt_u (i64.sub (call $now) (local.get $t1)) (i64.const 30000000)) (then unreachable))
+    ;; an instant already past is ready at once (read as a duration it would wait t1)
+    (local.set $t0 (call $now))
+    (call $block (call $sub_at (local.get $t1)))
+    (if (i64.gt_u (i64.sub (call $now) (local.get $t0)) (i64.const 25000000)) (then unreachable))
     ;; a ten-second deadline and a ready stream: poll returns [1] without waiting
     (i32.store (i32.const 96) (call $sub_dur (i64.const 10000000000)))
     (i32.store (i32.const 100) (call $sub_in (i32.const 0)))
@@ -234,14 +243,20 @@ const STDIO: &str = r#"
     (if (i32.ne (i32.load (i32.const 108)) (i32.const 1)) (then unreachable))
     (if (i32.ne (i32.load (i32.load (i32.const 104))) (i32.const 1)) (then unreachable))
     ;; wall-clock now: seconds (u64) at 120, nanoseconds (u32) at 128
+    (i32.store (i32.const 128) (i32.const -1))
     (call $wall (i32.const 120))
     (if (i64.lt_u (i64.load (i32.const 120)) (i64.const 1700000000)) (then unreachable))
+    (if (i64.gt_u (i64.load (i32.const 120)) (i64.const 100000000000)) (then unreachable))
     (if (i32.ge_u (i32.load (i32.const 128)) (i32.const 1000000000)) (then unreachable)))
 "#;
 
 fn stdio_wat() -> String {
     HELLO
-        .replacen("(memory (export", STDIO_IMPORTS, 1)
+        .replacen(
+            "(memory (export",
+            &format!("{STDIO_IMPORTS}\n  (memory (export"),
+            1,
+        )
         .replacen(
             "(func (export \"bye\")",
             &format!("{STDIO}\n  (func (export \"bye\")"),
