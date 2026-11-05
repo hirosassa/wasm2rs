@@ -11,7 +11,7 @@ To add a file: copy it here and add one entry to the `spec_test!` list in
 
 The set also covers files from the merged proposals (bulk memory, memory64, multi-memory,
 reference types, the `*64.wast` variants). The harness skips what it cannot replay and
-reports it: modules with imports, `register`, `assert_invalid`/`assert_malformed`, multi-value
+reports it: modules with imports other than `spectest.print*` (replayed with a no-op host), `register`, `assert_invalid`/`assert_malformed`, multi-value
 results and GC reference types. If a state-changing call is skipped, the rest of that
 module's assertions are skipped too, so a skipped call never causes a false failure.
 
