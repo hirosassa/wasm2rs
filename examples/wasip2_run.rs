@@ -6,7 +6,7 @@
 //! Get the core module of a component with `wasm2rs --extract-core component.wasm
 //! dir` (the program is the largest module). The module is transpiled with
 //! `named_imports` and `import_memory`, the host and a `main` calling the
-//! `wasi:cli/run` export are appended, and the result is built with `rustc -O` and
+//! `wasi:cli/run` export are appended, and the result is built with `rustc -C opt-level=1` and
 //! run; its exit code is this program's. See `docs/component-model-poc.md`.
 
 use std::process::Command;
@@ -17,22 +17,7 @@ use wasmparser::{ExternalKind, Parser, Payload};
 const HOST: &str = include_str!("wasip2_host/host.rs");
 const RUN_EXPORT: &str = "wasi:cli/run@0.2.0#run";
 
-/// The host source with the `// optional: <method>` blocks dropped unless the
-/// generated trait declares that method.
-fn keep_declared_methods(host: &str, generated: &str) -> String {
-    let mut out = Vec::new();
-    let mut skipping = false;
-    for line in host.lines() {
-        if let Some(method) = line.trim().strip_prefix("// optional: ") {
-            skipping = !generated.contains(&format!("fn {method}("));
-        } else if line.trim() == "// end optional" {
-            skipping = false;
-        } else if !skipping {
-            out.push(line);
-        }
-    }
-    out.join("\n")
-}
+include!("wasip2_host/filter.rs");
 
 /// The module's declared minimum pages for memory 0 and the index of its
 /// `wasi:cli/run` export.

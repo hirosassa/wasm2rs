@@ -30,9 +30,15 @@ impl P2Host {
         self.mem[at..at + bytes.len()].copy_from_slice(bytes);
     }
 
-    /// `result<_, _>` at `ptr`: the `ok` case is a zero tag byte.
-    fn ok(&mut self, ptr: i32) {
+    /// A zero tag byte at `ptr`: `result::ok` or `option::none`.
+    fn zero_tag(&mut self, ptr: i32) {
         self.put(ptr, &[0]);
+    }
+
+    /// An empty `list<_>` at `ret`: `(ptr, len)`.
+    fn empty_list(&mut self, ret: i32) {
+        self.put(ret, &4u32.to_le_bytes());
+        self.put(ret + 4, &0u32.to_le_bytes());
     }
 
     fn stream_write(&mut self, stream: i32, ptr: i32, len: i32) {
@@ -64,15 +70,13 @@ impl Imports for P2Host {
     // optional: wasi_cli_environment_get_arguments
     /// `list<string>` at `ret`: an empty list, `(ptr, len)`.
     fn wasi_cli_environment_get_arguments(&mut self, ret: i32) {
-        self.put(ret, &4u32.to_le_bytes());
-        self.put(ret + 4, &0u32.to_le_bytes());
+        self.empty_list(ret);
     }
     // end optional
 
     /// `list<tuple<string, string>>` at `ret`: an empty list, `(ptr, len)`.
     fn wasi_cli_environment_get_environment(&mut self, ret: i32) {
-        self.put(ret, &4u32.to_le_bytes());
-        self.put(ret + 4, &0u32.to_le_bytes());
+        self.empty_list(ret);
     }
 
     /// `exit(status: result)`: 0 is `ok`, 1 is `error`.
@@ -89,7 +93,7 @@ impl Imports for P2Host {
 
     /// `result<u64, stream-error>` at `ret`: `ok` with a fixed write budget.
     fn wasi_io_streams_method_output_stream_check_write(&mut self, _stream: i32, ret: i32) {
-        self.ok(ret);
+        self.zero_tag(ret);
         self.put(ret + 8, &4096u64.to_le_bytes());
     }
 
@@ -101,13 +105,13 @@ impl Imports for P2Host {
         ret: i32,
     ) {
         self.stream_write(stream, ptr, len);
-        self.ok(ret);
+        self.zero_tag(ret);
     }
 
     fn wasi_io_streams_method_output_stream_blocking_flush(&mut self, _stream: i32, ret: i32) {
         use std::io::Write;
         std::io::stdout().flush().ok();
-        self.ok(ret);
+        self.zero_tag(ret);
     }
 
     fn wasi_io_streams_method_output_stream_subscribe(&mut self, _stream: i32) -> i32 {
@@ -126,13 +130,13 @@ impl Imports for P2Host {
 
     /// `option<terminal>` at `ret`: `none`, the program is not attached to one.
     fn wasi_cli_terminal_stdin_get_terminal_stdin(&mut self, ret: i32) {
-        self.ok(ret);
+        self.zero_tag(ret);
     }
     fn wasi_cli_terminal_stdout_get_terminal_stdout(&mut self, ret: i32) {
-        self.ok(ret);
+        self.zero_tag(ret);
     }
     fn wasi_cli_terminal_stderr_get_terminal_stderr(&mut self, ret: i32) {
-        self.ok(ret);
+        self.zero_tag(ret);
     }
 
     fn wasi_clocks_monotonic_clock_subscribe_duration(&mut self, _when: i64) -> i32 {
