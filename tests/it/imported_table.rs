@@ -96,6 +96,37 @@ fn imported_table_dispatch_with_active_element() {
 }
 
 #[test]
+fn an_active_element_item_of_an_imported_table_may_read_an_imported_global() {
+    // The host-owned table is written after construction, so the item reads the
+    // host through the built instance.
+    let wat = r#"
+        (module
+          (type $t (func (result i32)))
+          (import "env" "f" (global funcref))
+          (import "env" "tbl" (table 2 funcref))
+          (elem (i32.const 1) funcref (global.get 0))
+          (func (type $t) (i32.const 7))
+          (func (param i32) (result i32) (call_indirect (type $t) (local.get 0))))
+        "#;
+    let extra = "struct Host { table: Vec<u32> }\n\
+         impl Imports for Host {\n    \
+             fn get_global0(&self) -> u32 { 0 }\n    \
+             fn table(&self) -> &[u32] { &self.table }\n    \
+             fn table_mut(&mut self) -> &mut Vec<u32> { &mut self.table }\n\
+         }\n\
+         fn main() {\n    \
+         let mut inst = Instance::new(Host { table: vec![u32::MAX; 2] });\n    \
+         assert_eq!(inst.func1(1), 7);\n    \
+         }";
+    let bin = compile("item_imported_global", wat, extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(
+        run.success(),
+        "imported-global item in an imported table failed"
+    );
+}
+
+#[test]
 fn imported_table_call_indirect_out_of_bounds_traps() {
     let extra = format!(
         "{HOST_TABLE}\n\

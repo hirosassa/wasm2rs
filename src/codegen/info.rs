@@ -55,6 +55,10 @@ pub(crate) struct TableInfo {
     /// The function every initial entry holds (`(table 2 funcref (ref.func $f))`);
     /// `None` starts them null.
     pub init: Option<u32>,
+    /// The imported global whose value fills every initial entry
+    /// (`(table 2 funcref (global.get $imported))`), read from the host when the
+    /// instance is built. `None` leaves `init` in charge.
+    pub init_global: Option<u32>,
 }
 
 /// One element segment: function indices for the table. `offset` is `Some` for
@@ -70,6 +74,11 @@ pub(crate) struct ElemSegment {
     pub offset: Option<u64>,
     pub declared: bool,
     pub funcs: Vec<u32>,
+    /// Active items that read an imported global: `(item index, imported global)`.
+    /// The host's value is written when the instance is built; `funcs` holds the
+    /// null placeholder at that index. A passive segment has none (its items live
+    /// in a static, which cannot hold a runtime value).
+    pub imported_items: Vec<(usize, u32)>,
 }
 
 /// One data segment: raw bytes for linear memory. `offset` is `Some` for an
