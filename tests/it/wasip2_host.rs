@@ -307,3 +307,64 @@ fn polling_deadline_pollables_waits_for_the_clock() {
     // 50 ms + 30 ms of waiting, and not the ten-second deadline.
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
+
+/// The `wasi:random` imports: `insecure-seed` is what a `HashMap` needs; the others are
+/// what `rand`/`getrandom`-style programs call.
+const RANDOM_IMPORTS: &str = r#"
+  (import "wasi:random/random@0.2.0" "get-random-bytes" (func $bytes (param i64 i32)))
+  (import "wasi:random/random@0.2.0" "get-random-u64" (func $u64 (result i64)))
+  (import "wasi:random/insecure@0.2.0" "get-insecure-random-bytes" (func $ibytes (param i64 i32)))
+  (import "wasi:random/insecure@0.2.0" "get-insecure-random-u64" (func $iu64 (result i64)))
+  (import "wasi:random/insecure-seed@0.2.0" "insecure-seed" (func $seed (param i32)))
+"#;
+
+/// `random` checks `list<u8>` results (ptr, len at the return pointer) and the
+/// `tuple<u64, u64>` seed (at the return pointer and 8 bytes after it).
+const RANDOM: &str = r#"
+  (func (export "random") (local $a i64) (local $b i64)
+    (call $bytes (i64.const 16) (i32.const 200))
+    (if (i32.ne (i32.load (i32.const 204)) (i32.const 16)) (then unreachable))
+    (local.set $a (i64.load (i32.load (i32.const 200))))
+    (call $bytes (i64.const 16) (i32.const 200))
+    (if (i64.eq (local.get $a) (i64.load (i32.load (i32.const 200)))) (then unreachable))
+    ;; no bytes: an empty list
+    (call $bytes (i64.const 0) (i32.const 200))
+    (if (i32.load (i32.const 204)) (then unreachable))
+    (call $ibytes (i64.const 5) (i32.const 200))
+    (if (i32.ne (i32.load (i32.const 204)) (i32.const 5)) (then unreachable))
+    (if (i64.eq (call $u64) (call $u64)) (then unreachable))
+    (if (i64.eq (call $iu64) (call $iu64)) (then unreachable))
+    ;; the seed: two u64s, both written
+    (i64.store (i32.const 220) (i64.const 0))
+    (i64.store (i32.const 228) (i64.const 0))
+    (call $seed (i32.const 220))
+    (if (i64.eqz (i64.load (i32.const 220))) (then unreachable))
+    (if (i64.eqz (i64.load (i32.const 228))) (then unreachable)))
+"#;
+
+#[test]
+fn a_host_serves_random_bytes_numbers_and_the_insecure_seed() {
+    let wat = HELLO
+        .replacen(
+            "(memory (export",
+            &format!("{RANDOM_IMPORTS}\n  (memory (export"),
+            1,
+        )
+        .replacen(
+            "(func (export \"bye\")",
+            &format!("{RANDOM}\n  (func (export \"bye\")"),
+            1,
+        );
+    let bin = compile(
+        "random",
+        &wat,
+        "P2Host::new(vec![], vec![])",
+        "inst.random();",
+    );
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

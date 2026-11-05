@@ -147,6 +147,19 @@ What it does not cover: files and directories, sockets and random; the `Imports`
 is generated per module, so the host has to match the module's import set (the example
 marks the methods only some programs need).
 
+## Result 6: random
+
+A program using a `HashMap` needed one more import, `wasi:random/insecure-seed`
+(`tuple<u64, u64>` at the return pointer and 8 bytes after it), and ran natively once
+the host had it. The host also implements the rest of `wasi:random`
+(`get-random-bytes`/`get-random-u64`, `get-insecure-random-bytes`/`-u64`), which
+`rand`/`getrandom`-style programs call; those are covered by the WAT test only. All
+five are optional blocks.
+
+The numbers come from a small non-cryptographic generator (splitmix64) seeded from the
+OS-seeded `std` hasher. That is right for `HashMap` seeds and examples, and wrong for
+keys or tokens: do not treat `get-random-bytes` here as cryptographically secure.
+
 ## Options for the next investment
 
 1. **Extract core modules** (small): a `wasmparser`-based extraction (the nested
@@ -155,7 +168,7 @@ marks the methods only some programs need).
 2. **Name-preserving imports** (small/medium): carry the import module/field name
    into the `Imports` trait (like `named_exports` did for exports). Prerequisite for
    everything below. *Done: `named_imports` / `--named-imports`.*
-3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin and clocks are done, see Results 3 to 5): implement the canonical ABI for the
+3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks and random are done, see Results 3 to 6): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks` subset (args, env, exit, stdio, clocks) as an opt-in
    generated or companion module, with a handle table. Filesystem is a further large
    step. This is what makes a wasip2 hello-world run natively.

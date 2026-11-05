@@ -16,7 +16,10 @@
 // is an index into `pollables`: `None` is always ready (streams), `Some(deadline)`
 // becomes ready at the deadline (clocks); `poll` and `block` sleep until then.
 // `read` blocks on the real stdin, so an input stream is always ready too.
-// Not implemented: files, sockets, random.
+// Random numbers come from a small non-cryptographic generator (splitmix64) seeded
+// from the OS-seeded `std` hasher: fine for `HashMap` seeds and examples, not for
+// keys or tokens.
+// Not implemented: files, sockets.
 
 use std::time::{Duration, Instant};
 
@@ -29,13 +32,41 @@ struct P2Host {
     /// The monotonic clock's zero; read only by the optional clock blocks.
     #[allow(dead_code)]
     start: Instant,
+    /// The generator state; read only by the optional `wasi:random` blocks.
+    #[allow(dead_code)]
+    rng: u64,
 }
 
 type Guest = Instance<P2Host>;
 
 impl P2Host {
     fn new(args: Vec<String>, env: Vec<(String, String)>) -> Self {
-        P2Host { args, env, pollables: Vec::new(), start: Instant::now() }
+        P2Host { args, env, pollables: Vec::new(), start: Instant::now(), rng: os_seed() }
+    }
+
+    /// The next 64 random bits (splitmix64).
+    #[allow(dead_code)]
+    fn next_u64(&mut self) -> u64 {
+        self.rng = self.rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.rng;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A `list<u8>` of `len` random bytes at `ret`: `(ptr, len)`.
+    #[allow(dead_code)]
+    fn random_bytes(&mut self, g: &mut Guest, len: i64, ret: i32) {
+        let len = u32::try_from(len as u64).expect("random bytes: length over 4 GiB") as usize;
+        let mut bytes = Vec::with_capacity(len + 8);
+        while bytes.len() < len {
+            bytes.extend_from_slice(&self.next_u64().to_le_bytes());
+        }
+        bytes.truncate(len);
+        let ptr = if len == 0 { 4 } else { alloc(g, 1, len as i32) };
+        put(g, ptr, &bytes);
+        put_u32(g, ret, ptr);
+        put_u32(g, ret + 4, len as i32);
     }
 
     /// A new pollable that is ready at `deadline` (always, for `None`).
@@ -55,6 +86,13 @@ impl P2Host {
             std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
         }
     }
+}
+
+/// A seed from the OS: `RandomState` is keyed from the system's randomness.
+#[allow(dead_code)]
+fn os_seed() -> u64 {
+    use std::hash::BuildHasher;
+    std::collections::hash_map::RandomState::new().hash_one(0u8)
 }
 
 fn put(g: &mut Guest, at: i32, bytes: &[u8]) {
@@ -315,6 +353,44 @@ impl Imports for P2Host {
             .unwrap();
         put(g, ret, &since.as_secs().to_le_bytes());
         put_u32(g, ret + 8, since.subsec_nanos() as i32);
+    }
+    // end optional
+
+    // optional: wasi_random_random_get_random_bytes
+    fn wasi_random_random_get_random_bytes(&mut self, g: &mut Guest, len: i64, ret: i32) {
+        self.random_bytes(g, len, ret);
+    }
+    // end optional
+
+    // optional: wasi_random_random_get_random_u64
+    fn wasi_random_random_get_random_u64(&mut self, _g: &mut Guest) -> i64 {
+        self.next_u64() as i64
+    }
+    // end optional
+
+    // optional: wasi_random_insecure_get_insecure_random_bytes
+    fn wasi_random_insecure_get_insecure_random_bytes(
+        &mut self,
+        g: &mut Guest,
+        len: i64,
+        ret: i32,
+    ) {
+        self.random_bytes(g, len, ret);
+    }
+    // end optional
+
+    // optional: wasi_random_insecure_get_insecure_random_u64
+    fn wasi_random_insecure_get_insecure_random_u64(&mut self, _g: &mut Guest) -> i64 {
+        self.next_u64() as i64
+    }
+    // end optional
+
+    // optional: wasi_random_insecure_seed_insecure_seed
+    /// `tuple<u64, u64>` at `ret`.
+    fn wasi_random_insecure_seed_insecure_seed(&mut self, g: &mut Guest, ret: i32) {
+        let (a, b) = (self.next_u64(), self.next_u64());
+        put(g, ret, &a.to_le_bytes());
+        put(g, ret + 8, &b.to_le_bytes());
     }
     // end optional
 }
