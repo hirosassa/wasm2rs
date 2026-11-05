@@ -161,6 +161,53 @@ fn an_extended_const_initializer_combines_an_imported_global() {
 }
 
 #[test]
+fn a_table_initializer_may_read_an_imported_funcref_global() {
+    // Every initial entry holds the function the host's global names (function 0).
+    transpile_compile_run(
+        "table_init_imported",
+        r#"
+        (module
+          (type $t (func (result i32)))
+          (import "env" "f" (global funcref))
+          (table 2 2 funcref (global.get 0))
+          (func (type $t) (i32.const 7))
+          (func (param i32) (result i32) (call_indirect (type $t) (local.get 0))))
+        "#,
+        "struct Host;\n    \
+         impl Imports for Host {\n        \
+             fn get_global0(&self) -> u32 { 0 }\n    \
+         }\n    \
+         let mut inst = Instance::new(Host);\n    \
+         assert_eq!(inst.func1(0), 7);\n    \
+         assert_eq!(inst.func1(1), 7);",
+    );
+}
+
+#[test]
+fn an_active_element_item_may_read_an_imported_funcref_global() {
+    // Slot 0 stays null (calling it traps); slot 1 holds the host's function.
+    transpile_compile_run(
+        "elem_item_imported",
+        r#"
+        (module
+          (type $t (func (result i32)))
+          (import "env" "f" (global funcref))
+          (table 2 funcref)
+          (elem (i32.const 1) funcref (global.get 0))
+          (func (type $t) (i32.const 7))
+          (func (param i32) (result i32) (call_indirect (type $t) (local.get 0))))
+        "#,
+        "struct Host;\n    \
+         impl Imports for Host {\n        \
+             fn get_global0(&self) -> u32 { 0 }\n    \
+         }\n    \
+         let mut inst = Instance::new(Host);\n    \
+         assert_eq!(inst.func1(1), 7);\n    \
+         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inst.func1(0))).is_err());",
+    );
+}
+
+#[test]
 fn imported_mutable_global_get_set_with_defined_global() {
     // Global 0 is the imported mutable global (host-backed); global 1 is a
     // defined mutable global, so its field must be named `g1`, not `g0`.

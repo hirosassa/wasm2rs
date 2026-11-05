@@ -31,8 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   global initializer, a table initializer or an element segment item (for a
   reference global). A *global* initializer may also read an immutable *imported*
   global: the value is the host's (`get_global{k}`), read when the instance is
-  built. A table initializer, an element item or an offset reading an imported
-  global is still rejected.
+  built. A table initializer (`(table 2 funcref (global.get $imported))`) and an
+  item of an *active* element segment may read an immutable imported reference
+  global the same way. An item of a passive segment (its items live in a static)
+  and an offset reading an imported global are still rejected.
 - A data or element segment offset may `global.get` an earlier immutable defined
   integer global (also inside extended-const arithmetic, and `i64` for memory64 and
   table64). An imported global in an offset is still rejected.

@@ -63,21 +63,33 @@ fn shared_memory64_is_rejected() {
 }
 
 #[test]
-fn an_imported_global_table_initializer_is_rejected() {
-    // `ref.func`, `ref.null` and `global.get` of a defined global are supported (see
-    // elem_exprs.rs); reading an imported global is not.
+fn a_mutable_imported_global_table_initializer_is_rejected() {
+    // An immutable imported global is read from the host when the instance is
+    // built (see imports.rs); a mutable one is not a constant.
     assert_unsupported(
-        r#"(module (import "e" "g" (global $g funcref)) (table 1 1 funcref (global.get $g)))"#,
-        "table initializer reading an imported, mutable or non-reference global",
+        r#"(module (import "e" "g" (global $g (mut funcref))) (table 1 1 funcref (global.get $g)))"#,
+        "table initializer reading a mutable, non-reference or non-constant global",
     );
 }
 
 #[test]
-fn an_imported_global_element_item_is_rejected() {
+fn a_defined_global_seeded_from_an_imported_one_is_not_a_constant_item() {
+    // Its value is only known to the host, so it has no transpile-time handle.
+    assert_unsupported(
+        r#"(module (import "e" "g" (global funcref))
+            (global $d funcref (global.get 0))
+            (table 1 funcref) (elem (i32.const 0) funcref (global.get $d)))"#,
+        "element segment item reading a mutable, non-reference or non-constant global",
+    );
+}
+
+#[test]
+fn an_imported_global_item_in_a_passive_element_segment_is_rejected() {
+    // A passive segment's items live in a static, which cannot hold the host's value.
     assert_unsupported(
         r#"(module (import "e" "g" (global $g funcref))
-            (table 1 funcref) (elem (i32.const 0) funcref (global.get $g)))"#,
-        "element segment item reading an imported, mutable or non-reference global",
+            (table 1 funcref) (elem funcref (global.get $g)))"#,
+        "element segment item reading an imported global in a passive segment",
     );
 }
 
@@ -101,7 +113,7 @@ fn a_mutable_global_element_item_is_rejected() {
              (global $g (mut funcref) (ref.func $f))
              (table 1 funcref)
              (elem (i32.const 0) funcref (global.get $g)))"#,
-        "element segment item reading an imported, mutable or non-reference global",
+        "element segment item reading a mutable, non-reference or non-constant global",
     );
 }
 

@@ -6,7 +6,7 @@ use super::runtime::render_rt_helpers;
 use super::wasi::share_fd_table;
 use super::{
     ALLOW, DataSegment, ElemSegment, ExportInfo, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
-    ModuleParts, WASM_PAGE_SIZE, WasiFn, data_static_line, indent, index_u32, rust_type,
+    ModuleParts, TableFill, WASM_PAGE_SIZE, WasiFn, data_static_line, indent, index_u32, rust_type,
     rust_types,
 };
 use crate::TranspileError;
@@ -484,8 +484,10 @@ fn constructor_lines(
     // Emit `<target>[idx] = fu32;` for each active element segment entry;
     // `target` is a defined table (`t`) or the host storage accessor
     // (`instance.table_mut()`).
+    // `imports` names the host an imported-global item reads: the constructor's
+    // parameter, or the built instance's field once it has been moved in.
     let copy_active_elems =
-        |lines: &mut Vec<String>, table_idx: u32, target: &str, indent: &str| {
+        |lines: &mut Vec<String>, table_idx: u32, target: &str, imports: &str, indent: &str| {
             for seg in active_elem.iter().filter(|seg| seg.table == table_idx) {
                 // An empty segment writes nothing, but an offset past the end of the
                 // table still traps at instantiation: check it with an empty slice.
@@ -499,7 +501,15 @@ fn constructor_lines(
                             .unwrap_or(0)
                             .saturating_add(u64::try_from(k).unwrap_or(u64::MAX)),
                     );
-                    lines.push(format!("{indent}{target}[{idx}] = {f}u32;"));
+                    let value = seg
+                        .imported_items
+                        .iter()
+                        .find(|(item, _)| *item == k)
+                        .map_or_else(
+                            || format!("{f}u32"),
+                            |(_, global)| format!("{imports}.get_global{global}()"),
+                        );
+                    lines.push(format!("{indent}{target}[{idx}] = {value};"));
                 }
             }
         };
@@ -519,9 +529,13 @@ fn constructor_lines(
         for (i, t) in defined.enumerate() {
             let i = index_u32(i)?;
             let (field, _) = table_accessor(i);
-            let fill = t
-                .init
-                .map_or_else(|| "u32::MAX".to_string(), |f| format!("{f}u32"));
+            let fill = match t.init {
+                Some(TableFill::ImportedGlobal(global)) => {
+                    format!("imports.get_global{global}()")
+                }
+                Some(TableFill::Func(f)) => format!("{f}u32"),
+                None => "u32::MAX".to_string(),
+            };
             if !active_elem.iter().any(|seg| seg.table == i) {
                 inner.push(format!("        {field}: vec![{fill}; {}],", t.min));
             } else {
@@ -532,7 +546,7 @@ fn constructor_lines(
                     "            let mut t: Vec<u32> = vec![{fill}; {}];",
                     t.min
                 ));
-                copy_active_elems(inner, i, "t", "            ");
+                copy_active_elems(inner, i, "t", "imports", "            ");
                 inner.push("            t".to_string());
                 inner.push("        },".to_string());
             }
@@ -711,7 +725,13 @@ fn constructor_lines(
                 copy_active_data(&mut inner, 0, "instance.mem_mut()", "    ");
             }
             if post_init_elem {
-                copy_active_elems(&mut inner, 0, "instance.table_mut()", "    ");
+                copy_active_elems(
+                    &mut inner,
+                    0,
+                    "instance.table_mut()",
+                    "instance.imports",
+                    "    ",
+                );
             }
             push_start(&mut inner);
             if start_call.is_none() {

@@ -568,10 +568,12 @@ where
                                 offset: None,
                                 declared: true,
                                 funcs: Vec::new(),
+                                imported_items: Vec::new(),
                             });
                             continue;
                         }
                     };
+                    let mut imported_items: Vec<(usize, u32)> = Vec::new();
                     let funcs = match element.items {
                         ElementItems::Functions(reader) => {
                             let mut indices = Vec::new();
@@ -581,16 +583,30 @@ where
                             indices
                         }
                         // Expression items (the form a typed-funcref table uses) are
-                        // supported when each is a plain `ref.func` or `ref.null`.
+                        // supported when each is a plain `ref.func`, `ref.null` or
+                        // `global.get`. An imported global's value is the host's, so
+                        // only an active segment (written at instantiation) may read one.
                         ElementItems::Expressions(_, reader) => {
                             let mut indices = Vec::new();
-                            for expr in reader {
-                                indices.push(ref_const_handle(
+                            for (k, expr) in reader.into_iter().enumerate() {
+                                match eval_ref_const(
                                     &expr?,
                                     "element segment item",
-                                    imported_globals.len(),
+                                    &imported_globals,
                                     &global_handles,
-                                )?);
+                                )? {
+                                    RefConst::Handle(h) => indices.push(h),
+                                    RefConst::Imported(_) if offset.is_none() => {
+                                        return Err(TranspileError::Unsupported(
+                                            "element segment item reading an imported global in a passive segment"
+                                                .into(),
+                                        ));
+                                    }
+                                    RefConst::Imported(g) => {
+                                        imported_items.push((k, g));
+                                        indices.push(u32::MAX);
+                                    }
+                                }
                             }
                             indices
                         }
@@ -600,6 +616,7 @@ where
                         offset,
                         declared: false,
                         funcs,
+                        imported_items,
                     });
                 }
             }
@@ -629,13 +646,14 @@ where
                     );
                     // A mutable global is not a constant, so no handle is recorded for it.
                     global_handles.push(
-                        ref_const_handle(
+                        eval_ref_const(
                             &global.init_expr,
                             "global",
-                            imported_globals.len(),
+                            &imported_globals,
                             &global_handles,
                         )
                         .ok()
+                        .and_then(RefConst::handle)
                         .filter(|_| !global.ty.mutable),
                     );
                     globals.push(codegen::GlobalInfo {
@@ -711,22 +729,29 @@ where
     // `ref.func` one is reachable even if the table is never read: it is seeded at
     // instantiation, like a `ref.func` in a global.
     for (slot, expr) in &pending_table_inits {
-        let func = ref_const_handle(
+        let init = eval_ref_const(
             expr,
             "table initializer",
-            imported_globals.len(),
+            &imported_globals,
             &global_handles,
         )?;
-        if func == u32::MAX {
-            continue;
-        }
-        global_funcs.push(func);
         let target = match slot {
             None => table.as_mut(),
             Some(i) => extra_tables.get_mut(*i),
         };
-        if let Some(target) = target {
-            target.init = Some(func);
+        match init {
+            RefConst::Handle(u32::MAX) => {}
+            RefConst::Handle(func) => {
+                global_funcs.push(func);
+                if let Some(target) = target {
+                    target.init = Some(codegen::TableFill::Func(func));
+                }
+            }
+            RefConst::Imported(global) => {
+                if let Some(target) = target {
+                    target.init = Some(codegen::TableFill::ImportedGlobal(global));
+                }
+            }
         }
     }
 
@@ -951,32 +976,61 @@ fn signature_from(func_ty: &FuncType) -> Signature {
     }
 }
 
-/// The table-slot handle of a constant reference expression: the function
-/// index for `ref.func`, `u32::MAX` (null) for `ref.null`, or, for `global.get`,
-/// the handle of an earlier defined global (`global_handles`, indexed after the
-/// `imported_globals` imported ones). Anything else is unsupported.
-fn ref_const_handle(
+/// What a constant reference expression denotes: a function index (`u32::MAX`
+/// for null) known at transpile time, or an immutable imported global whose value
+/// only the host knows.
+enum RefConst {
+    Handle(u32),
+    Imported(u32),
+}
+
+impl RefConst {
+    fn handle(self) -> Option<u32> {
+        match self {
+            RefConst::Handle(h) => Some(h),
+            RefConst::Imported(_) => None,
+        }
+    }
+}
+
+/// Evaluate a constant reference expression: the function index for `ref.func`,
+/// `u32::MAX` (null) for `ref.null`, or, for `global.get`, the handle of an
+/// earlier defined global (`global_handles`, indexed after the imported ones) or
+/// an immutable imported global. Anything else is unsupported.
+fn eval_ref_const(
     expr: &wasmparser::ConstExpr<'_>,
     what: &str,
-    imported_globals: usize,
+    imported_globals: &[codegen::ImportedGlobalInfo],
     global_handles: &[Option<u32>],
-) -> Result<u32, TranspileError> {
+) -> Result<RefConst, TranspileError> {
     let mut ops = expr.get_operators_reader();
     match (ops.read()?, ops.read()?) {
         (wasmparser::Operator::RefFunc { function_index }, wasmparser::Operator::End) => {
-            Ok(function_index)
+            Ok(RefConst::Handle(function_index))
         }
-        (wasmparser::Operator::RefNull { .. }, wasmparser::Operator::End) => Ok(u32::MAX),
+        (wasmparser::Operator::RefNull { .. }, wasmparser::Operator::End) => {
+            Ok(RefConst::Handle(u32::MAX))
+        }
         (wasmparser::Operator::GlobalGet { global_index }, wasmparser::Operator::End) => {
-            usize::try_from(global_index)
-                .ok()
-                .and_then(|i| i.checked_sub(imported_globals))
-                .and_then(|i| global_handles.get(i).copied().flatten())
-                .ok_or_else(|| {
-                    TranspileError::Unsupported(format!(
-                        "{what} reading an imported, mutable or non-reference global"
-                    ))
-                })
+            let constant = usize::try_from(global_index).ok().and_then(|i| {
+                match i.checked_sub(imported_globals.len()) {
+                    Some(defined) => global_handles
+                        .get(defined)
+                        .copied()
+                        .flatten()
+                        .map(RefConst::Handle),
+                    // Only an immutable reference global is a constant.
+                    None => imported_globals
+                        .get(i)
+                        .filter(|g| !g.mutable && matches!(g.ty, ValType::Ref(_)))
+                        .map(|_| RefConst::Imported(global_index)),
+                }
+            });
+            constant.ok_or_else(|| {
+                TranspileError::Unsupported(format!(
+                    "{what} reading a mutable, non-reference or non-constant global"
+                ))
+            })
         }
         _ => Err(TranspileError::Unsupported(format!(
             "{what} that is not ref.func, ref.null or global.get"

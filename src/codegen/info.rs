@@ -52,9 +52,19 @@ pub(crate) struct TableInfo {
     /// The table's element type (`funcref`, `externref` or `exnref`). All are stored as a
     /// `u32`, but `table.get` pushes an operand of this type.
     pub element: ValType,
-    /// The function every initial entry holds (`(table 2 funcref (ref.func $f))`);
-    /// `None` starts them null.
-    pub init: Option<u32>,
+    /// The value every initial entry holds; `None` starts them null.
+    pub init: Option<TableFill>,
+}
+
+/// What every initial entry of a table holds when it is not null.
+#[derive(Clone, Copy)]
+pub(crate) enum TableFill {
+    /// The function `(table 2 funcref (ref.func $f))` names.
+    Func(u32),
+    /// The value of an immutable imported global
+    /// (`(table 2 funcref (global.get $imported))`), read from the host when the
+    /// instance is built.
+    ImportedGlobal(u32),
 }
 
 /// One element segment: function indices for the table. `offset` is `Some` for
@@ -70,6 +80,11 @@ pub(crate) struct ElemSegment {
     pub offset: Option<u64>,
     pub declared: bool,
     pub funcs: Vec<u32>,
+    /// Active items that read an imported global: `(item index, imported global)`.
+    /// The host's value is written when the instance is built; `funcs` holds the
+    /// null placeholder at that index. A passive segment has none (its items live
+    /// in a static, which cannot hold a runtime value).
+    pub imported_items: Vec<(usize, u32)>,
 }
 
 /// One data segment: raw bytes for linear memory. `offset` is `Some` for an
