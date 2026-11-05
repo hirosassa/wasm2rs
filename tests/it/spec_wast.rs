@@ -294,15 +294,29 @@ fn start_group(module: &mut QuoteWat<'_>) -> Result<Group, String> {
     // a real host and are skipped.
     let mut has_imports = false;
     let mut only_print_imports = true;
+    // Types whose result list is empty, by type index.
+    let mut no_result_types: Vec<bool> = Vec::new();
     for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
-        if let Ok(wasmparser::Payload::ImportSection(reader)) = payload {
-            for import in reader.into_imports().flatten() {
-                has_imports = true;
-                let is_print = import.module == "spectest"
-                    && import.name.starts_with("print")
-                    && matches!(import.ty, wasmparser::TypeRef::Func(_));
-                only_print_imports &= is_print;
+        match payload {
+            Ok(wasmparser::Payload::TypeSection(reader)) => {
+                for group in reader.into_iter().flatten() {
+                    for ty in group.types() {
+                        no_result_types.push(matches!(&ty.composite_type.inner,
+                                wasmparser::CompositeInnerType::Func(f) if f.results().is_empty()));
+                    }
+                }
             }
+            Ok(wasmparser::Payload::ImportSection(reader)) => {
+                for import in reader.into_imports().flatten() {
+                    has_imports = true;
+                    let is_print = import.module == "spectest"
+                        && import.name.starts_with("print")
+                        && matches!(import.ty, wasmparser::TypeRef::Func(t)
+                            if no_result_types.get(t as usize).copied().unwrap_or(false));
+                    only_print_imports &= is_print;
+                }
+            }
+            _ => {}
         }
     }
     if has_imports && !only_print_imports {
@@ -445,17 +459,27 @@ fn directive_location(directive: &WastDirective<'_>, src: &str, name: &str) -> S
     format!("{name}.wast:{}", line + 1)
 }
 
+/// The body of the generated `main`. A tail call is an ordinary Rust call (no
+/// constant-stack guarantee) and the `return_call*` specs recurse a million deep,
+/// so only those files run on a thread with a big stack.
+fn main_body(name: &str, body: &str) -> String {
+    if name.contains("return_call") {
+        format!(
+            "std::thread::Builder::new().stack_size(2 << 30).spawn(|| {{\n{body}\n}}).unwrap().join().unwrap();"
+        )
+    } else {
+        body.to_string()
+    }
+}
+
 /// Compile and run one group. A spec file calls only some of a module's
 /// functions, so the harness (not the generator) tolerates unused code; every
 /// other warning in the generated source is still an error.
 fn run_group(name: &str, group: &Group) {
     let generated = wasm2rs::transpile(&group.wasm).expect("transpile module");
-    // A tail call is an ordinary Rust call (no constant-stack guarantee), and the
-    // spec recurses a million deep, so the body runs on a thread with a big stack.
     let program = format!(
-        "#![allow(dead_code, unused_mut, unused_variables)]\n{generated}\nfn main() {{\n\
-         std::thread::Builder::new().stack_size(2 << 30).spawn(|| {{\n{}\n}}).unwrap().join().unwrap();\n}}\n",
-        group.body
+        "#![allow(dead_code, unused_mut, unused_variables)]\n{generated}\nfn main() {{\n{}\n}}\n",
+        main_body(name, &group.body)
     );
     let bin = common::build(name, &program);
     let run = std::process::Command::new(&bin)
@@ -524,6 +548,28 @@ fn a_spectest_print_import_is_replayed_with_a_no_op_host() {
     );
     assert_eq!(report.executed, 1);
     assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+fn a_print_import_with_a_result_is_skipped() {
+    let report = run_wast(
+        "spec_print_with_result",
+        r#"
+(module
+  (import "spectest" "print_ret" (func $p (result i32)))
+  (func (export "f") (result i32) (call $p)))
+(assert_return (invoke "f") (i32.const 0))
+"#,
+    );
+    assert_eq!(report.executed, 0);
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.contains("module has imports")),
+        "{:?}",
+        report.skipped
+    );
 }
 
 #[test]
