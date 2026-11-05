@@ -86,3 +86,35 @@ About 23% of googlesql's memory accesses are inside loops.
 - Decision: stop here. Users who trust their module can already use
   `--unsafe-memory`. Revisit only with a profile of a real workload showing where
   the checked build loses, and an x86_64 measurement.
+
+## Fixed-size memory (`min == max`) prototype
+
+Idea (roadmap 6d): when a defined memory declares `min == max`, keep it as
+`Box<[u8; N]>`, so its length is a compile-time constant (and `memory.size` could be a
+constant; `memory.grow` would return the current size for a delta of 0 and -1 otherwise).
+
+Prototype: the generated code of each `benches/memory/` workload was edited by hand
+(`Vec<u8>` field to `Box<[u8; 65536]>`, `mem`/`mem_mut` through `[..]`), built like the
+other runs (`rustc -O`, `drive` not inlined), 7 interleaved runs, median, M4 Max.
+
+| workload | safe (ms) | fixed-size (ms) | unsafe (ms) | fixed / safe |
+|---|---|---|---|---|
+| hash | 883 | 883 | 882 | 0.999 |
+| matmul | 1007 | 682 | 683 | 0.677 |
+| random | 767 | 758 | 753 | 0.988 |
+
+Findings:
+
+- matmul with a fixed-size memory matches `unsafe_memory`: its addresses derive from
+  loop counters with small constant bounds, so once the length is a constant LLVM proves
+  every access in range. hash and random compute addresses LLVM cannot bound, so the
+  constant length changes nothing.
+- The gain therefore needs addresses that are provably below the declared size. Real
+  modules take addresses from pointers and heap data, so they will rarely qualify.
+- Real modules seldom declare `min == max`: the googlesql module (557 pages) has no
+  maximum, and Rust and growable Emscripten builds declare none or a larger one.
+- A fixed-size memory also cannot be an imported or shared one, and the change touches
+  the `memory.grow` helper that bug B (declared maximum) needs to rework.
+
+Decision: not implemented. Revisit with a profile of a real module that declares
+`min == max` and spends its time in bounded-address loops.
