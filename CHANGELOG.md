@@ -14,8 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries with `$f`; `(ref.null func)` is the null default).
 - `global.get` of an earlier immutable *defined* global in a constant expression: a
   global initializer, a table initializer or an element segment item (for a
-  reference global). Reading an *imported* global there, or in a segment offset, is
-  still rejected.
+  reference global). Reading an *imported* global there is still rejected.
+- A data or element segment offset may `global.get` an earlier immutable defined
+  integer global (also inside extended-const arithmetic, and `i64` for memory64 and
+  table64). An imported global in an offset is still rejected.
 - Support for 64-bit tables (`table i64`): indices, sizes and lengths are `i64` in
   `call_indirect` and the `table.*` instructions, and an element segment offset may
   be an `i64`. An index above `u32::MAX` traps. An imported or shared table64 is

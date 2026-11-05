@@ -297,6 +297,8 @@ where
     let mut pending_table_inits: Vec<(Option<usize>, wasmparser::ConstExpr<'_>)> = Vec::new();
     // For each defined global, the table-slot handle of its `ref.func`/`ref.null` initializer.
     let mut global_handles: Vec<Option<u32>> = Vec::new();
+    // For each defined global, its integer value if it is an immutable integer constant.
+    let mut global_ints: Vec<Option<codegen::ConstInt>> = Vec::new();
     let mut elements: Vec<codegen::ElemSegment> = Vec::new();
     let mut data: Vec<codegen::DataSegment> = Vec::new();
     let mut imports: Vec<codegen::ImportInfo> = Vec::new();
@@ -517,6 +519,10 @@ where
                 }
             }
             Payload::ElementSection(reader) => {
+                let int_globals = codegen::IntGlobals {
+                    imported: imported_globals.len(),
+                    values: &global_ints,
+                };
                 for element in reader {
                     let element = element?;
                     let mut seg_table: u32 = 0;
@@ -542,9 +548,13 @@ where
                                     .is_some_and(|t| t.table64)
                             };
                             Some(if is64 {
-                                codegen::const_expr_u64_for(offset_expr, "element offset")?
+                                codegen::const_expr_u64_for(
+                                    offset_expr,
+                                    "element offset",
+                                    int_globals,
+                                )?
                             } else {
-                                u64::from(codegen::const_expr_u32(offset_expr)?)
+                                u64::from(codegen::const_expr_u32(offset_expr, int_globals)?)
                             })
                         }
                         ElementKind::Passive => None,
@@ -607,6 +617,16 @@ where
                         imported_globals.len(),
                         &globals,
                     )?;
+                    global_ints.push(
+                        codegen::const_int_value(
+                            &global.init_expr,
+                            codegen::IntGlobals {
+                                imported: imported_globals.len(),
+                                values: &global_ints,
+                            },
+                        )
+                        .filter(|_| !global.ty.mutable),
+                    );
                     // A mutable global is not a constant, so no handle is recorded for it.
                     global_handles.push(
                         ref_const_handle(
@@ -626,13 +646,20 @@ where
                 }
             }
             Payload::DataSection(reader) => {
+                let int_globals = codegen::IntGlobals {
+                    imported: imported_globals.len(),
+                    values: &global_ints,
+                };
                 for segment in reader {
                     let segment = segment?;
                     let (offset, mem_index) = match &segment.kind {
                         DataKind::Active {
                             memory_index,
                             offset_expr,
-                        } => (Some(codegen::const_expr_u64(offset_expr)?), *memory_index),
+                        } => (
+                            Some(codegen::const_expr_u64(offset_expr, int_globals)?),
+                            *memory_index,
+                        ),
                         DataKind::Passive => (None, 0),
                     };
                     data.push(codegen::DataSegment {
