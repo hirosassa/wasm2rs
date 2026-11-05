@@ -363,3 +363,104 @@ fn a_host_serves_random_bytes_numbers_and_the_insecure_seed() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+/// The imports and path strings (at 300 to 400) a program needs to open a file and
+/// read it.
+const FS_IMPORTS: &str = r#"
+  (import "wasi:filesystem/types@0.2.0" "[resource-drop]descriptor" (func $drop_fd (param i32)))
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.read-via-stream" (func $rvs (param i32 i64 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.write-via-stream" (func $wvs (param i32 i64 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]input-stream.read" (func $read (param i32 i64 i32)))
+  (data (i32.const 300) "hello.txt")
+  (data (i32.const 320) "missing")
+  (data (i32.const 340) "../wasm2rs_wasip2_fs_secret.txt")
+  (data (i32.const 380) "/etc/passwd")
+  (data (i32.const 400) "link.txt")
+  (data (i32.const 420) "../wasm2rs_wasip2_fs_root/hello.txt")
+"#;
+
+/// `fs_read` walks the file API on a root holding `hello.txt` ("hello fs") and a
+/// symlink `link.txt` to a file outside it:
+/// `get-directories` is `list<tuple<descriptor, string>>` (12-byte elements),
+/// `open-at` and `read-via-stream` are `result<handle, error-code>` (the handle or the
+/// error's tag byte at `ret + 4`). Error codes: no-entry 20, not-permitted 31, read-only 33.
+const FS: &str = r#"
+  (func (export "fs_read") (local $dir i32) (local $f i32) (local $s i32)
+    (call $dirs (i32.const 200))
+    (if (i32.ne (i32.load (i32.const 204)) (i32.const 1)) (then unreachable))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    ;; the preopen's name is "/"
+    (if (i32.ne (i32.load offset=8 (i32.load (i32.const 200))) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.load offset=4 (i32.load (i32.const 200)))) (i32.const 47)) (then unreachable))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 9) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.load8_u (i32.const 220)) (then unreachable))
+    (local.set $f (i32.load (i32.const 224)))
+    (call $rvs (local.get $f) (i64.const 0) (i32.const 240))
+    (if (i32.load8_u (i32.const 240)) (then unreachable))
+    (local.set $s (i32.load (i32.const 244)))
+    ;; "hell", then the rest, then end of file
+    (call $read (local.get $s) (i64.const 4) (i32.const 260))
+    (if (i32.load8_u (i32.const 260)) (then unreachable))
+    (if (i32.ne (i32.load (i32.load (i32.const 264))) (i32.const 0x6c6c6568)) (then unreachable))
+    (call $read (local.get $s) (i64.const -1) (i32.const 260))
+    (if (i32.ne (i32.load (i32.const 268)) (i32.const 4)) (then unreachable))
+    (call $read (local.get $s) (i64.const 1) (i32.const 260))
+    (if (i32.ne (i32.load8_u (i32.const 260)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 264)) (i32.const 1)) (then unreachable))
+    ;; a second stream at offset 6 starts at "fs"
+    (call $rvs (local.get $f) (i64.const 6) (i32.const 240))
+    (call $read (i32.load (i32.const 244)) (i64.const 8) (i32.const 260))
+    (if (i32.ne (i32.load (i32.const 268)) (i32.const 2)) (then unreachable))
+    (if (i32.ne (i32.load16_u (i32.load (i32.const 264))) (i32.const 0x7366)) (then unreachable))
+    ;; no such file; a path out of the root; an absolute path
+    (call $open (local.get $dir) (i32.const 1) (i32.const 320) (i32.const 7) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.ne (i32.load8_u (i32.const 220)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 224)) (i32.const 20)) (then unreachable))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 340) (i32.const 31) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.ne (i32.load8_u (i32.const 224)) (i32.const 31)) (then unreachable))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 380) (i32.const 11) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.ne (i32.load8_u (i32.const 224)) (i32.const 31)) (then unreachable))
+    ;; `..` is refused even where it would lead back into the root
+    (call $open (local.get $dir) (i32.const 1) (i32.const 420) (i32.const 35) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.ne (i32.load8_u (i32.const 224)) (i32.const 31)) (then unreachable))
+    ;; a symlink under the root that leads out of it
+    (call $open (local.get $dir) (i32.const 1) (i32.const 400) (i32.const 8) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.ne (i32.load8_u (i32.const 224)) (i32.const 31)) (then unreachable))
+    ;; the host is read-only
+    (call $wvs (local.get $f) (i64.const 0) (i32.const 240))
+    (if (i32.ne (i32.load8_u (i32.const 240)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 244)) (i32.const 33)) (then unreachable))
+    (call $drop_fd (local.get $f)))
+"#;
+
+#[cfg(unix)]
+#[test]
+fn a_host_opens_and_reads_files_under_its_preopened_directory() {
+    let root = std::env::temp_dir().join("wasm2rs_wasip2_fs_root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("hello.txt"), "hello fs").unwrap();
+    // a file next to the root, which `../` would reach
+    let secret = root.parent().unwrap().join("wasm2rs_wasip2_fs_secret.txt");
+    std::fs::write(&secret, "no").unwrap();
+    let link = root.join("link.txt");
+    std::fs::remove_file(&link).ok();
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    let init = format!(
+        "P2Host::new(vec![], vec![]).with_preopen(std::path::PathBuf::from({:?}))",
+        root.to_str().unwrap()
+    );
+    let bin = compile(
+        "fs_read",
+        &hello_with(FS_IMPORTS, FS),
+        &init,
+        "inst.fs_read();",
+    );
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
