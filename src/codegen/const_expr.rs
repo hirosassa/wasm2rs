@@ -162,9 +162,11 @@ pub(crate) fn const_expr_to_rust(
                     .ok()
                     .and_then(|i| i.checked_sub(imported))
                     .and_then(|i| defined.get(i))
+                    // Only an immutable global is a constant.
+                    .filter(|g| !g.mutable)
                     .ok_or_else(|| {
                         TranspileError::Unsupported(
-                            "global.get of an imported (or later) global in a constant expression"
+                            "global.get of an imported, mutable or later global in a constant expression"
                                 .into(),
                         )
                     })?;

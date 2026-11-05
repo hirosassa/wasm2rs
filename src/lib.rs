@@ -607,6 +607,7 @@ where
                         imported_globals.len(),
                         &globals,
                     )?;
+                    // A mutable global is not a constant, so no handle is recorded for it.
                     global_handles.push(
                         ref_const_handle(
                             &global.init_expr,
@@ -614,7 +615,8 @@ where
                             imported_globals.len(),
                             &global_handles,
                         )
-                        .ok(),
+                        .ok()
+                        .filter(|_| !global.ty.mutable),
                     );
                     globals.push(codegen::GlobalInfo {
                         ty: global.ty.content_type,
@@ -944,7 +946,7 @@ fn ref_const_handle(
                 .and_then(|i| global_handles.get(i).copied().flatten())
                 .ok_or_else(|| {
                     TranspileError::Unsupported(format!(
-                        "{what} reading an imported (or non-reference) global"
+                        "{what} reading an imported, mutable or non-reference global"
                     ))
                 })
         }

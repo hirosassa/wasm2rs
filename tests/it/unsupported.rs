@@ -68,7 +68,7 @@ fn an_imported_global_table_initializer_is_rejected() {
     // elem_exprs.rs); reading an imported global is not.
     assert_unsupported(
         r#"(module (import "e" "g" (global $g funcref)) (table 1 1 funcref (global.get $g)))"#,
-        "table initializer reading an imported (or non-reference) global",
+        "table initializer reading an imported, mutable or non-reference global",
     );
 }
 
@@ -77,7 +77,31 @@ fn an_imported_global_element_item_is_rejected() {
     assert_unsupported(
         r#"(module (import "e" "g" (global $g funcref))
             (table 1 funcref) (elem (i32.const 0) funcref (global.get $g)))"#,
-        "element segment item reading an imported (or non-reference) global",
+        "element segment item reading an imported, mutable or non-reference global",
+    );
+}
+
+#[test]
+fn a_mutable_global_in_a_global_initializer_is_rejected() {
+    // Only an immutable global is a constant: a mutable one's value can change, so
+    // inlining its initializer would be wrong.
+    assert_unsupported(
+        r#"(module
+             (global $a (mut i32) (i32.const 1))
+             (global $b i32 (global.get $a)))"#,
+        "imported, mutable or later global",
+    );
+}
+
+#[test]
+fn a_mutable_global_element_item_is_rejected() {
+    assert_unsupported(
+        r#"(module
+             (func $f)
+             (global $g (mut funcref) (ref.func $f))
+             (table 1 funcref)
+             (elem (i32.const 0) funcref (global.get $g)))"#,
+        "element segment item reading an imported, mutable or non-reference global",
     );
 }
 
@@ -181,7 +205,7 @@ fn non_constant_global_initializer_is_rejected() {
         r#"(module
              (import "e" "g" (global i32))
              (global i32 (global.get 0)))"#,
-        "imported (or later) global",
+        "imported, mutable or later global",
     );
 }
 
