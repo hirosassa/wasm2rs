@@ -363,7 +363,11 @@ pub(crate) fn rust_type(
         // A `funcref` is a function index and an `externref` is an opaque host
         // handle; both are represented as a `u32` (`u32::MAX` is null), matching
         // the table's element representation.
-        ValType::Ref(rt) if rt.is_func_ref() || rt.is_extern_ref() => Ok("u32"),
+        ValType::Ref(rt)
+            if rt.is_func_ref() || rt.is_extern_ref() || is_exn_heap(rt.heap_type()) =>
+        {
+            Ok("u32")
+        }
         // An abstract GC reference (`any`/`eq`/`i31`/`struct`/`array`/`none`) is a
         // managed `GcRef` handle. An `i31ref` rides as the `GcRef::I31` variant so
         // it can flow through an `anyref`/`eqref` alongside heap objects.
@@ -383,6 +387,17 @@ pub(crate) fn rust_type(
         ValType::V128 => Ok("u128"),
         other => Err(TranspileError::Unsupported(format!("value type {other:?}"))),
     }
+}
+/// Whether a heap type is the abstract `exn` type: an `exnref` is a `u32` handle
+/// into the exception store.
+pub(crate) fn is_exn_heap(hty: HeapType) -> bool {
+    matches!(
+        hty,
+        HeapType::Abstract {
+            ty: AbstractHeapType::Exn,
+            ..
+        }
+    )
 }
 /// Whether a heap type is one of the abstract GC heap types (`any`/`eq`/`i31`/
 /// `struct`/`array`/`none`), which lower to the managed `GcRef` value model. The
@@ -450,6 +465,7 @@ pub(crate) fn default_value(ty: ValType, kinds: &[CompositeKind]) -> &'static st
         ValType::Ref(rt)
             if rt.is_func_ref()
                 || rt.is_extern_ref()
+                || is_exn_heap(rt.heap_type())
                 || matches!(rt.heap_type(), HeapType::Concrete(_)) =>
         {
             "u32::MAX"

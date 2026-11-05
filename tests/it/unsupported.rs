@@ -106,23 +106,6 @@ fn a_mutable_global_element_item_is_rejected() {
 }
 
 #[test]
-fn a_try_table_catch_all_ref_with_an_exnref_result_is_rejected() {
-    // `catch $tag $l` and `catch_all $l` are lowered (see try_table.rs); the
-    // `_ref` forms capture the exception as an `exnref`, which has no lowering yet
-    // (the `exnref` value type is rejected before the clause itself is reached).
-    assert_unsupported(
-        r#"(module
-            (tag $e)
-            (func (result exnref)
-              (block $b (result exnref)
-                try_table (result exnref) (catch_all_ref $b)
-                  ref.null exn
-                end)))"#,
-        "exnref",
-    );
-}
-
-#[test]
 fn br_table_out_of_try_body_is_rejected() {
     // A `br` and `br_if` escaping a `try` body are lowered via a closure-outcome
     // signal, but a `br_table` whose arms leave the body (mixing escaping and
@@ -165,19 +148,6 @@ fn multi_value_import_result_is_rejected() {
     assert_unsupported(
         r#"(module (import "e" "f" (func (result i32 i32))))"#,
         "multi-value import result",
-    );
-}
-
-#[test]
-fn throw_ref_is_rejected_with_the_operator_named() {
-    // A not-yet-implemented operator (here `throw_ref`, the exnref half of the
-    // exception-handling proposal) is rejected with the operator named, so the gap
-    // is diagnosable rather than a generic failure.
-    assert_unsupported(
-        r#"(module
-            (func (param exnref)
-              (throw_ref (local.get 0))))"#,
-        "ThrowRef",
     );
 }
 
@@ -384,10 +354,10 @@ fn continuation_body_also_called_directly_is_rejected() {
 fn ref_null_of_a_non_reference_heaptype_is_rejected() {
     // `funcref`/`externref` nulls lower to the `u32::MAX` sentinel and the
     // abstract GC heaptypes (`any`/`eq`/`struct`/`array`/`none`) lower to the
-    // managed `GcRef::Null`. An `exn` (exception) reference has neither
-    // representation, so it is rejected by name rather than mistranslated.
+    // managed `GcRef::Null`. A `noexn` null has neither representation, so it is
+    // rejected by name rather than mistranslated.
     assert_unsupported(
-        r#"(module (func (result i32) (ref.is_null (ref.null exn))))"#,
+        r#"(module (func (result i32) (ref.is_null (ref.null noexn))))"#,
         "ref.null of unsupported type",
     );
 }
@@ -704,17 +674,11 @@ fn a_try_table_clause_branching_to_a_try_whose_handler_it_is_in_is_rejected() {
 }
 
 #[test]
-fn a_try_table_catch_ref_clause_is_rejected_by_name() {
-    // The transpiler does not validate, so a `catch_ref` / `catch_all_ref` clause
-    // is reached (and rejected) even when its label has no `exnref` type.
-    for clause in ["(catch_ref $e $b)", "(catch_all_ref $b)"] {
-        assert_unsupported(
-            &format!(
-                r#"(module
-                    (tag $e)
-                    (func (block $b (try_table {clause}))))"#
-            ),
-            "catch_ref",
-        );
-    }
+fn an_exnref_table_is_rejected() {
+    // An `exnref` is a handle into a per-thread store, which a table does not
+    // model, so a table of them is rejected by its element type.
+    assert_unsupported(
+        r#"(module (table 1 exnref))"#,
+        "table of a non-funcref/externref type",
+    );
 }

@@ -65,7 +65,7 @@ base feature set. Findings of a non-base profile are saved as
 | `simd` | SIMD | 281 match, 19 skip |
 | `tail-call` | `return_call`, `return_call_indirect` | 271 match, 29 skip |
 | `extended-const` | arithmetic in constant expressions | 278 match, 22 skip (was 36 unsupported, now supported) |
-| `exceptions` | `try_table`, `throw`, `exnref` | 186 match, 19 skip, 95 unsupported (all `exnref`) |
+| `exceptions` | `try_table`, `throw`, `exnref` | 222 match, 19 skip, 59 unsupported (exnref tables and `br_table` out of a `try`), no mismatch |
 
 Only memory 0 is hashed, so a bug confined to another memory shows up only through
 a call's result or trap.
@@ -83,9 +83,10 @@ New-profile findings (seeds 0–299):
   These are now supported and the profile has no findings.
 - `extended-const`: 36 modules were `unsupported` for `i32`/`i64` `add`, `sub` or `mul` in
   a global initializer. These are now supported and the profile has no findings.
-- `exceptions`: `try_table` with `catch`/`catch_all` clauses is now supported. The
-  remaining `unsupported` modules all use `exnref` (values, tables, `ref.null exn`,
-  `catch_ref`, `throw_ref`). Earlier, 9 modules
+- `exceptions`: `try_table` (including `catch_ref` / `catch_all_ref`) and `exnref`
+  values, `ref.null exn` and `throw_ref` are now supported. The remaining
+  `unsupported` modules (59 of 300 seeds) use an `exnref` table or a `br_table` out of
+  a `try`. Earlier, 9 modules
   were `BROKEN` with `transpile: operand stack underflow`: a `try_table` in unreachable
   code was not counted as a nested region. Fixed; the profile now has no broken modules.
 - `tail-call`: no findings.

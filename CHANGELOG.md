@@ -11,9 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Support for `try_table` with `catch $tag $label` and `catch_all $label` clauses
   (the exception-handling proposal's structured form), lowered through the legacy
-  `try`/`catch` machinery. The `_ref` clauses, `throw_ref` and `exnref` values are
-  still unsupported. The spec harness replays `assert_exception`, and `throw.wast`
-  and `try_table.wast` are vendored.
+  `try`/`catch` machinery. The spec harness replays `assert_exception`, and
+  `throw.wast` and `try_table.wast` are vendored.
+- Support for `exnref`: the `catch_ref` / `catch_all_ref` clauses of `try_table`,
+  `throw_ref`, `ref.null exn`, and `exnref` locals, parameters, results and
+  globals. An `exnref` is a `u32` handle into a per-thread store of captured
+  exceptions (entries are never freed, and a handle is only valid on the thread
+  that captured it); `throw_ref` of a null reference traps. An
+  `exnref` table or an exception payload of a reference type is still rejected.
+  `throw_ref.wast` is vendored.
 - Support for `ref.null` items in element segments (funcref and externref) and for a
   table initializer expression (`(table 2 funcref (ref.func $f))` fills the initial
   entries with `$f`; `(ref.null func)` is the null default).

@@ -99,10 +99,19 @@ pub(crate) struct TryState {
     /// Whether a `delegate` bypasses this try's body, so its landing pad must
     /// first unwrap a [`Rt::DelegateExc`](super::Rt::DelegateExc) and re-raise.
     pub(crate) unwrap_delegate: bool,
-    /// The `catch`/`catch_all` clauses of a `try_table` (tag, label relative to the
-    /// `try_table`'s own position), lowered to handlers when the region ends.
+    /// The clauses of a `try_table`, lowered to handlers when the region ends.
     /// Empty for a legacy `try`.
-    pub(crate) table_catches: Vec<(Option<u32>, u32)>,
+    pub(crate) table_catches: Vec<TableCatch>,
+}
+/// One `try_table` catch clause.
+pub(crate) struct TableCatch {
+    /// The tag it catches (`None` for `catch_all`).
+    pub(crate) tag: Option<u32>,
+    /// The branch target, relative to the `try_table`'s own position.
+    pub(crate) label: u32,
+    /// Whether the clause also passes the caught exception as an `exnref`
+    /// (`catch_ref` / `catch_all_ref`).
+    pub(crate) capture: bool,
 }
 /// A branch that leaves a `try` body, recorded so the try's post-`match`
 /// dispatch can re-issue it outside the `catch_unwind` closure (as a direct

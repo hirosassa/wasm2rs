@@ -4,7 +4,7 @@ use wasmparser::{BlockType, ValType};
 
 use super::super::{
     BrArm, BranchEscape, CatchArm, CatchKind, EXC_TYPE, Frame, FrameKind, Node, RegionNode, Rt,
-    TryRegionNode, TryState, Val, condition_code, decode_exc_value, default_value,
+    TableCatch, TryRegionNode, TryState, Val, condition_code, decode_exc_value, default_value,
     encode_exc_value, index_u32, reachable_after, rust_type,
 };
 use super::{CatchPhase, TryBarrier};
@@ -240,8 +240,13 @@ impl<'a> super::FuncGen<'a> {
                 .and_then(|f| f.try_state.as_mut())
                 .map(|ts| mem::take(&mut ts.table_catches))
                 .unwrap_or_default();
-            for (tag, label) in clauses {
-                self.handle_catch(tag)?;
+            for TableCatch {
+                tag,
+                label,
+                capture,
+            } in clauses
+            {
+                self.handle_catch_capturing(tag, capture)?;
                 self.branch(label.saturating_add(1), None)?;
             }
             return self.handle_try_end();
@@ -942,11 +947,11 @@ impl<'a> super::FuncGen<'a> {
     }
 
     /// [`Self::open_try`] for a region that also carries a `try_table`'s catch
-    /// clauses (tag, label), which become handlers when it ends.
+    /// clauses, which become handlers when it ends.
     fn open_try_with(
         &mut self,
         blockty: wasmparser::BlockType,
-        table_catches: Vec<(Option<u32>, u32)>,
+        table_catches: Vec<TableCatch>,
     ) -> Result<(), TranspileError> {
         self.uses_eh = true;
         self.push_frame(FrameKind::Block, blockty, None)?;
@@ -978,36 +983,32 @@ impl<'a> super::FuncGen<'a> {
 
     /// `try_table`: opens the same protected region as a legacy `try`, remembering
     /// the catch clauses. Each becomes a handler that branches to its label when
-    /// the region ends (see [`Self::handle_end`]). A clause that captures the
-    /// exception as an `exnref` is not supported.
+    /// the region ends (see [`Self::handle_end`]).
     pub(super) fn open_try_table(
         &mut self,
         table: &wasmparser::TryTable,
     ) -> Result<(), TranspileError> {
-        let clauses = table
-            .catches
-            .iter()
-            .map(|catch| match *catch {
-                wasmparser::Catch::One { tag, label } => Ok((Some(tag), label)),
-                wasmparser::Catch::All { label } => Ok((None, label)),
-                wasmparser::Catch::OneRef { .. } | wasmparser::Catch::AllRef { .. } => {
-                    Err(TranspileError::Unsupported(
-                        "try_table catch_ref / catch_all_ref (exnref)".into(),
-                    ))
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         // The first matching clause wins, so a clause after a `catch_all`, or one
         // repeating an earlier tag, can never run. Dropping it keeps the landing
         // pad's `match` free of unreachable arms.
-        let mut live: Vec<(Option<u32>, u32)> = Vec::new();
-        for (tag, label) in clauses {
-            if live.last().is_some_and(|(last, _)| last.is_none())
-                || live.iter().any(|(seen, _)| tag.is_some() && *seen == tag)
+        let mut live: Vec<TableCatch> = Vec::new();
+        for catch in &table.catches {
+            let (tag, label, capture) = match *catch {
+                wasmparser::Catch::One { tag, label } => (Some(tag), label, false),
+                wasmparser::Catch::OneRef { tag, label } => (Some(tag), label, true),
+                wasmparser::Catch::All { label } => (None, label, false),
+                wasmparser::Catch::AllRef { label } => (None, label, true),
+            };
+            if live.last().is_some_and(|last| last.tag.is_none())
+                || live.iter().any(|seen| tag.is_some() && seen.tag == tag)
             {
                 continue;
             }
-            live.push((tag, label));
+            live.push(TableCatch {
+                tag,
+                label,
+                capture,
+            });
         }
         self.open_try_with(table.ty, live)
     }
@@ -1016,6 +1017,16 @@ impl<'a> super::FuncGen<'a> {
     /// current arm, reset the operand stack, bind the exception payload (for a
     /// tagged catch) and start the handler.
     pub(super) fn handle_catch(&mut self, tag: Option<u32>) -> Result<(), TranspileError> {
+        self.handle_catch_capturing(tag, false)
+    }
+
+    /// [`Self::handle_catch`] that, when `capture` is set, also pushes the caught
+    /// exception as an `exnref` after the payload (`catch_ref` / `catch_all_ref`).
+    fn handle_catch_capturing(
+        &mut self,
+        tag: Option<u32>,
+        capture: bool,
+    ) -> Result<(), TranspileError> {
         // The falling-through arm produces the try's results before it ends.
         if self.reachable {
             self.assign_fallthrough_result()?;
@@ -1038,7 +1049,8 @@ impl<'a> super::FuncGen<'a> {
         let label = frame.label;
 
         // Build the new handler's payload bindings and the operands it pushes.
-        let (new_kind, binds, pushed) = match tag {
+        let exc = format!("{exc_var}.downcast_ref::<{EXC_TYPE}>().unwrap()");
+        let (new_kind, mut binds, mut pushed) = match tag {
             Some(t) => {
                 let params = self
                     .ctx
@@ -1051,8 +1063,7 @@ impl<'a> super::FuncGen<'a> {
                 let mut pushed = Vec::with_capacity(params.len());
                 for (i, ty) in params.iter().enumerate() {
                     let var = format!("__hv{label}_{i}");
-                    let source =
-                        format!("{exc_var}.downcast_ref::<{EXC_TYPE}>().unwrap().values[{i}]");
+                    let source = format!("{exc}.values[{i}]");
                     binds.push(format!(
                         "let {var}: {} = {};",
                         rust_type(*ty, self.ctx.type_kinds)?,
@@ -1069,6 +1080,17 @@ impl<'a> super::FuncGen<'a> {
             }
             None => (CatchKind::All, Vec::new(), Vec::new()),
         };
+        if capture {
+            // The exception lives on in the store; the handler holds its handle.
+            let var = format!("__hx{label}");
+            binds.push(format!("let {var}: u32 = wasm2rs_exn_store({exc});"));
+            pushed.push(Val {
+                code: var,
+                ty: ValType::EXNREF,
+                stable: true,
+                may_trap: false,
+            });
+        }
 
         // Close the previous arm and start the new one.
         if let Some(ts) = self.frames[idx].try_state.as_mut() {
@@ -1217,6 +1239,17 @@ impl<'a> super::FuncGen<'a> {
             "::std::panic::panic_any({EXC_TYPE} {{ tag: {tag_index}u32, values: vec![{}] }});",
             encoded.join(", ")
         ));
+        self.reachable = false;
+        self.dead_nesting = 0;
+        Ok(())
+    }
+
+    /// `throw_ref`: raise the exception an `exnref` holds again. A null reference
+    /// traps.
+    pub(super) fn emit_throw_ref(&mut self) -> Result<(), TranspileError> {
+        self.uses_eh = true;
+        let exn = self.pop()?.code;
+        self.term(format!("::std::panic::panic_any(wasm2rs_exn_load({exn}));"));
         self.reachable = false;
         self.dead_nesting = 0;
         Ok(())

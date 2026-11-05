@@ -196,9 +196,33 @@ const EXC_TYPE: &str = "Wasm2RsException";
 /// of numeric types.
 const EXC_DEF: &str = "\
 #[allow(dead_code)]
+#[derive(Clone)]
 struct Wasm2RsException {
     tag: u32,
     values: Vec<u64>,
+}
+
+// An `exnref` is a handle (`u32::MAX` is null) into this per-thread store of the
+// exceptions `catch_ref` / `catch_all_ref` captured. Entries are never freed.
+thread_local! {
+    static WASM2RS_EXNS: std::cell::RefCell<Vec<Wasm2RsException>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[allow(dead_code)]
+fn wasm2rs_exn_store(exn: &Wasm2RsException) -> u32 {
+    WASM2RS_EXNS.with(|store| {
+        let mut store = store.borrow_mut();
+        store.push(exn.clone());
+        (store.len() - 1) as u32
+    })
+}
+
+#[allow(dead_code)]
+fn wasm2rs_exn_load(handle: u32) -> Wasm2RsException {
+    WASM2RS_EXNS.with(|store| match store.borrow().get(handle as usize) {
+        Some(exn) => exn.clone(),
+        None => panic!(\"null exception reference\"),
+    })
 }";
 /// The managed value model for heap-allocated `struct`/`array` objects (GC
 /// phase 4b). Every managed object — struct or array alike — is an

@@ -36,6 +36,7 @@ mod elem_exprs;
 mod emscripten_pthread;
 mod entry_exports;
 mod exceptions;
+mod exnref;
 mod export_names;
 mod extern_registry;
 mod external_funcref;
