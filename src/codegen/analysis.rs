@@ -388,6 +388,11 @@ pub(crate) fn rust_type(
         other => Err(TranspileError::Unsupported(format!("value type {other:?}"))),
     }
 }
+/// Whether `ty` is a reference lowered to a `u32` handle (`funcref`, `externref`,
+/// `exnref`, a function or continuation reference) rather than a managed `GcRef`.
+pub(crate) fn is_u32_ref(ty: ValType, kinds: &[CompositeKind]) -> Result<bool, TranspileError> {
+    Ok(matches!(ty, ValType::Ref(_)) && rust_type(ty, kinds)? == "u32")
+}
 /// Whether a heap type is the abstract `exn` type: an `exnref` is a `u32` handle
 /// into the exception store.
 pub(crate) fn is_exn_heap(hty: HeapType) -> bool {
@@ -489,6 +494,40 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn only_references_lowered_to_a_u32_handle_are_u32_refs() {
+        use wasmparser::{PackedIndex, RefType};
+        let kinds = [
+            CompositeKind::Func,
+            CompositeKind::Struct(Vec::new()),
+            CompositeKind::Cont(0),
+        ];
+        let concrete = |idx: u32| {
+            ValType::Ref(RefType::concrete(
+                true,
+                PackedIndex::from_module_index(idx).unwrap(),
+            ))
+        };
+        for handle in [
+            ValType::FUNCREF,
+            ValType::EXTERNREF,
+            ValType::EXNREF,
+            concrete(0),
+            concrete(2),
+        ] {
+            assert!(is_u32_ref(handle, &kinds).unwrap(), "{handle:?}");
+        }
+        for other in [
+            ValType::I32,
+            ValType::F64,
+            ValType::V128,
+            concrete(1),
+            ValType::Ref(RefType::ANYREF),
+        ] {
+            assert!(!is_u32_ref(other, &kinds).unwrap(), "{other:?}");
+        }
     }
 
     #[test]

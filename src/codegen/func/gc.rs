@@ -39,11 +39,7 @@ impl SlotShape {
             // A funcref/externref (abstract or a concrete function-type index)
             // lowers to a `u32`, so it needs the `GcSlot::Func` slot rather than
             // the `GcSlot::Ref` (`GcRef`) one used by managed struct/array refs.
-            StorageType::Val(ty @ ValType::Ref(_))
-                if super::super::rust_type(ty, kinds)? == "u32" =>
-            {
-                SlotShape::Func(ty)
-            }
+            StorageType::Val(ty) if super::super::is_u32_ref(ty, kinds)? => SlotShape::Func(ty),
             StorageType::Val(ty) => SlotShape::Val(ty),
         })
     }
