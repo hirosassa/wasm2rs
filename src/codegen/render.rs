@@ -519,13 +519,16 @@ fn constructor_lines(
         for (i, t) in defined.enumerate() {
             let i = index_u32(i)?;
             let (field, _) = table_accessor(i);
+            let fill = t
+                .init
+                .map_or_else(|| "u32::MAX".to_string(), |f| format!("{f}u32"));
             if !active_elem.iter().any(|seg| seg.table == i) {
-                inner.push(format!("        {field}: vec![u32::MAX; {}],", t.min));
+                inner.push(format!("        {field}: vec![{fill}; {}],", t.min));
             } else {
                 // Start every slot null, then apply each active element segment.
                 inner.push(format!("        {field}: {{"));
                 inner.push(format!(
-                    "            let mut t: Vec<u32> = vec![u32::MAX; {}];",
+                    "            let mut t: Vec<u32> = vec![{fill}; {}];",
                     t.min
                 ));
                 copy_active_elems(inner, i, "t", "            ");

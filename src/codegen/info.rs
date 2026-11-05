@@ -52,6 +52,9 @@ pub(crate) struct TableInfo {
     /// The table's element type (`funcref` or `externref`). Both are stored as a
     /// `u32`, but `table.get` pushes an operand of this type.
     pub element: ValType,
+    /// The function every initial entry holds (`(table 2 funcref (ref.func $f))`);
+    /// `None` starts them null.
+    pub init: Option<u32>,
 }
 
 /// One element segment: function indices for the table. `offset` is `Some` for

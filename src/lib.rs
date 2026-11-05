@@ -479,13 +479,21 @@ where
                             "multiple tables with an imported table".into(),
                         ));
                     }
-                    // Only a null-initialised table is supported; its entries
-                    // come from active element segments.
-                    if !matches!(table_entry.init, TableInit::RefNull) {
-                        return Err(TranspileError::Unsupported(
-                            "table with an initializer expression".into(),
-                        ));
-                    }
+                    // A `ref.null` table starts null (its entries come from active
+                    // element segments); a `ref.func` one starts filled with that function.
+                    let init = match &table_entry.init {
+                        TableInit::RefNull => None,
+                        TableInit::Expr(expr) => match ref_const_handle(expr, "table initializer")?
+                        {
+                            u32::MAX => None,
+                            func => {
+                                // Reachable even if the table is never read: it is seeded
+                                // at instantiation, like a `ref.func` in a global.
+                                global_funcs.push(func);
+                                Some(func)
+                            }
+                        },
+                    };
                     let min = u32::try_from(ty.initial)
                         .map_err(|_| TranspileError::Unsupported("table too large".into()))?;
                     let info = codegen::TableInfo {
@@ -494,6 +502,7 @@ where
                         imported: false,
                         table64: ty.table64,
                         element: ValType::Ref(ty.element_type),
+                        init,
                     };
                     if table.is_none() {
                         table = Some(info);
@@ -557,22 +566,11 @@ where
                             indices
                         }
                         // Expression items (the form a typed-funcref table uses) are
-                        // supported when each is a plain `ref.func`.
+                        // supported when each is a plain `ref.func` or `ref.null`.
                         ElementItems::Expressions(_, reader) => {
                             let mut indices = Vec::new();
                             for expr in reader {
-                                let mut ops = expr?.get_operators_reader();
-                                match (ops.read()?, ops.read()?) {
-                                    (
-                                        wasmparser::Operator::RefFunc { function_index },
-                                        wasmparser::Operator::End,
-                                    ) => indices.push(function_index),
-                                    _ => {
-                                        return Err(TranspileError::Unsupported(
-                                            "element segment with expression items".into(),
-                                        ));
-                                    }
-                                }
+                                indices.push(ref_const_handle(&expr?, "element segment item")?);
                             }
                             indices
                         }
@@ -858,6 +856,7 @@ fn classify_import(
                 imported: true,
                 table64: false,
                 element: ValType::Ref(table_ty.element_type),
+                init: None,
             });
             Ok(())
         }
@@ -872,6 +871,22 @@ fn signature_from(func_ty: &FuncType) -> Signature {
     Signature {
         params: func_ty.params().to_vec(),
         results: func_ty.results().to_vec(),
+    }
+}
+
+/// The table-slot handle of a constant reference expression: the function
+/// index for `ref.func`, `u32::MAX` (null) for `ref.null`. Anything else (e.g.
+/// `global.get`) is unsupported.
+fn ref_const_handle(expr: &wasmparser::ConstExpr<'_>, what: &str) -> Result<u32, TranspileError> {
+    let mut ops = expr.get_operators_reader();
+    match (ops.read()?, ops.read()?) {
+        (wasmparser::Operator::RefFunc { function_index }, wasmparser::Operator::End) => {
+            Ok(function_index)
+        }
+        (wasmparser::Operator::RefNull { .. }, wasmparser::Operator::End) => Ok(u32::MAX),
+        _ => Err(TranspileError::Unsupported(format!(
+            "{what} that is not ref.func or ref.null"
+        ))),
     }
 }
 
