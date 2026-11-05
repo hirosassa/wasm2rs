@@ -547,7 +547,8 @@ where
                                     .and_then(|i| extra_tables.get(i))
                                     .is_some_and(|t| t.table64)
                             };
-                            let constant = if is64 {
+                            let wide = is64;
+                            let constant = if wide {
                                 codegen::const_expr_u64_for(
                                     offset_expr,
                                     "element offset",
@@ -559,7 +560,7 @@ where
                             Some(segment_offset(
                                 offset_expr,
                                 constant,
-                                is64,
+                                wide,
                                 &type_kinds,
                                 &imported_globals,
                                 &globals,
@@ -998,6 +999,59 @@ fn signature_from(func_ty: &FuncType) -> Signature {
     }
 }
 
+/// Whether a constant expression reads an imported global (its value is the host's).
+fn reads_imported_global(
+    expr: &wasmparser::ConstExpr<'_>,
+    imported: usize,
+) -> Result<bool, TranspileError> {
+    for op in expr.get_operators_reader() {
+        if let wasmparser::Operator::GlobalGet { global_index } = op?
+            && usize::try_from(global_index).is_ok_and(|i| i < imported)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The transpiler does not run the validator, so a runtime offset's operands are
+/// checked here: every `global.get` and constant must have the offset's width
+/// (`i64` when `wide`, else `i32`), as the constant path insists.
+fn check_offset_width(
+    expr: &wasmparser::ConstExpr<'_>,
+    wide: bool,
+    imported_globals: &[codegen::ImportedGlobalInfo],
+    globals: &[codegen::GlobalInfo],
+) -> Result<(), TranspileError> {
+    use wasmparser::Operator::{
+        GlobalGet, I32Add, I32Const, I32Mul, I32Sub, I64Add, I64Const, I64Mul, I64Sub,
+    };
+    let width = if wide { ValType::I64 } else { ValType::I32 };
+    let mismatch = || {
+        TranspileError::Unsupported(format!(
+            "segment offset: operand type mismatch (expected {width})"
+        ))
+    };
+    for op in expr.get_operators_reader() {
+        match op? {
+            GlobalGet { global_index } => {
+                let index = usize::try_from(global_index).ok();
+                let ty = index.and_then(|i| match i.checked_sub(imported_globals.len()) {
+                    Some(defined) => globals.get(defined).map(|g| g.ty),
+                    None => imported_globals.get(i).map(|g| g.ty),
+                });
+                if ty != Some(width) {
+                    return Err(mismatch());
+                }
+            }
+            I32Const { .. } | I32Add | I32Sub | I32Mul if wide => return Err(mismatch()),
+            I64Const { .. } | I64Add | I64Sub | I64Mul if !wide => return Err(mismatch()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// An active segment's offset. `constant` is its value evaluated now; when that
 /// failed because the expression reads an imported global (only the host knows it),
 /// the offset becomes a Rust expression evaluated when the instance is built.
@@ -1014,17 +1068,10 @@ fn segment_offset(
         Ok(value) => return Ok(codegen::SegOffset::Const(value)),
         Err(err) => err,
     };
-    let mut reads_import = false;
-    for op in expr.get_operators_reader() {
-        if let wasmparser::Operator::GlobalGet { global_index } = op?
-            && usize::try_from(global_index).is_ok_and(|i| i < imported_globals.len())
-        {
-            reads_import = true;
-        }
-    }
-    if !reads_import {
+    if !reads_imported_global(expr, imported_globals.len())? {
         return Err(err);
     }
+    check_offset_width(expr, wide, imported_globals, globals)?;
     let rust = codegen::const_expr_to_rust(expr, type_kinds, imported_globals, globals)?;
     Ok(codegen::SegOffset::Runtime(if wide {
         format!("({rust}) as u64")

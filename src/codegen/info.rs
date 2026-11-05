@@ -70,7 +70,6 @@ pub(crate) enum TableFill {
 /// Where an active segment lands. Usually a constant, spelled into the generated
 /// source; a constant expression reading an imported global is only known to the
 /// host, so it is evaluated when the instance is built.
-#[derive(Clone)]
 pub(crate) enum SegOffset {
     /// A 64-bit table's or memory's segment can lie above 4 GiB, so it is a `u64`.
     Const(u64),
@@ -78,8 +77,20 @@ pub(crate) enum SegOffset {
     Runtime(String),
 }
 
+impl SegOffset {
+    /// A segment's constant base and, for a runtime offset, its expression. A
+    /// passive segment has no offset: `(0, None)`.
+    pub(crate) fn split(offset: Option<&Self>) -> (u64, Option<&str>) {
+        match offset {
+            Some(Self::Const(value)) => (*value, None),
+            Some(Self::Runtime(expr)) => (0, Some(expr.as_str())),
+            None => (0, None),
+        }
+    }
+}
+
 /// One element segment: function indices for the table. `offset` is `Some` for
-/// an active segment (written at that constant offset during instantiation) and
+/// an active segment (written at its offset during instantiation) and
 /// `None` for a passive one (retained for `table.init`). A `declared` segment
 /// (neither active nor passive) has no runtime effect but still occupies a slot
 /// so that `table.init`/`elem.drop` indices stay aligned with the wasm element
@@ -87,7 +98,6 @@ pub(crate) enum SegOffset {
 pub(crate) struct ElemSegment {
     /// The table an active segment initialises (0 for a passive or declared one).
     pub table: u32,
-    /// A 64-bit table's segment can lie above 4 GiB, so the offset is a `u64`.
     pub offset: Option<SegOffset>,
     pub declared: bool,
     pub funcs: Vec<u32>,
@@ -99,7 +109,7 @@ pub(crate) struct ElemSegment {
 }
 
 /// One data segment: raw bytes for linear memory. `offset` is `Some` for an
-/// active segment (written at that constant offset during instantiation) and
+/// active segment (written at its offset during instantiation) and
 /// `None` for a passive one (retained for `memory.init`). `mem_index` is the
 /// linear memory the (active) segment initialises; it is 0 for a passive
 /// segment (which names no memory until a `memory.init` selects one).

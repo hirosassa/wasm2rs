@@ -459,50 +459,46 @@ fn constructor_lines(
         ("    Self {", "    }")
     };
 
-    // The value of a segment offset that reads the host: `host` names the host
-    // (`imports`, the constructor's parameter, or `instance.imports` once it has
-    // been moved into the built instance), bound to `imports` for the expression.
-    let runtime_offset = |expr: &str, host: &str| format!("{{ let imports = &{host}; {expr} }}");
+    // Open a block that reads a runtime segment offset once, as `off`. `host` names
+    // the host the offset reads (`imports`, the constructor's parameter, or
+    // `instance.imports` once it has been moved into the built instance), bound to
+    // `imports` for the expression. An offset that does not fit in memory saturates
+    // to `usize::MAX`, which is out of bounds in the target. The caller closes the
+    // block.
+    let open_runtime_offset = |lines: &mut Vec<String>, expr: &str, host: &str, indent: &str| {
+        lines.push(format!("{indent}{{"));
+        lines.push(format!(
+            "{indent}    let off = usize::try_from({{ let imports = &{host}; {expr} }}).unwrap_or(usize::MAX);"
+        ));
+    };
 
     // Emit `<target>[off..end].copy_from_slice(&DATA{d});` for each active data
     // segment targeting memory `mem`; `target` is a defined buffer (`m`) or the
     // host buffer accessor (`instance.mem_mut()`), `host` names the host a
     // runtime offset reads, and `indent` matches the surrounding block.
-    let copy_active_data = |lines: &mut Vec<String>,
-                            mem: u32,
-                            target: &str,
-                            host: &str,
-                            indent: &str| {
-        for (d, seg) in active_for(mem) {
-            let len = u64::try_from(seg.bytes.len()).unwrap_or(u64::MAX);
-            if let Some(SegOffset::Runtime(expr)) = &seg.offset {
-                // Known only at instantiation: an end that would overflow
-                // saturates and is then out of bounds in the target.
-                let off = runtime_offset(expr, host);
-                lines.push(format!("{indent}{{"));
+    let copy_active_data =
+        |lines: &mut Vec<String>, mem: u32, target: &str, host: &str, indent: &str| {
+            for (d, seg) in active_for(mem) {
+                let len = u64::try_from(seg.bytes.len()).unwrap_or(u64::MAX);
+                let (base, runtime) = SegOffset::split(seg.offset.as_ref());
+                if let Some(expr) = runtime {
+                    open_runtime_offset(lines, expr, host, indent);
+                    let copy = format!(
+                        "{target}[off..off.saturating_add({len})].copy_from_slice(&DATA{d});"
+                    );
+                    lines.push(format!("{indent}    {copy}"));
+                    lines.push(format!("{indent}}}"));
+                    continue;
+                }
+                // The offset is only spelled into the generated source, so it stays a
+                // `u64` (a 64-bit memory's segment can lie above 4 GiB); an end that
+                // would overflow saturates and is then out of bounds in the target.
+                let end = base.saturating_add(len);
                 lines.push(format!(
-                    "{indent}    let off = usize::try_from({off}).unwrap_or(usize::MAX);"
+                    "{indent}{target}[{base}..{end}].copy_from_slice(&DATA{d});"
                 ));
-                lines.push(format!(
-                        "{indent}    {target}[off..off.saturating_add({len})].copy_from_slice(&DATA{d});"
-                    ));
-                lines.push(format!("{indent}}}"));
-                continue;
             }
-            // The offset is only spelled into the generated source, so it stays
-            // a `u64` (a 64-bit memory's segment can lie above 4 GiB); an end
-            // that would overflow saturates and is then out of bounds in the
-            // target.
-            let off = match &seg.offset {
-                Some(SegOffset::Const(off)) => *off,
-                _ => 0,
-            };
-            let end = off.saturating_add(len);
-            lines.push(format!(
-                "{indent}{target}[{off}..{end}].copy_from_slice(&DATA{d});"
-            ));
-        }
-    };
+        };
 
     // A table holds at most `u32::MAX` entries, so any slot at or above that is out
     // of range: clamping keeps the spelled literal valid on a 32-bit `usize` while
@@ -519,26 +515,14 @@ fn constructor_lines(
             for seg in active_elem.iter().filter(|seg| seg.table == table_idx) {
                 // A runtime offset is read once, in a block of its own; a constant
                 // one is spelled into each slot.
-                let runtime = match &seg.offset {
-                    Some(SegOffset::Runtime(expr)) => Some(expr),
-                    _ => None,
+                let (base, runtime) = SegOffset::split(seg.offset.as_ref());
+                let ind = match runtime {
+                    Some(expr) => {
+                        open_runtime_offset(lines, expr, imports, indent);
+                        format!("{indent}    ")
+                    }
+                    None => indent.to_string(),
                 };
-                let base = match &seg.offset {
-                    Some(SegOffset::Const(off)) => *off,
-                    _ => 0,
-                };
-                let ind = if runtime.is_some() {
-                    format!("{indent}    ")
-                } else {
-                    indent.to_string()
-                };
-                if let Some(expr) = runtime {
-                    let off = runtime_offset(expr, imports);
-                    lines.push(format!("{indent}{{"));
-                    lines.push(format!(
-                        "{ind}let off = usize::try_from({off}).unwrap_or(usize::MAX);"
-                    ));
-                }
                 // An empty segment writes nothing, but an offset past the end of the
                 // table still traps at instantiation: check it with an empty slice.
                 if seg.funcs.is_empty() {
