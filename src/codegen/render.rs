@@ -640,11 +640,12 @@ fn constructor_lines(
             inner.push("    }".to_string());
         }
         inner.push(shared_open.to_string());
+        inner.push("        memory,".to_string());
+        push_common_fields(&mut inner)?;
+        // Last, so a global initializer can still read the host.
         if has_imports {
             inner.push("        imports,".to_string());
         }
-        inner.push("        memory,".to_string());
-        push_common_fields(&mut inner)?;
         inner.push(shared_close.to_string());
         push_start(&mut inner);
         inner.push("}".to_string());
@@ -657,11 +658,12 @@ fn constructor_lines(
         inner.push(String::new());
         inner.push(format!("pub fn with_memory({with_param}) -> Self {{"));
         inner.push(shared_open.to_string());
+        inner.push("        memory: mem,".to_string());
+        push_common_fields(&mut inner)?;
+        // Last, so a global initializer can still read the host.
         if has_imports {
             inner.push("        imports,".to_string());
         }
-        inner.push("        memory: mem,".to_string());
-        push_common_fields(&mut inner)?;
         inner.push(shared_close.to_string());
         push_start(&mut inner);
         inner.push("}".to_string());
@@ -673,9 +675,6 @@ fn constructor_lines(
     } else {
         inner.push(format!("pub fn new({new_param}) -> Self {{"));
         inner.push(open.to_string());
-        if has_imports {
-            inner.push("        imports,".to_string());
-        }
         // Each defined memory's field literal: zero-filled, then each active data
         // segment for that memory copied in. Memory 0 keeps the `memory` field name
         // and the exact single-memory rendering; memory `i > 0` is `memory{i}`.
@@ -707,6 +706,10 @@ fn constructor_lines(
             }
         }
         push_common_fields(&mut inner)?;
+        // Last, so a global initializer can still read the host.
+        if has_imports {
+            inner.push("        imports,".to_string());
+        }
         inner.push(close.to_string());
         if post_init {
             // Copy each active data/element segment into the host-owned storage in

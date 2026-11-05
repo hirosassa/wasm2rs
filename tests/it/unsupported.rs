@@ -89,7 +89,7 @@ fn a_mutable_global_in_a_global_initializer_is_rejected() {
         r#"(module
              (global $a (mut i32) (i32.const 1))
              (global $b i32 (global.get $a)))"#,
-        "imported, mutable or later global",
+        "mutable or later global",
     );
 }
 
@@ -146,14 +146,14 @@ fn non_constant_element_offset_is_rejected() {
 }
 
 #[test]
-fn non_constant_global_initializer_is_rejected() {
-    // Reading an *imported* global in a constant expression needs the host at
-    // construction time and is not supported (a defined one is; see elem_exprs.rs).
+fn a_mutable_imported_global_in_a_global_initializer_is_rejected() {
+    // An immutable imported global is read from the host when the instance is
+    // built (see imports.rs); a mutable one is not a constant.
     assert_unsupported(
         r#"(module
-             (import "e" "g" (global i32))
+             (import "e" "g" (global (mut i32)))
              (global i32 (global.get 0)))"#,
-        "imported, mutable or later global",
+        "mutable or later global",
     );
 }
 

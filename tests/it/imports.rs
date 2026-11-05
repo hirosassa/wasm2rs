@@ -121,6 +121,46 @@ fn imported_immutable_global_is_read_from_host() {
 }
 
 #[test]
+fn a_global_initializer_may_read_an_imported_global() {
+    // The initial value is the host's, read when the instance is built.
+    transpile_compile_run(
+        "global_init_imported",
+        r#"
+        (module
+          (import "env" "base" (global i32))
+          (global (mut i32) (global.get 0))
+          (func (result i32) (global.get 1)))
+        "#,
+        "struct Host;\n    \
+         impl Imports for Host {\n        \
+             fn get_global0(&self) -> i32 { 42 }\n    \
+         }\n    \
+         let mut inst = Instance::new(Host);\n    \
+         assert_eq!(inst.func0(), 42);",
+    );
+}
+
+#[test]
+fn an_extended_const_initializer_combines_an_imported_global() {
+    transpile_compile_run(
+        "global_init_imported_arith",
+        r#"
+        (module
+          (import "env" "base" (global i64))
+          (global $a i64 (i64.add (global.get 0) (i64.const 5)))
+          (global i64 (i64.mul (global.get $a) (i64.const 2)))
+          (func (result i64) (global.get 2)))
+        "#,
+        "struct Host;\n    \
+         impl Imports for Host {\n        \
+             fn get_global0(&self) -> i64 { 10 }\n    \
+         }\n    \
+         let mut inst = Instance::new(Host);\n    \
+         assert_eq!(inst.func0(), 30);",
+    );
+}
+
+#[test]
 fn imported_mutable_global_get_set_with_defined_global() {
     // Global 0 is the imported mutable global (host-backed); global 1 is a
     // defined mutable global, so its field must be named `g1`, not `g0`.

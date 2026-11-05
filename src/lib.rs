@@ -614,7 +614,7 @@ where
                     let init = codegen::const_expr_to_rust(
                         &global.init_expr,
                         &type_kinds,
-                        imported_globals.len(),
+                        &imported_globals,
                         &globals,
                     )?;
                     global_ints.push(
