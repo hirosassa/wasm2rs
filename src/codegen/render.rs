@@ -6,8 +6,8 @@ use super::runtime::render_rt_helpers;
 use super::wasi::share_fd_table;
 use super::{
     ALLOW, DataSegment, ElemSegment, ExportInfo, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
-    ModuleParts, TableFill, WASM_PAGE_SIZE, WasiFn, data_static_line, indent, index_u32, rust_type,
-    rust_types,
+    ModuleParts, SegOffset, TableFill, WASM_PAGE_SIZE, WasiFn, data_static_line, indent, index_u32,
+    rust_type, rust_types,
 };
 use crate::TranspileError;
 use wasmparser::ValType;
@@ -459,17 +459,45 @@ fn constructor_lines(
         ("    Self {", "    }")
     };
 
+    // The value of a segment offset that reads the host: `host` names the host
+    // (`imports`, the constructor's parameter, or `instance.imports` once it has
+    // been moved into the built instance), bound to `imports` for the expression.
+    let runtime_offset = |expr: &str, host: &str| format!("{{ let imports = &{host}; {expr} }}");
+
     // Emit `<target>[off..end].copy_from_slice(&DATA{d});` for each active data
     // segment targeting memory `mem`; `target` is a defined buffer (`m`) or the
-    // host buffer accessor (`instance.mem_mut()`), and `indent` matches the
-    // surrounding block.
-    let copy_active_data = |lines: &mut Vec<String>, mem: u32, target: &str, indent: &str| {
+    // host buffer accessor (`instance.mem_mut()`), `host` names the host a
+    // runtime offset reads, and `indent` matches the surrounding block.
+    let copy_active_data = |lines: &mut Vec<String>,
+                            mem: u32,
+                            target: &str,
+                            host: &str,
+                            indent: &str| {
         for (d, seg) in active_for(mem) {
-            // The offset is only spelled into the generated source, so it stays a
-            // `u64` (a 64-bit memory's segment can lie above 4 GiB); an end that
-            // would overflow saturates and is then out of bounds in the target.
-            let off = seg.offset.unwrap_or(0);
-            let end = off.saturating_add(u64::try_from(seg.bytes.len()).unwrap_or(u64::MAX));
+            let len = u64::try_from(seg.bytes.len()).unwrap_or(u64::MAX);
+            if let Some(SegOffset::Runtime(expr)) = &seg.offset {
+                // Known only at instantiation: an end that would overflow
+                // saturates and is then out of bounds in the target.
+                let off = runtime_offset(expr, host);
+                lines.push(format!("{indent}{{"));
+                lines.push(format!(
+                    "{indent}    let off = usize::try_from({off}).unwrap_or(usize::MAX);"
+                ));
+                lines.push(format!(
+                        "{indent}    {target}[off..off.saturating_add({len})].copy_from_slice(&DATA{d});"
+                    ));
+                lines.push(format!("{indent}}}"));
+                continue;
+            }
+            // The offset is only spelled into the generated source, so it stays
+            // a `u64` (a 64-bit memory's segment can lie above 4 GiB); an end
+            // that would overflow saturates and is then out of bounds in the
+            // target.
+            let off = match &seg.offset {
+                Some(SegOffset::Const(off)) => *off,
+                _ => 0,
+            };
+            let end = off.saturating_add(len);
             lines.push(format!(
                 "{indent}{target}[{off}..{end}].copy_from_slice(&DATA{d});"
             ));
@@ -483,24 +511,51 @@ fn constructor_lines(
 
     // Emit `<target>[idx] = fu32;` for each active element segment entry;
     // `target` is a defined table (`t`) or the host storage accessor
-    // (`instance.table_mut()`).
-    // `imports` names the host an imported-global item reads: the constructor's
-    // parameter, or the built instance's field once it has been moved in.
+    // (`instance.table_mut()`). `imports` names the host an imported-global item or
+    // a runtime offset reads: the constructor's parameter, or the built instance's
+    // field once it has been moved in.
     let copy_active_elems =
         |lines: &mut Vec<String>, table_idx: u32, target: &str, imports: &str, indent: &str| {
             for seg in active_elem.iter().filter(|seg| seg.table == table_idx) {
+                // A runtime offset is read once, in a block of its own; a constant
+                // one is spelled into each slot.
+                let runtime = match &seg.offset {
+                    Some(SegOffset::Runtime(expr)) => Some(expr),
+                    _ => None,
+                };
+                let base = match &seg.offset {
+                    Some(SegOffset::Const(off)) => *off,
+                    _ => 0,
+                };
+                let ind = if runtime.is_some() {
+                    format!("{indent}    ")
+                } else {
+                    indent.to_string()
+                };
+                if let Some(expr) = runtime {
+                    let off = runtime_offset(expr, imports);
+                    lines.push(format!("{indent}{{"));
+                    lines.push(format!(
+                        "{ind}let off = usize::try_from({off}).unwrap_or(usize::MAX);"
+                    ));
+                }
                 // An empty segment writes nothing, but an offset past the end of the
                 // table still traps at instantiation: check it with an empty slice.
                 if seg.funcs.is_empty() {
-                    let off = elem_slot(seg.offset.unwrap_or(0));
-                    lines.push(format!("{indent}let _ = &{target}[{off}..{off}];"));
+                    let off = if runtime.is_some() {
+                        "off".to_string()
+                    } else {
+                        elem_slot(base).to_string()
+                    };
+                    lines.push(format!("{ind}let _ = &{target}[{off}..{off}];"));
                 }
                 for (k, f) in seg.funcs.iter().enumerate() {
-                    let idx = elem_slot(
-                        seg.offset
-                            .unwrap_or(0)
-                            .saturating_add(u64::try_from(k).unwrap_or(u64::MAX)),
-                    );
+                    let idx = if runtime.is_some() {
+                        format!("off.saturating_add({k})")
+                    } else {
+                        elem_slot(base.saturating_add(u64::try_from(k).unwrap_or(u64::MAX)))
+                            .to_string()
+                    };
                     let value = seg
                         .imported_items
                         .iter()
@@ -509,7 +564,10 @@ fn constructor_lines(
                             || format!("{f}u32"),
                             |(_, global)| format!("{imports}.get_global{global}()"),
                         );
-                    lines.push(format!("{indent}{target}[{idx}] = {value};"));
+                    lines.push(format!("{ind}{target}[{idx}] = {value};"));
+                }
+                if runtime.is_some() {
+                    lines.push(format!("{indent}}}"));
                 }
             }
         };
@@ -663,7 +721,7 @@ fn constructor_lines(
         if !active_for(0).is_empty() {
             inner.push("    {".to_string());
             inner.push("        let mut __m = memory.bytes();".to_string());
-            copy_active_data(&mut inner, 0, "__m", "        ");
+            copy_active_data(&mut inner, 0, "__m", "imports", "        ");
             inner.push("    }".to_string());
         }
         inner.push(shared_open.to_string());
@@ -723,7 +781,7 @@ fn constructor_lines(
                 inner.push(format!(
                     "            let mut m: Vec<u8> = vec![0u8; {bytes}];"
                 ));
-                copy_active_data(&mut inner, mem_index, "m", "            ");
+                copy_active_data(&mut inner, mem_index, "m", "imports", "            ");
                 inner.push("            m".to_string());
                 inner.push("        },".to_string());
             }
@@ -735,7 +793,13 @@ fn constructor_lines(
             // order. An out-of-bounds write panics here, faithfully reproducing a
             // wasm instantiation trap when a segment does not fit the host storage.
             if post_init_data {
-                copy_active_data(&mut inner, 0, "instance.mem_mut()", "    ");
+                copy_active_data(
+                    &mut inner,
+                    0,
+                    "instance.mem_mut()",
+                    "instance.imports",
+                    "    ",
+                );
             }
             push_bound_tail(&mut inner);
         }

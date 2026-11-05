@@ -547,15 +547,23 @@ where
                                     .and_then(|i| extra_tables.get(i))
                                     .is_some_and(|t| t.table64)
                             };
-                            Some(if is64 {
+                            let constant = if is64 {
                                 codegen::const_expr_u64_for(
                                     offset_expr,
                                     "element offset",
                                     int_globals,
-                                )?
+                                )
                             } else {
-                                u64::from(codegen::const_expr_u32(offset_expr, int_globals)?)
-                            })
+                                codegen::const_expr_u32(offset_expr, int_globals).map(u64::from)
+                            };
+                            Some(segment_offset(
+                                offset_expr,
+                                constant,
+                                is64,
+                                &type_kinds,
+                                &imported_globals,
+                                &globals,
+                            )?)
                         }
                         ElementKind::Passive => None,
                         // A declared segment has no runtime effect (it only
@@ -674,10 +682,24 @@ where
                         DataKind::Active {
                             memory_index,
                             offset_expr,
-                        } => (
-                            Some(codegen::const_expr_u64(offset_expr, int_globals)?),
-                            *memory_index,
-                        ),
+                        } => {
+                            let wide = usize::try_from(*memory_index)
+                                .ok()
+                                .and_then(|i| memories.get(i))
+                                .is_some_and(|m| m.memory64);
+                            let constant = codegen::const_expr_u64(offset_expr, int_globals);
+                            (
+                                Some(segment_offset(
+                                    offset_expr,
+                                    constant,
+                                    wide,
+                                    &type_kinds,
+                                    &imported_globals,
+                                    &globals,
+                                )?),
+                                *memory_index,
+                            )
+                        }
                         DataKind::Passive => (None, 0),
                     };
                     data.push(codegen::DataSegment {
@@ -974,6 +996,41 @@ fn signature_from(func_ty: &FuncType) -> Signature {
         params: func_ty.params().to_vec(),
         results: func_ty.results().to_vec(),
     }
+}
+
+/// An active segment's offset. `constant` is its value evaluated now; when that
+/// failed because the expression reads an imported global (only the host knows it),
+/// the offset becomes a Rust expression evaluated when the instance is built.
+/// `wide` says whether the offset is an `i64` (a 64-bit memory or table).
+fn segment_offset(
+    expr: &wasmparser::ConstExpr<'_>,
+    constant: Result<u64, TranspileError>,
+    wide: bool,
+    type_kinds: &[codegen::CompositeKind],
+    imported_globals: &[codegen::ImportedGlobalInfo],
+    globals: &[codegen::GlobalInfo],
+) -> Result<codegen::SegOffset, TranspileError> {
+    let err = match constant {
+        Ok(value) => return Ok(codegen::SegOffset::Const(value)),
+        Err(err) => err,
+    };
+    let mut reads_import = false;
+    for op in expr.get_operators_reader() {
+        if let wasmparser::Operator::GlobalGet { global_index } = op?
+            && usize::try_from(global_index).is_ok_and(|i| i < imported_globals.len())
+        {
+            reads_import = true;
+        }
+    }
+    if !reads_import {
+        return Err(err);
+    }
+    let rust = codegen::const_expr_to_rust(expr, type_kinds, imported_globals, globals)?;
+    Ok(codegen::SegOffset::Runtime(if wide {
+        format!("({rust}) as u64")
+    } else {
+        format!("({rust}) as u32 as u64")
+    }))
 }
 
 /// What a constant reference expression denotes: a function index (`u32::MAX`

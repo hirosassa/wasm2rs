@@ -67,6 +67,17 @@ pub(crate) enum TableFill {
     ImportedGlobal(u32),
 }
 
+/// Where an active segment lands. Usually a constant, spelled into the generated
+/// source; a constant expression reading an imported global is only known to the
+/// host, so it is evaluated when the instance is built.
+#[derive(Clone)]
+pub(crate) enum SegOffset {
+    /// A 64-bit table's or memory's segment can lie above 4 GiB, so it is a `u64`.
+    Const(u64),
+    /// A Rust expression of type `u64` that reads the host as `imports`.
+    Runtime(String),
+}
+
 /// One element segment: function indices for the table. `offset` is `Some` for
 /// an active segment (written at that constant offset during instantiation) and
 /// `None` for a passive one (retained for `table.init`). A `declared` segment
@@ -77,7 +88,7 @@ pub(crate) struct ElemSegment {
     /// The table an active segment initialises (0 for a passive or declared one).
     pub table: u32,
     /// A 64-bit table's segment can lie above 4 GiB, so the offset is a `u64`.
-    pub offset: Option<u64>,
+    pub offset: Option<SegOffset>,
     pub declared: bool,
     pub funcs: Vec<u32>,
     /// Active items that read an imported global: `(item index, imported global)`.
@@ -93,7 +104,7 @@ pub(crate) struct ElemSegment {
 /// linear memory the (active) segment initialises; it is 0 for a passive
 /// segment (which names no memory until a `memory.init` selects one).
 pub(crate) struct DataSegment {
-    pub offset: Option<u64>,
+    pub offset: Option<SegOffset>,
     pub mem_index: u32,
     pub bytes: Vec<u8>,
 }

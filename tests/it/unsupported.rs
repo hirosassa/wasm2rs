@@ -145,15 +145,15 @@ fn multi_value_import_result_is_rejected() {
 }
 
 #[test]
-fn non_constant_element_offset_is_rejected() {
-    // The element offset must be a plain `i32.const`; a `global.get` offset
-    // (permitted by wasm) is not supported.
+fn a_mutable_imported_global_element_offset_is_rejected() {
+    // An immutable imported global is read from the host at instantiation (see
+    // imports.rs); a mutable one is not a constant.
     assert_unsupported(
         r#"(module
-             (import "e" "g" (global i32))
+             (import "e" "g" (global (mut i32)))
              (table 1 funcref) (func $f)
              (elem (global.get 0) $f))"#,
-        "element offset",
+        "mutable or later global",
     );
 }
 

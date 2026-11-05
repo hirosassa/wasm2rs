@@ -208,6 +208,90 @@ fn an_active_element_item_may_read_an_imported_funcref_global() {
 }
 
 #[test]
+fn a_data_offset_may_read_an_imported_global() {
+    // The segment lands where the host's global says, resolved at instantiation.
+    transpile_compile_run(
+        "data_offset_imported",
+        r#"
+        (module
+          (import "env" "base" (global i32))
+          (memory 1)
+          (data (global.get 0) "\2a")
+          (func (result i32) (i32.load8_u (i32.const 8))))
+        "#,
+        "struct Host;\n    \
+         impl Imports for Host {\n        \
+             fn get_global0(&self) -> i32 { 8 }\n    \
+         }\n    \
+         let mut inst = Instance::new(Host);\n    \
+         assert_eq!(inst.func0(), 42);",
+    );
+}
+
+#[test]
+fn a_memory64_data_offset_may_read_an_imported_i64_global() {
+    transpile_compile_run(
+        "data_offset_imported64",
+        r#"
+        (module
+          (import "env" "base" (global i64))
+          (memory i64 1)
+          (data (global.get 0) "\2a")
+          (func (result i32) (i32.load8_u (i64.const 8))))
+        "#,
+        "struct Host;\n    \
+         impl Imports for Host {\n        \
+             fn get_global0(&self) -> i64 { 8 }\n    \
+         }\n    \
+         let mut inst = Instance::new(Host);\n    \
+         assert_eq!(inst.func0(), 42);",
+    );
+}
+
+#[test]
+fn an_element_offset_may_combine_an_imported_global_with_extended_const() {
+    // Slot = host's 1 + 1 = 2.
+    transpile_compile_run(
+        "elem_offset_imported",
+        r#"
+        (module
+          (type $t (func (result i32)))
+          (import "env" "base" (global i32))
+          (table 4 funcref)
+          (elem (offset (i32.add (global.get 0) (i32.const 1))) $seven)
+          (func $seven (type $t) (i32.const 7))
+          (func (param i32) (result i32) (call_indirect (type $t) (local.get 0))))
+        "#,
+        "struct Host;\n    \
+         impl Imports for Host {\n        \
+             fn get_global0(&self) -> i32 { 1 }\n    \
+         }\n    \
+         let mut inst = Instance::new(Host);\n    \
+         assert_eq!(inst.func1(2), 7);\n    \
+         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inst.func1(1))).is_err());",
+    );
+}
+
+#[test]
+fn a_data_offset_past_the_end_traps_at_instantiation() {
+    // The host's offset leaves no room for the byte: instantiation traps.
+    transpile_compile_run(
+        "data_offset_imported_oob",
+        r#"
+        (module
+          (import "env" "base" (global i32))
+          (memory 1)
+          (data (global.get 0) "\2a"))
+        "#,
+        "struct Host;\n    \
+         impl Imports for Host {\n        \
+             fn get_global0(&self) -> i32 { 65536 }\n    \
+         }\n    \
+         assert!(std::panic::catch_unwind(|| Instance::new(Host)).is_err());",
+    );
+}
+
+#[test]
 fn imported_mutable_global_get_set_with_defined_global() {
     // Global 0 is the imported mutable global (host-backed); global 1 is a
     // defined mutable global, so its field must be named `g1`, not `g0`.
