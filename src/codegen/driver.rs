@@ -164,10 +164,13 @@ impl ModuleCtx<'_> {
             .map_or(&[], Vec::as_slice)
     }
 
-    /// A call to host method `name` that also hands it the instance. The arguments
-    /// are evaluated first, into a tuple, since they may borrow `self`; the closure
-    /// then only captures the finished values.
+    /// A call to host method `name`. A re-entrant host also gets the instance; the
+    /// arguments are then evaluated first, into a tuple, since they may borrow
+    /// `self`, and the closure only captures the finished values.
     pub(crate) fn host_call(&self, name: &str, arity: usize, arg_list: &str) -> String {
+        if !self.reentrant_imports {
+            return format!("self.imports.{name}({arg_list})");
+        }
         let fields: String = (0..arity).map(|k| format!(", __a.{k}")).collect();
         let tuple = if arity == 0 {
             "()".to_string()
@@ -189,11 +192,7 @@ impl ModuleCtx<'_> {
                 Some(w) => format!("self.{}({arg_list})", w.method()),
                 None => {
                     let name = im.ident.clone().unwrap_or_else(|| format!("import{fidx}"));
-                    if self.reentrant_imports {
-                        self.host_call(&name, im.params.len(), arg_list)
-                    } else {
-                        format!("self.imports.{name}({arg_list})")
-                    }
+                    self.host_call(&name, im.params.len(), arg_list)
                 }
             };
         }

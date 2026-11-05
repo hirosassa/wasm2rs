@@ -22,6 +22,7 @@ const KEYWORDS: &[&str] = &[
 const FIXED: &[&str] = &[
     "new",
     "with_memory",
+    "with_host",
     "memory",
     "imports",
     "main",

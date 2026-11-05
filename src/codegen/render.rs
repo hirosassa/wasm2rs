@@ -837,27 +837,31 @@ fn constructor_lines(
     Ok(inner)
 }
 
-/// The uniform memory accessors (`mem`/`mem_mut`/`memory` for memory 0, then
-/// `mem{i}`/`mem{i}_mut`/`memory{i}`), so the load/store/bulk helpers read the
-/// same regardless of whether a memory is defined (a field) or imported (lent by
-/// the host). A shared module emits none of these — its helpers use
-/// `self.memory.bytes()` directly — so the accessor set is empty there.
 /// `with_host`: lend the host out of `imports` for one call, handing it the
-/// instance, and put it back. A host call reached from inside another one finds
-/// no host and traps.
+/// instance, and put it back, also when the call unwinds (a wasm exception thrown
+/// through the host, or a trap the embedder catches). A host call reached from
+/// inside another one finds no host and traps.
 fn with_host_lines() -> Vec<String> {
     [
         "fn with_host<R>(&mut self, f: impl FnOnce(&mut H, &mut Self) -> R) -> R {",
         "    let mut host = self.imports.take().expect(\"re-entrant import call\");",
-        "    let result = f(&mut host, self);",
+        "    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut host, self)));",
         "    self.imports = Some(host);",
-        "    result",
+        "    match result {",
+        "        Ok(value) => value,",
+        "        Err(payload) => std::panic::resume_unwind(payload),",
+        "    }",
         "}",
     ]
     .map(str::to_string)
     .to_vec()
 }
 
+/// The uniform memory accessors (`mem`/`mem_mut`/`memory` for memory 0, then
+/// `mem{i}`/`mem{i}_mut`/`memory{i}`), so the load/store/bulk helpers read the
+/// same regardless of whether a memory is defined (a field) or imported (lent by
+/// the host). A shared module emits none of these — its helpers use
+/// `self.memory.bytes()` directly — so the accessor set is empty there.
 fn memory_accessor_lines(parts: &ModuleParts<'_>, ctx: &ModuleCtx<'_>) -> Vec<String> {
     let mut inner: Vec<String> = Vec::new();
     for (i, m) in parts
@@ -1790,15 +1794,11 @@ fn dispatch_method_lines(
     if has_imports {
         lines.push("        u32::MAX => trap_indirect_type_mismatch(),".to_string());
         let slot_and_args = format!("h & {EXTERNAL_HANDLE_SLOT_MASK}{sep}{arg_list}");
-        let call = if ctx.reentrant_imports {
-            ctx.host_call(
-                &format!("call_ref_t{type_index}"),
-                sig.params.len() + 1,
-                &slot_and_args,
-            )
-        } else {
-            format!("self.imports.call_ref_t{type_index}({slot_and_args})")
-        };
+        let call = ctx.host_call(
+            &format!("call_ref_t{type_index}"),
+            sig.params.len() + 1,
+            &slot_and_args,
+        );
         lines.push(format!(
             "        h if (h & {EXTERNAL_HANDLE_BIT}) != 0 => {call},"
         ));

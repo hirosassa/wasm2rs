@@ -20,6 +20,8 @@
 
 use std::process::Command;
 
+use crate::common;
+
 fn options() -> wasm2rs::TranspileOptions {
     wasm2rs::TranspileOptions {
         reentrant_imports: true,
@@ -30,30 +32,10 @@ fn options() -> wasm2rs::TranspileOptions {
 fn compile(test: &str, wat: &str, extra: &str) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let generated = wasm2rs::transpile_with_options(&wasm, &options()).expect("transpile ok");
-
-    let dir = std::env::temp_dir().join(format!("wasm2rs_reentrant_{test}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-    std::fs::write(&src, format!("{generated}\n{extra}\n")).expect("write source");
-
-    let out = Command::new("rustc")
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "generated code failed to compile:\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr),
-    );
-    bin
+    common::build(
+        &format!("reentrant_{test}"),
+        &format!("{generated}\n{extra}\n"),
+    )
 }
 
 // Function indices: 0 is the import, 1 is `run`, 2 is `double`, 3 is `again`.
@@ -192,4 +174,73 @@ fn reentrant_imports_changes_nothing_without_a_host_function_import() {
     let plain = wasm2rs::transpile(&wasm).expect("plain");
     let reentrant = wasm2rs::transpile_with_options(&wasm, &options()).expect("reentrant");
     assert_eq!(plain, reentrant);
+}
+
+#[test]
+fn a_caught_exception_thrown_through_a_host_call_leaves_the_host_in_place() {
+    // The host calls a guest function that throws; the exception unwinds through
+    // the import, the guest catches it, and a later import call must still find
+    // its host.
+    let wat = r#"
+        (module
+          (import "env" "imp" (func $imp (param i32) (result i32)))
+          (tag $e (param i32))
+          (func $thrower (param i32) (result i32) (throw $e (local.get 0)))
+          (func (export "run") (result i32)
+            (block $h (result i32)
+              (try_table (result i32) (catch $e $h) (call $imp (i32.const 5))))
+            (call $imp (i32.const 0))
+            drop))
+        "#;
+    let extra = r#"
+        struct Host;
+        impl Imports for Host {
+            fn import0(&mut self, g: &mut Instance<Self>, x: i32) -> i32 {
+                if x != 0 { g.func1(x) } else { 0 }
+            }
+        }
+        fn main() {
+            let mut inst = Instance::new(Host);
+            assert_eq!(inst.func2(), 5);
+        }
+    "#;
+    let bin = compile("unwind", wat, extra);
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn an_export_named_like_the_host_helper_does_not_clash() {
+    let wat = r#"
+        (module
+          (import "env" "imp" (func $imp (param i32) (result i32)))
+          (func (export "with_host") (param i32) (result i32) (call $imp (local.get 0))))
+        "#;
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    let opts = wasm2rs::TranspileOptions {
+        named_exports: true,
+        ..options()
+    };
+    let generated = wasm2rs::transpile_with_options(&wasm, &opts).expect("transpile ok");
+    let extra = r#"
+        struct Host;
+        impl Imports for Host {
+            fn import0(&mut self, _g: &mut Instance<Self>, x: i32) -> i32 { x + 1 }
+        }
+        fn main() {
+            let mut inst = Instance::new(Host);
+            assert_eq!(inst.with_host_(1), 2);
+        }
+    "#;
+    let bin = common::build("reentrant_with_host", &format!("{generated}\n{extra}\n"));
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
