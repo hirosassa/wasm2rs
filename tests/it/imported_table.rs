@@ -183,6 +183,78 @@ fn a_shared_memory_start_function_sees_the_imported_table_elements() {
 }
 
 #[test]
+fn a_trapping_element_leaves_the_imported_memory_untouched() {
+    // Instantiation applies elements before data, so an element that does not fit
+    // the host table traps before any data reaches the host memory.
+    let wat = r#"
+        (module
+          (import "env" "mem" (memory 1))
+          (import "env" "tbl" (table 1 funcref))
+          (elem (i32.const 5) $f)
+          (data (i32.const 0) "\01")
+          (func $f))
+        "#;
+    let extra = r#"
+        static DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        struct Host { mem: Vec<u8>, table: Vec<u32> }
+        impl Drop for Host {
+            fn drop(&mut self) {
+                if self.mem[0] != 0 { DIRTY.store(true, std::sync::atomic::Ordering::SeqCst); }
+            }
+        }
+        impl Imports for Host {
+            fn memory(&self) -> &[u8] { &self.mem }
+            fn memory_mut(&mut self) -> &mut Vec<u8> { &mut self.mem }
+            fn table(&self) -> &[u32] { &self.table }
+            fn table_mut(&mut self) -> &mut Vec<u32> { &mut self.table }
+        }
+        fn main() {
+            let host = Host { mem: vec![0; 65536], table: vec![u32::MAX; 1] };
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Instance::new(host)));
+            assert!(r.is_err(), "the element should trap");
+            assert!(!DIRTY.load(std::sync::atomic::Ordering::SeqCst), "data was written before the trap");
+        }
+    "#;
+    let bin = compile("elem_before_data", wat, extra);
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn a_trapping_element_leaves_an_imported_shared_memory_untouched() {
+    let wat = r#"
+        (module
+          (import "env" "mem" (memory 1 1 shared))
+          (import "env" "tbl" (table 1 funcref))
+          (elem (i32.const 5) $f)
+          (data (i32.const 0) "\01")
+          (func $f))
+        "#;
+    let extra = format!(
+        "{HOST_TABLE}\n\
+         fn main() {{\n    \
+         let m = SharedMemory::new(65536);\n    \
+         let host = Host {{ table: vec![u32::MAX; 1] }};\n    \
+         let m2 = m.clone();\n    \
+         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Instance::new(m2, host)));\n    \
+         assert!(r.is_err(), \"the element should trap\");\n    \
+         assert_eq!(m.bytes()[0], 0, \"data was written before the trap\");\n    \
+         }}"
+    );
+    let bin = compile("shared_elem_before_data", wat, &extra);
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn imported_table_call_indirect_out_of_bounds_traps() {
     let extra = format!(
         "{HOST_TABLE}\n\

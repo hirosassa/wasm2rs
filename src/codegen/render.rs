@@ -651,13 +651,15 @@ fn constructor_lines(
     } else {
         ("    Self {", "    }")
     };
-    // The steps that run on the bound `instance`, in instantiation order: copy the
-    // active elements into the host-owned table, run the start function, return
-    // the instance.
-    let push_bound_tail = |lines: &mut Vec<String>| {
+    // The steps that run on the bound `instance`: copy the active elements into the
+    // host-owned table (`push_bound_elems`), then run the start function and return
+    // the instance (`push_bound_end`). Elements come before data, as in the spec.
+    let push_bound_elems = |lines: &mut Vec<String>| {
         if post_init_elem {
             copy_active_elems(lines, 0, "instance.table_mut()", "instance.imports", "    ");
         }
+    };
+    let push_bound_end = |lines: &mut Vec<String>| {
         if let Some(call) = &start_call {
             lines.push(format!("    {call};"));
         }
@@ -702,7 +704,10 @@ fn constructor_lines(
             };
             inner.push(format!("    let memory = {ctor};"));
         }
-        if !active_for(0).is_empty() {
+        // A host-owned table the elements are copied into after construction must
+        // receive them before the data reaches the (host-visible) memory.
+        let data_after_elems = mem0.imported && post_init_elem && !active_for(0).is_empty();
+        if !active_for(0).is_empty() && !data_after_elems {
             inner.push("    {".to_string());
             inner.push("        let mut __m = memory.bytes();".to_string());
             copy_active_data(&mut inner, 0, "__m", "imports", "        ");
@@ -713,7 +718,14 @@ fn constructor_lines(
         push_common_fields(&mut inner)?;
         inner.push(shared_close.to_string());
         if shared_bind {
-            push_bound_tail(&mut inner);
+            push_bound_elems(&mut inner);
+            if data_after_elems {
+                inner.push("    {".to_string());
+                inner.push("        let mut __m = instance.memory.bytes();".to_string());
+                copy_active_data(&mut inner, 0, "__m", "instance.imports", "        ");
+                inner.push("    }".to_string());
+            }
+            push_bound_end(&mut inner);
         }
         inner.push("}".to_string());
 
@@ -729,7 +741,8 @@ fn constructor_lines(
         push_common_fields(&mut inner)?;
         inner.push(shared_close.to_string());
         if shared_bind {
-            push_bound_tail(&mut inner);
+            push_bound_elems(&mut inner);
+            push_bound_end(&mut inner);
         }
         inner.push("}".to_string());
 
@@ -773,9 +786,9 @@ fn constructor_lines(
         push_common_fields(&mut inner)?;
         inner.push(close.to_string());
         if post_init {
-            // Copy each active data/element segment into the host-owned storage in
-            // order. An out-of-bounds write panics here, faithfully reproducing a
+            // Copy each active element, then data, segment into the host-owned storage. An out-of-bounds write panics here, faithfully reproducing a
             // wasm instantiation trap when a segment does not fit the host storage.
+            push_bound_elems(&mut inner);
             if post_init_data {
                 copy_active_data(
                     &mut inner,
@@ -785,7 +798,7 @@ fn constructor_lines(
                     "    ",
                 );
             }
-            push_bound_tail(&mut inner);
+            push_bound_end(&mut inner);
         }
         inner.push("}".to_string());
     }
