@@ -19,4 +19,4 @@ Not vendored yet: `memory_grow64` and `memory_size` (`memory.grow` does not hono
 memory's declared maximum), and files that need imports or `register` (`elem`, `data`,
 `global`, `table`, `ref_func`, `return_call*`, ...).
 
-`try_table` replays only 2 assertions: its main modules use `exnref` or need `register`/imports, so the rest are skipped and reported. `throw_ref` is not vendored (it needs `exnref`).
+`try_table` replays only 2 assertions: its main modules need imports, so the rest are skipped and reported.

@@ -371,6 +371,10 @@ impl<'a> super::FuncGen<'a> {
                 ty: AbstractHeapType::Extern,
                 ..
             } => ValType::EXTERNREF,
+            HeapType::Abstract {
+                ty: AbstractHeapType::Exn,
+                ..
+            } => ValType::EXNREF,
             // A concrete funcref/contref type index: form the nullable concrete
             // ref type and carry the `u32::MAX` handle. (Struct/array indices are
             // handled earlier by `ref_null_gc`, so anything reaching here is a

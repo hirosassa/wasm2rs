@@ -897,6 +897,7 @@ spec_test! {
     spec_return_call => "return_call",
     spec_return_call_indirect => "return_call_indirect",
     spec_throw => "throw",
+    spec_throw_ref => "throw_ref",
     spec_try_table => "try_table",
 }
 

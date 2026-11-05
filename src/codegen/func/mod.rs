@@ -877,6 +877,7 @@ impl<'a> FuncGen<'a> {
             Operator::Catch { tag_index } => self.handle_catch(Some(tag_index))?,
             Operator::CatchAll => self.handle_catch(None)?,
             Operator::Throw { tag_index } => self.emit_throw(tag_index)?,
+            Operator::ThrowRef => self.emit_throw_ref()?,
             Operator::Rethrow { relative_depth } => self.emit_rethrow(relative_depth)?,
             Operator::Delegate { relative_depth } => self.handle_delegate(relative_depth)?,
             // SIMD/v128 (round 1: foundation). A v128 is a `u128`; see `simd.rs`.
