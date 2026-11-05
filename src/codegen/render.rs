@@ -183,6 +183,9 @@ pub(super) fn render_module_head(
     // this is a straight concatenation.
     let mut inner: Vec<String> = Vec::new();
     inner.extend(constructor_lines(parts, ctx, &layout)?);
+    if ctx.reentrant_imports {
+        inner.extend(with_host_lines());
+    }
     inner.extend(memory_accessor_lines(parts, ctx));
     inner.extend(table_accessor_lines(parts));
     inner.extend(wasi_method_lines(parts.imports, &layout, ctx.memory_shared));
@@ -302,7 +305,13 @@ fn instance_field_lines(
         format!("pub struct Instance{decl_generics} {{"),
     ];
     if layout.has_imports {
-        lines.push("    imports: H,".to_string());
+        // A re-entrant host is lent out for the duration of each import call.
+        let ty = if ctx.reentrant_imports {
+            "Option<H>"
+        } else {
+            "H"
+        };
+        lines.push(format!("    imports: {ty},"));
     }
     // A single defined `shared` memory is a thread-shareable handle (cheap Arc
     // clone) rather than an owned `Vec<u8>`, so sibling instances on other
@@ -635,7 +644,11 @@ fn constructor_lines(
         }
         // Last, so a global initializer above can still read the host.
         if has_imports {
-            inner.push("        imports,".to_string());
+            inner.push(if ctx.reentrant_imports {
+                "        imports: Some(imports),".to_string()
+            } else {
+                "        imports,".to_string()
+            });
         }
         Ok(())
     };
@@ -829,6 +842,22 @@ fn constructor_lines(
 /// same regardless of whether a memory is defined (a field) or imported (lent by
 /// the host). A shared module emits none of these — its helpers use
 /// `self.memory.bytes()` directly — so the accessor set is empty there.
+/// `with_host`: lend the host out of `imports` for one call, handing it the
+/// instance, and put it back. A host call reached from inside another one finds
+/// no host and traps.
+fn with_host_lines() -> Vec<String> {
+    [
+        "fn with_host<R>(&mut self, f: impl FnOnce(&mut H, &mut Self) -> R) -> R {",
+        "    let mut host = self.imports.take().expect(\"re-entrant import call\");",
+        "    let result = f(&mut host, self);",
+        "    self.imports = Some(host);",
+        "    result",
+        "}",
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
 fn memory_accessor_lines(parts: &ModuleParts<'_>, ctx: &ModuleCtx<'_>) -> Vec<String> {
     let mut inner: Vec<String> = Vec::new();
     for (i, m) in parts
@@ -1760,9 +1789,18 @@ fn dispatch_method_lines(
     // `Imports` trait) can receive external handles.
     if has_imports {
         lines.push("        u32::MAX => trap_indirect_type_mismatch(),".to_string());
+        let slot_and_args = format!("h & {EXTERNAL_HANDLE_SLOT_MASK}{sep}{arg_list}");
+        let call = if ctx.reentrant_imports {
+            ctx.host_call(
+                &format!("call_ref_t{type_index}"),
+                sig.params.len() + 1,
+                &slot_and_args,
+            )
+        } else {
+            format!("self.imports.call_ref_t{type_index}({slot_and_args})")
+        };
         lines.push(format!(
-            "        h if (h & {EXTERNAL_HANDLE_BIT}) != 0 => \
-             self.imports.call_ref_t{type_index}(h & {EXTERNAL_HANDLE_SLOT_MASK}{sep}{arg_list}),"
+            "        h if (h & {EXTERNAL_HANDLE_BIT}) != 0 => {call},"
         ));
     }
     lines.push("        _ => trap_indirect_type_mismatch(),".to_string());
@@ -1843,7 +1881,18 @@ fn import_trait_lines(
     table_imported: bool,
     dispatch_sigs: &HashSet<u32>,
 ) -> Result<Vec<String>, TranspileError> {
-    let mut lines = vec!["pub trait Imports {".to_string()];
+    let reentrant = ctx.reentrant_imports;
+    let mut lines = vec![if reentrant {
+        "pub trait Imports: Sized {".to_string()
+    } else {
+        "pub trait Imports {".to_string()
+    }];
+    // A re-entrant method takes the instance right after `self`.
+    let self_params = if reentrant {
+        "&mut self, g: &mut Instance<Self>"
+    } else {
+        "&mut self"
+    };
     // Imported memory: the host lends its buffer for loads/stores/grow.
     if mem_imported {
         lines.push("    fn memory(&self) -> &[u8];".to_string());
@@ -1862,7 +1911,7 @@ fn import_trait_lines(
         if im.wasi.is_some() {
             continue;
         }
-        let mut params = String::from("&mut self");
+        let mut params = String::from(self_params);
         for (k, ty) in im.params.iter().enumerate() {
             params.push_str(&format!(", a{k}: {}", rust_type(*ty, ctx.type_kinds)?));
         }
@@ -1905,7 +1954,11 @@ fn import_trait_lines(
         };
         // Underscore the parameters: the default body ignores them, and an
         // override is free to rename them.
-        let mut params = String::from("&mut self, _slot: u32");
+        let mut params = if reentrant {
+            String::from("&mut self, _g: &mut Instance<Self>, _slot: u32")
+        } else {
+            String::from("&mut self, _slot: u32")
+        };
         for (k, ty) in sig.params.iter().enumerate() {
             params.push_str(&format!(", _a{k}: {}", rust_type(*ty, ctx.type_kinds)?));
         }

@@ -66,7 +66,7 @@ cargo build --release
 ## Usage
 
 ```
-wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]
+wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]
 wasm2rs --dump <input.wasm>
 wasm2rs --extract-core <component.wasm> <output dir>
 ```
@@ -87,6 +87,7 @@ wasm2rs --extract-core <component.wasm> <output dir>
 | `--named-exports` | Also emit a method (or free function, for a stateless module) named after each exported function, e.g. `inst.add(1, 2)`, forwarding to `func{N}`. The name is the export name as a snake_case identifier; a clash with a Rust keyword or a generated member appends `_`, and a duplicate appends `_{function index}`. Off by default. |
 | `--named-imports` | Name the `Imports` trait methods after the imports — `env_log` for `(import "env" "log" …)` — instead of `import{j}`. The name is the module (without a `@version` suffix) and field as snake_case, joined with `_`; a clash with a keyword or another trait member appends `_`, a duplicate appends `_{function index}`. WASI preview1 imports handled natively get no method. Off by default, since renaming breaks existing host implementations. |
 | `--import-memory` | Make the module's own (defined, non-shared) memory 0 host-owned, like an imported memory: the host lends the buffer through `Imports::memory`/`memory_mut` (at least the declared minimum number of pages), so its own methods can read and write guest memory. Active data segments are written into it at instantiation and `memory.grow` resizes it. Needed for imports that take pointers into linear memory, such as the lowered functions of a WASI preview2 component. No effect on a shared memory, a module that already imports its memory, or one without memory. |
+| `--reentrant-imports` | Let the host call back into the guest while an import runs: every `Imports` method takes the `Instance` as its second parameter (`g: &mut Instance<Self>`), so it can call guest functions (`g.func{N}(..)`, e.g. a canonical-ABI `cabi_realloc`) and read or write guest memory (`g.memory()`). The host is lent out for the call, so a guest function reached from inside an import that calls an import again traps. Cannot be combined with `--import-memory`, an imported memory, table or global, or the native `wasi::thread-spawn`. No effect without a host function import. Changes every `Imports` method signature, so it is off by default. |
 | `--extract-core` | Write the core modules of a WebAssembly component to `<output dir>/module{n}.wasm` (in order, nested components included) and list their sizes; each one is a plain module that wasm2rs can transpile. Takes the input and the directory. A component is not transpiled directly. |
 | `--dump` | Print a summary of the module (function/import/export counts, how each import resolves — native WASI or host trait —, memory limits, proposals in use, whether a host `Imports` implementation is needed) and generate no code. Takes only the input file. Works for modules the transpiler would reject. |
 

@@ -120,6 +120,10 @@ pub(crate) struct ModuleCtx<'a> {
     /// default; when set, an out-of-bounds access is undefined behaviour rather
     /// than a wasm trap, so it is only sound for trusted modules.
     pub(crate) unsafe_memory: bool,
+    /// Every `Imports` method receives the `Instance` (see
+    /// `TranspileOptions::reentrant_imports`); `imports` is then an `Option<H>`
+    /// lent out for each host call.
+    pub(crate) reentrant_imports: bool,
     /// Cap on match arms per flattened-dispatch *part* function. When a flattened
     /// `loop { match pc { … } }` has more surviving arms than this, it is split
     /// into `ceil(arms / split_dispatch)` sibling part functions over a shared
@@ -160,6 +164,19 @@ impl ModuleCtx<'_> {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// A call to host method `name` that also hands it the instance. The arguments
+    /// are evaluated first, into a tuple, since they may borrow `self`; the closure
+    /// then only captures the finished values.
+    pub(crate) fn host_call(&self, name: &str, arity: usize, arg_list: &str) -> String {
+        let fields: String = (0..arity).map(|k| format!(", __a.{k}")).collect();
+        let tuple = if arity == 0 {
+            "()".to_string()
+        } else {
+            format!("({arg_list},)")
+        };
+        format!("{{ let __a = {tuple}; self.with_host(|h, g| h.{name}(g{fields})) }}")
+    }
+
     /// The Rust call expression for invoking the function at full index `fidx`
     /// with the given comma-separated argument list. A recognised WASI import is
     /// a native inherent method; any other imported function is dispatched
@@ -170,10 +187,14 @@ impl ModuleCtx<'_> {
             // import is dispatched through the injected host trait.
             return match im.wasi {
                 Some(w) => format!("self.{}({arg_list})", w.method()),
-                None => match &im.ident {
-                    Some(name) => format!("self.imports.{name}({arg_list})"),
-                    None => format!("self.imports.import{fidx}({arg_list})"),
-                },
+                None => {
+                    let name = im.ident.clone().unwrap_or_else(|| format!("import{fidx}"));
+                    if self.reentrant_imports {
+                        self.host_call(&name, im.params.len(), arg_list)
+                    } else {
+                        format!("self.imports.{name}({arg_list})")
+                    }
+                }
             };
         }
         if self.is_method {
@@ -218,6 +239,8 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) start: Option<u32>,
     /// Opt-in unchecked linear-memory access (see [`ModuleCtx::unsafe_memory`]).
     pub(crate) unsafe_memory: bool,
+    /// See [`ModuleCtx::reentrant_imports`].
+    pub(crate) reentrant_imports: bool,
     /// Cap on match arms per flattened-dispatch part function; `0` disables the
     /// split (see [`ModuleCtx::split_dispatch`]).
     pub(crate) split_dispatch: usize,
@@ -423,6 +446,7 @@ pub(crate) fn build_ctx<'a>(
             step_locals,
         },
         unsafe_memory: parts.unsafe_memory,
+        reentrant_imports: parts.reentrant_imports,
         split_dispatch: parts.split_dispatch,
     };
     Ok((ctx, stateful))

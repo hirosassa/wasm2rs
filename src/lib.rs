@@ -171,6 +171,18 @@ pub struct TranspileOptions {
     /// shared memory, a module that already imports its memory, or one without
     /// memory. Off by default, since it adds `Imports` methods the host must implement.
     pub import_memory: bool,
+
+    /// Let the host call back into the guest while an import runs. Every `Imports`
+    /// method then takes the `Instance` as its second parameter (`g: &mut
+    /// Instance<Self>`): the host can call guest functions (`g.func{N}(..)`, for
+    /// example a canonical-ABI `cabi_realloc`) and read or write guest memory
+    /// (`g.memory()`), so no host-owned memory is needed. The host is lent out for
+    /// the duration of the call, so a guest function reached from inside an import
+    /// that calls an import again traps ("re-entrant import call"). Not combinable
+    /// with `import_memory`, an imported memory, table or global, or the native
+    /// `wasi::thread-spawn`. Has no effect on a module without a host function
+    /// import. Off by default, since it changes every `Imports` method signature.
+    pub reentrant_imports: bool,
 }
 
 /// The recommended `Cargo.toml` for a split crate, named `package_name`.
@@ -835,6 +847,28 @@ where
         None => vec![true; funcs.len()],
     };
 
+    // The instance is handed to each host call only when there is a host function
+    // import to hand it to; the host is lent out of `imports`, so nothing else may
+    // read the host while it runs.
+    let reentrant_imports = topts.reentrant_imports && imports.iter().any(|im| im.wasi.is_none());
+    if reentrant_imports {
+        let host_owned = memories.iter().any(|m| m.imported)
+            || table.as_ref().is_some_and(|t| t.imported)
+            || !imported_globals.is_empty();
+        if host_owned {
+            return Err(TranspileError::Unsupported(
+                "reentrant_imports with an imported memory, table or global".into(),
+            ));
+        }
+        if imports
+            .iter()
+            .any(|im| im.wasi.is_some_and(codegen::WasiFn::spawns_threads))
+        {
+            return Err(TranspileError::Unsupported(
+                "reentrant_imports with wasi thread-spawn".into(),
+            ));
+        }
+    }
     let parts = codegen::ModuleParts {
         imports: &imports,
         imported_globals: &imported_globals,
@@ -853,6 +887,7 @@ where
         exports: &exports,
         start,
         unsafe_memory: topts.unsafe_memory,
+        reentrant_imports,
         split_dispatch: topts.split_dispatch,
         jobs: topts.jobs,
         named_exports: topts.named_exports,
