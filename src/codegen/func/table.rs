@@ -5,6 +5,34 @@ use super::super::{CompositeKind, Helper, Val};
 use crate::TranspileError;
 
 impl<'a> super::FuncGen<'a> {
+    pub(super) fn is_table64(&self, table: u32) -> bool {
+        self.ctx
+            .table64
+            .get(table as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// The operand `code` as a slot index (`usize`). A 32-bit table's `i32` is
+    /// read as unsigned; a 64-bit table's `i64` is converted whole, so an index
+    /// above `u32::MAX` stays out of range (a trap) instead of wrapping.
+    pub(super) fn table_index_expr(&self, table: u32, code: &str) -> String {
+        if self.is_table64(table) {
+            format!("usize::try_from(({code}) as u64).unwrap_or(usize::MAX)")
+        } else {
+            format!("({code}) as u32 as usize")
+        }
+    }
+
+    /// The wasm value type of a table's indices, sizes and lengths.
+    fn table_index_ty(&self, table: u32) -> ValType {
+        if self.is_table64(table) {
+            ValType::I64
+        } else {
+            ValType::I32
+        }
+    }
+
     pub(super) fn table_copy(
         &mut self,
         dst_table: u32,
@@ -13,7 +41,8 @@ impl<'a> super::FuncGen<'a> {
         let dst_table = self.require_table_index(dst_table)?;
         let src_table = self.require_table_index(src_table)?;
         let (dest, src, len) = self.pop_bulk_operands()?;
-        if dst_table == 0 && src_table == 0 {
+        let any64 = self.is_table64(dst_table) || self.is_table64(src_table);
+        if dst_table == 0 && src_table == 0 && !any64 {
             self.used_helpers.insert((Helper::TableCopy, 0));
             self.line(format!(
                 "self.table_copy(({}) as u32, ({}) as u32, ({}) as u32);",
@@ -27,6 +56,17 @@ impl<'a> super::FuncGen<'a> {
         // ranges may overlap, so `copy_within` is used.
         let (_, dst_mut) = table_accessor(dst_table);
         let (src_get, _) = table_accessor(src_table);
+        // The length is an `i64` only when both tables are 64-bit.
+        let len_expr = if self.is_table64(dst_table) && self.is_table64(src_table) {
+            format!(
+                "usize::try_from(({}) as u64).unwrap_or(usize::MAX)",
+                len.code
+            )
+        } else {
+            format!("({}) as u32 as usize", len.code)
+        };
+        let src_expr = self.table_index_expr(src_table, &src.code);
+        let dest_expr = self.table_index_expr(dst_table, &dest.code);
         let body = if dst_table == src_table {
             format!("self.{dst_mut}().copy_within(s..s + n, d);")
         } else {
@@ -36,9 +76,7 @@ impl<'a> super::FuncGen<'a> {
             )
         };
         self.line(format!(
-            "{{ let n = ({}) as u32 as usize; let s = ({}) as u32 as usize; \
-             let d = ({}) as u32 as usize; {body} }}",
-            len.code, src.code, dest.code
+            "{{ let n = {len_expr}; let s = {src_expr}; let d = {dest_expr}; {body} }}"
         ));
         Ok(())
     }
@@ -57,7 +95,10 @@ impl<'a> super::FuncGen<'a> {
             .unwrap_or(ValType::FUNCREF);
         let (get, _) = table_accessor(table);
         self.push_trapping(
-            format!("self.{get}()[({}) as u32 as usize]", index.code),
+            format!(
+                "self.{get}()[{}]",
+                self.table_index_expr(table, &index.code)
+            ),
             element,
         )
     }
@@ -71,8 +112,9 @@ impl<'a> super::FuncGen<'a> {
         let index = self.pop()?;
         let (_, get_mut) = table_accessor(table);
         self.line(format!(
-            "self.{get_mut}()[({}) as u32 as usize] = ({}) as u32;",
-            index.code, value.code
+            "self.{get_mut}()[{}] = ({}) as u32;",
+            self.table_index_expr(table, &index.code),
+            value.code
         ));
         Ok(())
     }
@@ -82,9 +124,14 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn table_size(&mut self, table: u32) -> Result<(), TranspileError> {
         let table = self.require_table_index(table)?;
         let (get, _) = table_accessor(table);
+        let (ty, rust_ty) = if self.is_table64(table) {
+            (ValType::I64, "i64")
+        } else {
+            (ValType::I32, "i32")
+        };
         self.push(Val {
-            code: format!("(self.{get}().len() as i32)"),
-            ty: ValType::I32,
+            code: format!("(self.{get}().len() as {rust_ty})"),
+            ty,
             stable: false,
             may_trap: false,
         });
@@ -104,16 +151,21 @@ impl<'a> super::FuncGen<'a> {
         let delta = self.pop()?;
         let init = self.pop()?;
         let name = self.fresh_temp();
+        let ty = self.table_index_ty(table);
+        let rust_ty = if self.is_table64(table) { "i64" } else { "i32" };
+        // A 64-bit table is still capped at `u32::MAX` entries (an
+        // implementation limit), so a larger delta fails with -1.
         self.line(format!(
-            "let {name}: i32 = {{ let n = ({}) as u32 as usize; let old = self.{get}().len(); \
+            "let {name}: {rust_ty} = {{ let n = {}; let old = self.{get}().len(); \
              match old.checked_add(n) {{ \
-             Some(len) if len <= u32::MAX as usize => {{ self.{get_mut}().resize(len, ({}) as u32); old as i32 }} \
+             Some(len) if len <= u32::MAX as usize => {{ self.{get_mut}().resize(len, ({}) as u32); old as {rust_ty} }} \
              _ => -1, }} }};",
-            delta.code, init.code
+            self.table_index_expr(table, &delta.code),
+            init.code
         ));
         self.push(Val {
             code: name,
-            ty: ValType::I32,
+            ty,
             stable: true,
             may_trap: false,
         });
@@ -125,7 +177,7 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn table_fill(&mut self, table: u32) -> Result<(), TranspileError> {
         let table = self.require_table_index(table)?;
         let (dest, val, len) = self.pop_bulk_operands()?;
-        if table == 0 {
+        if table == 0 && !self.is_table64(table) {
             self.used_helpers.insert((Helper::TableFill, 0));
             self.line(format!(
                 "self.table_fill(({}) as u32, ({}) as u32, ({}) as u32);",
@@ -135,9 +187,10 @@ impl<'a> super::FuncGen<'a> {
         }
         let (_, get_mut) = table_accessor(table);
         self.line(format!(
-            "{{ let d = ({}) as u32 as usize; let v = ({}) as u32; \
-             let n = ({}) as u32 as usize; self.{get_mut}()[d..d + n].fill(v); }}",
-            dest.code, val.code, len.code
+            "{{ let d = {}; let v = ({}) as u32; let n = {}; self.{get_mut}()[d..d + n].fill(v); }}",
+            self.table_index_expr(table, &dest.code),
+            val.code,
+            self.table_index_expr(table, &len.code)
         ));
         Ok(())
     }

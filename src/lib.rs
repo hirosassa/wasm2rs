@@ -468,8 +468,8 @@ where
                             "table of a non-funcref/externref type".into(),
                         ));
                     }
-                    if ty.table64 || ty.shared {
-                        return Err(TranspileError::Unsupported("64-bit or shared table".into()));
+                    if ty.shared {
+                        return Err(TranspileError::Unsupported("shared table".into()));
                     }
                     // An imported table is host-lent storage addressed through the
                     // `Imports` trait; combining it with other tables is not
@@ -491,6 +491,7 @@ where
                     let info = codegen::TableInfo {
                         min,
                         imported: false,
+                        table64: ty.table64,
                         element: ValType::Ref(ty.element_type),
                     };
                     if table.is_none() {
@@ -517,7 +518,19 @@ where
                                 ));
                             }
                             seg_table = index;
-                            Some(codegen::const_expr_u32(offset_expr)?)
+                            let is64 = if index == 0 {
+                                table.as_ref().is_some_and(|t| t.table64)
+                            } else {
+                                usize::try_from(index - 1)
+                                    .ok()
+                                    .and_then(|i| extra_tables.get(i))
+                                    .is_some_and(|t| t.table64)
+                            };
+                            Some(if is64 {
+                                codegen::const_expr_u64_for(offset_expr, "element offset")?
+                            } else {
+                                u64::from(codegen::const_expr_u32(offset_expr)?)
+                            })
                         }
                         ElementKind::Passive => None,
                         // A declared segment has no runtime effect (it only
@@ -829,7 +842,9 @@ fn classify_import(
                 ));
             }
             if table_ty.table64 || table_ty.shared {
-                return Err(TranspileError::Unsupported("64-bit or shared table".into()));
+                return Err(TranspileError::Unsupported(
+                    "imported 64-bit or shared table".into(),
+                ));
             }
             if sink.table.is_some() {
                 return Err(TranspileError::Unsupported("multiple tables".into()));
@@ -839,6 +854,7 @@ fn classify_import(
             *sink.table = Some(codegen::TableInfo {
                 min,
                 imported: true,
+                table64: false,
                 element: ValType::Ref(table_ty.element_type),
             });
             Ok(())

@@ -44,6 +44,9 @@ pub(crate) struct MemInfo {
 pub(crate) struct TableInfo {
     pub min: u32,
     pub imported: bool,
+    /// Whether the table is declared `i64` (memory64's table counterpart): its
+    /// indices, sizes and lengths are `i64` instead of `i32`.
+    pub table64: bool,
     /// The table's element type (`funcref` or `externref`). Both are stored as a
     /// `u32`, but `table.get` pushes an operand of this type.
     pub element: ValType,
@@ -58,7 +61,8 @@ pub(crate) struct TableInfo {
 pub(crate) struct ElemSegment {
     /// The table an active segment initialises (0 for a passive or declared one).
     pub table: u32,
-    pub offset: Option<u32>,
+    /// A 64-bit table's segment can lie above 4 GiB, so the offset is a `u64`.
+    pub offset: Option<u64>,
     pub declared: bool,
     pub funcs: Vec<u32>,
 }

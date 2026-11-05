@@ -61,7 +61,7 @@ base feature set. Findings of a non-base profile are saved as
 | `base` | the default set above | (see the runs above) |
 | `multi-memory` | up to 3 memories | 276 match, 24 skip |
 | `multi-table` | up to 3 tables | 277 match, 23 skip |
-| `memory64` | 64-bit memories and tables | 195 match, 23 skip, 81 unsupported, 1 mismatch |
+| `memory64` | 64-bit memories and tables | 276 match, 23 skip, 1 mismatch |
 | `simd` | SIMD | 281 match, 19 skip |
 | `tail-call` | `return_call`, `return_call_indirect` | 271 match, 29 skip |
 | `extended-const` | arithmetic in constant expressions | 278 match, 22 skip (was 36 unsupported, now supported) |
@@ -72,8 +72,8 @@ a call's result or trap.
 
 `memory64` findings:
 
-- All 81 `unsupported` modules are `64-bit or shared table`: the profile also turns on
-  64-bit tables, which wasm2rs does not support yet.
+- 81 modules were `unsupported` because the profile also turns on 64-bit tables.
+  These are now supported (a defined `table i64`; an imported 64-bit table is not).
 - The one mismatch (seed 258) is the declared-maximum bug above: `(memory 3 4)` grows
   past its maximum.
 

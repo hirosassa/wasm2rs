@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Support for 64-bit tables (`table i64`): indices, sizes and lengths are `i64` in
+  `call_indirect` and the `table.*` instructions, and an element segment offset may
+  be an `i64`. An index above `u32::MAX` traps. An imported or shared table64 is
+  still rejected.
 - Support for a `v128.const` global initializer. Previously, transpiling a module
   that declared a `v128` global failed with an `Unsupported` error.
 - `extract_core_modules` and `--extract-core`: pull the core modules out of a

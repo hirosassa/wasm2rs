@@ -94,6 +94,8 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) has_imports: bool,
     /// Each table's element type (`funcref` or `externref`), in table-index
     /// order; `table.get` pushes an operand of this type.
+    /// Per table: whether it is declared `i64`.
+    pub(crate) table64: Vec<bool>,
     pub(crate) table_elements: Vec<ValType>,
     /// Per-data-segment: whether it is passive (so `memory.init`/`data.drop`
     /// can reference it through a `data{d}` field), indexed by data index.
@@ -382,6 +384,11 @@ pub(crate) fn build_ctx<'a>(
         memory_shared,
         has_table,
         has_imports,
+        table64: table
+            .into_iter()
+            .chain(extra_tables)
+            .map(|t| t.table64)
+            .collect(),
         table_elements: table
             .into_iter()
             .chain(extra_tables)

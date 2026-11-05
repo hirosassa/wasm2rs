@@ -165,8 +165,8 @@ impl<'a> super::FuncGen<'a> {
         // index panics on this slice access (a trap).
         let entry = self.fresh_temp();
         self.line(format!(
-            "let {entry} = self.{table_get}()[({}) as u32 as usize];",
-            index.code
+            "let {entry} = self.{table_get}()[{}];",
+            self.table_index_expr(table_index, &index.code)
         ));
 
         // Dispatch through the shared `call_ref_t{ti}` method (see
