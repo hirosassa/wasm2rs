@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A module with a passive data or element segment but no memory, table or import
+  failed to compile when it used `data.drop` or `elem.drop`: the segment is held by the `Instance`, which was not generated.
 - `memory.init`, `table.init`, `data.drop` and `elem.drop` on an active or declared segment
   no longer fail to transpile: such a segment is dropped at instantiation, so `*.init` reads
   it as empty and `*.drop` does nothing. An `i32` segment offset is now unsigned, so a
