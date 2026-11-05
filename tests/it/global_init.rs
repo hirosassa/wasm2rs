@@ -145,3 +145,168 @@ fn null_funcref_global_initializer_is_the_null_sentinel() {
          assert_eq!(inst.func1(), 1i32);",
     );
 }
+
+#[test]
+fn an_extended_const_i32_add_sub_mul_global_is_evaluated() {
+    transpile_compile_run(
+        "ext_i32",
+        r#"
+        (module
+          (global i32 (i32.add (i32.const 3) (i32.const 4)))
+          (global i32 (i32.sub (i32.const 3) (i32.const 10)))
+          (global i32 (i32.mul (i32.const 6) (i32.const 7)))
+          (func (export "a") (result i32) (global.get 0))
+          (func (export "b") (result i32) (global.get 1))
+          (func (export "c") (result i32) (global.get 2)))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(), 7);\n    \
+         assert_eq!(inst.func1(), -7);\n    \
+         assert_eq!(inst.func2(), 42);",
+    );
+}
+
+#[test]
+fn an_extended_const_i32_global_wraps_on_overflow() {
+    transpile_compile_run(
+        "ext_i32_wrap",
+        r#"
+        (module
+          (global i32 (i32.add (i32.const 2147483647) (i32.const 1)))
+          (global i32 (i32.mul (i32.const 65536) (i32.const 65536)))
+          (func (export "a") (result i32) (global.get 0))
+          (func (export "b") (result i32) (global.get 1)))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(), i32::MIN);\n    \
+         assert_eq!(inst.func1(), 0);",
+    );
+}
+
+#[test]
+fn an_extended_const_i64_global_is_evaluated_and_wraps() {
+    transpile_compile_run(
+        "ext_i64",
+        r#"
+        (module
+          (global i64 (i64.mul (i64.add (i64.const 1) (i64.const 2)) (i64.const 4)))
+          (global i64 (i64.add (i64.const 9223372036854775807) (i64.const 1)))
+          (global i64 (i64.sub (i64.const 0) (i64.const 1)))
+          (func (export "a") (result i64) (global.get 0))
+          (func (export "b") (result i64) (global.get 1))
+          (func (export "c") (result i64) (global.get 2)))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(), 12i64);\n    \
+         assert_eq!(inst.func1(), i64::MIN);\n    \
+         assert_eq!(inst.func2(), -1i64);",
+    );
+}
+
+#[test]
+fn a_nested_extended_const_global_is_evaluated() {
+    transpile_compile_run(
+        "ext_nested",
+        r#"
+        (module
+          (global i32 (i32.mul (i32.add (i32.const 1) (i32.const 2)) (i32.const 4)))
+          (func (export "a") (result i32) (global.get 0)))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(), 12);",
+    );
+}
+
+#[test]
+fn an_extended_const_data_offset_places_the_segment() {
+    transpile_compile_run(
+        "ext_data_offset",
+        r#"
+        (module
+          (memory 1)
+          (data (i32.add (i32.const 8) (i32.const 8)) "\2a")
+          (func (export "at") (param i32) (result i32) (i32.load8_u (local.get 0))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(16), 42);\n    \
+         assert_eq!(inst.func0(8), 0);",
+    );
+}
+
+#[test]
+fn an_extended_const_i64_data_offset_places_the_segment() {
+    transpile_compile_run(
+        "ext_data_offset64",
+        r#"
+        (module
+          (memory i64 1)
+          (data (i64.mul (i64.const 4) (i64.const 5)) "\2a")
+          (func (export "at") (param i64) (result i32) (i32.load8_u (local.get 0))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(20), 42);",
+    );
+}
+
+#[test]
+fn an_extended_const_elem_offset_places_the_function() {
+    transpile_compile_run(
+        "ext_elem_offset",
+        r#"
+        (module
+          (type $t (func (result i32)))
+          (table 8 funcref)
+          (elem (i32.add (i32.const 2) (i32.const 3)) $f)
+          (func $f (result i32) (i32.const 77))
+          (func (export "call") (param i32) (result i32)
+            (call_indirect (type $t) (local.get 0))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func1(5), 77);",
+    );
+}
+
+fn transpile_err(wat: &str) -> String {
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    wasm2rs::transpile(&wasm)
+        .expect_err("transpile should be rejected")
+        .to_string()
+}
+
+#[test]
+fn a_global_initializer_with_leftover_operands_is_rejected() {
+    let err = transpile_err("(module (global i32 (i32.const 1) (i32.const 2)))");
+    assert!(err.contains("leftover operand"), "{err}");
+}
+
+#[test]
+fn a_data_offset_with_leftover_operands_is_rejected() {
+    let err = transpile_err(r#"(module (memory 1) (data (offset i32.const 1 i32.const 2) "x"))"#);
+    assert!(err.contains("leftover operand"), "{err}");
+}
+
+#[test]
+fn a_mixed_width_constant_operation_is_a_type_mismatch_not_an_underflow() {
+    let err =
+        transpile_err(r#"(module (memory 1) (data (i32.add (i32.const 1) (i64.const 2)) "x"))"#);
+    assert!(err.contains("mismatch"), "{err}");
+    assert!(!err.contains("underflow"), "{err}");
+}
+
+#[test]
+fn a_constant_operation_without_operands_is_an_underflow() {
+    let err = transpile_err(r#"(module (memory 1) (data (i32.add) "x"))"#);
+    assert!(err.contains("underflow"), "{err}");
+}
+
+#[test]
+fn a_global_constant_operation_without_operands_is_an_underflow() {
+    let err = transpile_err("(module (global i32 (i32.add)))");
+    assert!(err.contains("underflow"), "{err}");
+}
+
+#[test]
+fn an_i64_element_offset_is_rejected() {
+    let err = transpile_err("(module (table 4 funcref) (elem (i64.const 1) $f) (func $f))");
+    assert!(err.contains("i64"), "{err}");
+}
