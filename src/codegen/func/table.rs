@@ -153,12 +153,21 @@ impl<'a> super::FuncGen<'a> {
         let name = self.fresh_temp();
         let ty = self.table_index_ty(table);
         let rust_ty = if self.is_table64(table) { "i64" } else { "i32" };
+        // The declared maximum (when any) caps the new length like the `u32::MAX`
+        // entry limit does.
+        let limit = self
+            .ctx
+            .table_max
+            .get(table as usize)
+            .copied()
+            .flatten()
+            .unwrap_or(u32::MAX);
         // A 64-bit table is still capped at `u32::MAX` entries (an
         // implementation limit), so a larger delta fails with -1.
         self.line(format!(
             "let {name}: {rust_ty} = {{ let n = {}; let old = self.{get}().len(); \
              match old.checked_add(n) {{ \
-             Some(len) if len <= u32::MAX as usize => {{ self.{get_mut}().resize(len, ({}) as u32); old as {rust_ty} }} \
+             Some(len) if len <= {limit}usize => {{ self.{get_mut}().resize(len, ({}) as u32); old as {rust_ty} }} \
              _ => -1, }} }};",
             self.table_index_expr(table, &delta.code),
             init.code

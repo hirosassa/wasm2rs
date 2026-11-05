@@ -43,6 +43,8 @@ pub(crate) struct MemInfo {
 /// entries are still this module's function indices, so dispatch is unchanged.
 pub(crate) struct TableInfo {
     pub min: u32,
+    /// The declared maximum number of entries, if any (`table.grow` fails past it).
+    pub max: Option<u32>,
     pub imported: bool,
     /// Whether the table is declared `i64` (memory64's table counterpart): its
     /// indices, sizes and lengths are `i64` instead of `i32`.

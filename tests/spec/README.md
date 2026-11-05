@@ -15,6 +15,6 @@ reports it: modules with imports, `register`, `assert_invalid`/`assert_malformed
 results and GC reference types. If a state-changing call is skipped, the rest of that
 module's assertions are skipped too, so a skipped call never causes a false failure.
 
-Not vendored yet: `table_grow` and `table_size` (a table's declared maximum is not honored by
-`table.grow`), `memory_grow64` and `memory_size` (the same for `memory.grow`), and files that
-need imports or `register` (`elem`, `data`, `global`, `table`, `ref_func`, `return_call*`, ...).
+Not vendored yet: `memory_grow64` and `memory_size` (`memory.grow` does not honor a
+memory's declared maximum), and files that need imports or `register` (`elem`, `data`,
+`global`, `table`, `ref_func`, `return_call*`, ...).
