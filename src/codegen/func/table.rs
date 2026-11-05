@@ -18,7 +18,7 @@ impl<'a> super::FuncGen<'a> {
     /// above `u32::MAX` stays out of range (a trap) instead of wrapping.
     pub(super) fn table_index_expr(&self, table: u32, code: &str) -> String {
         if self.is_table64(table) {
-            format!("({code}) as u64 as usize")
+            format!("usize::try_from(({code}) as u64).unwrap_or(usize::MAX)")
         } else {
             format!("({code}) as u32 as usize")
         }
@@ -58,7 +58,10 @@ impl<'a> super::FuncGen<'a> {
         let (src_get, _) = table_accessor(src_table);
         // The length is an `i64` only when both tables are 64-bit.
         let len_expr = if self.is_table64(dst_table) && self.is_table64(src_table) {
-            format!("({}) as u64 as usize", len.code)
+            format!(
+                "usize::try_from(({}) as u64).unwrap_or(usize::MAX)",
+                len.code
+            )
         } else {
             format!("({}) as u32 as usize", len.code)
         };

@@ -43,7 +43,9 @@ use self::render::{chunk_prelude, render_lib_root};
 use self::runtime::{render_rt_helpers, rt_name};
 use self::simd_rt::render_simd_helpers;
 
-pub(crate) use self::const_expr::{const_expr_to_rust, const_expr_u32, const_expr_u64};
+pub(crate) use self::const_expr::{
+    const_expr_to_rust, const_expr_u32, const_expr_u64, const_expr_u64_for,
+};
 pub(crate) use self::export_names::assign_import_names;
 pub(crate) use self::info::{
     CompositeKind, DataSegment, ElemSegment, ExportInfo, FieldInfo, FuncInput, GlobalInfo,

@@ -103,7 +103,13 @@ pub(crate) fn const_expr_u32(expr: &ConstExpr<'_>) -> Result<u32, TranspileError
 /// "negative" one is a huge address, and the segment traps at instantiation
 /// when it lies past the end of the memory.
 pub(crate) fn const_expr_u64(expr: &ConstExpr<'_>) -> Result<u64, TranspileError> {
-    Ok(eval_int_const_expr(expr, "data offset")?.widen())
+    const_expr_u64_for(expr, "data offset")
+}
+
+/// [`const_expr_u64`] with the offset's role (`what`) named in diagnostics, e.g.
+/// the element segment of a 64-bit table.
+pub(crate) fn const_expr_u64_for(expr: &ConstExpr<'_>, what: &str) -> Result<u64, TranspileError> {
+    Ok(eval_int_const_expr(expr, what)?.widen())
 }
 
 /// Translate a global's constant initializer expression to a Rust expression.

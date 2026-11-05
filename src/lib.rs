@@ -527,7 +527,7 @@ where
                                     .is_some_and(|t| t.table64)
                             };
                             Some(if is64 {
-                                codegen::const_expr_u64(offset_expr)?
+                                codegen::const_expr_u64_for(offset_expr, "element offset")?
                             } else {
                                 u64::from(codegen::const_expr_u32(offset_expr)?)
                             })

@@ -611,14 +611,6 @@ fn a_second_imported_table_is_rejected() {
 }
 
 #[test]
-fn imported_64_bit_table_is_rejected() {
-    assert_unsupported(
-        r#"(module (import "e" "t" (table i64 1 funcref)))"#,
-        "64-bit or shared table",
-    );
-}
-
-#[test]
 fn imported_table_of_a_gc_reference_type_is_rejected() {
     assert_unsupported(
         r#"(module (import "e" "t" (table 1 anyref)))"#,

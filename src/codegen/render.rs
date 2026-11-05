@@ -476,6 +476,11 @@ fn constructor_lines(
         }
     };
 
+    // A table holds at most `u32::MAX` entries, so any slot at or above that is out
+    // of range: clamping keeps the spelled literal valid on a 32-bit `usize` while
+    // the access still traps.
+    let elem_slot = |slot: u64| slot.min(u64::from(u32::MAX));
+
     // Emit `<target>[idx] = fu32;` for each active element segment entry;
     // `target` is a defined table (`t`) or the host storage accessor
     // (`instance.table_mut()`).
@@ -485,14 +490,15 @@ fn constructor_lines(
                 // An empty segment writes nothing, but an offset past the end of the
                 // table still traps at instantiation: check it with an empty slice.
                 if seg.funcs.is_empty() {
-                    let off = seg.offset.unwrap_or(0);
+                    let off = elem_slot(seg.offset.unwrap_or(0));
                     lines.push(format!("{indent}let _ = &{target}[{off}..{off}];"));
                 }
                 for (k, f) in seg.funcs.iter().enumerate() {
-                    let idx = seg
-                        .offset
-                        .unwrap_or(0)
-                        .saturating_add(u64::try_from(k).unwrap_or(u64::MAX));
+                    let idx = elem_slot(
+                        seg.offset
+                            .unwrap_or(0)
+                            .saturating_add(u64::try_from(k).unwrap_or(u64::MAX)),
+                    );
                     lines.push(format!("{indent}{target}[{idx}] = {f}u32;"));
                 }
             }

@@ -177,3 +177,16 @@ fn a_wide_copy_range_traps() {
         "let mut inst = Instance::new(); inst.func2(0x1_0000_0000, 2, 1);",
     );
 }
+
+#[test]
+fn an_unsupported_elem_offset_operator_is_reported_as_an_element_offset() {
+    let wasm = wat::parse_str(
+        r#"(module (table i64 4 funcref) (func $g)
+             (elem (offset i64.const 0 i64.const 1 i64.and) $g))"#,
+    )
+    .expect("valid wat");
+    let err = wasm2rs::transpile(&wasm)
+        .expect_err("must be rejected")
+        .to_string();
+    assert!(err.contains("element offset"), "{err}");
+}
