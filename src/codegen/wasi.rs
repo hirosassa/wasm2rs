@@ -359,7 +359,7 @@ impl WasiFn {
 
     /// Whether this import starts sibling instances on new threads, so the
     /// module needs the shared thread state and a cloneable, sendable host.
-    pub(super) fn spawns_threads(self) -> bool {
+    pub(crate) fn spawns_threads(self) -> bool {
         matches!(self, WasiFn::ThreadSpawn | WasiFn::PthreadCreateJs)
     }
 

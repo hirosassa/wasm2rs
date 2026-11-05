@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TranspileOptions::reentrant_imports` / `--reentrant-imports`: every `Imports` method also
+  receives the `Instance`, so a host can call guest functions and read or write guest
+  memory while an import runs (needed for `cabi_realloc` in a WASI preview2 host). The host
+  is lent out for the call; a nested import call traps. Off by default.
 - `TranspileOptions::import_memory` / `--import-memory`: treat the module's own memory 0 as
   host-owned, like an imported memory, so the host's `Imports` methods can read and
   write guest memory (needed for the lowered imports of a WASI preview2 component).
