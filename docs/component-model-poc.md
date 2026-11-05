@@ -100,15 +100,33 @@ Two programs ran: `println!("hello")` (21 imports) and one using `eprintln!`,
 `print!`, `flush` and `std::env::args` (22; the extra one is `get-arguments`). A small
 WAT with the same imports is covered by `tests/it/wasip2_host.rs`.
 
-What it does not cover, and what the next step needs:
+## Result 4: the host calls back into the guest
 
-- **`wasi:io/poll.poll`** returns a `list<u32>`, which the host must allocate in guest
-  memory by calling the guest's exported `cabi_realloc`. The host cannot call guest
-  functions yet, so `poll` panics. Real programs that wait on a pollable (sleeping,
-  non-blocking streams) need it; `output-stream` writes and `pollable.block` did not.
-- The same applies to any import returning a string or list (`get-environment` and
-  `get-arguments` are empty lists here, which need no allocation).
-- stdin, clocks, files and directories are not implemented.
+`reentrant_imports` / `--reentrant-imports` makes every `Imports` method also receive
+the `Instance`, so the host reaches the guest's memory (`g.memory()`) and its exports
+(`g.cabi_realloc(..)`) while an import runs. That replaces `import_memory` for this
+host: the guest keeps its own memory, and the host builds the lists and strings it
+returns in it, the way the canonical ABI expects (`cabi_realloc(0, 0, align, size)`,
+then `(ptr, len)` at the return pointer).
+
+`examples/wasip2_host/host.rs` now implements, besides the hello-world imports:
+
+- `get-arguments` (`list<string>`, 8-byte elements) and `get-environment`
+  (`list<tuple<string, string>>`, 16-byte elements), non-empty;
+- `poll`, a `list<u32>` of the ready pollables' indices (all of them: every pollable
+  is always ready).
+
+The runner passes its trailing arguments and its environment to the program
+(`wasip2_run -- module0.wasm one "two words"`; the work dir moved to
+`$WASIP2_WORK_DIR`). The `std::env::args` program above prints 3 arguments (its own
+name and the two given). `tests/it/wasip2_host.rs` checks the exact layouts from a
+WAT module with a bump-allocator `cabi_realloc`; no real program calls `poll` from
+`println!`, so `poll` is covered by that test only.
+
+What it does not cover:
+
+- stdin, clocks, files and directories are not implemented (`subscribe-duration`
+  returns a placeholder pollable that is always ready).
 - The `Imports` trait is generated per module, so the host has to match the module's
   import set; the example marks the methods only some programs need.
 
@@ -120,7 +138,7 @@ What it does not cover, and what the next step needs:
 2. **Name-preserving imports** (small/medium): carry the import module/field name
    into the `Imports` trait (like `named_exports` did for exports). Prerequisite for
    everything below. *Done: `named_imports` / `--named-imports`.*
-3. **A preview2 host shim over `Imports`** (large; the hello-world slice is done, see Result 3): implement the canonical ABI for the
+3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment and `poll` are done, see Results 3 and 4): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks` subset (args, env, exit, stdio, clocks) as an opt-in
    generated or companion module, with a handle table. Filesystem is a further large
    step. This is what makes a wasip2 hello-world run natively.
