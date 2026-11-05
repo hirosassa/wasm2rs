@@ -70,6 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A module with an imported table and a shared memory never copied its active element
+  segments into the host's table (calls through it trapped on null entries). `new` and
+  `with_memory` now copy them, before the start function runs.
 - `table.grow` now honors the table's declared maximum: growing past it returns -1 and
   leaves the table unchanged, as the spec requires. It used to grow up to the `u32::MAX`
   implementation limit regardless of the declaration.
