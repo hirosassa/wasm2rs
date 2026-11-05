@@ -687,7 +687,7 @@ impl<'a> super::FuncGen<'a> {
                 // Handled above by `branch_table_as_branches`.
                 BranchTarget::Escape { .. } => {
                     return Err(TranspileError::Unsupported(
-                        "br_table out of a try region".into(),
+                        "br_table: an escaping arm reached the match lowering".into(),
                     ));
                 }
             };
