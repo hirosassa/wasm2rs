@@ -490,6 +490,7 @@ where
                         .map_err(|_| TranspileError::Unsupported("table too large".into()))?;
                     let info = codegen::TableInfo {
                         min,
+                        max: ty.maximum.and_then(|m| u32::try_from(m).ok()),
                         imported: false,
                         table64: ty.table64,
                         element: ValType::Ref(ty.element_type),
@@ -853,6 +854,7 @@ fn classify_import(
                 .map_err(|_| TranspileError::Unsupported("table too large".into()))?;
             *sink.table = Some(codegen::TableInfo {
                 min,
+                max: table_ty.maximum.and_then(|m| u32::try_from(m).ok()),
                 imported: true,
                 table64: false,
                 element: ValType::Ref(table_ty.element_type),

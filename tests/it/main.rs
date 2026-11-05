@@ -91,6 +91,7 @@ mod split_dispatch;
 mod state;
 mod streaming;
 mod table64;
+mod table_max;
 mod table_ops;
 mod tail_call;
 mod tier2;

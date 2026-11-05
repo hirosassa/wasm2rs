@@ -41,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `table.grow` now honors the table's declared maximum: growing past it returns -1 and
+  leaves the table unchanged, as the spec requires. It used to grow up to the `u32::MAX`
+  implementation limit regardless of the declaration.
 - A module with a passive data or element segment but no memory, table or import
   failed to compile when it used `data.drop` or `elem.drop`: the segment is held by the `Instance`, which was not generated.
 - `memory.init`, `table.init`, `data.drop` and `elem.drop` on an active or declared segment
