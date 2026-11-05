@@ -44,7 +44,8 @@ use self::runtime::{render_rt_helpers, rt_name};
 use self::simd_rt::render_simd_helpers;
 
 pub(crate) use self::const_expr::{
-    const_expr_to_rust, const_expr_u32, const_expr_u64, const_expr_u64_for,
+    ConstInt, IntGlobals, const_expr_to_rust, const_expr_u32, const_expr_u64, const_expr_u64_for,
+    const_int_value,
 };
 pub(crate) use self::export_names::assign_import_names;
 pub(crate) use self::info::{

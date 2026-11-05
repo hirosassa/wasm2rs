@@ -5,7 +5,7 @@ use crate::TranspileError;
 
 /// An integer value on a constant-expression evaluation stack.
 #[derive(Clone, Copy)]
-enum ConstInt {
+pub(crate) enum ConstInt {
     I32(u32),
     I64(u64),
 }
@@ -19,10 +19,35 @@ impl ConstInt {
     }
 }
 
+/// The globals a constant expression may read with `global.get`: the integer
+/// value of each earlier immutable *defined* global (`None` for any other), after
+/// the `imported` imported ones (whose values only the host knows).
+#[derive(Clone, Copy)]
+pub(crate) struct IntGlobals<'a> {
+    pub imported: usize,
+    pub values: &'a [Option<ConstInt>],
+}
+
+impl IntGlobals<'_> {
+    fn get(&self, index: u32) -> Option<ConstInt> {
+        let slot = usize::try_from(index).ok()?.checked_sub(self.imported)?;
+        self.values.get(slot).copied().flatten()
+    }
+}
+
+/// The integer value of a defined global's initializer, if it is one.
+pub(crate) fn const_int_value(expr: &ConstExpr<'_>, globals: IntGlobals<'_>) -> Option<ConstInt> {
+    eval_int_const_expr(expr, "global", globals).ok()
+}
+
 /// Evaluate an integer constant expression (`i32.const`/`i64.const` with the
 /// extended-const `add`, `sub` and `mul`, which wrap like the runtime operators)
 /// to its final value. `what` names the use for error messages.
-fn eval_int_const_expr(expr: &ConstExpr<'_>, what: &str) -> Result<ConstInt, TranspileError> {
+fn eval_int_const_expr(
+    expr: &ConstExpr<'_>,
+    what: &str,
+    globals: IntGlobals<'_>,
+) -> Result<ConstInt, TranspileError> {
     let mut stack: Vec<ConstInt> = Vec::new();
     for op in expr.get_operators_reader() {
         match op? {
@@ -35,6 +60,14 @@ fn eval_int_const_expr(expr: &ConstExpr<'_>, what: &str) -> Result<ConstInt, Tra
             Operator::I64Add => binary_i64(&mut stack, u64::wrapping_add)?,
             Operator::I64Sub => binary_i64(&mut stack, u64::wrapping_sub)?,
             Operator::I64Mul => binary_i64(&mut stack, u64::wrapping_mul)?,
+            Operator::GlobalGet { global_index } => {
+                let value = globals.get(global_index).ok_or_else(|| {
+                    TranspileError::Unsupported(format!(
+                        "{what}: global.get of an imported, mutable or non-integer global"
+                    ))
+                })?;
+                stack.push(value);
+            }
             Operator::End => {}
             other => return Err(TranspileError::Unsupported(format!("{what}: {other:?}"))),
         }
@@ -89,8 +122,11 @@ fn binary_i64(stack: &mut Vec<ConstInt>, f: fn(u64, u64) -> u64) -> Result<(), T
 /// Evaluate a constant offset expression to a `u32`, as used for an active
 /// element segment's table offset. The offset is unsigned, so a "negative" one is
 /// a huge index.
-pub(crate) fn const_expr_u32(expr: &ConstExpr<'_>) -> Result<u32, TranspileError> {
-    match eval_int_const_expr(expr, "element offset")? {
+pub(crate) fn const_expr_u32(
+    expr: &ConstExpr<'_>,
+    globals: IntGlobals<'_>,
+) -> Result<u32, TranspileError> {
+    match eval_int_const_expr(expr, "element offset", globals)? {
         ConstInt::I32(v) => Ok(v),
         ConstInt::I64(_) => Err(TranspileError::Unsupported(
             "element offset: an i64 offset".into(),
@@ -102,14 +138,21 @@ pub(crate) fn const_expr_u32(expr: &ConstExpr<'_>) -> Result<u32, TranspileError
 /// `i64` one for a 64-bit memory) to a `u64`. The offset is unsigned, so a
 /// "negative" one is a huge address, and the segment traps at instantiation
 /// when it lies past the end of the memory.
-pub(crate) fn const_expr_u64(expr: &ConstExpr<'_>) -> Result<u64, TranspileError> {
-    const_expr_u64_for(expr, "data offset")
+pub(crate) fn const_expr_u64(
+    expr: &ConstExpr<'_>,
+    globals: IntGlobals<'_>,
+) -> Result<u64, TranspileError> {
+    const_expr_u64_for(expr, "data offset", globals)
 }
 
 /// [`const_expr_u64`] with the offset's role (`what`) named in diagnostics, e.g.
 /// the element segment of a 64-bit table.
-pub(crate) fn const_expr_u64_for(expr: &ConstExpr<'_>, what: &str) -> Result<u64, TranspileError> {
-    Ok(eval_int_const_expr(expr, what)?.widen())
+pub(crate) fn const_expr_u64_for(
+    expr: &ConstExpr<'_>,
+    what: &str,
+    globals: IntGlobals<'_>,
+) -> Result<u64, TranspileError> {
+    Ok(eval_int_const_expr(expr, what, globals)?.widen())
 }
 
 /// Translate a global's constant initializer expression to a Rust expression.

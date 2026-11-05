@@ -55,6 +55,7 @@ mod gc_null;
 mod gc_ref_reuse;
 mod gc_refs;
 mod global_init;
+mod global_offsets;
 mod helper_naming;
 mod host_memory_access;
 mod i64;
