@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `wasm2rs::build`: `transpile_to_out_dir` (and `_with_options`, `transpile_to_dir`)
   transpile a `.wasm` file into `OUT_DIR` from a `build.rs`, to be pulled in with
   `include!`. It emits `cargo:rerun-if-changed` for the input.
+- Extended constant expressions: `i32`/`i64` `add`, `sub` and `mul` (wrapping, like the
+  runtime operators) are now accepted in global initializers and in active data and
+  element segment offsets.
 
 ### Changed
 
