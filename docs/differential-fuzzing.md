@@ -60,7 +60,7 @@ Re-run of every profile with seeds 1–300 after the exception-handling work (`t
 `exnref`, `br_table` out of a `try`): no `unsupported` module in any profile, and the
 only mismatch is the known declared-maximum one below.
 
-| Profile | Adds | Seeds 0–299 |
+| Profile | Adds | Seeds 1–300 |
 | --- | --- | --- |
 | `base` | the default set above | 279 match, 21 skip |
 | `multi-memory` | up to 3 memories | 276 match, 24 skip |
