@@ -600,7 +600,7 @@ fn constructor_lines(
 
     // Shared-memory constructors build the struct directly, or bind it first when
     // active elements must be copied into a host-owned table or a start function
-    // must run on it; `push_shared_tail` appends those steps and the returned
+    // must run on it; `push_bound_tail` appends those steps and the returned
     // instance. The data segments are applied once, to the shared memory, so only
     // elements repeat per instance (each sibling has its own host table).
     let shared_bind = start_call.is_some() || post_init_elem;
@@ -609,22 +609,17 @@ fn constructor_lines(
     } else {
         ("    Self {", "    }")
     };
-    let push_start = |lines: &mut Vec<String>| {
-        if let Some(call) = &start_call {
-            lines.push(format!("    {call};"));
-            lines.push("    instance".to_string());
-        }
-    };
-    let push_shared_tail = |lines: &mut Vec<String>| {
+    // The steps that run on the bound `instance`, in instantiation order: copy the
+    // active elements into the host-owned table, run the start function, return
+    // the instance.
+    let push_bound_tail = |lines: &mut Vec<String>| {
         if post_init_elem {
             copy_active_elems(lines, 0, "instance.table_mut()", "instance.imports", "    ");
         }
         if let Some(call) = &start_call {
             lines.push(format!("    {call};"));
         }
-        if shared_bind {
-            lines.push("    instance".to_string());
-        }
+        lines.push("    instance".to_string());
     };
 
     if ctx.memory_shared {
@@ -675,7 +670,9 @@ fn constructor_lines(
         inner.push("        memory,".to_string());
         push_common_fields(&mut inner)?;
         inner.push(shared_close.to_string());
-        push_shared_tail(&mut inner);
+        if shared_bind {
+            push_bound_tail(&mut inner);
+        }
         inner.push("}".to_string());
 
         let with_param = if has_imports {
@@ -689,7 +686,9 @@ fn constructor_lines(
         inner.push("        memory: mem,".to_string());
         push_common_fields(&mut inner)?;
         inner.push(shared_close.to_string());
-        push_shared_tail(&mut inner);
+        if shared_bind {
+            push_bound_tail(&mut inner);
+        }
         inner.push("}".to_string());
 
         inner.push(String::new());
@@ -738,19 +737,7 @@ fn constructor_lines(
             if post_init_data {
                 copy_active_data(&mut inner, 0, "instance.mem_mut()", "    ");
             }
-            if post_init_elem {
-                copy_active_elems(
-                    &mut inner,
-                    0,
-                    "instance.table_mut()",
-                    "instance.imports",
-                    "    ",
-                );
-            }
-            push_start(&mut inner);
-            if start_call.is_none() {
-                inner.push("    instance".to_string());
-            }
+            push_bound_tail(&mut inner);
         }
         inner.push("}".to_string());
     }

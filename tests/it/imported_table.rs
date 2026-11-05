@@ -130,8 +130,7 @@ fn an_active_element_item_of_an_imported_table_may_read_an_imported_global() {
 fn a_shared_memory_module_applies_active_elements_to_an_imported_table() {
     // With a shared memory the constructors take a different path; both `new` and
     // `with_memory` (a sibling instance with its own host table) must still copy
-    // the active element segment into the host-owned table, before the start
-    // function runs.
+    // the active element segment into the host-owned table.
     let wat = r#"
         (module
           (type $t (func (result i32)))
