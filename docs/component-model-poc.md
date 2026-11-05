@@ -143,7 +143,7 @@ the host.
 - `tests/it/wasip2_host.rs` covers all of it from WAT (piped stdin, deadline waits, a
   ready pollable returning at once next to a ten-second deadline).
 
-What it does not cover: files and directories and sockets (random: see Result 6); the `Imports` trait
+What it does not cover: sockets, and file metadata and directory listings (random: see Result 6; reading files: Result 7); the `Imports` trait
 is generated per module, so the host has to match the module's import set (the example
 marks the methods only some programs need).
 
@@ -160,6 +160,27 @@ The numbers come from a small non-cryptographic generator (splitmix64) seeded fr
 OS-seeded `std` hasher. That is right for `HashMap` seeds and examples, and wrong for
 keys or tokens: do not treat `get-random-bytes` here as cryptographically secure.
 
+## Result 7: reading files
+
+`std::fs::read_to_string` (and `File::open`) now works. A program that touches
+`std::fs` imports the whole `wasi:filesystem` surface (13 imports) even if it only
+reads, so the host implements all of it: `get-directories`, `open-at`,
+`read-via-stream` and the descriptor/stream drops do the work, and the rest answers an
+`error-code`. Run it with `WASIP2_PREOPEN=<dir> cargo run --release --example
+wasip2_run -- module0.wasm`: `<dir>` is the guest's `/` (without it the guest has no
+preopens), and both `hello.txt` and `/hello.txt` open the same file.
+
+- The preopen is read-only: creating, truncating and writing (`open-at` flags,
+  `write-via-stream`, `append-via-stream`) return `read-only`.
+- Paths must stay under the preopen: an absolute path or any `..` is `not-permitted`
+  (stricter than WASI, which allows `..` that stays inside), and so is a symlink that
+  leads out (the resolved path is checked against the preopen). Path flags are
+  ignored; links are always followed.
+- A file's input stream shares `input-stream.read` with stdin (handle 0). Streams are
+  freed on `resource-drop`; descriptors are not.
+- Not done yet: `stat`, `stat-at`, `get-flags`, `metadata-hash` and `read-directory`
+  return `unsupported`. `std::fs::metadata` and `read_dir` therefore fail.
+
 ## Options for the next investment
 
 1. **Extract core modules** (small): a `wasmparser`-based extraction (the nested
@@ -168,7 +189,7 @@ keys or tokens: do not treat `get-random-bytes` here as cryptographically secure
 2. **Name-preserving imports** (small/medium): carry the import module/field name
    into the `Imports` trait (like `named_exports` did for exports). Prerequisite for
    everything below. *Done: `named_imports` / `--named-imports`.*
-3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks and random are done, see Results 3 to 6): implement the canonical ABI for the
+3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
    generated or companion module, with a handle table. Filesystem is a further large
    step. This is what makes a wasip2 hello-world run natively.

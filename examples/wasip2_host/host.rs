@@ -1,5 +1,5 @@
 // A minimal WASI preview2 host for the lowered imports of a `wasm32-wasip2`
-// program (`println!`, arguments, environment, exit, stdin, `poll`, clocks, random). It is source text appended to
+// program (`println!`, arguments, environment, exit, stdin, `poll`, clocks, random, files). It is source text appended to
 // the generated code (see `examples/wasip2_run.rs`), not a crate: the `Imports` trait
 // it implements is generated per module. Build the module with `named_imports`,
 // `named_exports` and `reentrant_imports`: the methods are named after the imports,
@@ -19,8 +19,14 @@
 // Random numbers come from a small non-cryptographic generator (splitmix64) seeded
 // from the OS-seeded `std` hasher: fine for `HashMap` seeds and examples, not for
 // keys or tokens.
-// Not implemented: files, sockets.
+// Files: a single preopened directory (`with_preopen`, shown to the guest as "/"),
+// read-only. A descriptor is an index into `descriptors` (the preopen is 0), a file's
+// input stream is `3 + index` into `files`. Paths are resolved against the preopen and
+// must stay under it: absolute paths and `..` are refused (`not-permitted`), and so are
+// symlinks that lead out. Anything that would write is refused with `read-only`.
+// Not implemented: `stat`, directory listing, sockets.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 struct P2Host {
@@ -35,13 +41,51 @@ struct P2Host {
     /// The generator state; read only by the optional `wasi:random` blocks.
     #[allow(dead_code)]
     rng: u64,
+    /// The preopened directory (canonical); read only by the optional filesystem blocks.
+    #[allow(dead_code)]
+    root: Option<PathBuf>,
+    /// Paths behind descriptor handles (the preopen first), all under `root`.
+    #[allow(dead_code)]
+    descriptors: Vec<PathBuf>,
+    /// Open files behind input-stream handles `3..`; `None` once dropped.
+    #[allow(dead_code)]
+    files: Vec<Option<std::fs::File>>,
 }
 
 type Guest = Instance<P2Host>;
 
 impl P2Host {
     fn new(args: Vec<String>, env: Vec<(String, String)>) -> Self {
-        P2Host { args, env, pollables: Vec::new(), start: Instant::now(), rng: os_seed() }
+        P2Host { args, env, pollables: Vec::new(), start: Instant::now(),
+            rng: os_seed(),
+            root: None,
+            descriptors: Vec::new(),
+            files: Vec::new(),
+        }
+    }
+
+    /// Gives the guest the directory `root` (as its "/"), read-only.
+    #[allow(dead_code)]
+    fn with_preopen(mut self, root: PathBuf) -> Self {
+        let root = root.canonicalize().expect("preopen: directory does not exist");
+        self.descriptors = vec![root.clone()];
+        self.root = Some(root);
+        self
+    }
+
+    /// The path `path` names under the directory behind descriptor `dir`, or the
+    /// `error-code` to return: `not-permitted` outside the preopen.
+    #[allow(dead_code)]
+    fn resolve(&self, dir: i32, path: &str) -> Result<PathBuf, u8> {
+        use std::path::Component;
+        let root = self.root.as_ref().ok_or(code::NOT_PERMITTED)?;
+        let base = self.descriptors.get(dir as u32 as usize).ok_or(code::BAD_DESCRIPTOR)?;
+        let relative = std::path::Path::new(path);
+        if relative.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
+            return Err(code::NOT_PERMITTED);
+        }
+        let full = base.join(relative).canonicalize().map_err(io_error_code)?;
+        if full.starts_with(root) { Ok(full) } else { Err(code::NOT_PERMITTED) }
     }
 
     /// The next 64 random bits (splitmix64).
@@ -82,6 +126,33 @@ impl P2Host {
         if let Some(deadline) = self.deadline(pollable as u32) {
             std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
         }
+    }
+}
+
+/// `wasi:filesystem` error codes; which ones a program's host uses depends on the
+/// optional blocks kept.
+#[allow(dead_code)]
+mod code {
+    pub const ACCESS: u8 = 0;
+    pub const BAD_DESCRIPTOR: u8 = 3;
+    pub const EXIST: u8 = 7;
+    pub const IO: u8 = 13;
+    pub const IS_DIRECTORY: u8 = 14;
+    pub const NO_ENTRY: u8 = 20;
+    pub const NOT_DIRECTORY: u8 = 24;
+    pub const UNSUPPORTED: u8 = 27;
+    pub const NOT_PERMITTED: u8 = 31;
+    pub const READ_ONLY: u8 = 33;
+}
+
+#[allow(dead_code)]
+fn io_error_code(e: std::io::Error) -> u8 {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        NotFound => code::NO_ENTRY,
+        PermissionDenied => code::ACCESS,
+        AlreadyExists => code::EXIST,
+        _ => code::IO,
     }
 }
 
@@ -132,6 +203,28 @@ fn zero_tag(g: &mut Guest, ptr: i32) {
     put(g, ptr, &[0]);
 }
 
+/// `result<_, error-code>::err` at `ret`: the error's tag byte sits at `ret + payload`,
+/// the offset of the result's payload (its alignment).
+#[allow(dead_code)]
+fn fs_error(g: &mut Guest, ret: i32, payload: i32, code: u8) {
+    put(g, ret, &[1]);
+    put(g, ret + payload, &[code]);
+}
+
+/// `result<handle, error-code>::ok` at `ret`.
+#[allow(dead_code)]
+fn fs_ok_handle(g: &mut Guest, ret: i32, handle: usize) {
+    zero_tag(g, ret);
+    put_u32(g, ret + 4, handle as i32);
+}
+
+/// The `len` bytes at `ptr` as text, `None` if they are not UTF-8.
+#[allow(dead_code)]
+fn get_str(g: &mut Guest, ptr: i32, len: i32) -> Option<String> {
+    let (ptr, len) = (ptr as u32 as usize, len as u32 as usize);
+    String::from_utf8(g.memory()[ptr..ptr + len].to_vec()).ok()
+}
+
 fn stream_write(g: &mut Guest, stream: i32, ptr: i32, len: i32) {
     use std::io::Write;
     let (ptr, len) = (ptr as u32 as usize, len as u32 as usize);
@@ -145,7 +238,11 @@ fn stream_write(g: &mut Guest, stream: i32, ptr: i32, len: i32) {
 impl Imports for P2Host {
     fn wasi_io_error_resource_drop_error(&mut self, _g: &mut Guest, _handle: i32) {}
     fn wasi_io_poll_resource_drop_pollable(&mut self, _g: &mut Guest, _handle: i32) {}
-    fn wasi_io_streams_resource_drop_input_stream(&mut self, _g: &mut Guest, _handle: i32) {}
+    fn wasi_io_streams_resource_drop_input_stream(&mut self, _g: &mut Guest, handle: i32) {
+        if let Some(file) = self.files.get_mut((handle as usize).wrapping_sub(3)) {
+            *file = None;
+        }
+    }
     fn wasi_io_streams_resource_drop_output_stream(&mut self, _g: &mut Guest, _handle: i32) {}
     fn wasi_cli_terminal_input_resource_drop_terminal_input(
         &mut self,
@@ -263,7 +360,7 @@ impl Imports for P2Host {
     fn wasi_io_streams_method_input_stream_read(
         &mut self,
         g: &mut Guest,
-        _stream: i32,
+        stream: i32,
         len: i64,
         ret: i32,
     ) {
@@ -274,7 +371,14 @@ impl Imports for P2Host {
         let n = if want == 0 {
             0
         } else {
-            match std::io::stdin().read(&mut buf) {
+            let read = match stream {
+                0 => std::io::stdin().read(&mut buf),
+                _ => {
+                    let file = &mut self.files[stream as usize - 3];
+                    file.as_mut().expect("read from a dropped stream").read(&mut buf)
+                }
+            };
+            match read {
                 Ok(0) | Err(_) => {
                     put(g, ret, &[1]); // result::err
                     put(g, ret + 4, &[1]); // stream-error::closed
@@ -349,6 +453,186 @@ impl Imports for P2Host {
             .unwrap();
         put(g, ret, &since.as_secs().to_le_bytes());
         put_u32(g, ret + 8, since.subsec_nanos() as i32);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_resource_drop_descriptor
+    fn wasi_filesystem_types_resource_drop_descriptor(&mut self, _g: &mut Guest, _handle: i32) {}
+    // end optional
+
+    // optional: wasi_filesystem_types_resource_drop_directory_entry_stream
+    fn wasi_filesystem_types_resource_drop_directory_entry_stream(
+        &mut self,
+        _g: &mut Guest,
+        _handle: i32,
+    ) {
+    }
+    // end optional
+
+    // optional: wasi_filesystem_preopens_get_directories
+    /// `list<tuple<descriptor, string>>` at `ret`: 12-byte `(handle, ptr, len)`
+    /// elements; the preopen, named "/", if there is one.
+    fn wasi_filesystem_preopens_get_directories(&mut self, g: &mut Guest, ret: i32) {
+        let count = self.root.iter().count() as i32;
+        let items = guest_list(g, ret, 12, count);
+        if count == 1 {
+            put_u32(g, items, 0);
+            put_string(g, items + 4, "/");
+        }
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_open_at
+    /// `open-at(path-flags, path, open-flags, descriptor-flags)` -> `result<descriptor,
+    /// error-code>`. Path flags are ignored (links are always followed, within the
+    /// preopen); creating, truncating and writing are `read-only`.
+    fn wasi_filesystem_types_method_descriptor_open_at(
+        &mut self,
+        g: &mut Guest,
+        dir: i32,
+        _path_flags: i32,
+        path_ptr: i32,
+        path_len: i32,
+        open_flags: i32,
+        descriptor_flags: i32,
+        ret: i32,
+    ) {
+        const CREATE_EXCLUSIVE_TRUNCATE: i32 = 1 | 4 | 8;
+        const WRITE_MUTATE_DIRECTORY: i32 = 2 | 32;
+        const DIRECTORY: i32 = 2;
+        if open_flags & CREATE_EXCLUSIVE_TRUNCATE != 0 || descriptor_flags & WRITE_MUTATE_DIRECTORY != 0 {
+            return fs_error(g, ret, 4, code::READ_ONLY);
+        }
+        let Some(path) = get_str(g, path_ptr, path_len) else {
+            return fs_error(g, ret, 4, code::IO);
+        };
+        match self.resolve(dir, &path) {
+            Ok(full) if open_flags & DIRECTORY != 0 && !full.is_dir() => {
+                fs_error(g, ret, 4, code::NOT_DIRECTORY)
+            }
+            Ok(full) => {
+                self.descriptors.push(full);
+                fs_ok_handle(g, ret, self.descriptors.len() - 1);
+            }
+            Err(code) => fs_error(g, ret, 4, code),
+        }
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_read_via_stream
+    /// `read-via-stream(offset)` -> `result<input-stream, error-code>`: a new stream
+    /// over the file, starting at `offset`.
+    fn wasi_filesystem_types_method_descriptor_read_via_stream(
+        &mut self,
+        g: &mut Guest,
+        descriptor: i32,
+        offset: i64,
+        ret: i32,
+    ) {
+        use std::io::{Seek, SeekFrom};
+        let Some(path) = self.descriptors.get(descriptor as u32 as usize) else {
+            return fs_error(g, ret, 4, code::BAD_DESCRIPTOR);
+        };
+        if path.is_dir() {
+            return fs_error(g, ret, 4, code::IS_DIRECTORY);
+        }
+        let opened = std::fs::File::open(path).and_then(|mut file| {
+            file.seek(SeekFrom::Start(offset as u64))?;
+            Ok(file)
+        });
+        match opened {
+            Ok(file) => {
+                self.files.push(Some(file));
+                fs_ok_handle(g, ret, self.files.len() + 2);
+            }
+            Err(e) => fs_error(g, ret, 4, io_error_code(e)),
+        }
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_write_via_stream
+    fn wasi_filesystem_types_method_descriptor_write_via_stream(
+        &mut self,
+        g: &mut Guest,
+        _descriptor: i32,
+        _offset: i64,
+        ret: i32,
+    ) {
+        fs_error(g, ret, 4, code::READ_ONLY);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_append_via_stream
+    fn wasi_filesystem_types_method_descriptor_append_via_stream(
+        &mut self,
+        g: &mut Guest,
+        _descriptor: i32,
+        ret: i32,
+    ) {
+        fs_error(g, ret, 4, code::READ_ONLY);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_get_flags
+    fn wasi_filesystem_types_method_descriptor_get_flags(&mut self, g: &mut Guest, _d: i32, ret: i32) {
+        fs_error(g, ret, 1, code::UNSUPPORTED);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_read_directory
+    fn wasi_filesystem_types_method_descriptor_read_directory(&mut self, g: &mut Guest, _d: i32, ret: i32) {
+        fs_error(g, ret, 4, code::UNSUPPORTED);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_stat
+    fn wasi_filesystem_types_method_descriptor_stat(&mut self, g: &mut Guest, _d: i32, ret: i32) {
+        fs_error(g, ret, 8, code::UNSUPPORTED);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_stat_at
+    fn wasi_filesystem_types_method_descriptor_stat_at(
+        &mut self,
+        g: &mut Guest,
+        _d: i32,
+        _path_flags: i32,
+        _ptr: i32,
+        _len: i32,
+        ret: i32,
+    ) {
+        fs_error(g, ret, 8, code::UNSUPPORTED);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_metadata_hash
+    fn wasi_filesystem_types_method_descriptor_metadata_hash(&mut self, g: &mut Guest, _d: i32, ret: i32) {
+        fs_error(g, ret, 8, code::UNSUPPORTED);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_metadata_hash_at
+    fn wasi_filesystem_types_method_descriptor_metadata_hash_at(
+        &mut self,
+        g: &mut Guest,
+        _d: i32,
+        _path_flags: i32,
+        _ptr: i32,
+        _len: i32,
+        ret: i32,
+    ) {
+        fs_error(g, ret, 8, code::UNSUPPORTED);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_directory_entry_stream_read_directory_entry
+    fn wasi_filesystem_types_method_directory_entry_stream_read_directory_entry(
+        &mut self,
+        g: &mut Guest,
+        _stream: i32,
+        ret: i32,
+    ) {
+        fs_error(g, ret, 4, code::UNSUPPORTED);
     }
     // end optional
 
