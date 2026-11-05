@@ -265,3 +265,48 @@ fn an_extended_const_elem_offset_places_the_function() {
          assert_eq!(inst.func1(5), 77);",
     );
 }
+
+fn transpile_err(wat: &str) -> String {
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    wasm2rs::transpile(&wasm)
+        .expect_err("transpile should be rejected")
+        .to_string()
+}
+
+#[test]
+fn a_global_initializer_with_leftover_operands_is_rejected() {
+    let err = transpile_err("(module (global i32 (i32.const 1) (i32.const 2)))");
+    assert!(err.contains("leftover operand"), "{err}");
+}
+
+#[test]
+fn a_data_offset_with_leftover_operands_is_rejected() {
+    let err = transpile_err(r#"(module (memory 1) (data (offset i32.const 1 i32.const 2) "x"))"#);
+    assert!(err.contains("leftover operand"), "{err}");
+}
+
+#[test]
+fn a_mixed_width_constant_operation_is_a_type_mismatch_not_an_underflow() {
+    let err =
+        transpile_err(r#"(module (memory 1) (data (i32.add (i32.const 1) (i64.const 2)) "x"))"#);
+    assert!(err.contains("mismatch"), "{err}");
+    assert!(!err.contains("underflow"), "{err}");
+}
+
+#[test]
+fn a_constant_operation_without_operands_is_an_underflow() {
+    let err = transpile_err(r#"(module (memory 1) (data (i32.add) "x"))"#);
+    assert!(err.contains("underflow"), "{err}");
+}
+
+#[test]
+fn a_global_constant_operation_without_operands_is_an_underflow() {
+    let err = transpile_err("(module (global i32 (i32.add)))");
+    assert!(err.contains("underflow"), "{err}");
+}
+
+#[test]
+fn an_i64_element_offset_is_rejected() {
+    let err = transpile_err("(module (table 4 funcref) (elem (i64.const 1) $f) (func $f))");
+    assert!(err.contains("i64"), "{err}");
+}

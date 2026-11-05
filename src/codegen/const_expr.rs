@@ -39,9 +39,29 @@ fn eval_int_const_expr(expr: &ConstExpr<'_>, what: &str) -> Result<ConstInt, Tra
             other => return Err(TranspileError::Unsupported(format!("{what}: {other:?}"))),
         }
     }
-    stack
+    single_result(stack, what)
+}
+
+/// The one value a well-formed constant expression leaves on the stack. The
+/// transpiler does not run the validator, so a malformed expression with none or
+/// several values is rejected here instead of silently keeping the last one.
+fn single_result<T>(mut stack: Vec<T>, what: &str) -> Result<T, TranspileError> {
+    let value = stack
         .pop()
-        .ok_or_else(|| TranspileError::Unsupported(format!("empty {what}")))
+        .ok_or_else(|| TranspileError::Unsupported(format!("empty {what}")))?;
+    if stack.is_empty() {
+        Ok(value)
+    } else {
+        Err(TranspileError::Unsupported(format!(
+            "{what}: leftover operand on the stack"
+        )))
+    }
+}
+
+fn operand_mismatch(expected: &str) -> TranspileError {
+    TranspileError::Unsupported(format!(
+        "constant expression: operand type mismatch (expected two {expected} operands)"
+    ))
 }
 
 fn binary_i32(stack: &mut Vec<ConstInt>, f: fn(u32, u32) -> u32) -> Result<(), TranspileError> {
@@ -50,6 +70,7 @@ fn binary_i32(stack: &mut Vec<ConstInt>, f: fn(u32, u32) -> u32) -> Result<(), T
             stack.push(ConstInt::I32(f(a, b)));
             Ok(())
         }
+        (Some(_), Some(_)) => Err(operand_mismatch("i32")),
         _ => Err(TranspileError::StackUnderflow),
     }
 }
@@ -60,6 +81,7 @@ fn binary_i64(stack: &mut Vec<ConstInt>, f: fn(u64, u64) -> u64) -> Result<(), T
             stack.push(ConstInt::I64(f(a, b)));
             Ok(())
         }
+        (Some(_), Some(_)) => Err(operand_mismatch("i64")),
         _ => Err(TranspileError::StackUnderflow),
     }
 }
@@ -128,9 +150,7 @@ pub(crate) fn const_expr_to_rust(
             }
         }
     }
-    stack
-        .pop()
-        .ok_or_else(|| TranspileError::Unsupported("empty global initializer".into()))
+    single_result(stack, "global initializer")
 }
 
 /// Combine the top two operands with the wrapping method `method`.
