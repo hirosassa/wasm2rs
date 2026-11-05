@@ -275,7 +275,7 @@ fn encode_exc_value(
         ValType::F64 => format!("({expr}).to_bits()"),
         // A `u32`-backed handle (e.g. `funcref`/`externref`/`exnref`) rides as its
         // value; a managed `GcRef` cannot.
-        ValType::Ref(_) if rust_type(ty, kinds)? == "u32" => format!("({expr}) as u64"),
+        ValType::Ref(_) if is_u32_ref(ty, kinds)? => format!("({expr}) as u64"),
         ValType::Ref(_) => {
             return Err(TranspileError::Unsupported(
                 "exception payload with a reference type".into(),
@@ -300,7 +300,7 @@ fn decode_exc_value(
         ValType::I64 => format!("{expr} as i64"),
         ValType::F32 => format!("f32::from_bits({expr} as u32)"),
         ValType::F64 => format!("f64::from_bits({expr})"),
-        ValType::Ref(_) if rust_type(ty, kinds)? == "u32" => format!("{expr} as u32"),
+        ValType::Ref(_) if is_u32_ref(ty, kinds)? => format!("{expr} as u32"),
         ValType::Ref(_) => {
             return Err(TranspileError::Unsupported(
                 "exception payload with a reference type".into(),

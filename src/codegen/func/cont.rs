@@ -26,7 +26,7 @@ use wasmparser::{FunctionBody, HeapType, Operator, ValType};
 
 use super::super::{
     ALLOW, CompositeKind, FrameKind, GenMeta, Node, TypeSig, Val, flatten_cont_body, index_u32,
-    render_body_into, render_nodes_into, rust_type,
+    is_u32_ref, render_body_into, render_nodes_into, rust_type,
 };
 use crate::TranspileError;
 
@@ -738,7 +738,7 @@ impl super::FuncGen<'_> {
     /// handle — which a `switch` transfers and delivers back as a self-reference.
     /// Managed (`GcRef`) references still have no `i64` erasure and are rejected.
     fn unerase_from_i64(&self, expr: &str, ty: ValType) -> Result<String, TranspileError> {
-        if matches!(ty, ValType::Ref(_)) && rust_type(ty, self.ctx.type_kinds)? == "u32" {
+        if is_u32_ref(ty, self.ctx.type_kinds)? {
             return Ok(format!("(({expr}) as u32)"));
         }
         decode_from_i64(expr, ty)
