@@ -62,8 +62,8 @@ fn main() {
     // `run` returns the lowered `result`: 0 is ok, 1 is error.
     let main = format!(
         "fn main() {{\n    \
-         let args = std::env::args().collect();\n    \
-         let env = std::env::vars().collect();\n    \
+         let args = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();\n    \
+         let env = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();\n    \
          let mut inst = Instance::new(P2Host::new(args, env));\n    \
          let status = inst.func{run}();\n    \
          std::process::exit(status);\n    \

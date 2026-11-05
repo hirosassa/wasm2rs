@@ -16,9 +16,12 @@
 // placeholders, and every pollable is always ready.
 // Not implemented: stdin reads, files, clocks.
 
-// `args` is read only by the optional `get-arguments` block.
-#[allow(dead_code)]
+/// The pollable every `subscribe` returns; it is always ready.
+const PLACEHOLDER_POLLABLE: i32 = 3;
+
 struct P2Host {
+    /// Read only by the optional `get-arguments` block.
+    #[allow(dead_code)]
     args: Vec<String>,
     env: Vec<(String, String)>,
 }
@@ -45,11 +48,12 @@ fn alloc(g: &mut Guest, align: i32, size: i32) -> i32 {
     g.cabi_realloc(0, 0, align, size)
 }
 
-/// A string copied into guest memory: `(ptr, len)`.
-fn guest_string(g: &mut Guest, s: &str) -> (i32, i32) {
+/// A string copied into guest memory, with its `(ptr, len)` written at `at`.
+fn put_string(g: &mut Guest, at: i32, s: &str) {
     let ptr = alloc(g, 1, s.len() as i32);
     put(g, ptr, s.as_bytes());
-    (ptr, s.len() as i32)
+    put_u32(g, at, ptr);
+    put_u32(g, at + 4, s.len() as i32);
 }
 
 /// A `list<_>` of `count` elements of `size` bytes at `ret`: `(ptr, len)`. Returns
@@ -99,9 +103,7 @@ impl Imports for P2Host {
     fn wasi_cli_environment_get_arguments(&mut self, g: &mut Guest, ret: i32) {
         let items = guest_list(g, ret, 8, self.args.len() as i32);
         for (i, arg) in self.args.iter().enumerate() {
-            let (ptr, len) = guest_string(g, arg);
-            put_u32(g, items + 8 * i as i32, ptr);
-            put_u32(g, items + 8 * i as i32 + 4, len);
+            put_string(g, items + 8 * i as i32, arg);
         }
     }
     // end optional
@@ -111,12 +113,8 @@ impl Imports for P2Host {
         let items = guest_list(g, ret, 16, self.env.len() as i32);
         for (i, (key, value)) in self.env.iter().enumerate() {
             let at = items + 16 * i as i32;
-            let (ptr, len) = guest_string(g, key);
-            put_u32(g, at, ptr);
-            put_u32(g, at + 4, len);
-            let (ptr, len) = guest_string(g, value);
-            put_u32(g, at + 8, ptr);
-            put_u32(g, at + 12, len);
+            put_string(g, at, key);
+            put_string(g, at + 8, value);
         }
     }
 
@@ -131,7 +129,9 @@ impl Imports for P2Host {
 
     /// `poll(in: list<borrow<pollable>>) -> list<u32>`: every pollable is ready, so
     /// the result is the indices `0..len`.
+    /// An empty list traps, as the interface specifies.
     fn wasi_io_poll_poll(&mut self, g: &mut Guest, _list: i32, len: i32, ret: i32) {
+        assert!(len > 0, "wasi:io/poll.poll: empty list");
         let items = guest_list(g, ret, 4, len);
         for i in 0..len {
             put_u32(g, items + 4 * i, i);
@@ -172,8 +172,12 @@ impl Imports for P2Host {
         zero_tag(g, ret);
     }
 
-    fn wasi_io_streams_method_output_stream_subscribe(&mut self, _g: &mut Guest, _stream: i32) -> i32 {
-        3
+    fn wasi_io_streams_method_output_stream_subscribe(
+        &mut self,
+        _g: &mut Guest,
+        _stream: i32,
+    ) -> i32 {
+        PLACEHOLDER_POLLABLE
     }
 
     fn wasi_cli_stdin_get_stdin(&mut self, _g: &mut Guest) -> i32 {
@@ -197,7 +201,11 @@ impl Imports for P2Host {
         zero_tag(g, ret);
     }
 
-    fn wasi_clocks_monotonic_clock_subscribe_duration(&mut self, _g: &mut Guest, _when: i64) -> i32 {
-        3
+    fn wasi_clocks_monotonic_clock_subscribe_duration(
+        &mut self,
+        _g: &mut Guest,
+        _when: i64,
+    ) -> i32 {
+        PLACEHOLDER_POLLABLE
     }
 }

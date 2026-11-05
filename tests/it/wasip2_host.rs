@@ -90,7 +90,7 @@ const HELLO: &str = r#"
 
 include!("../../examples/wasip2_host/filter.rs");
 
-fn compile(test: &str, wat: &str, host: &str, body: &str) -> std::path::PathBuf {
+fn compile(test: &str, wat: &str, host_init: &str, body: &str) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let opts = wasm2rs::TranspileOptions {
         named_exports: true,
@@ -104,7 +104,8 @@ fn compile(test: &str, wat: &str, host: &str, body: &str) -> std::path::PathBuf 
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let src = dir.join("gen.rs");
     let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-    let main = format!("fn main() {{\n    let mut inst = Instance::new({host});\n    {body}\n}}");
+    let main =
+        format!("fn main() {{\n    let mut inst = Instance::new({host_init});\n    {body}\n}}");
     let host = keep_declared_methods(HOST, &generated);
     std::fs::write(&src, format!("{generated}\n{host}\n{main}\n")).expect("write source");
 
@@ -148,6 +149,7 @@ const ARGS: &str = r#"
     (if (i32.ne (i32.load (i32.const 76)) (i32.const 2)) (then unreachable))
     (local.set $p (i32.load (i32.const 72)))
     (if (i32.ne (i32.load offset=4 (local.get $p)) (i32.const 4)) (then unreachable))
+    (if (i32.ne (i32.load (i32.load (local.get $p))) (i32.const 0x676f7270)) (then unreachable))
     (if (i32.ne (i32.load offset=12 (local.get $p)) (i32.const 1)) (then unreachable))
     (if (i32.ne (i32.load8_u (i32.load offset=8 (local.get $p))) (i32.const 120)) (then unreachable))
     (i64.store (i32.const 80) (i64.const -1))

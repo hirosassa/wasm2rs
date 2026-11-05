@@ -117,8 +117,8 @@ then `(ptr, len)` at the return pointer).
   is always ready).
 
 The runner passes its trailing arguments and its environment to the program
-(`wasip2_run -- module0.wasm one "two words"`; the work dir moved to
-`$WASIP2_WORK_DIR`). The `std::env::args` program above prints 3 arguments (its own
+(`wasip2_run -- module0.wasm one "two words"`; the work dir is
+`$WASIP2_WORK_DIR`, default a temporary directory). The `std::env::args` program above prints 3 arguments (its own
 name and the two given). `tests/it/wasip2_host.rs` checks the exact layouts from a
 WAT module with a bump-allocator `cabi_realloc`; no real program calls `poll` from
 `println!`, so `poll` is covered by that test only.
