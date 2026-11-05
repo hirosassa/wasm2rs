@@ -273,8 +273,8 @@ fn encode_exc_value(
         ValType::I64 => format!("({expr}) as u64"),
         ValType::F32 => format!("({expr}).to_bits() as u64"),
         ValType::F64 => format!("({expr}).to_bits()"),
-        // A `u32`-backed handle (`funcref`/`externref`/`exnref`/a function
-        // reference) rides as its value; a managed `GcRef` cannot.
+        // A `u32`-backed handle (e.g. `funcref`/`externref`/`exnref`) rides as its
+        // value; a managed `GcRef` cannot.
         ValType::Ref(_) if rust_type(ty, kinds)? == "u32" => format!("({expr}) as u64"),
         ValType::Ref(_) => {
             return Err(TranspileError::Unsupported(

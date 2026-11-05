@@ -49,7 +49,7 @@ pub(crate) struct TableInfo {
     /// Whether the table is declared `i64` (memory64's table counterpart): its
     /// indices, sizes and lengths are `i64` instead of `i32`.
     pub table64: bool,
-    /// The table's element type (`funcref` or `externref`). Both are stored as a
+    /// The table's element type (`funcref`, `externref` or `exnref`). All are stored as a
     /// `u32`, but `table.get` pushes an operand of this type.
     pub element: ValType,
     /// The function every initial entry holds (`(table 2 funcref (ref.func $f))`);

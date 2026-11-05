@@ -833,7 +833,7 @@ struct ImportSink<'a> {
 /// Classify an import by its type: a function import is pushed onto `imports`, a
 /// global onto `imported_globals`, an imported memory recorded in `memory`, an
 /// imported table in `table`, and an imported exception tag onto `tags`.
-/// A table holds `funcref`, `externref`, or a concrete function reference
+/// A table holds `funcref`, `externref`, `exnref`, or a concrete function reference
 /// `(ref null $ft)`; the latter is stored exactly like a `funcref` (a `u32`
 /// function handle). Tables of GC struct/array/cont references are unsupported.
 fn is_supported_table_element(
