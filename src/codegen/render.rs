@@ -1204,9 +1204,21 @@ fn named_export_lines(
         .iter()
         .filter(|e| e.name != WASI_THREAD_START)
         .collect();
-    let idents =
-        super::export_names::assign(exports.iter().map(|e| (e.name.as_str(), e.func_index)));
+    // Global getters share the namespace with the function wrappers, so the names
+    // are assigned together (functions first).
+    let idents = super::export_names::assign(
+        exports
+            .iter()
+            .map(|e| (e.name.as_str(), e.func_index))
+            .chain(
+                parts
+                    .global_exports
+                    .iter()
+                    .map(|g| (g.name.as_str(), g.global_index)),
+            ),
+    );
     let mut lines = Vec::new();
+    lines.extend(global_getter_lines(parts, ctx, &idents[exports.len()..]));
     for (export, ident) in exports.iter().zip(idents) {
         let Some(defined) = usize::try_from(export.func_index)
             .ok()
@@ -1242,6 +1254,44 @@ fn named_export_lines(
         ));
     }
     Ok(lines)
+}
+
+/// A `pub fn <name>(&self) -> T` getter for every exported numeric global (a
+/// reference-typed or `v128` one is skipped), reading the current value: the field
+/// of a defined global, the host's `get_global{k}` for an imported one. `idents`
+/// are the names assigned to `parts.global_exports`, in order. A global only
+/// exists in a stateful module, so a stateless one has no getters.
+fn global_getter_lines(
+    parts: &ModuleParts<'_>,
+    ctx: &ModuleCtx<'_>,
+    idents: &[String],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !ctx.is_method {
+        return lines;
+    }
+    for (export, ident) in parts.global_exports.iter().zip(idents) {
+        let index = export.global_index as usize;
+        let (ty, imported) = match index.checked_sub(ctx.imported_globals.len()) {
+            None => (ctx.imported_globals.get(index).map(|g| g.0), true),
+            Some(defined) => (ctx.globals.get(defined).map(|g| g.0), false),
+        };
+        let rust_ty = match ty {
+            Some(ValType::I32) => "i32",
+            Some(ValType::I64) => "i64",
+            Some(ValType::F32) => "f32",
+            Some(ValType::F64) => "f64",
+            _ => continue,
+        };
+        let read = if imported {
+            format!("self.imports.get_global{index}()")
+        } else {
+            format!("self.g{index}")
+        };
+        lines.push(String::new());
+        lines.push(format!("pub fn {ident}(&self) -> {rust_ty} {{ {read} }}"));
+    }
+    lines
 }
 
 /// One by-name wrapper for the export `name`, whose function must be defined

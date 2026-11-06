@@ -330,6 +330,7 @@ where
     // then locally-defined ones, matching the wasm tag index space.
     let mut tags: Vec<codegen::TagInfo> = Vec::new();
     let mut exports: Vec<codegen::ExportInfo> = Vec::new();
+    let mut global_exports: Vec<codegen::GlobalExportInfo> = Vec::new();
     let mut start: Option<u32> = None;
     // Functions named by `ref.func` in a global initialiser (roots for `entry_exports`).
     let mut global_funcs: Vec<u32> = Vec::new();
@@ -738,11 +739,16 @@ where
             Payload::ExportSection(reader) => {
                 for export in reader {
                     let export = export?;
-                    if export.kind == ExternalKind::Func {
-                        exports.push(codegen::ExportInfo {
+                    match export.kind {
+                        ExternalKind::Func => exports.push(codegen::ExportInfo {
                             name: export.name.to_string(),
                             func_index: export.index,
-                        });
+                        }),
+                        ExternalKind::Global => global_exports.push(codegen::GlobalExportInfo {
+                            name: export.name.to_string(),
+                            global_index: export.index,
+                        }),
+                        _ => {}
                     }
                 }
             }
@@ -885,6 +891,7 @@ where
         elements: &elements,
         tags: &tags,
         exports: &exports,
+        global_exports: &global_exports,
         start,
         unsafe_memory: topts.unsafe_memory,
         reentrant_imports,

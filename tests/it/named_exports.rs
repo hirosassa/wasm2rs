@@ -116,3 +116,68 @@ fn off_by_default_the_output_is_unchanged() {
     assert_eq!(plain, with_default);
     assert!(!plain.contains("pub fn add("), "{plain}");
 }
+
+#[test]
+fn exported_globals_get_a_getter_that_tracks_the_current_value() {
+    run_named(
+        "named_global_getter",
+        r#"(module
+            (global $sp (export "stack_pointer") (mut i32) (i32.const 1024))
+            (global (export "big") i64 (i64.const 7))
+            (global (export "ratio") (mut f64) (f64.const 0.5))
+            (func (export "bump") (global.set $sp (i32.add (global.get $sp) (i32.const 16)))))"#,
+        "let mut inst = Instance::new();\n \
+         assert_eq!(inst.stack_pointer(), 1024);\n \
+         assert_eq!(inst.big(), 7);\n \
+         assert_eq!(inst.ratio(), 0.5);\n \
+         inst.bump();\n \
+         assert_eq!(inst.stack_pointer(), 1040);",
+    );
+}
+
+#[test]
+fn a_global_name_clashing_with_a_function_export_stays_unique() {
+    run_named(
+        "named_global_clash",
+        r#"(module
+            (global (export "x") i32 (i32.const 5))
+            (func (export "x") (result i32) i32.const 9))"#,
+        "let mut inst = Instance::new();\n \
+         assert_eq!(inst.x(), 9);\n \
+         assert_eq!(inst.x_0(), 5);",
+    );
+}
+
+#[test]
+fn global_getters_are_off_without_named_exports() {
+    let wasm =
+        wat::parse_str(r#"(module (global (export "sp") (mut i32) (i32.const 1)))"#).unwrap();
+    let generated = transpile(&wasm).unwrap();
+    assert!(!generated.contains("pub fn sp("), "{generated}");
+}
+
+#[test]
+fn an_exported_imported_global_reads_through_the_host_and_non_numeric_ones_are_skipped() {
+    let wasm = wat::parse_str(
+        r#"(module
+            (import "env" "g" (global $g i32))
+            (global (export "again") i32 (global.get $g))
+            (export "reexport" (global $g))
+            (global (export "fn_ref") (mut funcref) (ref.null func))
+            (global (export "wide") v128 (v128.const i64x2 1 2)))"#,
+    )
+    .unwrap();
+    let generated = transpile_with_options(&wasm, &named()).unwrap();
+    assert!(
+        generated.contains("pub fn reexport(&self) -> i32 { self.imports.get_global0() }"),
+        "{generated}"
+    );
+    assert!(
+        generated.contains("pub fn again(&self) -> i32 { self.g1 }"),
+        "{generated}"
+    );
+    assert!(
+        !generated.contains("fn fn_ref(") && !generated.contains("fn wide("),
+        "{generated}"
+    );
+}

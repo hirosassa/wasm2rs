@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `named_exports` / `--named-exports` also emits a getter `pub fn <name>(&self) -> T` for each
+  exported numeric (`i32`/`i64`/`f32`/`f64`) global, e.g. `inst.stack_pointer()`, returning its
+  current value (an imported global is read through the host). Reference-typed and `v128`
+  globals get none. Names share one namespace with the function wrappers.
 - The WASI preview2 host example can let a program write files: `P2Host::with_writable_preopen`
   (`$WASIP2_PREOPEN_WRITABLE=1` in `wasip2_run`) supports `open-at` with `create`,
   `exclusive` and `truncate`, `write-via-stream` and `append-via-stream`; the preopen is
