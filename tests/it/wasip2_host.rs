@@ -464,3 +464,141 @@ fn a_host_opens_and_reads_files_under_its_preopened_directory() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+/// The imports and path strings (at 300 to 340) the metadata and directory tests use.
+const STAT_IMPORTS: &str = r#"
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[resource-drop]descriptor" (func (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[resource-drop]directory-entry-stream" (func (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.stat" (func $stat (param i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.stat-at" (func $stat_at (param i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.get-flags" (func $flags (param i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.metadata-hash" (func $hash (param i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.metadata-hash-at" (func $hash_at (param i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.read-directory" (func $readdir (param i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]directory-entry-stream.read-directory-entry" (func $entry (param i32 i32)))
+  (data (i32.const 300) "a.txt")
+  (data (i32.const 310) "sub")
+  (data (i32.const 320) "missing")
+  (data (i32.const 330) "../x")
+  (data (i32.const 340) "link.txt")
+"#;
+
+/// `fs_stat` runs on a root holding `a.txt` ("hello") and `sub/` (with `b.txt` and
+/// `c.txt`). `descriptor-stat` sits at `ret + 8` of its result: type (6 = regular
+/// file, 3 = directory), link count, size, then three `option<datetime>` of 24 bytes
+/// from `ret + 32` (tag, seconds, nanoseconds). `metadata-hash` is two u64s at
+/// `ret + 8`. `read-directory-entry` is `result<option<entry>>`: the option's tag at
+/// `ret + 4`, the entry (type byte, name `(ptr, len)`) at `ret + 8`.
+const STAT: &str = r#"
+  (func (export "fs_stat") (local $dir i32) (local $sub i32) (local $file i32) (local $stream i32)
+        (local $count i32) (local $sum i32) (local $h i64)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    ;; a file by path: regular file, size 5, one link, a plausible modification time
+    (call $stat_at (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 600))
+    (if (i32.load8_u (i32.const 600)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 608)) (i32.const 6)) (then unreachable))
+    (if (i64.eqz (i64.load (i32.const 616))) (then unreachable))
+    (if (i64.ne (i64.load (i32.const 624)) (i64.const 5)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 632)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 656)) (i32.const 1)) (then unreachable))
+    (if (i32.load8_u (i32.const 680)) (then unreachable))
+    (if (i64.lt_u (i64.load (i32.const 664)) (i64.const 1700000000)) (then unreachable))
+    (if (i32.ge_u (i32.load (i32.const 672)) (i32.const 1000000000)) (then unreachable))
+    ;; a directory by path, and the root descriptor itself
+    (call $stat_at (local.get $dir) (i32.const 1) (i32.const 310) (i32.const 3) (i32.const 600))
+    (if (i32.ne (i32.load8_u (i32.const 608)) (i32.const 3)) (then unreachable))
+    (call $stat (local.get $dir) (i32.const 600))
+    (if (i32.load8_u (i32.const 600)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 608)) (i32.const 3)) (then unreachable))
+    ;; no such file; a path out of the root
+    (call $stat_at (local.get $dir) (i32.const 1) (i32.const 320) (i32.const 7) (i32.const 600))
+    (if (i32.ne (i32.load8_u (i32.const 600)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 608)) (i32.const 20)) (then unreachable))
+    (call $stat_at (local.get $dir) (i32.const 1) (i32.const 330) (i32.const 4) (i32.const 600))
+    (if (i32.ne (i32.load8_u (i32.const 608)) (i32.const 31)) (then unreachable))
+    ;; a symlink to a file outside the root
+    (call $stat_at (local.get $dir) (i32.const 1) (i32.const 340) (i32.const 8) (i32.const 600))
+    (if (i32.ne (i32.load8_u (i32.const 608)) (i32.const 31)) (then unreachable))
+    ;; descriptor-flags: `read` (1), the flags byte at ret + 1
+    (call $flags (local.get $dir) (i32.const 700))
+    (if (i32.load8_u (i32.const 700)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 701)) (i32.const 1)) (then unreachable))
+    ;; metadata-hash: the same file twice gives the same value, another file another
+    (call $hash_at (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 720))
+    (if (i32.load8_u (i32.const 720)) (then unreachable))
+    (local.set $h (i64.load (i32.const 728)))
+    (call $hash_at (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 760))
+    (if (i64.ne (local.get $h) (i64.load (i32.const 768))) (then unreachable))
+    (if (i64.ne (i64.load (i32.const 736)) (i64.load (i32.const 776))) (then unreachable))
+    (call $hash_at (local.get $dir) (i32.const 1) (i32.const 310) (i32.const 3) (i32.const 760))
+    (if (i64.eq (local.get $h) (i64.load (i32.const 768))) (then unreachable))
+    (call $hash (local.get $dir) (i32.const 760))
+    (if (i32.load8_u (i32.const 760)) (then unreachable))
+    ;; read-directory of `sub`: two regular files, b.txt and c.txt, then none
+    (call $open (local.get $dir) (i32.const 1) (i32.const 310) (i32.const 3) (i32.const 2) (i32.const 1) (i32.const 220))
+    (if (i32.load8_u (i32.const 220)) (then unreachable))
+    (local.set $sub (i32.load (i32.const 224)))
+    (call $readdir (local.get $sub) (i32.const 800))
+    (if (i32.load8_u (i32.const 800)) (then unreachable))
+    (local.set $stream (i32.load (i32.const 804)))
+    (loop $next
+      (call $entry (local.get $stream) (i32.const 820))
+      (if (i32.load8_u (i32.const 820)) (then unreachable))
+      (if (i32.load8_u (i32.const 824))
+        (then
+          (if (i32.ne (i32.load8_u (i32.const 828)) (i32.const 6)) (then unreachable))
+          (if (i32.ne (i32.load (i32.const 836)) (i32.const 5)) (then unreachable))
+          (local.set $sum (i32.add (local.get $sum) (i32.load8_u (i32.load (i32.const 832)))))
+          (local.set $count (i32.add (local.get $count) (i32.const 1)))
+          (br $next))))
+    (if (i32.ne (local.get $count) (i32.const 2)) (then unreachable))
+    (if (i32.ne (local.get $sum) (i32.const 197)) (then unreachable))
+    ;; open-at with the directory flag on a file, and read-directory of a file, are
+    ;; not-directory (24)
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 2) (i32.const 1) (i32.const 220))
+    (if (i32.ne (i32.load8_u (i32.const 224)) (i32.const 24)) (then unreachable))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.load8_u (i32.const 220)) (then unreachable))
+    (local.set $file (i32.load (i32.const 224)))
+    (call $readdir (local.get $file) (i32.const 800))
+    (if (i32.ne (i32.load8_u (i32.const 800)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 804)) (i32.const 24)) (then unreachable)))
+"#;
+
+#[cfg(unix)]
+#[test]
+fn a_host_stats_files_and_lists_directories_under_its_preopen() {
+    let root = std::env::temp_dir().join("wasm2rs_wasip2_fs_stat_root");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("a.txt"), "hello").unwrap();
+    std::fs::write(root.join("sub/b.txt"), "b").unwrap();
+    std::fs::write(root.join("sub/c.txt"), "c").unwrap();
+    // a file next to the root, which `../` would reach
+    let secret = root
+        .parent()
+        .unwrap()
+        .join("wasm2rs_wasip2_fs_stat_secret.txt");
+    std::fs::write(&secret, "no").unwrap();
+    let link = root.join("link.txt");
+    std::fs::remove_file(&link).ok();
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    let init = format!(
+        "P2Host::new(vec![], vec![]).with_preopen(std::path::PathBuf::from({:?}))",
+        root.to_str().unwrap()
+    );
+    let bin = compile(
+        "fs_stat",
+        &hello_with(STAT_IMPORTS, STAT),
+        &init,
+        "inst.fs_stat();",
+    );
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

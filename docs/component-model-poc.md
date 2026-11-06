@@ -143,8 +143,7 @@ the host.
 - `tests/it/wasip2_host.rs` covers all of it from WAT (piped stdin, deadline waits, a
   ready pollable returning at once next to a ten-second deadline).
 
-What it does not cover: sockets, file metadata and directory listings (random and reading files:
-Results 6 and 7); the `Imports` trait
+What it does not cover: sockets (random and files: Results 6 and 7); the `Imports` trait
 is generated per module, so the host has to match the module's import set (the example
 marks the methods only some programs need).
 
@@ -161,13 +160,12 @@ The numbers come from a small non-cryptographic generator (splitmix64) seeded fr
 OS-seeded `std` hasher. That is right for `HashMap` seeds and examples, and wrong for
 keys or tokens: do not treat `get-random-bytes` here as cryptographically secure.
 
-## Result 7: reading files
+## Result 7: files (read-only)
 
-`std::fs::read_to_string` (and `File::open`) now works. A program that touches
-`std::fs` imports the whole `wasi:filesystem` surface (13 imports) even if it only
-reads, so the host implements all of it: `get-directories`, `open-at`,
-`read-via-stream` and the descriptor/stream drops do the work, and the rest answers an
-`error-code`. Run it with `WASIP2_PREOPEN=<dir> cargo run --release --example
+`std::fs::read_to_string`, `File::open`, `metadata` and `read_dir` now work. A program
+that touches `std::fs` imports the whole `wasi:filesystem` surface (13 imports) even if
+it only reads, so the host implements all of it: opening and reading files, metadata
+and directory listings work, and writing answers an `error-code`. Run it with `WASIP2_PREOPEN=<dir> cargo run --release --example
 wasip2_run -- module0.wasm`: `<dir>` is the guest's `/` (without it the guest has no
 preopens), and both `hello.txt` and `/hello.txt` open the same file.
 
@@ -179,8 +177,12 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   ignored; links are always followed.
 - A file's input stream shares `input-stream.read` with stdin (handle 0). Streams are
   freed on `resource-drop`; descriptors are not.
-- Not done yet: `stat`, `stat-at`, `get-flags`, `metadata-hash` and `read-directory`
-  return `unsupported`. `std::fs::metadata` and `read_dir` therefore fail.
+- Metadata and directories: `stat`, `stat-at` (type, link count, size, access and
+  modification times; the status-change time is `none`), `get-flags` (always `read`),
+  `metadata-hash` (a hash of the canonical path) and `read-directory` /
+  `read-directory-entry` (a snapshot taken when the directory is opened, without `.`
+  and `..`, in the OS's order). `std::fs::metadata`, `File::metadata` and `read_dir`
+  work; the same path checks apply to `stat-at` and `metadata-hash-at`.
 
 ## Options for the next investment
 
@@ -192,8 +194,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
    everything below. *Done: `named_imports` / `--named-imports`.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
-   generated or companion module, with a handle table. Writing files, metadata and
-   directory listing are a further step. This is what makes a wasip2 hello-world run natively.
+   generated or companion module, with a handle table. Writing files is a further step. This is what makes a wasip2 hello-world run natively.
 4. **Full component support** (very large): parse the component, resolve instances
    and `canon lift/lower` per the spec, and generate glue for arbitrary WIT worlds.
    Months of work; only worth it if general components are a goal.
