@@ -21,10 +21,12 @@
 // from the OS-seeded `std` hasher: fine for `HashMap` seeds and examples, not for
 // keys or tokens.
 // Files: a single preopened directory (`with_preopen`, shown to the guest as "/"),
-// read-only. A descriptor is an index into `descriptors` (the preopen is 0), a file's
+// read-only unless `with_writable_preopen`. A descriptor is an index into `descriptors` (the preopen is 0), a file's
 // input stream is `FIRST_FILE_STREAM + index` into `files`. Paths are resolved against the preopen and
 // must stay under it: absolute paths and `..` are refused (`not-permitted`), and so are
-// symlinks that lead out. Anything that would write is refused with `read-only`.
+// symlinks that lead out. Anything that would write is refused with `read-only`; with a
+// writable preopen, files can be created, written, appended to and truncated (not yet
+// removed or renamed).
 // `stat`, `get-flags`, `metadata-hash` and directory listings work on the same paths.
 // `resource-drop` frees a handle's slot, which the next resource of its kind reuses; a guest
 // must not use a handle after dropping it (see docs/component-model-poc.md).
@@ -94,12 +96,17 @@ struct P2Host {
     /// The preopened directory (canonical); read only by the optional filesystem blocks.
     #[allow(dead_code)]
     root: Option<PathBuf>,
-    /// Paths behind descriptor handles (the preopen is slot 0, never freed), all under `root`.
+    /// Whether the guest may write under `root`; set by `with_writable_preopen`.
     #[allow(dead_code)]
-    descriptors: Slab<PathBuf>,
+    writable: bool,
+    /// Descriptor handles (the preopen is slot 0, never freed), all under `root`.
+    #[allow(dead_code)]
+    descriptors: Slab<Descriptor>,
     /// Open files behind input-stream handles `3..`.
     #[allow(dead_code)]
     files: Slab<std::fs::File>,
+    /// Open files behind the output-stream handles `3..` (1 and 2 are stdout and stderr).
+    outputs: Slab<std::fs::File>,
     /// Directory listings behind `directory-entry-stream` handles: the entries
     /// (type, name) still to be read.
     #[allow(dead_code)]
@@ -119,19 +126,30 @@ impl P2Host {
             start: Instant::now(),
             rng: os_seed(),
             root: None,
+            writable: false,
             descriptors: Slab::new(),
             files: Slab::new(),
+            outputs: Slab::new(),
             listings: Slab::new(),
         }
     }
 
-    /// Gives the guest the directory `root` (as its "/"), read-only.
+    /// Gives the guest the directory `root` (as its "/"), read-only; see
+    /// `with_writable_preopen`.
     #[allow(dead_code)]
     fn with_preopen(mut self, root: PathBuf) -> Self {
         let root = root.canonicalize().expect("preopen: directory does not exist");
-        self.descriptors.insert(root.clone()); // slot 0
+        self.descriptors.insert(Descriptor { path: root.clone(), write: false }); // slot 0
         self.root = Some(root);
         self
+    }
+
+    /// Like `with_preopen`, but the guest may create, write, append to and truncate
+    /// files under `root`.
+    #[allow(dead_code)]
+    fn with_writable_preopen(mut self, root: PathBuf) -> Self {
+        self.writable = true;
+        self.with_preopen(root)
     }
 
     /// The open file behind an input-stream handle (`None` for stdin, stdout, stderr or
@@ -141,11 +159,16 @@ impl P2Host {
         self.files.get_mut(file_index(stream)?)
     }
 
+    /// The descriptor behind a handle, or `bad-descriptor`.
+    #[allow(dead_code)]
+    fn open_descriptor(&self, descriptor: i32) -> Result<&Descriptor, u8> {
+        self.descriptors.get(descriptor as u32 as usize).ok_or(code::BAD_DESCRIPTOR)
+    }
+
     /// The path behind a descriptor handle, or `bad-descriptor`.
     #[allow(dead_code)]
     fn descriptor(&self, descriptor: i32) -> Result<&Path, u8> {
-        let path = self.descriptors.get(descriptor as u32 as usize);
-        path.map(PathBuf::as_path).ok_or(code::BAD_DESCRIPTOR)
+        self.open_descriptor(descriptor).map(|d| d.path.as_path())
     }
 
     /// Like `resolve`, for the path given as `(ptr, len)` in guest memory.
@@ -166,6 +189,50 @@ impl P2Host {
         }
         let full = base.join(relative).canonicalize().map_err(io_error_code)?;
         if full.starts_with(root) { Ok(full) } else { Err(code::NOT_PERMITTED) }
+    }
+
+    /// Like `resolve`, for a file that `open-at` may create: if `path` does not exist,
+    /// its parent directory must exist under the preopen, and the file is named there.
+    /// A symlink that leads nowhere (or out of the preopen) is `not-permitted`, not a
+    /// place to create a file.
+    #[allow(dead_code)]
+    fn resolve_to_create(&self, dir: i32, path: &str) -> Result<PathBuf, u8> {
+        match self.resolve(dir, path) {
+            Err(code::NO_ENTRY) => {}
+            found => return found,
+        }
+        let root = self.root.as_ref().ok_or(code::NOT_PERMITTED)?;
+        let relative = Path::new(path);
+        let name = relative.file_name().ok_or(code::INVALID)?;
+        let parent = relative.parent().unwrap_or(Path::new(""));
+        let parent = self.descriptor(dir)?.join(parent).canonicalize().map_err(io_error_code)?;
+        let full = parent.join(name);
+        if !parent.starts_with(root) || full.symlink_metadata().is_ok() {
+            return Err(code::NOT_PERMITTED);
+        }
+        Ok(full)
+    }
+
+    /// The file behind a descriptor opened for `write`, opened with `options` (which
+    /// the caller sets up for writing), or the `error-code`: `read-only` unless the
+    /// preopen is writable.
+    #[allow(dead_code)]
+    fn writable_file(
+        &self,
+        descriptor: i32,
+        options: impl FnOnce(&mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions,
+    ) -> Result<std::fs::File, u8> {
+        if !self.writable {
+            return Err(code::READ_ONLY);
+        }
+        let descriptor = self.open_descriptor(descriptor)?;
+        if descriptor.path.is_dir() {
+            return Err(code::IS_DIRECTORY);
+        }
+        if !descriptor.write {
+            return Err(code::BAD_DESCRIPTOR);
+        }
+        options(&mut std::fs::OpenOptions::new()).open(&descriptor.path).map_err(io_error_code)
     }
 
     /// The next 64 random bits (splitmix64).
@@ -249,6 +316,14 @@ impl P2Host {
     }
 }
 
+/// What a descriptor handle names: a path under the preopen, and whether the guest
+/// opened it for writing.
+#[allow(dead_code)]
+struct Descriptor {
+    path: PathBuf,
+    write: bool,
+}
+
 /// A table of live handles: a handle is a slot's index, and the slot of a dropped
 /// handle is reused by the next `insert`. A guest must not use a handle after
 /// dropping it (the Component Model forbids it); the host does not detect that, and
@@ -310,6 +385,7 @@ mod code {
     pub const ACCESS: u8 = 0;
     pub const BAD_DESCRIPTOR: u8 = 3;
     pub const EXIST: u8 = 7;
+    pub const INVALID: u8 = 12;
     pub const IO: u8 = 13;
     pub const IS_DIRECTORY: u8 = 14;
     pub const NO_ENTRY: u8 = 20;
@@ -485,7 +561,11 @@ impl Imports for P2Host {
             self.files.remove(index);
         }
     }
-    fn wasi_io_streams_resource_drop_output_stream(&mut self, _g: &mut Guest, _handle: i32) {}
+    fn wasi_io_streams_resource_drop_output_stream(&mut self, _g: &mut Guest, handle: i32) {
+        if let Some(index) = file_index(handle) {
+            self.outputs.remove(index);
+        }
+    }
     fn wasi_cli_terminal_input_resource_drop_terminal_input(
         &mut self,
         _g: &mut Guest,
@@ -562,8 +642,21 @@ impl Imports for P2Host {
         len: i32,
         ret: i32,
     ) {
-        stream_write(g, stream, ptr, len);
-        zero_tag(g, ret);
+        use std::io::Write;
+        let Some(index) = file_index(stream) else {
+            stream_write(g, stream, ptr, len);
+            return zero_tag(g, ret);
+        };
+        let (ptr, len) = (ptr as u32 as usize, len as u32 as usize);
+        let bytes = &g.memory()[ptr..ptr + len];
+        let written = self.outputs.get_mut(index).map(|file| file.write_all(bytes));
+        if let Some(Ok(())) = written {
+            zero_tag(g, ret);
+        } else {
+            // a failed write ends the stream: `result::err(stream-error::closed)`
+            put(g, ret, &[1]);
+            put(g, ret + 4, &[1]);
+        }
     }
 
     fn wasi_io_streams_method_output_stream_blocking_flush(
@@ -727,7 +820,9 @@ impl Imports for P2Host {
     // optional: wasi_filesystem_types_method_descriptor_open_at
     /// `open-at(path-flags, path, open-flags, descriptor-flags)` -> `result<descriptor,
     /// error-code>`. Path flags are ignored (links are always followed, within the
-    /// preopen); creating, truncating and writing are `read-only`.
+    /// preopen). Creating, truncating and writing are `read-only` unless the preopen is
+    /// writable; then `create`, `exclusive` and `truncate` act at once, and the
+    /// descriptor remembers whether it was opened for `write`.
     fn wasi_filesystem_types_method_descriptor_open_at(
         &mut self,
         g: &mut Guest,
@@ -739,22 +834,51 @@ impl Imports for P2Host {
         descriptor_flags: i32,
         ret: i32,
     ) {
-        const OPEN_CREATE_EXCLUSIVE_TRUNCATE: i32 = 1 | 4 | 8;
-        const DESCRIPTOR_WRITE_MUTATE_DIRECTORY: i32 = 2 | 32;
+        const OPEN_CREATE: i32 = 1;
         const OPEN_DIRECTORY: i32 = 2;
-        if open_flags & OPEN_CREATE_EXCLUSIVE_TRUNCATE != 0 || descriptor_flags & DESCRIPTOR_WRITE_MUTATE_DIRECTORY != 0 {
+        const OPEN_EXCLUSIVE: i32 = 4;
+        const OPEN_TRUNCATE: i32 = 8;
+        const DESCRIPTOR_WRITE: i32 = 2;
+        const DESCRIPTOR_MUTATE_DIRECTORY: i32 = 32;
+        let changes = open_flags & (OPEN_CREATE | OPEN_EXCLUSIVE | OPEN_TRUNCATE) != 0;
+        let writes = descriptor_flags & DESCRIPTOR_WRITE != 0;
+        if !self.writable && (changes || writes || descriptor_flags & DESCRIPTOR_MUTATE_DIRECTORY != 0) {
             return fs_error(g, ret, 4, code::READ_ONLY);
         }
-        match self.resolve_at(g, dir, path_ptr, path_len) {
-            Ok(full) if open_flags & OPEN_DIRECTORY != 0 && !full.is_dir() => {
-                fs_error(g, ret, 4, code::NOT_DIRECTORY)
-            }
-            Ok(full) => {
-                let handle = self.descriptors.insert(full);
-                fs_ok_handle(g, ret, handle);
-            }
-            Err(code) => fs_error(g, ret, 4, code),
+        if open_flags & OPEN_DIRECTORY != 0 && (changes || writes) {
+            return fs_error(g, ret, 4, code::INVALID);
         }
+        let path = get_str(g, path_ptr, path_len).ok_or(code::IO);
+        let full = path.and_then(|path| {
+            if open_flags & OPEN_CREATE != 0 {
+                self.resolve_to_create(dir, &path)
+            } else {
+                self.resolve(dir, &path)
+            }
+        });
+        let full = match full {
+            Ok(full) if open_flags & OPEN_DIRECTORY != 0 && !full.is_dir() => {
+                return fs_error(g, ret, 4, code::NOT_DIRECTORY);
+            }
+            Ok(full) if full.is_dir() && writes => return fs_error(g, ret, 4, code::IS_DIRECTORY),
+            Ok(full) if open_flags & (OPEN_CREATE | OPEN_EXCLUSIVE) == OPEN_CREATE | OPEN_EXCLUSIVE && full.exists() => {
+                return fs_error(g, ret, 4, code::EXIST);
+            }
+            Ok(full) => full,
+            Err(code) => return fs_error(g, ret, 4, code),
+        };
+        if open_flags & (OPEN_CREATE | OPEN_TRUNCATE) != 0 {
+            let created = std::fs::OpenOptions::new()
+                .write(true)
+                .create(open_flags & OPEN_CREATE != 0)
+                .truncate(open_flags & OPEN_TRUNCATE != 0)
+                .open(&full);
+            if let Err(e) = created {
+                return fs_error(g, ret, 4, io_error_code(e));
+            }
+        }
+        let handle = self.descriptors.insert(Descriptor { path: full, write: writes });
+        fs_ok_handle(g, ret, handle);
     }
     // end optional
 
@@ -791,34 +915,61 @@ impl Imports for P2Host {
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_write_via_stream
+    /// `write-via-stream(offset)` -> `result<output-stream, error-code>`: a new stream
+    /// writing into the file from `offset`. `read-only` unless the preopen is writable;
+    /// the descriptor must have been opened for `write`.
     fn wasi_filesystem_types_method_descriptor_write_via_stream(
         &mut self,
         g: &mut Guest,
-        _descriptor: i32,
-        _offset: i64,
+        descriptor: i32,
+        offset: i64,
         ret: i32,
     ) {
-        fs_error(g, ret, 4, code::READ_ONLY);
+        use std::io::{Seek, SeekFrom};
+        let opened = self.writable_file(descriptor, |options| options.write(true)).and_then(|mut file| {
+            file.seek(SeekFrom::Start(offset as u64)).map_err(io_error_code)?;
+            Ok(file)
+        });
+        match opened {
+            Ok(file) => {
+                let slot = self.outputs.insert(file);
+                fs_ok_handle(g, ret, FIRST_FILE_STREAM + slot);
+            }
+            Err(c) => fs_error(g, ret, 4, c),
+        }
     }
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_append_via_stream
+    /// `append-via-stream` -> `result<output-stream, error-code>`: every write goes to
+    /// the end of the file.
     fn wasi_filesystem_types_method_descriptor_append_via_stream(
         &mut self,
         g: &mut Guest,
-        _descriptor: i32,
+        descriptor: i32,
         ret: i32,
     ) {
-        fs_error(g, ret, 4, code::READ_ONLY);
+        match self.writable_file(descriptor, |options| options.append(true)) {
+            Ok(file) => {
+                let slot = self.outputs.insert(file);
+                fs_ok_handle(g, ret, FIRST_FILE_STREAM + slot);
+            }
+            Err(c) => fs_error(g, ret, 4, c),
+        }
     }
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_get_flags
     /// `result<descriptor-flags, error-code>`: the flags are one byte, at `ret + 1`;
-    /// every descriptor is `read` (1).
-    fn wasi_filesystem_types_method_descriptor_get_flags(&mut self, g: &mut Guest, _d: i32, ret: i32) {
-        zero_tag(g, ret);
-        put(g, ret + 1, &[1]);
+    /// every descriptor is `read` (1), plus `write` (2) if it was opened for writing.
+    fn wasi_filesystem_types_method_descriptor_get_flags(&mut self, g: &mut Guest, d: i32, ret: i32) {
+        match self.open_descriptor(d) {
+            Ok(descriptor) => {
+                zero_tag(g, ret);
+                put(g, ret + 1, &[1 | if descriptor.write { 2 } else { 0 }]);
+            }
+            Err(c) => fs_error(g, ret, 1, c),
+        }
     }
     // end optional
 

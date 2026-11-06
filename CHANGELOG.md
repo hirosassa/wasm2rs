@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The WASI preview2 host example can let a program write files: `P2Host::with_writable_preopen`
+  (`$WASIP2_PREOPEN_WRITABLE=1` in `wasip2_run`) supports `open-at` with `create`,
+  `exclusive` and `truncate`, `write-via-stream` and `append-via-stream`; the preopen is
+  read-only by default. Removing and renaming files is not done yet.
 - `wasm2rs_macros::include_wasm!` accepts `named_imports`, `import_memory` and
   `reentrant_imports` (the `TranspileOptions` of the same name), so a host such as the
   WASI preview2 example can embed a module without a build script.

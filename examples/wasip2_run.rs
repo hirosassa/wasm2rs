@@ -10,7 +10,8 @@
 //! `rustc -C opt-level=1` and run with `args` as the program's arguments and this
 //! process's environment; its exit code is this program's. The build goes in
 //! `$WASIP2_WORK_DIR` (default: a temporary directory). The program sees the
-//! directory `$WASIP2_PREOPEN`, if set, as its read-only `/`. See
+//! directory `$WASIP2_PREOPEN`, if set, as its `/`: read-only, or also writable if
+//! `$WASIP2_PREOPEN_WRITABLE=1`. See
 //! `docs/component-model-poc.md`.
 
 use std::process::Command;
@@ -66,7 +67,8 @@ fn main() {
          let args = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();\n    \
          let env = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();\n    \
          let mut host = P2Host::new(args, env);\n    \
-         if let Some(dir) = std::env::var_os(\"WASIP2_PREOPEN\") {{ host = host.with_preopen(dir.into()); }}\n    \
+         if let Some(dir) = std::env::var_os(\"WASIP2_PREOPEN\") {{\n        \
+         host = if std::env::var_os(\"WASIP2_PREOPEN_WRITABLE\").is_some_and(|v| v == \"1\") {{ host.with_writable_preopen(dir.into()) }} else {{ host.with_preopen(dir.into()) }};\n    }}\n    \
          let mut inst = Instance::new(host);\n    \
          let status = inst.func{run}();\n    \
          std::process::exit(status);\n    \

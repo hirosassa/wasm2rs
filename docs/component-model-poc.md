@@ -164,7 +164,7 @@ The numbers come from a small non-cryptographic generator (splitmix64) seeded fr
 OS-seeded `std` hasher. That is right for `HashMap` seeds and examples, and wrong for
 keys or tokens: do not treat `get-random-bytes` here as cryptographically secure.
 
-## Result 7: files (read-only)
+## Result 7: files
 
 `std::fs::read_to_string`, `File::open`, `metadata` and `read_dir` now work. A program
 that touches `std::fs` imports the whole `wasi:filesystem` surface (13 imports) even if
@@ -173,8 +173,21 @@ and directory listings work, and writing answers an `error-code`. Run it with `W
 wasip2_run -- module0.wasm`: `<dir>` is the guest's `/` (without it the guest has no
 preopens), and both `hello.txt` and `/hello.txt` open the same file.
 
-- The preopen is read-only: creating, truncating and writing (`open-at` flags,
-  `write-via-stream`, `append-via-stream`) return `read-only`.
+- The preopen is read-only by default: creating, truncating and writing (`open-at`
+  flags, `write-via-stream`, `append-via-stream`) return `read-only`.
+- **Writing is opt-in**: `P2Host::with_writable_preopen(dir)` (`$WASIP2_PREOPEN_WRITABLE=1`
+  next to `$WASIP2_PREOPEN` in `wasip2_run`). Then `open-at` honours `create`,
+  `exclusive` (`exist` if the file is there) and `truncate`, and a descriptor opened
+  with `write` gives `write-via-stream(offset)` and `append-via-stream`, whose output
+  streams share `check-write`/`write`/`blocking-flush` with stdout (file streams are
+  handles `3..`; a failed write answers `closed`). A new file is named under an
+  existing directory that must itself resolve under the preopen, and a symlink that
+  leads nowhere or out (even a dangling one) is `not-permitted`, not a place to create
+  a file. The path is checked when the file is opened, not held open: a program that
+  swaps a directory for a symlink between the check and the open can escape, so only
+  preopen a directory you trust the program with. Deleting, `create-directory-at`,
+  `rename-at`, `set-times`, `sync` and the like are not done yet (`unsupported` or
+  `read-only`).
 - Paths must stay under the preopen: an absolute path or any `..` is `not-permitted`
   (stricter than WASI, which allows `..` that stays inside), and so is a symlink that
   leads out (the resolved path is checked against the preopen). Path flags are
@@ -205,7 +218,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
    everything below. *Done: `named_imports` / `--named-imports`.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
-   generated or companion module, with a handle table. Writing files is a further step. This is what makes a wasip2 hello-world run natively.
+   generated or companion module, with a handle table. Writing files is partly done (Result 7); removing and renaming are further steps. This is what makes a wasip2 hello-world run natively.
 4. **Full component support** (very large): parse the component, resolve instances
    and `canon lift/lower` per the spec, and generate glue for arbitrary WIT worlds.
    Months of work; only worth it if general components are a goal.
