@@ -78,9 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `wasm2rs --dump` refuses the flags that only change the generated code (`--unsafe-memory`,
-  `--named-exports`, `--named-imports`, `--import-memory`, `--reentrant-imports`,
-  `--split-dispatch`, `--jobs`, `--entry-exports`) instead of silently ignoring them.
+- `wasm2rs --dump` and `--extract-core` refuse the flags that only change the generated code
+  (`--unsafe-memory`, `--named-exports`, `--named-imports`, `--import-memory`,
+  `--reentrant-imports`, `--split-dispatch`, `--jobs`, `--entry-exports`) instead of
+  silently ignoring them; `--extract-core` also refuses `--dump`.
 - `docs/component-model-poc.md`: what a wasip2 component contains, that its core module
   already transpiles, and how far its preview2 imports are from the preview1 support.
 
