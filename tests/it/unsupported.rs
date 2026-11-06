@@ -388,12 +388,12 @@ fn continuation_body_also_called_directly_is_rejected() {
 
 #[test]
 fn ref_null_of_a_non_reference_heaptype_is_rejected() {
-    // `funcref`/`externref` nulls lower to the `u32::MAX` sentinel and the
-    // abstract GC heaptypes (`any`/`eq`/`struct`/`array`/`none`) lower to the
-    // managed `GcRef::Null`. A `noexn` null has neither representation, so it is
-    // rejected by name rather than mistranslated.
+    // `funcref`/`externref`/`exnref` nulls (and their bottom types) lower to the
+    // `u32::MAX` sentinel and the abstract GC heaptypes (`any`/`eq`/`struct`/
+    // `array`/`none`) lower to the managed `GcRef::Null`. A `nocont` null has
+    // neither representation, so it is rejected by name rather than mistranslated.
     assert_unsupported(
-        r#"(module (func (result i32) (ref.is_null (ref.null noexn))))"#,
+        r#"(module (func (result i32) (ref.is_null (ref.null nocont))))"#,
         "ref.null of unsupported type",
     );
 }

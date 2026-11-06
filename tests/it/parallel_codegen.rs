@@ -98,7 +98,7 @@ fn a_failing_function_reports_the_same_error_for_any_job_count() {
     let mut wat = String::from("(module (tag $e)\n");
     for i in 0..40 {
         if i == 30 {
-            wat.push_str("(func (result i32) (ref.is_null (ref.null noexn)))\n");
+            wat.push_str("(func (result i32) (ref.is_null (ref.null nocont)))\n");
         } else {
             wat.push_str(&format!("(func (result i32) (i32.const {i}))\n"));
         }

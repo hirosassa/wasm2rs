@@ -14,9 +14,10 @@ pub(crate) fn declares_gc_types(type_kinds: &[CompositeKind]) -> bool {
         .any(|k| matches!(k, CompositeKind::Struct(_) | CompositeKind::Array(_)))
 }
 /// Whether the managed value model ([`GCREF_DEF`]) must be emitted: either the
-/// module declares a struct/array type, or a body introduces an abstract GC
-/// reference (e.g. `ref.null any`), which also lowers to a `GcRef` even without
-/// any concrete GC type declared.
+/// module declares a struct/array type, a body introduces an abstract GC
+/// reference (e.g. `ref.null any`), or one appears only in a type (a global,
+/// signature, table element or local: [`abstract_gc_in_types`]); the last two
+/// also lower to a `GcRef` even without any concrete GC type declared.
 pub(crate) fn needs_gc_types(parts: &ModuleParts<'_>) -> Result<bool, TranspileError> {
     Ok(declares_gc_types(parts.type_kinds)
         || abstract_gc_in_types(parts)?
@@ -397,14 +398,7 @@ pub(crate) fn rust_type(
         // A `funcref` is a function index and an `externref` is an opaque host
         // handle; both are represented as a `u32` (`u32::MAX` is null), matching
         // the table's element representation.
-        ValType::Ref(rt)
-            if rt.is_func_ref()
-                || rt.is_extern_ref()
-                || is_exn_heap(rt.heap_type())
-                || is_bottom_u32_heap(rt.heap_type()) =>
-        {
-            Ok("u32")
-        }
+        ValType::Ref(rt) if is_abstract_u32_ref(rt) => Ok("u32"),
         // An abstract GC reference (`any`/`eq`/`i31`/`struct`/`array`/`none`) is a
         // managed `GcRef` handle. An `i31ref` rides as the `GcRef::I31` variant so
         // it can flow through an `anyref`/`eqref` alongside heap objects.
@@ -441,6 +435,14 @@ pub(crate) fn is_bottom_u32_heap(hty: HeapType) -> bool {
             ..
         }
     )
+}
+/// Whether a reference type lowers to a plain `u32` handle (`u32::MAX` is null): a
+/// `funcref`, `externref`, `exnref` or one of their bottom types.
+pub(crate) fn is_abstract_u32_ref(rt: wasmparser::RefType) -> bool {
+    rt.is_func_ref()
+        || rt.is_extern_ref()
+        || is_exn_heap(rt.heap_type())
+        || is_bottom_u32_heap(rt.heap_type())
 }
 /// Whether a heap type is the abstract `exn` type: an `exnref` is a `u32` handle
 /// into the exception store.
@@ -517,11 +519,7 @@ pub(crate) fn default_value(ty: ValType, kinds: &[CompositeKind]) -> &'static st
         // A default `funcref`/`externref` (and any concrete typed funcref) is
         // null.
         ValType::Ref(rt)
-            if rt.is_func_ref()
-                || rt.is_extern_ref()
-                || is_exn_heap(rt.heap_type())
-                || is_bottom_u32_heap(rt.heap_type())
-                || matches!(rt.heap_type(), HeapType::Concrete(_)) =>
+            if is_abstract_u32_ref(rt) || matches!(rt.heap_type(), HeapType::Concrete(_)) =>
         {
             "u32::MAX"
         }
