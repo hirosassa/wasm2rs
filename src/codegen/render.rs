@@ -570,17 +570,16 @@ fn constructor_lines(
     // `Instance::new` and — for a shared module — `with_memory`. Only the memory
     // field differs between the two, so factoring the rest keeps them in lock-step.
     let push_common_fields = |inner: &mut Vec<String>| -> Result<(), TranspileError> {
-        // An imported table is host-owned (see the post-construction elem copy);
-        // only a defined table gets a `table` field.
-        // Table 0 keeps the `table` field; table `i > 0` is `table{i}`.
+        // An imported table 0 is host-owned (see the post-construction elem copy), so
+        // it has no field. Table 0 keeps the `table` field and table `i > 0` is
+        // `table{i}`; the defined tables number from 1 when table 0 is imported.
         let defined = table
             .filter(|_| !table_imported)
             .into_iter()
             .chain(parts.extra_tables);
-        // An imported table 0 is not in `defined`, so the defined tables number from 1.
         let first = usize::from(table_imported);
-        for (i, t) in defined.enumerate() {
-            let i = index_u32(first + i)?;
+        for (i, t) in (first..).zip(defined) {
+            let i = index_u32(i)?;
             let (field, _) = table_accessor(i);
             let fill = match t.init {
                 Some(TableFill::ImportedGlobal(global)) => {

@@ -414,9 +414,8 @@ fn an_imported_table_may_sit_next_to_a_defined_one() {
          // table.copy $t0 <- $t1: table 1 slot 2 lands in host slot 0.\n    \
          inst.func7(0, 2, 1);\n    \
          assert_eq!(inst.func3(0), 1);\n    \
-         assert_eq!(inst.table_len_of_host(), 2);\n    \
-         }}\n\
-         impl<H: Imports> Instance<H> {{ fn table_len_of_host(&self) -> usize {{ self.table().len() }} }}"
+         assert_eq!(inst.table().len(), 2);\n    \
+         }}"
     );
     let bin = compile("with_defined", IMPORTED_AND_DEFINED, &extra);
     let run = Command::new(&bin).status().expect("run generated binary");
