@@ -305,6 +305,10 @@ where
     // declares no supertype), parallel to `type_kinds`. Drives the runtime
     // subtype checks emitted for `ref.test`/`ref.cast`/`br_on_cast`.
     let mut supers: Vec<Option<u32>> = Vec::new();
+    // Whether every function type is final, declares no supertype and sits alone in
+    // its rec group. Only then is a function's signature its whole type, which the
+    // funcref `ref.test`/`ref.cast` lowering relies on.
+    let mut plain_func_types = true;
     let mut func_type_indices: Vec<u32> = Vec::new();
     let mut bodies: Vec<wasmparser::FunctionBody> = Vec::new();
     let mut globals: Vec<codegen::GlobalInfo> = Vec::new();
@@ -340,7 +344,14 @@ where
             Payload::Version { encoding, .. } => reject_component(encoding)?,
             Payload::TypeSection(reader) => {
                 for group in reader {
-                    for sub in group?.types() {
+                    let group = group?;
+                    let lone = group.types().len() == 1;
+                    for sub in group.types() {
+                        if matches!(sub.composite_type.inner, CompositeInnerType::Func(_))
+                            && !(lone && sub.is_final && sub.supertype_idxs.is_empty())
+                        {
+                            plain_func_types = false;
+                        }
                         // Record the direct supertype (if any) before matching
                         // the kind, keeping `supers` aligned with the type index
                         // space so a subtype chain can be walked at codegen time.
@@ -876,6 +887,7 @@ where
         types: &types,
         type_kinds: &type_kinds,
         supers: &supers,
+        plain_func_types,
         globals: &globals,
         memories: &memories,
         data: &data,
@@ -932,7 +944,8 @@ struct ImportSink<'a> {
 /// imported table in `table`, and an imported exception tag onto `tags`.
 /// A table holds `funcref`, `externref`, `exnref`, or a concrete function reference
 /// `(ref null $ft)`; the latter is stored exactly like a `funcref` (a `u32`
-/// function handle). Tables of GC struct/array/cont references are unsupported.
+/// function handle). An abstract `contref` or bottom type is a `u32` handle too; tables
+/// of GC struct/array or concrete continuation references are unsupported.
 fn is_supported_table_element(
     element: wasmparser::RefType,
     type_kinds: &[codegen::CompositeKind],

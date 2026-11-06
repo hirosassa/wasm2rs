@@ -9,11 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ref.test`, `ref.cast` and `br_on_cast` against a concrete function type: a funcref is a
+  function-index handle, so (as for `call_indirect`) it matches when its function's signature
+  equals the target's; null follows the target's nullability. This is exact only when every
+  function type is final, has no supertype and sits alone in its rec group, the target signature
+  has no concrete reference, and the module has no host (an external funcref carries no
+  signature); otherwise the cast is rejected as unsupported. A test against a concrete
+  continuation type is also unsupported.
+- The abstract `contref` type and `ref.null cont`: a `u32` handle like a concrete continuation
+  reference.
 - `ref.null nocont` / `nullcontref`: the bottom of the continuation hierarchy lowers to the same
   `u32` handle as a concrete continuation reference.
 - `ref.test`, `ref.cast` and `br_on_cast` accept the func/extern/exn hierarchies (and their bottom
   types) as targets: a top type matches every non-null value, a bottom type only null. A test
-  against a concrete function type is still unsupported (a funcref handle has no runtime type).
+  against a concrete function type is covered separately below.
 - A module may import several tables: each is host-owned and lent through its own accessor pair
   (`table`/`table_mut` for table 0, `table1`/`table1_mut`, ... for the others). Active element
   segments are copied in module order after construction. An imported `table i64` is supported.

@@ -9,6 +9,7 @@
 
 mod bottom_ref_types;
 mod common;
+mod func_ref_casts;
 
 mod active_segment_init;
 mod atomics;
