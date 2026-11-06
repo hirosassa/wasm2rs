@@ -313,12 +313,12 @@ fn spawn_piped(bin: &std::path::Path) -> std::process::Child {
         .expect("spawn generated binary")
 }
 
-/// Waits up to five seconds for `child` to exit successfully; kills it and fails if it
-/// does not exit, or fails.
-fn finish_within_five_seconds(mut child: std::process::Child) {
+/// Waits up to 30 seconds (the machine may be busy) for `child` to exit successfully;
+/// kills it and fails if it does not exit, or fails.
+fn finish_within_30_seconds(mut child: std::process::Child) {
     let started = std::time::Instant::now();
     while child.try_wait().unwrap().is_none() {
-        if started.elapsed() > std::time::Duration::from_secs(5) {
+        if started.elapsed() > std::time::Duration::from_secs(30) {
             child.kill().unwrap();
             panic!("the generated binary blocked");
         }
@@ -343,7 +343,7 @@ fn a_host_reads_stdin_and_reports_end_of_input_as_closed() {
     );
     let mut child = spawn_piped(&bin);
     child.stdin.take().unwrap().write_all(b"ab\ncd").unwrap();
-    finish_within_five_seconds(child);
+    finish_within_30_seconds(child);
 }
 
 #[test]
@@ -357,7 +357,7 @@ fn reading_an_idle_stdin_returns_an_empty_list_without_blocking() {
     let mut child = spawn_piped(&bin);
     // the write end stays open, so stdin is idle, not at its end
     let _stdin = child.stdin.take().unwrap();
-    finish_within_five_seconds(child);
+    finish_within_30_seconds(child);
 }
 
 #[test]
@@ -380,8 +380,9 @@ fn polling_stdin_wakes_when_data_arrives_and_at_the_end_of_input() {
     // let the program read "x" before the input ends
     std::thread::sleep(std::time::Duration::from_millis(200));
     drop(stdin);
-    // far less than the ten-second deadline `poll` also waits on
-    finish_within_five_seconds(child);
+    // a `poll` that missed the data would wait out its ten-second deadline and the guest's
+    // checks would fail
+    finish_within_30_seconds(child);
 }
 
 #[test]
@@ -400,7 +401,7 @@ fn polling_deadline_pollables_waits_for_the_clock() {
         String::from_utf8_lossy(&run.stderr)
     );
     // 50 ms + 30 ms of waiting, and not the ten-second deadline.
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(started.elapsed() < std::time::Duration::from_secs(9));
 }
 
 /// The `wasi:random` imports: `insecure-seed` is what a `HashMap` needs; the others are

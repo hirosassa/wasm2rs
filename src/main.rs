@@ -152,7 +152,10 @@ fn run() -> Result<(), String> {
             (jobs > 0, "--jobs"),
             (entry_exports.is_some(), "--entry-exports"),
         ];
-        if let Some((_, flag)) = code_flags.iter().find(|(given, _)| *given) {
+        if let Some(flag) = code_flags
+            .into_iter()
+            .find_map(|(given, flag)| given.then_some(flag))
+        {
             return Err(format!(
                 "--dump takes only the input file; {flag} changes the generated code, which --dump does not generate"
             ));

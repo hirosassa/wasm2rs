@@ -101,7 +101,8 @@ fn resolve_path(path: &str, manifest_dir: &Path, out_dir: Option<&str>) -> Resul
     Ok(manifest_dir.join(path))
 }
 
-/// The option names `include_wasm!` accepts, for the error message.
+/// The option names `include_wasm!` accepts, for the error message (keep in step with
+/// the `match` in `generate` and the crate docs).
 const OPTIONS: &str = "`named_exports`, `unsafe_memory`, `named_imports`, `import_memory` or \
                        `reentrant_imports`";
 
@@ -166,17 +167,24 @@ mod tests {
         assert!(err.contains("here.wasm"), "{err}");
     }
 
+    /// Writes `wasm` to a temp `.wasm` file unique to this process and `name`.
+    fn write_temp_wasm(name: &str, wasm: &[u8]) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("wasm2rs_macros_{}_{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("m.wasm");
+        std::fs::write(&path, wasm).unwrap();
+        path
+    }
+
     #[test]
     fn generate_honours_named_exports() {
-        let dir = std::env::temp_dir().join(format!("wasm2rs_macros_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("add.wasm");
         let wasm: &[u8] = &[
             0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x60, 0x02, 0x7f,
             0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64,
             0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,
         ];
-        std::fs::write(&path, wasm).unwrap();
+        let path = write_temp_wasm("add", wasm);
         assert!(!generate(&path, &[]).unwrap().contains("pub fn add("));
         assert!(
             generate(&path, &["named_exports".into()])
@@ -187,10 +195,6 @@ mod tests {
 
     /// A module importing `env.f` and owning a memory, written to a temp `.wasm`.
     fn module_with_an_import(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("wasm2rs_macros_{}_{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("imp.wasm");
         let wasm: &[u8] = &[
             0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
             0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type: () -> ()
@@ -200,8 +204,7 @@ mod tests {
             0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x01, // export run
             0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b, // run calls the import
         ];
-        std::fs::write(&path, wasm).unwrap();
-        path
+        write_temp_wasm(name, wasm)
     }
 
     #[test]
@@ -209,6 +212,9 @@ mod tests {
         let path = module_with_an_import("options");
         let plain = generate(&path, &[]).unwrap();
         assert!(plain.contains("fn import0(&mut self);"), "{plain}");
+        assert!(!plain.contains("env_f"), "{plain}");
+        assert!(!plain.contains("memory_mut"), "{plain}");
+        assert!(!plain.contains("g: &mut Instance<Self>"), "{plain}");
         let named = generate(&path, &["named_imports".into()]).unwrap();
         assert!(named.contains("fn env_f(&mut self);"), "{named}");
         let memory = generate(&path, &["import_memory".into()]).unwrap();

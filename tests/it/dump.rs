@@ -203,7 +203,8 @@ fn the_dump_flag_rejects_an_output_path() {
 }
 
 /// Every flag that only changes the generated code: `--dump` generates none, so it
-/// refuses them instead of silently ignoring them.
+/// refuses them instead of silently ignoring them. (The defaults `--jobs=0` and
+/// `--split-dispatch=0` change nothing and are accepted.)
 #[test]
 fn the_dump_flag_rejects_code_generation_flags() {
     let input = write_wasm("cli_flags");
@@ -224,8 +225,8 @@ fn the_dump_flag_rejects_code_generation_flags() {
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "{flag} was accepted");
         let name = flag.split('=').next().unwrap();
+        assert!(!out.status.success(), "{flag} was accepted");
         assert!(
             stderr.contains("--dump") && stderr.contains(name),
             "{flag}: {stderr}"
