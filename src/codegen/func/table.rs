@@ -1,7 +1,7 @@
 use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, ValType};
 
 use super::super::helpers::{mem_accessor, table_accessor};
-use super::super::{CompositeKind, Helper, Val, is_bottom_u32_heap};
+use super::super::{CompositeKind, Helper, Val, is_bottom_u32_heap, is_cont_heap};
 use crate::TranspileError;
 
 impl<'a> super::FuncGen<'a> {
@@ -375,9 +375,9 @@ impl<'a> super::FuncGen<'a> {
                 ty: AbstractHeapType::Exn,
                 ..
             } => ValType::EXNREF,
-            // A bottom type holds only null: keep its own type (it lowers like the
-            // top type of its hierarchy).
-            hty if is_bottom_u32_heap(hty) => {
+            // A bottom type holds only null (it lowers like the top type of its
+            // hierarchy) and `contref` is a `u32` handle: keep the type as written.
+            hty if is_bottom_u32_heap(hty) || is_cont_heap(hty) => {
                 ValType::Ref(RefType::new(true, hty).ok_or_else(|| {
                     TranspileError::Unsupported("ref.null: bottom reference type".into())
                 })?)

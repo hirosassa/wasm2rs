@@ -174,3 +174,24 @@ fn br_on_cast_on_a_funcref_branches_on_nullness() {
          assert_eq!(func2(), 0);",
     );
 }
+
+#[test]
+fn the_abstract_contref_type_is_a_u32_handle_like_a_concrete_cont() {
+    common::compile_run(
+        "abstract_contref",
+        r#"(module
+          (type $ft (func))
+          (type $ct (cont $ft))
+          (global $g (mut contref) (ref.null cont))
+          (func $id (param contref) (result contref) (local $l contref) (local.get 0))
+          (func (export "null_is_null") (result i32) (ref.is_null (ref.null cont)))
+          (func (export "via_global") (result i32) (ref.is_null (global.get $g)))
+          (func (export "via_param") (result i32) (ref.is_null (call $id (ref.null cont))))
+          (func (export "from_nocont") (result i32) (ref.is_null (call $id (ref.null nocont))))
+          (func (export "to_concrete") (result i32)
+            (ref.is_null (ref.null $ct))))"#,
+        "let mut inst = Instance::new();\n assert_eq!(inst.func1(), 1);\n \
+         assert_eq!(inst.func2(), 1);\n assert_eq!(inst.func3(), 1);\n \
+         assert_eq!(inst.func4(), 1);\n assert_eq!(inst.func5(), 1);",
+    );
+}

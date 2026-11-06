@@ -677,6 +677,20 @@ impl super::FuncGen<'_> {
                 ty: AbstractHeapType::None,
                 ..
             } => ("false".to_string(), "false".to_string()),
+            // A funcref is a function-index handle whose runtime type is its
+            // function's signature (as for `call_indirect`), so a concrete function
+            // type matches exactly the functions of that signature. An external
+            // handle (high bit set) is no local index and never matches.
+            HeapType::Concrete(idx)
+                if idx.as_module_index().is_some_and(|i| {
+                    matches!(
+                        self.ctx.type_kinds.get(i as usize),
+                        Some(CompositeKind::Func)
+                    )
+                }) =>
+            {
+                return self.func_heap_test(ref_expr, idx.as_module_index(), null_matches);
+            }
             HeapType::Concrete(_) => {
                 let target = self.gc_type_index(hty).ok_or_else(|| {
                     TranspileError::Unsupported(
@@ -694,6 +708,34 @@ impl super::FuncGen<'_> {
         Ok(format!(
             "match &({ref_expr}) {{ GcRef::Null => {null_matches}, \
              GcRef::I31(_) => {i31_arm}, GcRef::Obj {{ ty, .. }} => {obj_arm} }}"
+        ))
+    }
+
+    /// The Rust condition testing that the `u32` funcref `ref_expr` is a function
+    /// whose signature equals the function type `idx` (or null, when
+    /// `null_matches`).
+    fn func_heap_test(
+        &self,
+        ref_expr: &str,
+        idx: Option<u32>,
+        null_matches: bool,
+    ) -> Result<String, TranspileError> {
+        let sig = idx
+            .and_then(|i| self.ctx.types.get(i as usize))
+            .ok_or_else(|| TranspileError::Unsupported("ref cast/test: unknown type".into()))?;
+        let targets: Vec<String> = self
+            .ctx
+            .funcs_with_sig(&sig.params, &sig.results)
+            .iter()
+            .map(|f| format!("{f}u32"))
+            .collect();
+        let hit = if targets.is_empty() {
+            "false".to_string()
+        } else {
+            format!("matches!(__f, {})", targets.join(" | "))
+        };
+        Ok(format!(
+            "{{ let __f: u32 = ({ref_expr}); if __f == u32::MAX {{ {null_matches} }} else {{ {hit} }} }}"
         ))
     }
 

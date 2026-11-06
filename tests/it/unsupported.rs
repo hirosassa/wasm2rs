@@ -387,14 +387,16 @@ fn continuation_body_also_called_directly_is_rejected() {
 }
 
 #[test]
-fn ref_null_of_a_non_reference_heaptype_is_rejected() {
-    // `funcref`/`externref`/`exnref` nulls (and their bottom types) lower to the
-    // `u32::MAX` sentinel and the abstract GC heaptypes (`any`/`eq`/`struct`/
-    // `array`/`none`) lower to the managed `GcRef::Null`. The abstract `cont` null has
-    // neither representation, so it is rejected by name rather than mistranslated.
+fn ref_test_on_a_concrete_continuation_type_is_rejected() {
+    // A test against a concrete function type compares signatures, but a
+    // continuation handle carries no runtime type, so a test against a concrete
+    // continuation type is rejected rather than mistranslated.
     assert_unsupported(
-        r#"(module (func (result i32) (ref.is_null (ref.null cont))))"#,
-        "ref.null of unsupported type",
+        r#"(module
+             (type $ft (func))
+             (type $ct (cont $ft))
+             (func (result i32) (ref.test (ref $ct) (ref.null cont))))"#,
+        "non-struct/array concrete type",
     );
 }
 
@@ -479,21 +481,6 @@ fn array_new_data_with_a_reference_element_is_rejected() {
              (func (result (ref $a))
                (array.new_data $a 0 (i32.const 0) (i32.const 1))))"#,
         "array.new_data/init_data with a reference element type",
-    );
-}
-
-#[test]
-fn ref_test_on_a_concrete_function_type_is_rejected() {
-    // A test against the abstract `func`/`extern` types (and their bottoms) needs
-    // only a null check, but a test against a concrete function type needs the
-    // callee's runtime type. wasm2rs represents funcrefs as opaque `u32` handles
-    // with no runtime type tag, so it rejects rather than mistranslates.
-    assert_unsupported(
-        r#"(module
-             (type $ft (func))
-             (func (param funcref) (result i32)
-               (ref.test (ref $ft) (local.get 0))))"#,
-        "non-struct/array concrete type",
     );
 }
 
