@@ -244,9 +244,7 @@ impl P2Host {
     /// at its end), or the `error-code`: `read-only` unless the preopen is writable.
     #[allow(dead_code)]
     fn writable_file(&self, descriptor: i32, append: bool) -> Result<std::fs::File, u8> {
-        if !self.writable {
-            return Err(code::READ_ONLY);
-        }
+        self.require_writable()?;
         let descriptor = self.open_descriptor(descriptor)?;
         if descriptor.path.is_dir() {
             return Err(code::IS_DIRECTORY);
@@ -1056,7 +1054,8 @@ impl Imports for P2Host {
 
     // optional: wasi_filesystem_types_method_descriptor_rename_at
     /// `rename-at(old-path, new-descriptor, new-path)`: both names are checked like any
-    /// other entry; an existing target file is replaced.
+    /// other entry; an existing target file is replaced. A symlink cannot be renamed
+    /// (`not-permitted`).
     fn wasi_filesystem_types_method_descriptor_rename_at(
         &mut self,
         g: &mut Guest,
@@ -1071,7 +1070,12 @@ impl Imports for P2Host {
         let done = self.require_writable().and_then(|()| {
             let old = self.entry_at(g, dir, old_ptr, old_len)?;
             let new = self.entry_at(g, new_dir, new_ptr, new_len)?;
-            old.symlink_metadata().map_err(io_error_code)?;
+            // Not a symlink: a descriptor's path is checked once, when it is opened, and
+            // stays valid because nothing a guest can do puts a symlink under a path it
+            // holds. Moving a symlink there would lead the descriptor out of the preopen.
+            if old.symlink_metadata().map_err(io_error_code)?.file_type().is_symlink() {
+                return Err(code::NOT_PERMITTED);
+            }
             std::fs::rename(old, new).map_err(io_error_code)
         });
         put_status(g, ret, done);

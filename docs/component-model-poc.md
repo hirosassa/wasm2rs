@@ -187,11 +187,14 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   swaps a directory for a symlink between the check and the open can escape, so only
   preopen a directory you trust the program with.
 - With a writable preopen, `create-directory-at`, `unlink-file-at`,
-  `remove-directory-at` and `rename-at` work too (`std::fs::create_dir(_all)`,
-  `remove_file`, `remove_dir(_all)`, `rename`). The name is resolved like a created
+  `remove-directory-at` and `rename-at` work too (`std::fs::create_dir`,
+  `remove_file`, `remove_dir`, `rename`; `create_dir_all` and `remove_dir_all` are built
+  from them). The name is resolved like a created
   file's (parent under the preopen; `..`, absolute paths and names ending in `/` or
   `/.` refused), and the entry itself is never followed: `unlink` removes a symlink,
-  not its target, and `remove-directory-at` on a symlink is `not-directory`. Errors:
+  not its target, `remove-directory-at` on a symlink is `not-directory`, and a symlink
+  cannot be renamed (`not-permitted`: a descriptor's path is checked only when it is
+  opened, so a symlink moved onto it would lead it out of the preopen). Errors:
   `exist`, `no-entry`, `is-directory`, `not-directory`, `not-empty`. On a read-only
   preopen all four are `read-only`. `set-times`, `set-size`, `sync` and the like are
   not done yet.

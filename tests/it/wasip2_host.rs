@@ -893,7 +893,7 @@ fn a_writable_preopen_creates_writes_appends_and_truncates_files() {
     );
 }
 
-/// The imports and path strings (at 300 to 507) of the tests that create, remove and
+/// The imports and path strings (at 300 to 523) of the tests that create, remove and
 /// rename entries. Each of these calls returns `result<_, error-code>`: the tag at
 /// `ret`, the error's tag byte at `ret + 1`.
 const REMOVE_IMPORTS: &str = r#"
@@ -921,6 +921,8 @@ const REMOVE_IMPORTS: &str = r#"
   (data (i32.const 483) "mine.txt")
   (data (i32.const 493) "missing")
   (data (i32.const 502) "x.txt")
+  (data (i32.const 509) "linked.txt")
+  (data (i32.const 521) "o2")
 "#;
 
 /// `fs_remove` runs on a writable root holding `del.txt`, `emptydir/`, `fulldir/f.txt`,
@@ -964,6 +966,12 @@ const REMOVE: &str = r#"
     (call $expect (i32.const 20))
     (call $unlink (local.get $dir) (i32.const 363) (i32.const 8) (i32.const 220))
     (call $expect (i32.const 14))
+    ;; a symlink cannot be renamed: moved onto a name a descriptor holds, it would lead
+    ;; that descriptor out of the root
+    (call $rename (local.get $dir) (i32.const 373) (i32.const 8) (local.get $dir) (i32.const 509) (i32.const 10) (i32.const 220))
+    (call $expect (i32.const 31))
+    (call $rename (local.get $dir) (i32.const 422) (i32.const 6) (local.get $dir) (i32.const 521) (i32.const 2) (i32.const 220))
+    (call $expect (i32.const 31))
     (call $unlink (local.get $dir) (i32.const 373) (i32.const 8) (i32.const 220))
     (call $expect (i32.const 0))
     (call $unlink (local.get $dir) (i32.const 383) (i32.const 17) (i32.const 220))
@@ -1004,8 +1012,8 @@ const REMOVE: &str = r#"
 "#;
 
 /// A root for the remove/rename tests, and the files and directories outside it that
-/// they must not touch: `outside/wasm2rs_b_outfile.txt` (behind `link_out`) and
-/// `outside/wasm2rs_b_outdir/victim.txt` (behind `outdir`).
+/// they must not touch: `outside/file.txt` (behind `link_out`) and
+/// `outside/dir/victim.txt` (behind `outdir`).
 #[cfg(unix)]
 fn remove_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!("wasm2rs_wasip2_{name}_root"));
@@ -1069,7 +1077,8 @@ fn a_writable_preopen_creates_and_removes_directories_and_renames_entries() {
             .is_symlink()
     );
     assert!(!root.join("mine.txt").exists());
-    assert!(!outside.parent().unwrap().join("wasm2rs_b_x").exists());
+    assert!(!root.join("linked.txt").exists() && !root.join("o2").exists());
+    assert!(!root.parent().unwrap().join("wasm2rs_b_x").exists());
 }
 
 #[cfg(unix)]
@@ -1084,7 +1093,7 @@ fn a_read_only_preopen_refuses_to_create_remove_and_rename() {
     );
     run_ok(&bin);
     assert!(!root.join("made").exists());
-    for kept in ["del.txt", "emptydir", "ren_a.txt", "fulldir"] {
+    for kept in ["del.txt", "emptydir", "ren_a.txt"] {
         assert!(root.join(kept).exists(), "{kept} was removed");
     }
     assert!(outside.join("file.txt").exists());
