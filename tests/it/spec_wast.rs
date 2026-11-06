@@ -42,6 +42,8 @@ struct Group {
     /// Stateful modules (memory, globals, ...) are an `Instance`; stateless
     /// ones are plain free functions.
     stateful: bool,
+    /// The expression building the instance (`None` for a stateless module).
+    ctor: Option<String>,
     funcs: HashMap<String, u32>,
     body: String,
     /// A state-changing call was skipped: the module's later assertions would see
@@ -298,6 +300,19 @@ struct SpectestImports {
     memory: bool,
 }
 
+impl SpectestImports {
+    /// The `Host { .. }` expression matching [`spectest_host`]'s struct.
+    fn host_init(&self) -> String {
+        let table = if self.table { SPECTEST_TABLE_LEN } else { 0 };
+        let memory = if self.memory {
+            SPECTEST_MEMORY_PAGES * WASM_PAGE
+        } else {
+            0
+        };
+        format!("Host {{ table: vec![u32::MAX; {table}], memory: vec![0; {memory}] }}")
+    }
+}
+
 /// The spec's `spectest` table is `(table 10 20 funcref)` and its memory is
 /// `(memory 1 2)`. A module is linked against these actual sizes whatever minimum
 /// it declares, and one they do not satisfy (a larger minimum, or a maximum below
@@ -438,28 +453,22 @@ fn start_group(wasm: Vec<u8>) -> Result<Group, String> {
     let generated = wasm2rs::transpile(&wasm).map_err(|e| format!("transpile failed: {e:?}"))?;
     let stateful = generated.contains("pub struct Instance");
     let mut body = String::from(TRAP_HELPER);
-    if has_imports {
+    let ctor = if has_imports {
         body.push_str(&spectest_host(&generated, &spectest));
-        let table = if spectest.table {
-            SPECTEST_TABLE_LEN
-        } else {
-            0
-        };
-        let memory = if spectest.memory {
-            SPECTEST_MEMORY_PAGES * WASM_PAGE
-        } else {
-            0
-        };
-        body.push_str(&format!(
-            "let mut inst = Instance::new(Host {{ table: vec![u32::MAX; {table}], memory: vec![0; {memory}] }});\n"
-        ));
+        Some(format!("Instance::new({})", spectest.host_init()))
     } else if stateful {
-        body.push_str("let mut inst = Instance::new();\n");
+        Some("Instance::new()".to_string())
+    } else {
+        None
+    };
+    if let Some(ctor) = &ctor {
+        body.push_str(&format!("let mut inst = {ctor};\n"));
     }
     Ok(Group {
         funcs: export_funcs(&wasm),
         wasm,
         stateful,
+        ctor,
         body,
         tainted: false,
     })
@@ -470,19 +479,16 @@ fn start_group(wasm: Vec<u8>) -> Result<Group, String> {
 /// no instantiation to trap, so it is skipped.
 fn trapping_instantiation(wasm: Vec<u8>, message: &str, ctx: &str) -> Result<Group, String> {
     let mut group = start_group(wasm)?;
-    if !group.stateful {
-        return Err("a stateless module has no instantiation to trap".into());
-    }
-    // `start_group` ends the body with the instance construction; run it under
+    let ctor = group
+        .ctor
+        .take()
+        .ok_or("a stateless module has no instantiation to trap")?;
+    // `start_group` ended the body with the construction; run it under
     // `expect_trap` instead.
     let at = group
         .body
         .rfind("let mut inst = ")
         .ok_or("no constructor to run")?;
-    let ctor = group.body[at + "let mut inst = ".len()..]
-        .trim_end()
-        .trim_end_matches(';')
-        .to_string();
     group.body.truncate(at);
     let needles = format!("{:?}", trap_needles(message));
     group.body.push_str(&format!(
