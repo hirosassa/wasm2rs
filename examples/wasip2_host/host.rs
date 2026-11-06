@@ -134,12 +134,11 @@ impl P2Host {
         self
     }
 
-    /// The slot of a file's input stream (`None` for stdin, stdout, stderr or an
-    /// unknown handle).
+    /// The open file behind an input-stream handle (`None` for stdin, stdout, stderr or
+    /// an unknown handle).
     #[allow(dead_code)]
     fn file_stream(&mut self, stream: i32) -> Option<&mut std::fs::File> {
-        let index = (stream as u32 as usize).checked_sub(FIRST_FILE_STREAM)?;
-        self.files.get_mut(index)
+        self.files.get_mut(file_index(stream)?)
     }
 
     /// The path behind a descriptor handle, or `bad-descriptor`.
@@ -259,7 +258,6 @@ struct Slab<T> {
     free: Vec<usize>,
 }
 
-#[allow(dead_code)]
 impl<T> Slab<T> {
     fn new() -> Self {
         Slab { slots: Vec::new(), free: Vec::new() }
@@ -282,6 +280,7 @@ impl<T> Slab<T> {
         self.slots.get(slot)?.as_ref()
     }
 
+    #[allow(dead_code)]
     fn get_mut(&mut self, slot: usize) -> Option<&mut T> {
         self.slots.get_mut(slot)?.as_mut()
     }
@@ -297,6 +296,12 @@ impl<T> Slab<T> {
 /// The handle of the first file's input stream (0 to 2 are stdin, stdout, stderr).
 #[allow(dead_code)]
 const FIRST_FILE_STREAM: usize = 3;
+
+/// The slot in `files` of an input-stream handle (`None` for stdin, stdout, stderr).
+#[allow(dead_code)]
+fn file_index(stream: i32) -> Option<usize> {
+    (stream as u32 as usize).checked_sub(FIRST_FILE_STREAM)
+}
 
 /// `wasi:filesystem` error codes; which ones a program's host uses depends on the
 /// optional blocks kept.
@@ -476,7 +481,7 @@ impl Imports for P2Host {
         self.pollables.remove(handle as u32 as usize);
     }
     fn wasi_io_streams_resource_drop_input_stream(&mut self, _g: &mut Guest, handle: i32) {
-        if let Some(index) = (handle as u32 as usize).checked_sub(FIRST_FILE_STREAM) {
+        if let Some(index) = file_index(handle) {
             self.files.remove(index);
         }
     }
@@ -605,8 +610,7 @@ impl Imports for P2Host {
             let n = shared.bytes.read(&mut buf).unwrap(); // a `VecDeque` never fails
             (n > 0 || !shared.eof).then_some(n)
         } else {
-            let file = self.file_stream(stream);
-            let file = file.expect("read from an unknown or dropped stream");
+            let file = self.file_stream(stream).expect("read from an unknown or dropped stream");
             file.read(&mut buf).ok().filter(|&n| n > 0)
         };
         let Some(n) = read else {
@@ -691,6 +695,7 @@ impl Imports for P2Host {
     // optional: wasi_filesystem_types_resource_drop_descriptor
     fn wasi_filesystem_types_resource_drop_descriptor(&mut self, _g: &mut Guest, handle: i32) {
         if handle != 0 {
+            // the preopen (slot 0) is never freed
             self.descriptors.remove(handle as u32 as usize);
         }
     }

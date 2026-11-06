@@ -31,8 +31,8 @@ const HOST: &str = include_str!("../../examples/wasip2_host/host.rs");
 const HELLO: &str = r#"
 (module
   (import "wasi:io/error@0.2.0" "[resource-drop]error" (func (param i32)))
-  (import "wasi:io/poll@0.2.0" "[resource-drop]pollable" (func (param i32)))
-  (import "wasi:io/streams@0.2.0" "[resource-drop]input-stream" (func (param i32)))
+  (import "wasi:io/poll@0.2.0" "[resource-drop]pollable" (func $drop_pollable (param i32)))
+  (import "wasi:io/streams@0.2.0" "[resource-drop]input-stream" (func $drop_stream (param i32)))
   (import "wasi:io/streams@0.2.0" "[resource-drop]output-stream" (func (param i32)))
   (import "wasi:cli/terminal-input@0.2.0" "[resource-drop]terminal-input" (func (param i32)))
   (import "wasi:cli/terminal-output@0.2.0" "[resource-drop]terminal-output" (func (param i32)))
@@ -708,7 +708,7 @@ const REUSE_IMPORTS: &str = r#"
 /// open, and keeps the preopen even if the guest drops it. Results are
 /// `result<handle, error-code>` (the handle at `ret + 4`).
 const REUSE: &str = r#"
-  (func (export "fs_reuse") (local $dir i32) (local $f1 i32) (local $f2 i32) (local $s i32) (local $l i32) (local $p i32)
+  (func (export "fs_reuse") (local $dir i32) (local $f1 i32) (local $s i32) (local $l i32) (local $p i32)
     (call $dirs (i32.const 200))
     (local.set $dir (i32.load (i32.load (i32.const 200))))
     ;; a descriptor: the slot comes back once dropped, but not while it is open
@@ -741,8 +741,6 @@ const REUSE: &str = r#"
     (call $drop_fd (local.get $dir))
     (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 9) (i32.const 0) (i32.const 1) (i32.const 220))
     (if (i32.load8_u (i32.const 220)) (then unreachable))
-    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 9) (i32.const 0) (i32.const 1) (i32.const 220))
-    (call $drop_fd (local.get $dir))
     (if (i32.eq (i32.load (i32.const 224)) (local.get $dir)) (then unreachable)))
 "#;
 
@@ -755,18 +753,7 @@ fn a_host_reuses_the_slots_of_dropped_handles() {
         "P2Host::new(vec![], vec![]).with_preopen(std::path::PathBuf::from({:?}))",
         root.to_str().unwrap()
     );
-    // name the drops of the base module, which it imports without a name
-    let wat = hello_with(&format!("{FS_IMPORTS}{REUSE_IMPORTS}"), REUSE)
-        .replacen(
-            "\"[resource-drop]pollable\" (func (param i32))",
-            "\"[resource-drop]pollable\" (func $drop_pollable (param i32))",
-            1,
-        )
-        .replacen(
-            "\"[resource-drop]input-stream\" (func (param i32))",
-            "\"[resource-drop]input-stream\" (func $drop_stream (param i32))",
-            1,
-        );
+    let wat = hello_with(&format!("{FS_IMPORTS}{REUSE_IMPORTS}"), REUSE);
     let bin = compile("fs_reuse", &wat, &init, "inst.fs_reuse();");
     let run = Command::new(&bin).output().expect("run generated binary");
     assert!(

@@ -183,11 +183,11 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
 - Handles are reused: `resource-drop` of a pollable, descriptor, file input stream or
   directory-entry-stream frees its slot, and the next resource of that kind takes the
   most recently freed one, so a program that opens and drops in a loop does not grow
-  the host's tables. **Contract:** a guest must not use a handle after dropping it (the
-  Component Model forbids it). The host does not promise to detect that: once the slot
-  is reused, a stale handle silently names the newer resource (before that, it is
-  `bad-descriptor` or a panic, depending on the call). The preopen (descriptor 0) is
-  never freed.
+  the host's tables. The preopen (descriptor 0) is never freed.
+- **Contract:** a guest must not use a handle after dropping it (the Component Model
+  forbids it). The host does not promise to detect that. Until the slot is reused, a
+  stale handle may fail (`bad-descriptor` or a panic) or quietly succeed, depending on
+  the call; once it is reused, the stale handle silently names the newer resource.
 - Metadata and directories: `stat`, `stat-at` (type, link count, size, access and
   modification times; the status-change time is `none`), `get-flags` (always `read`),
   `metadata-hash` (a hash of the canonical path) and `read-directory` /
