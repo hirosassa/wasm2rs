@@ -21,8 +21,9 @@
 // from the OS-seeded `std` hasher: fine for `HashMap` seeds and examples, not for
 // keys or tokens.
 // Files: a single preopened directory (`with_preopen`, shown to the guest as "/"),
-// read-only unless `with_writable_preopen`. A descriptor is an index into `descriptors` (the preopen is 0), a file's
-// input stream is `FIRST_FILE_STREAM + index` into `files`. Paths are resolved against the preopen and
+// read-only unless `with_writable_preopen`. A descriptor is an index into `descriptors`
+// (the preopen is 0), a file's input stream is `FIRST_FILE_STREAM + index` into `files` and
+// its output stream the same into `outputs`. Paths are resolved against the preopen and
 // must stay under it: absolute paths and `..` are refused (`not-permitted`), and so are
 // symlinks that lead out. Anything that would write is refused with `read-only`; with a
 // writable preopen, files can be created, written, appended to and truncated (not yet
@@ -202,6 +203,11 @@ impl P2Host {
             found => return found,
         }
         let root = self.root.as_ref().ok_or(code::NOT_PERMITTED)?;
+        // `resolve` has already refused `..` and absolute paths. A name that ends in `/`
+        // or `/.` names a directory, which `file_name` would silently drop.
+        if path.ends_with('/') || path.ends_with("/.") {
+            return Err(code::INVALID);
+        }
         let relative = Path::new(path);
         let name = relative.file_name().ok_or(code::INVALID)?;
         let parent = relative.parent().unwrap_or(Path::new(""));
@@ -213,15 +219,10 @@ impl P2Host {
         Ok(full)
     }
 
-    /// The file behind a descriptor opened for `write`, opened with `options` (which
-    /// the caller sets up for writing), or the `error-code`: `read-only` unless the
-    /// preopen is writable.
+    /// The file behind a descriptor opened for `write`, opened for writing (`append`:
+    /// at its end), or the `error-code`: `read-only` unless the preopen is writable.
     #[allow(dead_code)]
-    fn writable_file(
-        &self,
-        descriptor: i32,
-        options: impl FnOnce(&mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions,
-    ) -> Result<std::fs::File, u8> {
+    fn writable_file(&self, descriptor: i32, append: bool) -> Result<std::fs::File, u8> {
         if !self.writable {
             return Err(code::READ_ONLY);
         }
@@ -232,7 +233,20 @@ impl P2Host {
         if !descriptor.write {
             return Err(code::BAD_DESCRIPTOR);
         }
-        options(&mut std::fs::OpenOptions::new()).open(&descriptor.path).map_err(io_error_code)
+        let opened = std::fs::OpenOptions::new().write(true).append(append).open(&descriptor.path);
+        opened.map_err(io_error_code)
+    }
+
+    /// `result<output-stream, error-code>` at `ret`: a new stream over `opened`, or the error.
+    #[allow(dead_code)]
+    fn put_output_stream(&mut self, g: &mut Guest, ret: i32, opened: Result<std::fs::File, u8>) {
+        match opened {
+            Ok(file) => {
+                let slot = self.outputs.insert(file);
+                fs_ok_handle(g, ret, FIRST_FILE_STREAM + slot);
+            }
+            Err(c) => fs_error(g, ret, 4, c),
+        }
     }
 
     /// The next 64 random bits (splitmix64).
@@ -368,11 +382,13 @@ impl<T> Slab<T> {
     }
 }
 
-/// The handle of the first file's input stream (0 to 2 are stdin, stdout, stderr).
+/// The handle of the first file's stream, input or output (0 to 2 are stdin, stdout,
+/// stderr).
 #[allow(dead_code)]
 const FIRST_FILE_STREAM: usize = 3;
 
-/// The slot in `files` of an input-stream handle (`None` for stdin, stdout, stderr).
+/// The slot in `files` (an input stream) or `outputs` (an output stream) of a stream
+/// handle (`None` for stdin, stdout, stderr).
 #[allow(dead_code)]
 fn file_index(stream: i32) -> Option<usize> {
     (stream as u32 as usize).checked_sub(FIRST_FILE_STREAM)
@@ -840,39 +856,33 @@ impl Imports for P2Host {
         const OPEN_TRUNCATE: i32 = 8;
         const DESCRIPTOR_WRITE: i32 = 2;
         const DESCRIPTOR_MUTATE_DIRECTORY: i32 = 32;
-        let changes = open_flags & (OPEN_CREATE | OPEN_EXCLUSIVE | OPEN_TRUNCATE) != 0;
+        let (create, exclusive, truncate) =
+            (open_flags & OPEN_CREATE != 0, open_flags & OPEN_EXCLUSIVE != 0, open_flags & OPEN_TRUNCATE != 0);
         let writes = descriptor_flags & DESCRIPTOR_WRITE != 0;
+        let changes = create || exclusive || truncate;
         if !self.writable && (changes || writes || descriptor_flags & DESCRIPTOR_MUTATE_DIRECTORY != 0) {
             return fs_error(g, ret, 4, code::READ_ONLY);
         }
         if open_flags & OPEN_DIRECTORY != 0 && (changes || writes) {
             return fs_error(g, ret, 4, code::INVALID);
         }
-        let path = get_str(g, path_ptr, path_len).ok_or(code::IO);
-        let full = path.and_then(|path| {
-            if open_flags & OPEN_CREATE != 0 {
-                self.resolve_to_create(dir, &path)
-            } else {
-                self.resolve(dir, &path)
-            }
-        });
+        let Some(path) = get_str(g, path_ptr, path_len) else {
+            return fs_error(g, ret, 4, code::IO);
+        };
+        let full = if create { self.resolve_to_create(dir, &path) } else { self.resolve(dir, &path) };
         let full = match full {
             Ok(full) if open_flags & OPEN_DIRECTORY != 0 && !full.is_dir() => {
                 return fs_error(g, ret, 4, code::NOT_DIRECTORY);
             }
             Ok(full) if full.is_dir() && writes => return fs_error(g, ret, 4, code::IS_DIRECTORY),
-            Ok(full) if open_flags & (OPEN_CREATE | OPEN_EXCLUSIVE) == OPEN_CREATE | OPEN_EXCLUSIVE && full.exists() => {
+            Ok(full) if create && exclusive && full.exists() => {
                 return fs_error(g, ret, 4, code::EXIST);
             }
             Ok(full) => full,
             Err(code) => return fs_error(g, ret, 4, code),
         };
-        if open_flags & (OPEN_CREATE | OPEN_TRUNCATE) != 0 {
-            let created = std::fs::OpenOptions::new()
-                .write(true)
-                .create(open_flags & OPEN_CREATE != 0)
-                .truncate(open_flags & OPEN_TRUNCATE != 0)
-                .open(&full);
+        if create || truncate {
+            let created = std::fs::OpenOptions::new().write(true).create(create).truncate(truncate).open(&full);
             if let Err(e) = created {
                 return fs_error(g, ret, 4, io_error_code(e));
             }
@@ -926,17 +936,11 @@ impl Imports for P2Host {
         ret: i32,
     ) {
         use std::io::{Seek, SeekFrom};
-        let opened = self.writable_file(descriptor, |options| options.write(true)).and_then(|mut file| {
+        let opened = self.writable_file(descriptor, false).and_then(|mut file| {
             file.seek(SeekFrom::Start(offset as u64)).map_err(io_error_code)?;
             Ok(file)
         });
-        match opened {
-            Ok(file) => {
-                let slot = self.outputs.insert(file);
-                fs_ok_handle(g, ret, FIRST_FILE_STREAM + slot);
-            }
-            Err(c) => fs_error(g, ret, 4, c),
-        }
+        self.put_output_stream(g, ret, opened);
     }
     // end optional
 
@@ -949,13 +953,8 @@ impl Imports for P2Host {
         descriptor: i32,
         ret: i32,
     ) {
-        match self.writable_file(descriptor, |options| options.append(true)) {
-            Ok(file) => {
-                let slot = self.outputs.insert(file);
-                fs_ok_handle(g, ret, FIRST_FILE_STREAM + slot);
-            }
-            Err(c) => fs_error(g, ret, 4, c),
-        }
+        let opened = self.writable_file(descriptor, true);
+        self.put_output_stream(g, ret, opened);
     }
     // end optional
 

@@ -68,7 +68,8 @@ fn main() {
          let env = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();\n    \
          let mut host = P2Host::new(args, env);\n    \
          if let Some(dir) = std::env::var_os(\"WASIP2_PREOPEN\") {{\n        \
-         host = if std::env::var_os(\"WASIP2_PREOPEN_WRITABLE\").is_some_and(|v| v == \"1\") {{ host.with_writable_preopen(dir.into()) }} else {{ host.with_preopen(dir.into()) }};\n    }}\n    \
+         let writable = std::env::var_os(\"WASIP2_PREOPEN_WRITABLE\").is_some_and(|v| v == \"1\");\n        \
+         host = if writable {{ host.with_writable_preopen(dir.into()) }} else {{ host.with_preopen(dir.into()) }};\n    }}\n    \
          let mut inst = Instance::new(host);\n    \
          let status = inst.func{run}();\n    \
          std::process::exit(status);\n    \

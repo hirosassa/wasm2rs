@@ -747,7 +747,7 @@ fn a_host_reuses_the_slots_of_dropped_handles() {
     run_ok(&bin);
 }
 
-/// The imports and data `fs_write` needs: paths at 300 to 396, contents at 400 to 440.
+/// The imports and data `fs_write` needs: paths at 300 to 396 and 450 to 466, contents at 400 to 440.
 const WRITE_IMPORTS: &str = r#"
   (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
   (import "wasi:filesystem/types@0.2.0" "[resource-drop]descriptor" (func $drop_fd (param i32)))
@@ -761,6 +761,8 @@ const WRITE_IMPORTS: &str = r#"
   (data (i32.const 360) "sub/in.txt")
   (data (i32.const 372) "trunc.txt")
   (data (i32.const 384) "outdir/x.txt")
+  (data (i32.const 450) "newd/")
+  (data (i32.const 460) "newd/.")
   (data (i32.const 400) "hello")
   (data (i32.const 410) "EY")
   (data (i32.const 420) " world")
@@ -774,7 +776,7 @@ const WRITE_IMPORTS: &str = r#"
 /// create 1, exclusive 4, truncate 8; descriptor-flags: read 1, write 2 (so `3` is
 /// read + write); path-flags 1 follows links. `put_via` writes `(ptr, len)` to a
 /// stream from `write-via-stream` at `offset` (or `append-via-stream` for `-1`), then
-/// flushes and drops the stream. Error codes: exist 7, not-permitted 31.
+/// flushes and drops the stream. Error codes: exist 7, invalid 12, not-permitted 31.
 const WRITE: &str = r#"
   (func $open_at (param $dir i32) (param $path i32) (param $len i32) (param $oflags i32) (param $dflags i32)
     (call $open (local.get $dir) (i32.const 1) (local.get $path) (local.get $len)
@@ -836,6 +838,11 @@ const WRITE: &str = r#"
     ;; ... and a new file in a directory that is a symlink out of the root
     (call $open_at (local.get $dir) (i32.const 384) (i32.const 12) (i32.const 1) (i32.const 3))
     (call $expect_err (i32.const 31))
+    ;; a name ending in `/` or `/.` names a directory, so it cannot be created as a file
+    (call $open_at (local.get $dir) (i32.const 450) (i32.const 5) (i32.const 1) (i32.const 3))
+    (call $expect_err (i32.const 12))
+    (call $open_at (local.get $dir) (i32.const 460) (i32.const 6) (i32.const 1) (i32.const 3))
+    (call $expect_err (i32.const 12))
     ;; a file opened for reading only has no output stream
     (call $open_at (local.get $dir) (i32.const 300) (i32.const 7) (i32.const 0) (i32.const 1))
     (local.set $f (i32.load (i32.const 224)))
@@ -851,14 +858,15 @@ fn a_writable_preopen_creates_writes_appends_and_truncates_files() {
     std::fs::remove_dir_all(&root).ok();
     std::fs::create_dir_all(root.join("sub")).unwrap();
     std::fs::write(root.join("trunc.txt"), "old contents").unwrap();
-    let escape = root.parent().unwrap().join("wasm2rs_w_escape.txt");
+    let outside = root.parent().unwrap();
+    let escape = outside.join("wasm2rs_w_escape.txt");
     std::fs::remove_file(&escape).ok();
     // a symlink under the root to a file outside it that does not exist yet
-    let target = root.parent().unwrap().join("wasm2rs_w_dangling_target.txt");
+    let target = outside.join("wasm2rs_w_dangling_target.txt");
     std::fs::remove_file(&target).ok();
     std::os::unix::fs::symlink(&target, root.join("dangle")).unwrap();
     // a symlink under the root to a directory outside it
-    let outdir = root.parent().unwrap().join("wasm2rs_w_outdir");
+    let outdir = outside.join("wasm2rs_w_outdir");
     std::fs::remove_dir_all(&outdir).ok();
     std::fs::create_dir_all(&outdir).unwrap();
     std::os::unix::fs::symlink(&outdir, root.join("outdir")).unwrap();
@@ -875,6 +883,10 @@ fn a_writable_preopen_creates_writes_appends_and_truncates_files() {
     assert_eq!(read("trunc.txt"), "N");
     assert!(!escape.exists(), "created a file outside the root");
     assert!(!target.exists(), "wrote through a symlink that leads out");
+    assert!(
+        !root.join("newd").exists(),
+        "created a file for a directory name"
+    );
     assert!(
         !outdir.join("x.txt").exists(),
         "created a file through a linked directory"
