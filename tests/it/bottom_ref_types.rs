@@ -72,3 +72,32 @@ fn a_nullref_global_works_without_any_gc_type_or_gc_operator() {
         "let mut inst = Instance::new();\n let _ = inst.func0();\n assert_eq!(inst.func1(), 1);",
     );
 }
+
+#[test]
+fn an_anyref_only_inside_a_called_function_type_still_gets_the_gc_value_model() {
+    // `anyref` appears only in the function type behind `call_ref`'s `(ref null $ft)`,
+    // which itself lowers to a `u32`.
+    common::compile_run(
+        "gc_ref_in_call_ref_type",
+        r#"(module
+          (type $ft (func (result anyref)))
+          (func (export "x") (param (ref null $ft)) (result i32)
+            (ref.is_null (call_ref $ft (local.get 0)))))"#,
+        "let mut inst = Instance::new();\n let _ = Instance::func0 as fn(&mut Instance, u32) -> i32;\n let _ = &mut inst;",
+    );
+}
+
+#[test]
+fn an_anyref_only_as_a_block_result_still_gets_the_gc_value_model() {
+    common::compile_run(
+        "gc_ref_in_block_type",
+        r#"(module
+          (func (export "x") (result i32)
+            (block (result anyref) (unreachable)) (ref.is_null))
+          (func (export "y") (param i32) (result i32)
+            (if (result anyref) (local.get 0)
+              (then (unreachable)) (else (unreachable)))
+            (ref.is_null)))"#,
+        "let _ = func0 as fn() -> i32;\n let _ = func1 as fn(i32) -> i32;",
+    );
+}

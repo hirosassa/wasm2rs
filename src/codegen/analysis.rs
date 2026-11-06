@@ -2,7 +2,7 @@ use super::*;
 
 use std::collections::{HashMap, HashSet};
 
-use wasmparser::{AbstractHeapType, HeapType, Operator, ValType};
+use wasmparser::{AbstractHeapType, BlockType, HeapType, Operator, ValType};
 
 use crate::TranspileError;
 
@@ -30,14 +30,12 @@ fn abstract_gc_in_types(parts: &ModuleParts<'_>) -> Result<bool, TranspileError>
     let is_gc = |ty: &ValType| matches!(ty, ValType::Ref(rt) if abstract_is_gc(rt.heap_type()));
     if parts.globals.iter().any(|g| is_gc(&g.ty))
         || parts.imported_globals.iter().any(|g| is_gc(&g.ty))
+        // Every function signature (defined or imported, and the one behind a
+        // `call_ref`) is in the type section.
         || parts
-            .imports
+            .types
             .iter()
-            .any(|i| i.params.iter().chain(&i.results).any(is_gc))
-        || parts
-            .funcs
-            .iter()
-            .any(|f| f.params.iter().chain(f.results).any(is_gc))
+            .any(|t| t.params.iter().chain(&t.results).any(is_gc))
         || parts
             .table
             .into_iter()
@@ -82,6 +80,15 @@ pub(crate) fn any_body_op(
 pub(crate) fn uses_abstract_gc(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
     any_body_op(funcs, |op| {
         matches!(op, Operator::RefNull { hty } if abstract_is_gc(*hty))
+            // A single-value block result (`(block (result anyref) ..)`).
+            || matches!(
+                op,
+                Operator::Block { blockty: BlockType::Type(ValType::Ref(rt)) }
+                    | Operator::Loop { blockty: BlockType::Type(ValType::Ref(rt)) }
+                    | Operator::If { blockty: BlockType::Type(ValType::Ref(rt)) }
+                    | Operator::TryTable { try_table: wasmparser::TryTable { ty: BlockType::Type(ValType::Ref(rt)), .. } }
+                    if abstract_is_gc(rt.heap_type())
+            )
             || matches!(
                 op,
                 Operator::RefI31 | Operator::AnyConvertExtern | Operator::ExternConvertAny
