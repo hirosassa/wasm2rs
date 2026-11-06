@@ -1321,22 +1321,28 @@ const LINK_TIMES: &str = r#"
     ;; following the symlink sets the times of its target
     (call $touch (local.get $dir) (i32.const 1) (i32.const 320) (i32.const 2) (i64.const 1000000000) (i32.const 0))
     (call $ok (i32.const 220))
+    ;; now for both, on g.txt (its modification time is set below)
+    (call $set_times_at (local.get $dir) (i32.const 1) (i32.const 310) (i32.const 5)
+                        (i32.const 1) (i64.const 0) (i32.const 0)
+                        (i32.const 1) (i64.const 0) (i32.const 0) (i32.const 220))
+    (call $ok (i32.const 220))
     ;; without following, a file is set as it is; a symlink cannot be
     (call $touch (local.get $dir) (i32.const 0) (i32.const 310) (i32.const 5) (i64.const 1500000000) (i32.const 0))
     (call $ok (i32.const 220))
     (call $touch (local.get $dir) (i32.const 0) (i32.const 320) (i32.const 2) (i64.const 1) (i32.const 0))
     (call $err (i32.const 221) (i32.const 27))
-    ;; now for both, then out-of-range nanoseconds, a missing path, and one outside the preopen
-    (call $set_times_at (local.get $dir) (i32.const 1) (i32.const 310) (i32.const 5)
-                        (i32.const 1) (i64.const 0) (i32.const 0)
-                        (i32.const 1) (i64.const 0) (i32.const 0) (i32.const 220))
-    (call $ok (i32.const 220))
+    ;; out-of-range nanoseconds, a missing path, and paths outside the preopen
     (call $touch (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i64.const 5) (i32.const 1000000000))
     (call $err (i32.const 221) (i32.const 12))
     (call $touch (local.get $dir) (i32.const 1) (i32.const 350) (i32.const 4) (i64.const 5) (i32.const 0))
     (call $err (i32.const 221) (i32.const 20))
     (call $touch (local.get $dir) (i32.const 1) (i32.const 360) (i32.const 8) (i64.const 5) (i32.const 0))
-    (call $err (i32.const 221) (i32.const 31)))
+    (call $err (i32.const 221) (i32.const 31))
+    ;; a symlink that leads out is refused when followed (`abs`), or has nothing at its target (`up`)
+    (call $touch (local.get $dir) (i32.const 1) (i32.const 330) (i32.const 3) (i64.const 5) (i32.const 0))
+    (call $err (i32.const 221) (i32.const 31))
+    (call $touch (local.get $dir) (i32.const 1) (i32.const 340) (i32.const 2) (i64.const 5) (i32.const 0))
+    (call $err (i32.const 221) (i32.const 20)))
   (func (export "fs_links_denied") (local $dir i32)
     (call $dirs (i32.const 200))
     (local.set $dir (i32.load (i32.load (i32.const 200))))
@@ -1376,8 +1382,19 @@ fn set_times_at_follows_symlinks_on_request_and_readlink_at_shows_relative_targe
             .unwrap()
     };
     assert_eq!(epoch_secs(modified("f.txt")), 1_000_000_000);
-    // g.txt was set to 1_500_000_000, then to now
-    assert!(epoch_secs(modified("g.txt")) > 1_600_000_000);
+    // g.txt's times were set to now, then its modification time to 1_500_000_000
+    assert_eq!(epoch_secs(modified("g.txt")), 1_500_000_000);
+    let accessed = std::fs::metadata(root.join("g.txt"))
+        .unwrap()
+        .accessed()
+        .unwrap();
+    assert!(epoch_secs(accessed) > 1_600_000_000);
+    // the host directory `abs` leads to was not touched
+    let outside = std::fs::metadata(std::env::temp_dir())
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_ne!(epoch_secs(outside), 5);
 }
 
 #[cfg(unix)]
