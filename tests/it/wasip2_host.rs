@@ -278,15 +278,18 @@ const STDIO: &str = r#"
     (if (i32.ge_u (i32.load (i32.const 128)) (i32.const 1000000000)) (then unreachable)))
 "#;
 
-/// `HELLO` with extra imports (before its memory) and functions (before `bye`).
-/// Runs `bin` and fails with its stderr unless it exits successfully.
-fn run_ok(bin: &std::path::Path) {
-    let run = Command::new(bin).output().expect("run generated binary");
+/// Fails with `run`'s stderr unless it exited successfully.
+fn assert_succeeded(run: &std::process::Output) {
     assert!(
         run.status.success(),
         "{}",
         String::from_utf8_lossy(&run.stderr)
     );
+}
+
+/// Runs `bin` and fails with its stderr unless it exits successfully.
+fn run_ok(bin: &std::path::Path) {
+    assert_succeeded(&Command::new(bin).output().expect("run generated binary"));
 }
 
 /// The host expression for a program that sees `root` as its read-only `/`.
@@ -297,6 +300,7 @@ fn preopen_host(root: &std::path::Path) -> String {
     )
 }
 
+/// `HELLO` with extra imports (before its memory) and functions (before `bye`).
 fn hello_with(imports: &str, funcs: &str) -> String {
     HELLO
         .replacen(
@@ -337,12 +341,7 @@ fn finish_within_30_seconds(mut child: std::process::Child) {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let run = child.wait_with_output().unwrap();
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_succeeded(&child.wait_with_output().unwrap());
 }
 
 #[test]
