@@ -24,7 +24,8 @@
 // input stream is `FIRST_FILE_STREAM + index` into `files`. Paths are resolved against the preopen and
 // must stay under it: absolute paths and `..` are refused (`not-permitted`), and so are
 // symlinks that lead out. Anything that would write is refused with `read-only`.
-// Not implemented: `stat`, directory listing, sockets.
+// `stat`, `get-flags`, `metadata-hash` and directory listings work on the same paths.
+// Not implemented: sockets.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -50,6 +51,10 @@ struct P2Host {
     /// Open files behind input-stream handles `3..`; `None` once dropped.
     #[allow(dead_code)]
     files: Vec<Option<std::fs::File>>,
+    /// Directory listings behind `directory-entry-stream` handles: the entries
+    /// (type, name) still to be read; `None` once dropped.
+    #[allow(dead_code)]
+    listings: Vec<Option<std::vec::IntoIter<(u8, String)>>>,
 }
 
 type Guest = Instance<P2Host>;
@@ -61,6 +66,7 @@ impl P2Host {
             root: None,
             descriptors: Vec::new(),
             files: Vec::new(),
+            listings: Vec::new(),
         }
     }
 
@@ -79,6 +85,12 @@ impl P2Host {
     fn file_stream(&mut self, stream: i32) -> Option<&mut Option<std::fs::File>> {
         let index = (stream as u32 as usize).checked_sub(FIRST_FILE_STREAM)?;
         self.files.get_mut(index)
+    }
+
+    /// The path behind a descriptor handle.
+    #[allow(dead_code)]
+    fn descriptor(&self, descriptor: i32) -> Option<&Path> {
+        self.descriptors.get(descriptor as u32 as usize).map(PathBuf::as_path)
     }
 
     /// The path `path` names under the directory behind descriptor `dir`, or the
@@ -151,7 +163,6 @@ mod code {
     pub const IS_DIRECTORY: u8 = 14;
     pub const NO_ENTRY: u8 = 20;
     pub const NOT_DIRECTORY: u8 = 24;
-    pub const UNSUPPORTED: u8 = 27;
     pub const NOT_PERMITTED: u8 = 31;
     pub const READ_ONLY: u8 = 33;
 }
@@ -227,6 +238,72 @@ fn fs_error(g: &mut Guest, ret: i32, payload: i32, code: u8) {
 fn fs_ok_handle(g: &mut Guest, ret: i32, handle: usize) {
     zero_tag(g, ret);
     put_u32(g, ret + 4, handle as i32);
+}
+
+/// `option<datetime>` at `at`: the tag, seconds (`u64`) at `at + 8`, nanoseconds at
+/// `at + 16`; `none` if the time is unknown.
+#[allow(dead_code)]
+fn put_datetime_option(g: &mut Guest, at: i32, time: std::io::Result<std::time::SystemTime>) {
+    let since = time.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+    match since {
+        Some(d) => {
+            put(g, at, &[1]);
+            put(g, at + 8, &d.as_secs().to_le_bytes());
+            put_u32(g, at + 16, d.subsec_nanos() as i32);
+        }
+        None => put(g, at, &[0]),
+    }
+}
+
+/// The `descriptor-type` of a file type: directory 3, regular file 6, symlink 5.
+#[allow(dead_code)]
+fn descriptor_type(t: std::fs::FileType) -> u8 {
+    if t.is_dir() {
+        3
+    } else if t.is_file() {
+        6
+    } else if t.is_symlink() {
+        5
+    } else {
+        0
+    }
+}
+
+/// `result<descriptor-stat, error-code>` at `ret` for `path`: the record starts at
+/// `ret + 8` (type, link count, size, then access, modification and status-change
+/// times as `option<datetime>` of 24 bytes; the status-change time is `none`).
+#[allow(dead_code)]
+fn put_stat(g: &mut Guest, ret: i32, path: &Path) {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) => return fs_error(g, ret, 8, io_error_code(e)),
+    };
+    #[cfg(unix)]
+    let links = std::os::unix::fs::MetadataExt::nlink(&meta);
+    #[cfg(not(unix))]
+    let links = 1;
+    zero_tag(g, ret);
+    put(g, ret + 8, &[descriptor_type(meta.file_type())]);
+    put(g, ret + 16, &links.to_le_bytes());
+    put(g, ret + 24, &meta.len().to_le_bytes());
+    put_datetime_option(g, ret + 32, meta.accessed());
+    put_datetime_option(g, ret + 56, meta.modified());
+    put(g, ret + 80, &[0]);
+}
+
+/// `result<metadata-hash-value, error-code>` at `ret`: two `u64`s at `ret + 8`, a
+/// hash of the file's canonical path (the same file always gives the same value).
+#[allow(dead_code)]
+fn put_metadata_hash(g: &mut Guest, ret: i32, path: &Path) {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let hash = |salt: u8| {
+        let mut hasher = DefaultHasher::new();
+        (salt, path).hash(&mut hasher);
+        hasher.finish()
+    };
+    zero_tag(g, ret);
+    put(g, ret + 8, &hash(0).to_le_bytes());
+    put(g, ret + 16, &hash(1).to_le_bytes());
 }
 
 /// The `len` bytes at `ptr` as text, `None` if they are not UTF-8.
@@ -476,8 +553,11 @@ impl Imports for P2Host {
     fn wasi_filesystem_types_resource_drop_directory_entry_stream(
         &mut self,
         _g: &mut Guest,
-        _handle: i32,
+        handle: i32,
     ) {
+        if let Some(listing) = self.listings.get_mut(handle as u32 as usize) {
+            *listing = None;
+        }
     }
     // end optional
 
@@ -586,40 +666,75 @@ impl Imports for P2Host {
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_get_flags
+    /// `result<descriptor-flags, error-code>`: the flags are one byte, at `ret + 1`;
+    /// every descriptor is `read` (1).
     fn wasi_filesystem_types_method_descriptor_get_flags(&mut self, g: &mut Guest, _d: i32, ret: i32) {
-        fs_error(g, ret, 1, code::UNSUPPORTED); // the flags are one byte: payload at 1
+        zero_tag(g, ret);
+        put(g, ret + 1, &[1]);
     }
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_read_directory
-    fn wasi_filesystem_types_method_descriptor_read_directory(&mut self, g: &mut Guest, _d: i32, ret: i32) {
-        fs_error(g, ret, 4, code::UNSUPPORTED);
+    /// `read-directory` -> `result<directory-entry-stream, error-code>`: a snapshot of
+    /// the entries (without `.` and `..`), in the OS's order.
+    fn wasi_filesystem_types_method_descriptor_read_directory(&mut self, g: &mut Guest, d: i32, ret: i32) {
+        let Some(path) = self.descriptor(d) else {
+            return fs_error(g, ret, 4, code::BAD_DESCRIPTOR);
+        };
+        if !path.is_dir() {
+            return fs_error(g, ret, 4, code::NOT_DIRECTORY);
+        }
+        let entries = std::fs::read_dir(path).and_then(|dir| {
+            dir.map(|entry| {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                Ok((descriptor_type(entry.file_type()?), name))
+            })
+            .collect::<std::io::Result<Vec<_>>>()
+        });
+        match entries {
+            Ok(entries) => {
+                self.listings.push(Some(entries.into_iter()));
+                fs_ok_handle(g, ret, self.listings.len() - 1);
+            }
+            Err(e) => fs_error(g, ret, 4, io_error_code(e)),
+        }
     }
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_stat
-    fn wasi_filesystem_types_method_descriptor_stat(&mut self, g: &mut Guest, _d: i32, ret: i32) {
-        fs_error(g, ret, 8, code::UNSUPPORTED); // 8-aligned payload
+    fn wasi_filesystem_types_method_descriptor_stat(&mut self, g: &mut Guest, d: i32, ret: i32) {
+        match self.descriptor(d) {
+            Some(path) => put_stat(g, ret, &path.to_path_buf()),
+            None => fs_error(g, ret, 8, code::BAD_DESCRIPTOR),
+        }
     }
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_stat_at
+    /// Like `stat`, for a path under the descriptor (links are followed).
     fn wasi_filesystem_types_method_descriptor_stat_at(
         &mut self,
         g: &mut Guest,
-        _d: i32,
+        d: i32,
         _path_flags: i32,
-        _ptr: i32,
-        _len: i32,
+        ptr: i32,
+        len: i32,
         ret: i32,
     ) {
-        fs_error(g, ret, 8, code::UNSUPPORTED); // 8-aligned payload
+        match get_str(g, ptr, len).ok_or(code::IO).and_then(|path| self.resolve(d, &path)) {
+            Ok(full) => put_stat(g, ret, &full),
+            Err(c) => fs_error(g, ret, 8, c),
+        }
     }
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_metadata_hash
-    fn wasi_filesystem_types_method_descriptor_metadata_hash(&mut self, g: &mut Guest, _d: i32, ret: i32) {
-        fs_error(g, ret, 8, code::UNSUPPORTED); // 8-aligned payload
+    fn wasi_filesystem_types_method_descriptor_metadata_hash(&mut self, g: &mut Guest, d: i32, ret: i32) {
+        match self.descriptor(d) {
+            Some(path) => put_metadata_hash(g, ret, &path.to_path_buf()),
+            None => fs_error(g, ret, 8, code::BAD_DESCRIPTOR),
+        }
     }
     // end optional
 
@@ -627,24 +742,42 @@ impl Imports for P2Host {
     fn wasi_filesystem_types_method_descriptor_metadata_hash_at(
         &mut self,
         g: &mut Guest,
-        _d: i32,
+        d: i32,
         _path_flags: i32,
-        _ptr: i32,
-        _len: i32,
+        ptr: i32,
+        len: i32,
         ret: i32,
     ) {
-        fs_error(g, ret, 8, code::UNSUPPORTED); // 8-aligned payload
+        match get_str(g, ptr, len).ok_or(code::IO).and_then(|path| self.resolve(d, &path)) {
+            Ok(full) => put_metadata_hash(g, ret, &full),
+            Err(c) => fs_error(g, ret, 8, c),
+        }
     }
     // end optional
 
     // optional: wasi_filesystem_types_method_directory_entry_stream_read_directory_entry
+    /// `read-directory-entry` -> `result<option<directory-entry>, error-code>`: the
+    /// option's tag at `ret + 4`, then the entry: its type byte at `ret + 8` and its
+    /// name `(ptr, len)` at `ret + 12`. `none` once the listing is exhausted.
     fn wasi_filesystem_types_method_directory_entry_stream_read_directory_entry(
         &mut self,
         g: &mut Guest,
-        _stream: i32,
+        stream: i32,
         ret: i32,
     ) {
-        fs_error(g, ret, 4, code::UNSUPPORTED);
+        let Some(Some(listing)) = self.listings.get_mut(stream as u32 as usize) else {
+            return fs_error(g, ret, 4, code::BAD_DESCRIPTOR);
+        };
+        let next = listing.next();
+        zero_tag(g, ret);
+        match next {
+            Some((kind, name)) => {
+                put(g, ret + 4, &[1]);
+                put(g, ret + 8, &[kind]);
+                put_string(g, ret + 12, &name);
+            }
+            None => put(g, ret + 4, &[0]),
+        }
     }
     // end optional
 
