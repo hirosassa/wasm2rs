@@ -65,7 +65,7 @@ fn br_on_cast_to_a_concrete_function_type_branches_on_a_match() {
 }
 
 // Declared subtyping and canonical equivalence decide the test, not signature
-// equality. Funcs: `$h`=0, `$x`=1, `$y`=2, `$k`=3, `$m`=4, then the exports.
+// equality. Funcs: `$h`=0, `$x`=1, `$y`=2, `$k`=3, `$m`=4, then the exports from func5.
 const SUBTYPING: &str = r#"(module
   (type $f (sub (func (result funcref))))
   (type $g (sub $f (func (result (ref func)))))
@@ -122,4 +122,44 @@ fn ref_test_treats_equivalent_function_types_as_one() {
          assert_eq!(func11(), 1);\n assert_eq!(func12(), 1);\n \
          assert_eq!(func13(), 0);\n",
     );
+}
+
+#[test]
+fn a_cast_funcref_can_be_called_through_the_supertype() {
+    // `$fq` is declared a subtype of `$p` with a covariant result, so the cast passes
+    // and `call_ref $p` must dispatch to it (not only to functions of `$p`'s exact
+    // signature).
+    common::compile_run(
+        "func_sub_call_ref",
+        r#"(module
+          (type $p (sub (func (result anyref))))
+          (type $q (sub $p (func (result eqref))))
+          (func $fq (type $q) (ref.i31 (i32.const 3)))
+          (elem declare func $fq)
+          (func (export "run") (result i32)
+            (i31.get_s (ref.cast (ref i31)
+              (call_ref $p (ref.cast (ref $p) (ref.func $fq)))))))"#,
+        "let mut inst = Instance::new();\n assert_eq!(inst.func1(), 3);",
+    );
+}
+
+#[test]
+fn a_function_only_an_element_segment_array_reaches_is_still_a_cast_target() {
+    // With `entry_exports` only `t` is a root. `$only_elem` is reached solely through
+    // `array.new_elem`, so it must still count as live for the test below.
+    let wat = r#"(module
+          (rec (type $a (sub (func (result i32)))) (type $b (sub $a (func (result i32)))))
+          (type $arr (array funcref))
+          (func $only_elem (type $b) (i32.const 9))
+          (elem $e func $only_elem)
+          (func (export "t") (result i32)
+            (ref.test (ref $a)
+              (array.get $arr (array.new_elem $arr $e (i32.const 0) (i32.const 1)) (i32.const 0)))))"#;
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    let opts = wasm2rs::TranspileOptions {
+        entry_exports: Some(vec!["t".to_string()]),
+        ..Default::default()
+    };
+    let out = wasm2rs::transpile_with_options(&wasm, &opts).expect("transpile ok");
+    assert!(out.contains("matches!(__f, 0u32)"), "{out}");
 }

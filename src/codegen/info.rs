@@ -226,15 +226,11 @@ impl TypeRel {
         let (Some(&a), Some(&b)) = (self.canon.get(a as usize), self.canon.get(b as usize)) else {
             return false;
         };
-        let mut cur = Some(a);
         // The chain is finite for a validated module; bound the walk anyway.
-        for _ in 0..=self.canon_super.len() {
-            match cur {
-                Some(c) if c == b => return true,
-                Some(c) => cur = self.canon_super.get(c as usize).copied().flatten(),
-                None => return false,
-            }
-        }
-        false
+        std::iter::successors(Some(a), |&c| {
+            self.canon_super.get(c as usize).copied().flatten()
+        })
+        .take(self.canon_super.len() + 1)
+        .any(|c| c == b)
     }
 }

@@ -349,20 +349,10 @@ where
                 range,
             } => {
                 reject_component(encoding)?;
-                if type_validator
-                    .as_mut()
-                    .is_some_and(|v| v.version(num, encoding, &range).is_err())
-                {
-                    type_validator = None;
-                }
+                feed_validator(&mut type_validator, |v| v.version(num, encoding, &range));
             }
             Payload::TypeSection(reader) => {
-                if type_validator
-                    .as_mut()
-                    .is_some_and(|v| v.type_section(&reader).is_err())
-                {
-                    type_validator = None;
-                }
+                feed_validator(&mut type_validator, |v| v.type_section(&reader));
                 for group in reader {
                     for sub in group?.types() {
                         // Record the direct supertype (if any) before matching
@@ -1218,6 +1208,17 @@ fn eval_ref_const(
         _ => Err(TranspileError::Unsupported(format!(
             "{what} that is not ref.func, ref.null or global.get"
         ))),
+    }
+}
+
+/// Run one step on the type validator, dropping it (and with it the type relation) if
+/// the step fails.
+fn feed_validator(
+    validator: &mut Option<wasmparser::Validator>,
+    step: impl FnOnce(&mut wasmparser::Validator) -> wasmparser::Result<()>,
+) {
+    if validator.as_mut().is_some_and(|v| step(v).is_err()) {
+        *validator = None;
     }
 }
 

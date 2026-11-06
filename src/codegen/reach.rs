@@ -84,7 +84,10 @@ pub(crate) fn live_functions(
                     | Operator::ReturnCallIndirect { .. }
                     | Operator::TableGet { .. }
                     | Operator::TableCopy { .. }
-                    | Operator::TableInit { .. } => table_read = true,
+                    | Operator::TableInit { .. }
+                    // `array.new_elem`/`array.init_elem` read a segment's functions too.
+                    | Operator::ArrayNewElem { .. }
+                    | Operator::ArrayInitElem { .. } => table_read = true,
                     _ => {}
                 }
             }

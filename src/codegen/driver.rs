@@ -184,6 +184,21 @@ impl ModuleCtx<'_> {
         )
     }
 
+    /// The full indices of the functions a `call_indirect`/`call_ref` of function type
+    /// `type_index` can reach, ascending: those whose declared type is that type or a
+    /// declared subtype of it, or, if the type relation is unavailable, those of exactly
+    /// its signature.
+    pub(crate) fn dispatch_targets(&self, type_index: u32) -> Vec<usize> {
+        if let Some(funcs) = self.funcs_of_subtype(type_index) {
+            return funcs;
+        }
+        self.types
+            .get(type_index as usize)
+            .map_or_else(Vec::new, |sig| {
+                self.funcs_with_sig(&sig.params, &sig.results).to_vec()
+            })
+    }
+
     /// A call to host method `name`. A re-entrant host also gets the instance; the
     /// arguments are then evaluated first, into a tuple, since they may borrow
     /// `self`, and the closure only captures the finished values.

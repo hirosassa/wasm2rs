@@ -634,7 +634,7 @@ impl super::FuncGen<'_> {
     /// (`any`/`eq`/`i31`/`struct`/`array`/`none`); the `i31`, `struct` and
     /// `array` cases separate the `GcRef::I31` and `GcRef::Obj` variants.
     /// `null_matches` picks how the null handle is classified (a nullable target
-    /// matches null). A concrete function type target compares signatures (see
+    /// matches null). A concrete function type target tests declared subtyping (see
     /// `func_heap_test`); a concrete continuation type target is unsupported, as a
     /// continuation handle carries no runtime type.
     fn gc_heap_test(
@@ -716,7 +716,7 @@ impl super::FuncGen<'_> {
     }
 
     /// The Rust condition testing that the `u32` funcref `ref_expr` is a function
-    /// whose signature equals the function type `idx` (or null, when
+    /// whose declared type is the function type `idx` or a declared subtype of it (or null, when
     /// `null_matches`).
     fn func_heap_test(
         &self,

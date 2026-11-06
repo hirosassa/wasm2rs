@@ -1861,8 +1861,7 @@ fn dispatch_method_lines(
         .types
         .get(type_index as usize)
         .ok_or_else(|| TranspileError::Unsupported("call_indirect: unknown type".into()))?;
-    // Structural type equality (no subtyping), matching `call_indirect`.
-    let targets = ctx.funcs_with_sig(&sig.params, &sig.results);
+    let targets = ctx.dispatch_targets(type_index);
 
     let mut params = String::from("&mut self, f: u32");
     for (k, ty) in sig.params.iter().enumerate() {
@@ -1883,7 +1882,7 @@ fn dispatch_method_lines(
         format!("pub fn call_ref_t{type_index}({params}){ret} {{"),
         "    match f {".to_string(),
     ];
-    for &fidx in targets {
+    for fidx in targets {
         let expr = ctx.call_expr(fidx, &arg_list);
         lines.push(format!("        {fidx}u32 => {expr},"));
     }
