@@ -105,6 +105,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- With an imported memory 0 next to a defined memory, the active data segments are applied after
+  construction in module order, and after the active elements, so a trapping segment leaves the
+  earlier writes (and the elements) in the host storage as the spec says.
 - A module with an imported table and a shared memory never copied its active element
   segments into the host's table (calls through it trapped on null entries). `new` and
   `with_memory` now copy them, before the start function runs.
