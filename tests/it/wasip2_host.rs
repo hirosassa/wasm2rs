@@ -696,3 +696,82 @@ fn a_host_stats_files_and_lists_directories_under_its_preopen() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+/// What `fs_reuse` needs beyond `FS_IMPORTS`.
+const REUSE_IMPORTS: &str = r#"
+  (import "wasi:filesystem/types@0.2.0" "[resource-drop]directory-entry-stream" (func $drop_ls (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.read-directory" (func $readdir (param i32 i32)))
+"#;
+
+/// `fs_reuse` drops each kind of handle and takes a new one: the host reuses a
+/// dropped slot (so its tables do not grow), never hands out a handle that is still
+/// open, and keeps the preopen even if the guest drops it. Results are
+/// `result<handle, error-code>` (the handle at `ret + 4`).
+const REUSE: &str = r#"
+  (func (export "fs_reuse") (local $dir i32) (local $f1 i32) (local $f2 i32) (local $s i32) (local $l i32) (local $p i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    ;; a descriptor: the slot comes back once dropped, but not while it is open
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 9) (i32.const 0) (i32.const 1) (i32.const 220))
+    (local.set $f1 (i32.load (i32.const 224)))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 9) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.eq (i32.load (i32.const 224)) (local.get $f1)) (then unreachable))
+    (call $drop_fd (local.get $f1))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 9) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.ne (i32.load (i32.const 224)) (local.get $f1)) (then unreachable))
+    ;; an input stream
+    (call $rvs (local.get $f1) (i64.const 0) (i32.const 240))
+    (local.set $s (i32.load (i32.const 244)))
+    (call $drop_stream (local.get $s))
+    (call $rvs (local.get $f1) (i64.const 0) (i32.const 240))
+    (if (i32.ne (i32.load (i32.const 244)) (local.get $s)) (then unreachable))
+    (call $read (local.get $s) (i64.const 4) (i32.const 260))
+    (if (i32.ne (i32.load (i32.load (i32.const 264))) (i32.const 0x6c6c6568)) (then unreachable))
+    ;; a directory listing
+    (call $readdir (local.get $dir) (i32.const 800))
+    (local.set $l (i32.load (i32.const 804)))
+    (call $drop_ls (local.get $l))
+    (call $readdir (local.get $dir) (i32.const 800))
+    (if (i32.ne (i32.load (i32.const 804)) (local.get $l)) (then unreachable))
+    ;; a pollable
+    (local.set $p (call $sub_dur (i64.const 0)))
+    (call $drop_pollable (local.get $p))
+    (if (i32.ne (call $sub_dur (i64.const 0)) (local.get $p)) (then unreachable))
+    ;; the preopen is never freed
+    (call $drop_fd (local.get $dir))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 9) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.load8_u (i32.const 220)) (then unreachable))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 9) (i32.const 0) (i32.const 1) (i32.const 220))
+    (call $drop_fd (local.get $dir))
+    (if (i32.eq (i32.load (i32.const 224)) (local.get $dir)) (then unreachable)))
+"#;
+
+#[test]
+fn a_host_reuses_the_slots_of_dropped_handles() {
+    let root = std::env::temp_dir().join("wasm2rs_wasip2_reuse_root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("hello.txt"), "hello fs").unwrap();
+    let init = format!(
+        "P2Host::new(vec![], vec![]).with_preopen(std::path::PathBuf::from({:?}))",
+        root.to_str().unwrap()
+    );
+    // name the drops of the base module, which it imports without a name
+    let wat = hello_with(&format!("{FS_IMPORTS}{REUSE_IMPORTS}"), REUSE)
+        .replacen(
+            "\"[resource-drop]pollable\" (func (param i32))",
+            "\"[resource-drop]pollable\" (func $drop_pollable (param i32))",
+            1,
+        )
+        .replacen(
+            "\"[resource-drop]input-stream\" (func (param i32))",
+            "\"[resource-drop]input-stream\" (func $drop_stream (param i32))",
+            1,
+        );
+    let bin = compile("fs_reuse", &wat, &init, "inst.fs_reuse();");
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

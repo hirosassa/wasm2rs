@@ -179,8 +179,15 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   (stricter than WASI, which allows `..` that stays inside), and so is a symlink that
   leads out (the resolved path is checked against the preopen). Path flags are
   ignored; links are always followed.
-- A file's input stream shares `input-stream.read` with stdin (handle 0). Streams are
-  freed on `resource-drop`; descriptors are not.
+- A file's input stream shares `input-stream.read` with stdin (handle 0).
+- Handles are reused: `resource-drop` of a pollable, descriptor, file input stream or
+  directory-entry-stream frees its slot, and the next resource of that kind takes the
+  most recently freed one, so a program that opens and drops in a loop does not grow
+  the host's tables. **Contract:** a guest must not use a handle after dropping it (the
+  Component Model forbids it). The host does not promise to detect that: once the slot
+  is reused, a stale handle silently names the newer resource (before that, it is
+  `bad-descriptor` or a panic, depending on the call). The preopen (descriptor 0) is
+  never freed.
 - Metadata and directories: `stat`, `stat-at` (type, link count, size, access and
   modification times; the status-change time is `none`), `get-flags` (always `read`),
   `metadata-hash` (a hash of the canonical path) and `read-directory` /

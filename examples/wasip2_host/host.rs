@@ -26,6 +26,8 @@
 // must stay under it: absolute paths and `..` are refused (`not-permitted`), and so are
 // symlinks that lead out. Anything that would write is refused with `read-only`.
 // `stat`, `get-flags`, `metadata-hash` and directory listings work on the same paths.
+// `resource-drop` frees a handle's slot, which the next resource of its kind reuses; a guest
+// must not use a handle after dropping it (see docs/component-model-poc.md).
 // Not implemented: sockets.
 
 use std::collections::VecDeque;
@@ -77,7 +79,7 @@ struct P2Host {
     #[allow(dead_code)]
     args: Vec<String>,
     env: Vec<(String, String)>,
-    pollables: Vec<Pollable>,
+    pollables: Slab<Pollable>,
     /// Filled by the stdin thread, which `start_stdin` spawns on first use.
     stdin: SharedStdin,
     /// Read only by `start_stdin`, which only the optional stdin blocks call.
@@ -92,16 +94,16 @@ struct P2Host {
     /// The preopened directory (canonical); read only by the optional filesystem blocks.
     #[allow(dead_code)]
     root: Option<PathBuf>,
-    /// Paths behind descriptor handles (the preopen first), all under `root`; never freed.
+    /// Paths behind descriptor handles (the preopen is slot 0, never freed), all under `root`.
     #[allow(dead_code)]
-    descriptors: Vec<PathBuf>,
-    /// Open files behind input-stream handles `3..`; `None` once dropped.
+    descriptors: Slab<PathBuf>,
+    /// Open files behind input-stream handles `3..`.
     #[allow(dead_code)]
-    files: Vec<Option<std::fs::File>>,
+    files: Slab<std::fs::File>,
     /// Directory listings behind `directory-entry-stream` handles: the entries
-    /// (type, name) still to be read; `None` once dropped.
+    /// (type, name) still to be read.
     #[allow(dead_code)]
-    listings: Vec<Option<std::vec::IntoIter<(u8, String)>>>,
+    listings: Slab<std::vec::IntoIter<(u8, String)>>,
 }
 
 type Guest = Instance<P2Host>;
@@ -111,15 +113,15 @@ impl P2Host {
         P2Host {
             args,
             env,
-            pollables: Vec::new(),
+            pollables: Slab::new(),
             stdin: SharedStdin::default(),
             stdin_started: false,
             start: Instant::now(),
             rng: os_seed(),
             root: None,
-            descriptors: Vec::new(),
-            files: Vec::new(),
-            listings: Vec::new(),
+            descriptors: Slab::new(),
+            files: Slab::new(),
+            listings: Slab::new(),
         }
     }
 
@@ -127,7 +129,7 @@ impl P2Host {
     #[allow(dead_code)]
     fn with_preopen(mut self, root: PathBuf) -> Self {
         let root = root.canonicalize().expect("preopen: directory does not exist");
-        self.descriptors = vec![root.clone()];
+        self.descriptors.insert(root.clone()); // slot 0
         self.root = Some(root);
         self
     }
@@ -135,7 +137,7 @@ impl P2Host {
     /// The slot of a file's input stream (`None` for stdin, stdout, stderr or an
     /// unknown handle).
     #[allow(dead_code)]
-    fn file_stream(&mut self, stream: i32) -> Option<&mut Option<std::fs::File>> {
+    fn file_stream(&mut self, stream: i32) -> Option<&mut std::fs::File> {
         let index = (stream as u32 as usize).checked_sub(FIRST_FILE_STREAM)?;
         self.files.get_mut(index)
     }
@@ -189,10 +191,14 @@ impl P2Host {
         put(g, ptr, &bytes);
     }
 
+    /// The pollable behind a handle.
+    fn pollable(&self, handle: u32) -> &Pollable {
+        self.pollables.get(handle as usize).expect("unknown or dropped pollable")
+    }
+
     /// A new pollable.
     fn subscribe(&mut self, pollable: Pollable) -> i32 {
-        self.pollables.push(pollable);
-        self.pollables.len() as i32 - 1
+        self.pollables.insert(pollable) as i32
     }
 
     /// Starts the thread that reads the real stdin into the buffer (once).
@@ -230,16 +236,60 @@ impl P2Host {
         loop {
             let now = Instant::now();
             let ready: Vec<i32> = (0..handles.len() as i32)
-                .filter(|&i| self.pollables[handles[i as usize] as usize].is_ready(now, &buf))
+                .filter(|&i| self.pollable(handles[i as usize]).is_ready(now, &buf))
                 .collect();
             if !ready.is_empty() {
                 return ready;
             }
-            let earliest = handles.iter().filter_map(|&h| self.pollables[h as usize].deadline()).min();
+            let earliest = handles.iter().filter_map(|&h| self.pollable(h).deadline()).min();
             buf = match earliest {
                 Some(d) => changed.wait_timeout(buf, d.saturating_duration_since(now)).unwrap().0,
                 None => changed.wait(buf).unwrap(),
             };
+        }
+    }
+}
+
+/// A table of live handles: a handle is a slot's index, and the slot of a dropped
+/// handle is reused by the next `insert`. A guest must not use a handle after
+/// dropping it (the Component Model forbids it); the host does not detect that, and
+/// the stale handle may then name a newer resource.
+struct Slab<T> {
+    slots: Vec<Option<T>>,
+    free: Vec<usize>,
+}
+
+#[allow(dead_code)]
+impl<T> Slab<T> {
+    fn new() -> Self {
+        Slab { slots: Vec::new(), free: Vec::new() }
+    }
+
+    fn insert(&mut self, value: T) -> usize {
+        match self.free.pop() {
+            Some(slot) => {
+                self.slots[slot] = Some(value);
+                slot
+            }
+            None => {
+                self.slots.push(Some(value));
+                self.slots.len() - 1
+            }
+        }
+    }
+
+    fn get(&self, slot: usize) -> Option<&T> {
+        self.slots.get(slot)?.as_ref()
+    }
+
+    fn get_mut(&mut self, slot: usize) -> Option<&mut T> {
+        self.slots.get_mut(slot)?.as_mut()
+    }
+
+    /// Frees a slot; an unknown or already free one is ignored.
+    fn remove(&mut self, slot: usize) {
+        if self.slots.get_mut(slot).and_then(Option::take).is_some() {
+            self.free.push(slot);
         }
     }
 }
@@ -422,10 +472,12 @@ fn stream_write(g: &mut Guest, stream: i32, ptr: i32, len: i32) {
 
 impl Imports for P2Host {
     fn wasi_io_error_resource_drop_error(&mut self, _g: &mut Guest, _handle: i32) {}
-    fn wasi_io_poll_resource_drop_pollable(&mut self, _g: &mut Guest, _handle: i32) {}
+    fn wasi_io_poll_resource_drop_pollable(&mut self, _g: &mut Guest, handle: i32) {
+        self.pollables.remove(handle as u32 as usize);
+    }
     fn wasi_io_streams_resource_drop_input_stream(&mut self, _g: &mut Guest, handle: i32) {
-        if let Some(file) = self.file_stream(handle) {
-            *file = None;
+        if let Some(index) = (handle as u32 as usize).checked_sub(FIRST_FILE_STREAM) {
+            self.files.remove(index);
         }
     }
     fn wasi_io_streams_resource_drop_output_stream(&mut self, _g: &mut Guest, _handle: i32) {}
@@ -553,7 +605,7 @@ impl Imports for P2Host {
             let n = shared.bytes.read(&mut buf).unwrap(); // a `VecDeque` never fails
             (n > 0 || !shared.eof).then_some(n)
         } else {
-            let file = self.file_stream(stream).and_then(Option::as_mut);
+            let file = self.file_stream(stream);
             let file = file.expect("read from an unknown or dropped stream");
             file.read(&mut buf).ok().filter(|&n| n > 0)
         };
@@ -637,7 +689,11 @@ impl Imports for P2Host {
     // end optional
 
     // optional: wasi_filesystem_types_resource_drop_descriptor
-    fn wasi_filesystem_types_resource_drop_descriptor(&mut self, _g: &mut Guest, _handle: i32) {}
+    fn wasi_filesystem_types_resource_drop_descriptor(&mut self, _g: &mut Guest, handle: i32) {
+        if handle != 0 {
+            self.descriptors.remove(handle as u32 as usize);
+        }
+    }
     // end optional
 
     // optional: wasi_filesystem_types_resource_drop_directory_entry_stream
@@ -646,9 +702,7 @@ impl Imports for P2Host {
         _g: &mut Guest,
         handle: i32,
     ) {
-        if let Some(listing) = self.listings.get_mut(handle as u32 as usize) {
-            *listing = None;
-        }
+        self.listings.remove(handle as u32 as usize);
     }
     // end optional
 
@@ -691,8 +745,8 @@ impl Imports for P2Host {
                 fs_error(g, ret, 4, code::NOT_DIRECTORY)
             }
             Ok(full) => {
-                self.descriptors.push(full);
-                fs_ok_handle(g, ret, self.descriptors.len() - 1);
+                let handle = self.descriptors.insert(full);
+                fs_ok_handle(g, ret, handle);
             }
             Err(code) => fs_error(g, ret, 4, code),
         }
@@ -723,8 +777,8 @@ impl Imports for P2Host {
         });
         match opened {
             Ok(file) => {
-                self.files.push(Some(file));
-                fs_ok_handle(g, ret, FIRST_FILE_STREAM + self.files.len() - 1);
+                let slot = self.files.insert(file);
+                fs_ok_handle(g, ret, FIRST_FILE_STREAM + slot);
             }
             Err(e) => fs_error(g, ret, 4, io_error_code(e)),
         }
@@ -784,8 +838,8 @@ impl Imports for P2Host {
         });
         match entries {
             Ok(entries) => {
-                self.listings.push(Some(entries.into_iter()));
-                fs_ok_handle(g, ret, self.listings.len() - 1);
+                let handle = self.listings.insert(entries.into_iter());
+                fs_ok_handle(g, ret, handle);
             }
             Err(e) => fs_error(g, ret, 4, io_error_code(e)),
         }
@@ -855,7 +909,7 @@ impl Imports for P2Host {
         stream: i32,
         ret: i32,
     ) {
-        let Some(Some(listing)) = self.listings.get_mut(stream as u32 as usize) else {
+        let Some(listing) = self.listings.get_mut(stream as u32 as usize) else {
             return fs_error(g, ret, 4, code::BAD_DESCRIPTOR);
         };
         zero_tag(g, ret);
