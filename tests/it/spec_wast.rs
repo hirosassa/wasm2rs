@@ -42,6 +42,8 @@ struct Group {
     /// Stateful modules (memory, globals, ...) are an `Instance`; stateless
     /// ones are plain free functions.
     stateful: bool,
+    /// The expression building the instance (`None` for a stateless module).
+    ctor: Option<String>,
     funcs: HashMap<String, u32>,
     body: String,
     /// A state-changing call was skipped: the module's later assertions would see
@@ -286,12 +288,97 @@ fn return_stmt(
     }
 }
 
-/// Encode and vet one `module` directive into a [`Group`], or say why it
-/// cannot be replayed.
-/// `struct Host` implementing the generated `Imports` trait with empty bodies:
-/// each `fn importN(..);` declaration of the trait becomes `fn importN(..) {}`.
-/// Only used for `spectest.print*`, which return nothing.
-fn no_op_host(generated: &str) -> String {
+/// The host-owned state the `spectest` imports of one module stand for.
+#[derive(Default)]
+struct SpectestImports {
+    /// Rust literal of each imported global's value, in import order (the
+    /// `get_global{k}` index).
+    globals: Vec<&'static str>,
+    /// The module imports `spectest.table`.
+    table: bool,
+    /// The module imports `spectest.memory`.
+    memory: bool,
+}
+
+impl SpectestImports {
+    /// The `Host { .. }` expression matching [`spectest_host`]'s struct.
+    fn host_init(&self) -> String {
+        let table = if self.table { SPECTEST_TABLE_LEN } else { 0 };
+        let memory = if self.memory {
+            SPECTEST_MEMORY_PAGES * WASM_PAGE
+        } else {
+            0
+        };
+        format!("Host {{ table: vec![u32::MAX; {table}], memory: vec![0; {memory}] }}")
+    }
+}
+
+/// The spec's `spectest` table is `(table 10 20 funcref)` and its memory is
+/// `(memory 1 2)`. A module is linked against these actual sizes whatever minimum
+/// it declares, and one they do not satisfy (a larger minimum, or a maximum below
+/// the actual one) would not link, so it is not replayed.
+const SPECTEST_TABLE_LEN: u64 = 10;
+const SPECTEST_TABLE_MAX: u64 = 20;
+const SPECTEST_MEMORY_PAGES: u64 = 1;
+const SPECTEST_MEMORY_MAX: u64 = 2;
+const WASM_PAGE: u64 = 65536;
+
+/// The `spectest` import, if it is one the harness can replay: `print*` (no
+/// result), the four `global_*` constants, `table` (funcref) and `memory`.
+fn replay_spectest_import(
+    import: &wasmparser::Import<'_>,
+    no_result_types: &[bool],
+    out: &mut SpectestImports,
+) -> bool {
+    use wasmparser::{TypeRef, ValType};
+    if import.module != "spectest" {
+        return false;
+    }
+    match import.ty {
+        TypeRef::Func(t) => {
+            import.name.starts_with("print")
+                && no_result_types.get(t as usize).copied() == Some(true)
+        }
+        TypeRef::Global(g) if !g.mutable => {
+            let value = match (import.name, g.content_type) {
+                ("global_i32", ValType::I32) => "666",
+                ("global_i64", ValType::I64) => "666",
+                ("global_f32", ValType::F32) => "666.6",
+                ("global_f64", ValType::F64) => "666.6",
+                _ => return false,
+            };
+            out.globals.push(value);
+            true
+        }
+        TypeRef::Table(t)
+            if import.name == "table"
+                && !t.table64
+                && t.element_type.is_func_ref()
+                && t.initial <= SPECTEST_TABLE_LEN
+                && t.maximum.is_none_or(|max| max >= SPECTEST_TABLE_MAX) =>
+        {
+            out.table = true;
+            true
+        }
+        TypeRef::Memory(m)
+            if import.name == "memory"
+                && !m.memory64
+                && !m.shared
+                && m.initial <= SPECTEST_MEMORY_PAGES
+                && m.maximum.is_none_or(|max| max >= SPECTEST_MEMORY_MAX) =>
+        {
+            out.memory = true;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// `struct Host` implementing the generated `Imports` trait: `spectest.print*` do
+/// nothing, an imported global reads its `spectest` constant, and the table is a
+/// host-owned vector of null slots. Each `fn name(..);` declaration of the trait
+/// gets a body accordingly.
+fn spectest_host(generated: &str, spectest: &SpectestImports) -> String {
     let start = generated
         .find("pub trait Imports {")
         .expect("Imports trait");
@@ -300,18 +387,71 @@ fn no_op_host(generated: &str) -> String {
     let methods: String = trait_body[..end]
         .lines()
         .filter(|line| line.trim_end().ends_with(';'))
-        .map(|line| format!("{} {{}}\n", line.trim_end_matches(';')))
+        .map(|line| {
+            let decl = line.trim_end_matches(';');
+            let body = if let Some(k) = decl
+                .trim()
+                .strip_prefix("fn get_global")
+                .and_then(|r| r.split('(').next())
+                .and_then(|k| k.parse::<usize>().ok())
+            {
+                spectest.globals[k]
+            } else if decl.contains("fn table(") {
+                "&self.table"
+            } else if decl.contains("fn table_mut(") {
+                "&mut self.table"
+            } else if decl.contains("fn memory(") {
+                "&self.memory"
+            } else if decl.contains("fn memory_mut(") {
+                "&mut self.memory"
+            } else {
+                ""
+            };
+            format!("{decl} {{ {body} }}\n")
+        })
         .collect();
-    format!("struct Host;\n#[allow(unused_variables)]\nimpl Imports for Host {{\n{methods}}}\n")
+    format!(
+        "struct Host {{ table: Vec<u32>, memory: Vec<u8> }}\n#[allow(unused_variables)]\nimpl Imports for Host {{\n{methods}}}\n"
+    )
 }
 
-fn start_group(module: &mut QuoteWat<'_>) -> Result<Group, String> {
-    let wasm = module.encode().map_err(|e| format!("encode failed: {e}"))?;
-    // The spec's `spectest` host prints; only that import shape is replayed, with
-    // a no-op host. Memory, global and table imports (and any other module) need
-    // a real host and are skipped.
+/// Whether a function body runs `table.grow` / `memory.grow` while the module
+/// imports `spectest.table` / `spectest.memory`. The host is a plain vector, so the
+/// real maximum (20 slots, 2 pages) is not enforced and the spec's failing grow
+/// would not be reproduced.
+fn grows_imported_spectest(wasm: &[u8], spectest: &SpectestImports) -> bool {
+    use wasmparser::{Operator, Payload};
+    wasmparser::Parser::new(0)
+        .parse_all(wasm)
+        .filter_map(Result::ok)
+        .filter_map(|payload| match payload {
+            Payload::CodeSectionEntry(body) => Some(body),
+            _ => None,
+        })
+        .flat_map(|body| {
+            body.get_operators_reader()
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>()
+        })
+        .any(|op| match op {
+            Operator::TableGrow { .. } => spectest.table,
+            Operator::MemoryGrow { .. } => spectest.memory,
+            _ => false,
+        })
+}
+
+fn encode_module(module: &mut QuoteWat<'_>) -> Result<Vec<u8>, String> {
+    module.encode().map_err(|e| format!("encode failed: {e}"))
+}
+
+fn start_group(wasm: Vec<u8>) -> Result<Group, String> {
+    // The spec's `spectest` host is replayed (see `replay_spectest_import`); an
+    // import from any other module needs a real host and is skipped.
     let mut has_imports = false;
-    let mut only_print_imports = true;
+    let mut all_replayable = true;
+    let mut spectest = SpectestImports::default();
     // Types whose result list is empty, by type index.
     let mut no_result_types: Vec<bool> = Vec::new();
     for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
@@ -327,35 +467,64 @@ fn start_group(module: &mut QuoteWat<'_>) -> Result<Group, String> {
             Ok(wasmparser::Payload::ImportSection(reader)) => {
                 for import in reader.into_imports().flatten() {
                     has_imports = true;
-                    let is_print = import.module == "spectest"
-                        && import.name.starts_with("print")
-                        && matches!(import.ty, wasmparser::TypeRef::Func(t)
-                            if no_result_types.get(t as usize).copied().unwrap_or(false));
-                    only_print_imports &= is_print;
+                    all_replayable &=
+                        replay_spectest_import(&import, &no_result_types, &mut spectest);
                 }
             }
             _ => {}
         }
     }
-    if has_imports && !only_print_imports {
+    if has_imports && !all_replayable {
         return Err("module has imports".into());
+    }
+    if (spectest.table || spectest.memory) && grows_imported_spectest(&wasm, &spectest) {
+        return Err("grows an imported spectest table or memory: its limit is not enforced".into());
     }
     let generated = wasm2rs::transpile(&wasm).map_err(|e| format!("transpile failed: {e:?}"))?;
     let stateful = generated.contains("pub struct Instance");
     let mut body = String::from(TRAP_HELPER);
-    if has_imports {
-        body.push_str(&no_op_host(&generated));
-        body.push_str("let mut inst = Instance::new(Host);\n");
+    let ctor = if has_imports {
+        body.push_str(&spectest_host(&generated, &spectest));
+        Some(format!("Instance::new({})", spectest.host_init()))
     } else if stateful {
-        body.push_str("let mut inst = Instance::new();\n");
+        Some("Instance::new()".to_string())
+    } else {
+        None
+    };
+    if let Some(ctor) = &ctor {
+        body.push_str(&format!("let mut inst = {ctor};\n"));
     }
     Ok(Group {
         funcs: export_funcs(&wasm),
         wasm,
         stateful,
+        ctor,
         body,
         tainted: false,
     })
+}
+
+/// A group for `(assert_trap (module ...) msg)`: the generated `main` only checks
+/// that building the instance traps. A module without an `Instance` (stateless) has
+/// no instantiation to trap, so it is skipped.
+fn trapping_instantiation(wasm: Vec<u8>, message: &str, ctx: &str) -> Result<Group, String> {
+    let mut group = start_group(wasm)?;
+    let ctor = group
+        .ctor
+        .take()
+        .ok_or("a stateless module has no instantiation to trap")?;
+    // `start_group` ended the body with the construction; run it under
+    // `expect_trap` instead.
+    let at = group
+        .body
+        .rfind("let mut inst = ")
+        .ok_or("no constructor to run")?;
+    group.body.truncate(at);
+    let needles = format!("{:?}", trap_needles(message));
+    group.body.push_str(&format!(
+        "expect_trap(\"{ctx}\", &{needles}, || {{ let _ = {ctor}; }});\n"
+    ));
+    Ok(group)
 }
 
 fn run_wast(name: &str, src: &str) -> Report {
@@ -363,6 +532,8 @@ fn run_wast(name: &str, src: &str) -> Report {
     let mut wast = parser::parse::<Wast>(&buf).expect("parse wast");
     let mut report = Report::default();
     let mut groups: Vec<Group> = Vec::new();
+    // Modules whose instantiation must trap. They never become the current module.
+    let mut trap_groups: Vec<Group> = Vec::new();
     // Whether the latest `module` was accepted (its group is `groups.last()`).
     let mut module_ok = false;
     for directive in &mut wast.directives {
@@ -372,7 +543,7 @@ fn run_wast(name: &str, src: &str) -> Report {
         let mut effect_only: Option<String> = None;
         let (kind, outcome): (&str, Result<Option<String>, String>) = match directive {
             WastDirective::Module(module) => {
-                match start_group(module) {
+                match encode_module(module).and_then(start_group) {
                     Ok(group) => {
                         groups.push(group);
                         module_ok = true;
@@ -407,6 +578,22 @@ fn run_wast(name: &str, src: &str) -> Report {
                         format!("expect_trap(\"{ctx}\", &{needles}, || {{ let _ = {c}; }});")
                     })
                 }),
+            ),
+            WastDirective::AssertTrap {
+                exec: WastExecute::Wat(wat),
+                message,
+                ..
+            } => (
+                // Not a `state_call`: the trapping instance has its own host and
+                // cannot change the current module.
+                "assert_trap_module",
+                wat.encode()
+                    .map_err(|e| format!("encode failed: {e}"))
+                    .and_then(|wasm| trapping_instantiation(wasm, message, &ctx))
+                    .map(|group| {
+                        trap_groups.push(group);
+                        None
+                    }),
             ),
             WastDirective::AssertException {
                 exec: WastExecute::Invoke(invoke),
@@ -465,6 +652,10 @@ fn run_wast(name: &str, src: &str) -> Report {
     for (i, group) in groups.iter().enumerate() {
         run_group(&format!("{name}_{i}"), group);
     }
+    for (i, group) in trap_groups.iter().enumerate() {
+        run_group(&format!("{name}_trap{i}"), group);
+    }
+    report.executed += trap_groups.len();
     eprintln!(
         "{name}: {} executed, {} skipped",
         report.executed,
@@ -576,6 +767,178 @@ fn a_spectest_print_import_is_replayed_with_a_no_op_host() {
     );
     assert_eq!(report.executed, 1);
     assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+fn a_module_level_assert_trap_expects_instantiation_to_trap() {
+    // The data segment does not fit the 1-page memory, so instantiation traps; the
+    // current module (`ok`) is untouched by it.
+    let report = run_wast(
+        "spec_assert_trap_module",
+        r#"
+(module (memory 1) (func (export "ok") (result i32) (i32.const 1)))
+(assert_trap
+  (module (memory 1) (data (i32.const 65536) "x"))
+  "out of bounds memory access")
+(assert_return (invoke "ok") (i32.const 1))
+"#,
+    );
+    assert_eq!(report.executed, 2);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+#[should_panic(expected = "expected a trap")]
+fn a_module_level_assert_trap_fails_when_instantiation_succeeds() {
+    run_wast(
+        "spec_assert_trap_module_no_trap",
+        r#"
+(assert_trap
+  (module (memory 1) (data (i32.const 0) "x"))
+  "out of bounds memory access")
+"#,
+    );
+}
+
+#[test]
+fn spectest_globals_are_replayed_with_their_standard_values() {
+    let report = run_wast(
+        "spec_spectest_globals",
+        r#"
+(module
+  (import "spectest" "global_i32" (global $a i32))
+  (import "spectest" "global_i64" (global $b i64))
+  (import "spectest" "global_f32" (global $c f32))
+  (import "spectest" "global_f64" (global $d f64))
+  (func (export "a") (result i32) (global.get $a))
+  (func (export "b") (result i64) (global.get $b))
+  (func (export "c") (result f32) (global.get $c))
+  (func (export "d") (result f64) (global.get $d)))
+(assert_return (invoke "a") (i32.const 666))
+(assert_return (invoke "b") (i64.const 666))
+(assert_return (invoke "c") (f32.const 666.6))
+(assert_return (invoke "d") (f64.const 666.6))
+"#,
+    );
+    assert_eq!(report.executed, 4);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+fn spectest_table_and_memory_have_their_actual_sizes_whatever_the_declared_minimum() {
+    let report = run_wast(
+        "spec_spectest_table_memory",
+        r#"
+(module
+  (import "spectest" "table" (table 0 funcref))
+  (import "spectest" "memory" (memory 0))
+  (func (export "table_size") (result i32) (table.size 0))
+  (func (export "memory_size") (result i32) (memory.size)))
+(assert_return (invoke "table_size") (i32.const 10))
+(assert_return (invoke "memory_size") (i32.const 1))
+"#,
+    );
+    assert_eq!(report.executed, 2);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+fn a_spectest_import_the_real_host_would_not_link_is_skipped() {
+    // The actual table is (10 20) and the memory (1 2): a larger minimum, or a
+    // maximum below the actual one, does not link.
+    for (i, import) in [
+        r#"(import "spectest" "table" (table 11 funcref))"#,
+        r#"(import "spectest" "table" (table 0 19 funcref))"#,
+        r#"(import "spectest" "memory" (memory 2))"#,
+        r#"(import "spectest" "memory" (memory 0 1))"#,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let report = run_wast(
+            &format!("spec_spectest_unlinkable_{i}"),
+            &format!(
+                "(module {import} (func (export \"f\") (result i32) (i32.const 1)))\n(assert_return (invoke \"f\") (i32.const 1))"
+            ),
+        );
+        assert_eq!(report.executed, 0, "{import}");
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.contains("module has imports")),
+            "{import}: {:?}",
+            report.skipped
+        );
+    }
+}
+
+#[test]
+fn growing_an_imported_spectest_table_or_memory_is_skipped() {
+    // The host is a plain vector, so the real maximum (20 slots, 2 pages) is not
+    // enforced and the spec's `-1` would not be reproduced.
+    for (i, wat) in [
+        r#"(import "spectest" "table" (table 10 funcref))
+           (func (export "g") (result i32) (table.grow (ref.null func) (i32.const 11)))"#,
+        r#"(import "spectest" "memory" (memory 1))
+           (func (export "g") (result i32) (memory.grow (i32.const 2)))"#,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let report = run_wast(
+            &format!("spec_spectest_grow_{i}"),
+            &format!("(module {wat})\n(assert_return (invoke \"g\") (i32.const -1))"),
+        );
+        assert_eq!(report.executed, 0, "{wat}");
+        assert!(
+            report.skipped.iter().any(|s| s.contains("limit")),
+            "{wat}: {:?}",
+            report.skipped
+        );
+    }
+}
+
+#[test]
+fn a_skipped_module_level_assert_trap_does_not_taint_the_current_module() {
+    let report = run_wast(
+        "spec_skipped_trap_module_no_taint",
+        r#"
+(module (func (export "f") (result i32) i32.const 1))
+(assert_trap
+  (module (import "env" "x" (func)) (func unreachable) (start 1))
+  "unreachable")
+(assert_return (invoke "f") (i32.const 1))
+"#,
+    );
+    assert_eq!(report.executed, 1);
+    assert!(
+        report.skipped.iter().any(|s| s.starts_with("assert_trap")),
+        "{:?}",
+        report.skipped
+    );
+}
+
+#[test]
+fn an_unknown_global_import_is_still_skipped() {
+    let report = run_wast(
+        "spec_unknown_global_import",
+        r#"
+(module
+  (import "env" "g" (global i32))
+  (func (export "f") (result i32) (global.get 0)))
+(assert_return (invoke "f") (i32.const 0))
+"#,
+    );
+    assert_eq!(report.executed, 0);
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.contains("module has imports")),
+        "{:?}",
+        report.skipped
+    );
 }
 
 #[test]
@@ -820,6 +1183,7 @@ macro_rules! spec_known_gap {
 
 spec_test! {
     spec_br_table => "br_table",
+    spec_global => "global",
     spec_elem => "elem",
     spec_data => "data",
     spec_ref_null => "ref_null",
