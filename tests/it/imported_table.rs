@@ -471,3 +471,39 @@ fn table_init_grow_and_fill_act_on_the_defined_table_not_the_imported_one() {
     let run = Command::new(&bin).status().expect("run generated binary");
     assert!(run.success(), "table ops next to an imported table failed");
 }
+
+#[test]
+fn active_elements_of_an_imported_and_a_defined_table_apply_in_module_order() {
+    // Segment 0 fills the host table, segment 1 (defined table) is out of bounds and
+    // traps. The spec applies segments in module order, so the host table keeps
+    // segment 0's write.
+    let wat = r#"
+        (module
+          (import "env" "tbl" (table $t0 2 funcref))
+          (table $t1 2 funcref)
+          (func $a)
+          (elem (table $t0) (i32.const 0) func $a)
+          (elem (table $t1) (i32.const 5) func $a))
+        "#;
+    let extra = r#"
+        struct Host { table: *mut Vec<u32> }
+        impl Imports for Host {
+            fn table(&self) -> &[u32] { unsafe { &*self.table } }
+            fn table_mut(&mut self) -> &mut Vec<u32> { unsafe { &mut *self.table } }
+        }
+        fn main() {
+            let table: &'static mut Vec<u32> = Box::leak(Box::new(vec![u32::MAX; 2]));
+            let ptr: *mut Vec<u32> = table;
+            std::panic::set_hook(Box::new(|_| {}));
+            let r = std::panic::catch_unwind(|| { let _ = Instance::new(Host { table: ptr }); });
+            assert!(r.is_err(), "the out-of-bounds segment must trap");
+            assert_eq!(unsafe { &*ptr }[0], 0, "segment 0 ran before the trap");
+        }
+    "#;
+    let bin = compile("elem_order", wat, extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(
+        run.success(),
+        "elem segments were not applied in module order"
+    );
+}

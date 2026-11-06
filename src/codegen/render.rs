@@ -519,9 +519,9 @@ fn constructor_lines(
     // (`instance.table_mut()`). `imports` names the host an imported-global item or
     // a runtime offset reads: the constructor's parameter, or the built instance's
     // field once it has been moved in.
-    let copy_active_elems =
-        |lines: &mut Vec<String>, table_idx: u32, target: &str, imports: &str, indent: &str| {
-            for seg in active_elem.iter().filter(|seg| seg.table == table_idx) {
+    let copy_elem_seg =
+        |lines: &mut Vec<String>, seg: &ElemSegment, target: &str, imports: &str, indent: &str| {
+            {
                 // A runtime offset is read once, in a block of its own; a constant
                 // one is spelled into each slot.
                 let (base, runtime) = SegOffset::split(seg.offset.as_ref());
@@ -564,6 +564,17 @@ fn constructor_lines(
                 }
             }
         };
+    // The active segments of one defined table, in module order.
+    let copy_active_elems =
+        |lines: &mut Vec<String>, table_idx: u32, target: &str, imports: &str, indent: &str| {
+            for seg in active_elem.iter().filter(|seg| seg.table == table_idx) {
+                copy_elem_seg(lines, seg, target, imports, indent);
+            }
+        };
+    // With an imported table 0 and a segment for a defined table, every segment is
+    // applied after construction, in module order: a trap then leaves the earlier
+    // segments' writes in the host table, as the spec says.
+    let elems_in_module_order = table_imported && active_elem.iter().any(|seg| seg.table > 0);
 
     // The non-memory field initialisers (table, globals, wasi_fds, the retained
     // passive segments, and `imports` last), pushed identically by both
@@ -588,7 +599,7 @@ fn constructor_lines(
                 Some(TableFill::Func(f)) => format!("{f}u32"),
                 None => "u32::MAX".to_string(),
             };
-            if !active_elem.iter().any(|seg| seg.table == i) {
+            if elems_in_module_order || !active_elem.iter().any(|seg| seg.table == i) {
                 inner.push(format!("        {field}: vec![{fill}; {}],", t.min));
             } else {
                 // Start every slot at the table's initializer (null unless it is
@@ -674,7 +685,13 @@ fn constructor_lines(
     // host-owned table (`push_bound_elems`), then run the start function and return
     // the instance (`push_bound_end`). Elements come before data, as in the spec.
     let push_bound_elems = |lines: &mut Vec<String>| {
-        if post_init_elem {
+        if elems_in_module_order {
+            for seg in &active_elem {
+                let (_, get_mut) = table_accessor(seg.table);
+                let target = format!("instance.{get_mut}()");
+                copy_elem_seg(lines, seg, &target, "instance.imports", "    ");
+            }
+        } else if post_init_elem {
             copy_active_elems(lines, 0, "instance.table_mut()", "instance.imports", "    ");
         }
     };
