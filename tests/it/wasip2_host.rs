@@ -33,7 +33,7 @@ const HELLO: &str = r#"
   (import "wasi:io/error@0.2.0" "[resource-drop]error" (func (param i32)))
   (import "wasi:io/poll@0.2.0" "[resource-drop]pollable" (func $drop_pollable (param i32)))
   (import "wasi:io/streams@0.2.0" "[resource-drop]input-stream" (func $drop_stream (param i32)))
-  (import "wasi:io/streams@0.2.0" "[resource-drop]output-stream" (func (param i32)))
+  (import "wasi:io/streams@0.2.0" "[resource-drop]output-stream" (func $drop_out (param i32)))
   (import "wasi:cli/terminal-input@0.2.0" "[resource-drop]terminal-input" (func (param i32)))
   (import "wasi:cli/terminal-output@0.2.0" "[resource-drop]terminal-output" (func (param i32)))
   (import "wasi:cli/environment@0.2.0" "get-environment" (func $env (param i32)))
@@ -294,8 +294,14 @@ fn run_ok(bin: &std::path::Path) {
 
 /// The host expression for a program that sees `root` as its read-only `/`.
 fn preopen_host(root: &std::path::Path) -> String {
+    preopen_host_with(root, "with_preopen")
+}
+
+/// Like `preopen_host`, through the constructor `method` (`with_writable_preopen`
+/// lets the program write).
+fn preopen_host_with(root: &std::path::Path, method: &str) -> String {
     format!(
-        "P2Host::new(vec![], vec![]).with_preopen(std::path::PathBuf::from({:?}))",
+        "P2Host::new(vec![], vec![]).{method}(std::path::PathBuf::from({:?}))",
         root.to_str().unwrap()
     )
 }
@@ -739,4 +745,150 @@ fn a_host_reuses_the_slots_of_dropped_handles() {
     let wat = hello_with(&format!("{FS_IMPORTS}{REUSE_IMPORTS}"), REUSE);
     let bin = compile("fs_reuse", &wat, &init, "inst.fs_reuse();");
     run_ok(&bin);
+}
+
+/// The imports and data `fs_write` needs: paths at 300 to 396 and 450 to 466, contents at 400 to 440.
+const WRITE_IMPORTS: &str = r#"
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[resource-drop]descriptor" (func $drop_fd (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.write-via-stream" (func $wvs (param i32 i64 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.append-via-stream" (func $avs (param i32 i32)))
+  (data (i32.const 300) "new.txt")
+  (data (i32.const 310) "../wasm2rs_w_escape.txt")
+  (data (i32.const 340) "/abs.txt")
+  (data (i32.const 350) "dangle")
+  (data (i32.const 360) "sub/in.txt")
+  (data (i32.const 372) "trunc.txt")
+  (data (i32.const 384) "outdir/x.txt")
+  (data (i32.const 450) "newd/")
+  (data (i32.const 460) "newd/.")
+  (data (i32.const 400) "hello")
+  (data (i32.const 410) "EY")
+  (data (i32.const 420) " world")
+  (data (i32.const 430) "in")
+  (data (i32.const 440) "N")
+"#;
+
+/// `fs_write` runs on a writable root holding `trunc.txt` ("old contents"), `sub/`, a
+/// symlink `dangle` to a file outside the root that does not exist and a symlink
+/// `outdir` to a directory outside it. open-flags:
+/// create 1, exclusive 4, truncate 8; descriptor-flags: read 1, write 2 (so `3` is
+/// read + write); path-flags 1 follows links. `put_via` writes `(ptr, len)` to a
+/// stream from `write-via-stream` at `offset` (or `append-via-stream` for `-1`), then
+/// flushes and drops the stream. Error codes: exist 7, invalid 12, not-permitted 31.
+const WRITE: &str = r#"
+  (func $open_at (param $dir i32) (param $path i32) (param $len i32) (param $oflags i32) (param $dflags i32)
+    (call $open (local.get $dir) (i32.const 1) (local.get $path) (local.get $len)
+                (local.get $oflags) (local.get $dflags) (i32.const 220)))
+  (func $expect_err (param $code i32)
+    (if (i32.ne (i32.load8_u (i32.const 220)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 224)) (local.get $code)) (then unreachable)))
+  (func $put_via (param $f i32) (param $offset i64) (param $ptr i32) (param $len i32) (local $s i32)
+    (if (i64.lt_s (local.get $offset) (i64.const 0))
+      (then (call $avs (local.get $f) (i32.const 240)))
+      (else (call $wvs (local.get $f) (local.get $offset) (i32.const 240))))
+    (if (i32.load8_u (i32.const 240)) (then unreachable))
+    (local.set $s (i32.load (i32.const 244)))
+    (call $check (local.get $s) (i32.const 260))
+    (if (i32.load8_u (i32.const 260)) (then unreachable))
+    (if (i64.lt_u (i64.load (i32.const 268)) (i64.extend_i32_u (local.get $len))) (then unreachable))
+    (call $write (local.get $s) (local.get $ptr) (local.get $len) (i32.const 280))
+    (if (i32.load8_u (i32.const 280)) (then unreachable))
+    (call $flush (local.get $s) (i32.const 280))
+    (if (i32.load8_u (i32.const 280)) (then unreachable))
+    (call $drop_out (local.get $s)))
+  (func (export "fs_write") (local $dir i32) (local $f i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    ;; create a file and write it from offset 0
+    (call $open_at (local.get $dir) (i32.const 300) (i32.const 7) (i32.const 1) (i32.const 3))
+    (if (i32.load8_u (i32.const 220)) (then unreachable))
+    (local.set $f (i32.load (i32.const 224)))
+    (call $put_via (local.get $f) (i64.const 0) (i32.const 400) (i32.const 5))
+    (call $drop_fd (local.get $f))
+    ;; overwrite from offset 1, then append
+    (call $open_at (local.get $dir) (i32.const 300) (i32.const 7) (i32.const 0) (i32.const 2))
+    (local.set $f (i32.load (i32.const 224)))
+    (call $put_via (local.get $f) (i64.const 1) (i32.const 410) (i32.const 2))
+    (call $put_via (local.get $f) (i64.const -1) (i32.const 420) (i32.const 6))
+    (call $drop_fd (local.get $f))
+    ;; a file in a subdirectory
+    (call $open_at (local.get $dir) (i32.const 360) (i32.const 10) (i32.const 1) (i32.const 3))
+    (if (i32.load8_u (i32.const 220)) (then unreachable))
+    (local.set $f (i32.load (i32.const 224)))
+    (call $put_via (local.get $f) (i64.const 0) (i32.const 430) (i32.const 2))
+    (call $drop_fd (local.get $f))
+    ;; truncate an existing file, then write
+    (call $open_at (local.get $dir) (i32.const 372) (i32.const 9) (i32.const 8) (i32.const 2))
+    (if (i32.load8_u (i32.const 220)) (then unreachable))
+    (local.set $f (i32.load (i32.const 224)))
+    (call $put_via (local.get $f) (i64.const 0) (i32.const 440) (i32.const 1))
+    (call $drop_fd (local.get $f))
+    ;; create + exclusive on an existing file
+    (call $open_at (local.get $dir) (i32.const 300) (i32.const 7) (i32.const 5) (i32.const 2))
+    (call $expect_err (i32.const 7))
+    ;; creating outside the root: `..`, an absolute path, a dangling symlink that leads out
+    (call $open_at (local.get $dir) (i32.const 310) (i32.const 23) (i32.const 1) (i32.const 3))
+    (call $expect_err (i32.const 31))
+    (call $open_at (local.get $dir) (i32.const 340) (i32.const 8) (i32.const 1) (i32.const 3))
+    (call $expect_err (i32.const 31))
+    (call $open_at (local.get $dir) (i32.const 350) (i32.const 6) (i32.const 1) (i32.const 3))
+    (call $expect_err (i32.const 31))
+    ;; ... and a new file in a directory that is a symlink out of the root
+    (call $open_at (local.get $dir) (i32.const 384) (i32.const 12) (i32.const 1) (i32.const 3))
+    (call $expect_err (i32.const 31))
+    ;; a name ending in `/` or `/.` names a directory, so it cannot be created as a file
+    (call $open_at (local.get $dir) (i32.const 450) (i32.const 5) (i32.const 1) (i32.const 3))
+    (call $expect_err (i32.const 12))
+    (call $open_at (local.get $dir) (i32.const 460) (i32.const 6) (i32.const 1) (i32.const 3))
+    (call $expect_err (i32.const 12))
+    ;; a file opened for reading only has no output stream
+    (call $open_at (local.get $dir) (i32.const 300) (i32.const 7) (i32.const 0) (i32.const 1))
+    (local.set $f (i32.load (i32.const 224)))
+    (call $wvs (local.get $f) (i64.const 0) (i32.const 240))
+    (if (i32.eqz (i32.load8_u (i32.const 240))) (then unreachable))
+    (call $drop_fd (local.get $f)))
+"#;
+
+#[cfg(unix)]
+#[test]
+fn a_writable_preopen_creates_writes_appends_and_truncates_files() {
+    let root = std::env::temp_dir().join("wasm2rs_wasip2_write_root");
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("trunc.txt"), "old contents").unwrap();
+    let outside = root.parent().unwrap();
+    let escape = outside.join("wasm2rs_w_escape.txt");
+    std::fs::remove_file(&escape).ok();
+    // a symlink under the root to a file outside it that does not exist yet
+    let target = outside.join("wasm2rs_w_dangling_target.txt");
+    std::fs::remove_file(&target).ok();
+    std::os::unix::fs::symlink(&target, root.join("dangle")).unwrap();
+    // a symlink under the root to a directory outside it
+    let outdir = outside.join("wasm2rs_w_outdir");
+    std::fs::remove_dir_all(&outdir).ok();
+    std::fs::create_dir_all(&outdir).unwrap();
+    std::os::unix::fs::symlink(&outdir, root.join("outdir")).unwrap();
+    let bin = compile(
+        "fs_write",
+        &hello_with(WRITE_IMPORTS, WRITE),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_write();",
+    );
+    run_ok(&bin);
+    let read = |name: &str| std::fs::read_to_string(root.join(name)).unwrap();
+    assert_eq!(read("new.txt"), "hEYlo world");
+    assert_eq!(read("sub/in.txt"), "in");
+    assert_eq!(read("trunc.txt"), "N");
+    assert!(!escape.exists(), "created a file outside the root");
+    assert!(!target.exists(), "wrote through a symlink that leads out");
+    assert!(
+        !root.join("newd").exists(),
+        "created a file for a directory name"
+    );
+    assert!(
+        !outdir.join("x.txt").exists(),
+        "created a file through a linked directory"
+    );
 }
