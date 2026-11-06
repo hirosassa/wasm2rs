@@ -30,11 +30,11 @@
 // descriptor resolves its path again on each use. Anything that would write is refused
 // with `read-only`; with a writable preopen, files can be created, written, appended to,
 // truncated, removed and renamed, and directories created and removed (symlinks are
-// never followed for the last name).
+// never followed for the last name). `readlink-at` shows a relative target only.
 // `stat`, `get-flags`, `metadata-hash` and directory listings work on the same paths.
 // `resource-drop` frees a handle's slot, which the next resource of its kind reuses; a guest
 // must not use a handle after dropping it (see docs/component-model-poc.md).
-// Not implemented: sockets.
+// Not implemented: `symlink-at`, `link-at` and sockets.
 
 use std::collections::VecDeque;
 use std::path::{Component, Path, PathBuf};
@@ -312,29 +312,60 @@ impl P2Host {
         access: (i32, i64, i32),
         modification: (i32, i64, i32),
     ) -> Result<(), u8> {
-        use std::time::{SystemTime, UNIX_EPOCH};
         self.require_writable()?;
         let d = self.open_descriptor(descriptor)?;
         if d.file.is_some() && !d.write {
             return Err(code::BAD_DESCRIPTOR);
         }
-        let time = |(tag, seconds, nanos): (i32, i64, i32)| match tag {
-            0 => Ok(None),
-            1 => Ok(Some(SystemTime::now())),
-            2 if (0..1_000_000_000).contains(&nanos) => {
-                let since = Duration::new(seconds as u64, nanos as u32);
-                UNIX_EPOCH.checked_add(since).map(Some).ok_or(code::INVALID)
-            }
-            _ => Err(code::INVALID),
-        };
-        let mut times = std::fs::FileTimes::new();
-        if let Some(t) = time(access)? {
-            times = times.set_accessed(t);
-        }
-        if let Some(t) = time(modification)? {
-            times = times.set_modified(t);
-        }
+        let times = file_times(access, modification)?;
         self.with_descriptor_file(descriptor, |file| file.set_times(times))
+    }
+
+    /// Sets the times of the entry `path` names under the directory behind `dir`. With
+    /// `follow` (`symlink-follow`) a symlink is followed to its target; without it the
+    /// entry itself is set, but `std` cannot set the times of a symlink, so that is
+    /// `unsupported`. Needs a writable preopen (`read-only`); the times are as in
+    /// `set_descriptor_times`.
+    #[allow(dead_code)]
+    fn set_path_times(
+        &self,
+        g: &mut Guest,
+        dir: i32,
+        follow: bool,
+        (ptr, len): (i32, i32),
+        access: (i32, i64, i32),
+        modification: (i32, i64, i32),
+    ) -> Result<(), u8> {
+        self.require_writable()?;
+        let times = file_times(access, modification)?;
+        let path = if follow {
+            self.resolve_at(g, dir, ptr, len)?
+        } else {
+            let entry = self.entry_at(g, dir, ptr, len)?;
+            if entry.symlink_metadata().map_err(io_error_code)?.is_symlink() {
+                return Err(code::UNSUPPORTED);
+            }
+            entry
+        };
+        let file = std::fs::File::open(path).map_err(io_error_code)?;
+        file.set_times(times).map_err(io_error_code)
+    }
+
+    /// The target of the symlink `path` names under the directory behind `dir` (the
+    /// link itself, not followed), as the link holds it. Anything but a symlink is
+    /// `invalid`. A target that is absolute or has a `..` would show the host's paths
+    /// (or lead out of the preopen), so it is `not-permitted`.
+    #[allow(dead_code)]
+    fn read_link_target(&self, g: &mut Guest, dir: i32, ptr: i32, len: i32) -> Result<String, u8> {
+        let entry = self.entry_at(g, dir, ptr, len)?;
+        if !entry.symlink_metadata().map_err(io_error_code)?.is_symlink() {
+            return Err(code::INVALID);
+        }
+        let target = std::fs::read_link(entry).map_err(io_error_code)?;
+        if target.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
+            return Err(code::NOT_PERMITTED);
+        }
+        target.into_os_string().into_string().map_err(|_| code::IO)
     }
 
     /// `result<output-stream, error-code>` at `ret`: a new stream over `opened`, or the error.
@@ -549,8 +580,37 @@ mod code {
     pub const NO_ENTRY: u8 = 20;
     pub const NOT_DIRECTORY: u8 = 24;
     pub const NOT_EMPTY: u8 = 25;
+    pub const UNSUPPORTED: u8 = 27;
     pub const NOT_PERMITTED: u8 = 31;
     pub const READ_ONLY: u8 = 33;
+}
+
+/// The times of a `set-times` call: each is a `new-timestamp` flattened to
+/// `(tag, seconds, nanoseconds)` (`no-change` 0, `now` 1, `timestamp` 2). A tag that is
+/// none of these, nanoseconds of a second or more, or a time too far ahead is `invalid`.
+#[allow(dead_code)]
+fn file_times(
+    access: (i32, i64, i32),
+    modification: (i32, i64, i32),
+) -> Result<std::fs::FileTimes, u8> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let time = |(tag, seconds, nanos): (i32, i64, i32)| match tag {
+        0 => Ok(None),
+        1 => Ok(Some(SystemTime::now())),
+        2 if (0..1_000_000_000).contains(&nanos) => {
+            let since = Duration::new(seconds as u64, nanos as u32);
+            UNIX_EPOCH.checked_add(since).map(Some).ok_or(code::INVALID)
+        }
+        _ => Err(code::INVALID),
+    };
+    let mut times = std::fs::FileTimes::new();
+    if let Some(t) = time(access)? {
+        times = times.set_accessed(t);
+    }
+    if let Some(t) = time(modification)? {
+        times = times.set_modified(t);
+    }
+    Ok(times)
 }
 
 #[allow(dead_code)]
@@ -1268,6 +1328,47 @@ impl Imports for P2Host {
         let modification = (modification_tag, modification_seconds, modification_nanos);
         let timed = self.set_descriptor_times(descriptor, access, modification);
         put_status(g, ret, timed);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_set_times_at
+    /// `set-times-at(path-flags, path, access, modification)` -> `result<_, error-code>`:
+    /// `set-times` for the entry a path names (see `set_path_times`). `symlink-follow` is
+    /// bit 0 of the flags.
+    fn wasi_filesystem_types_method_descriptor_set_times_at(
+        &mut self,
+        g: &mut Guest,
+        d: i32,
+        path_flags: i32,
+        ptr: i32,
+        len: i32,
+        access_tag: i32,
+        access_seconds: i64,
+        access_nanos: i32,
+        modification_tag: i32,
+        modification_seconds: i64,
+        modification_nanos: i32,
+        ret: i32,
+    ) {
+        let access = (access_tag, access_seconds, access_nanos);
+        let modification = (modification_tag, modification_seconds, modification_nanos);
+        let timed = self.set_path_times(g, d, path_flags & 1 != 0, (ptr, len), access, modification);
+        put_status(g, ret, timed);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_readlink_at
+    /// `readlink-at(path)` -> `result<string, error-code>`: the target of a symlink, if
+    /// it is relative and stays under the preopen (see `read_link_target`). Allowed on a
+    /// read-only preopen.
+    fn wasi_filesystem_types_method_descriptor_readlink_at(&mut self, g: &mut Guest, d: i32, ptr: i32, len: i32, ret: i32) {
+        match self.read_link_target(g, d, ptr, len) {
+            Ok(target) => {
+                zero_tag(g, ret);
+                put_string(g, ret + 4, &target);
+            }
+            Err(c) => fs_error(g, ret, 4, c),
+        }
     }
     // end optional
 

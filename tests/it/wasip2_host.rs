@@ -1256,6 +1256,171 @@ fn a_read_only_preopen_refuses_to_resize_or_touch_files() {
     assert_eq!(meta.modified().unwrap(), before);
 }
 
+/// The imports and paths of the test of `set-times-at` and `readlink-at`. Both return
+/// `result<_, error-code>`-shaped values at `ret` (220): the tag at 220 and, for
+/// `readlink-at`, the string's `(ptr, len)` at 224/228 or, for an error, its tag byte at
+/// 224 (a string's alignment is 4), while `set-times-at` puts it at 221. Paths: `f.txt`,
+/// `g.txt`, `ln` (a symlink to `f.txt`), `abs` (to an absolute path), `up` (to `../x`),
+/// `nope` (nothing), `../f.txt`.
+const LINK_TIMES_IMPORTS: &str = r#"
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-times-at" (func $set_times_at (param i32 i32 i32 i32 i32 i64 i32 i32 i64 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.readlink-at" (func $readlink_at (param i32 i32 i32 i32)))
+  (data (i32.const 300) "f.txt")
+  (data (i32.const 310) "g.txt")
+  (data (i32.const 320) "ln")
+  (data (i32.const 330) "abs")
+  (data (i32.const 340) "up")
+  (data (i32.const 350) "nope")
+  (data (i32.const 360) "../f.txt")
+"#;
+
+/// `fs_links` runs on a writable root, `fs_links_denied` on a read-only one. Error codes:
+/// invalid 12, no-entry 20, unsupported 27, not-permitted 31, read-only 33. Path-flags:
+/// symlink-follow 1.
+const LINK_TIMES: &str = r#"
+  (func $ok (param $at i32)
+    (if (i32.load8_u (local.get $at)) (then unreachable)))
+  (func $err (param $at i32) (param $code i32)
+    (if (i32.ne (i32.load8_u (i32.const 220)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (local.get $at)) (local.get $code)) (then unreachable)))
+  ;; the modification time of `path` set to `secs` (nanoseconds `nanos`), the access time kept
+  (func $touch (param $dir i32) (param $flags i32) (param $path i32) (param $len i32)
+               (param $secs i64) (param $nanos i32)
+    (call $set_times_at (local.get $dir) (local.get $flags) (local.get $path) (local.get $len)
+                        (i32.const 0) (i64.const 0) (i32.const 0)
+                        (i32.const 2) (local.get $secs) (local.get $nanos) (i32.const 220)))
+  ;; `readlink-at` of `path` is the `want_len` bytes at `want`
+  (func $target_is (param $dir i32) (param $path i32) (param $len i32)
+                   (param $want i32) (param $want_len i32) (local $i i32)
+    (call $readlink_at (local.get $dir) (local.get $path) (local.get $len) (i32.const 220))
+    (call $ok (i32.const 220))
+    (if (i32.ne (i32.load (i32.const 228)) (local.get $want_len)) (then unreachable))
+    (loop $next
+      (if (i32.ne (i32.load8_u (i32.add (i32.load (i32.const 224)) (local.get $i)))
+                  (i32.load8_u (i32.add (local.get $want) (local.get $i))))
+        (then unreachable))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $next (i32.lt_u (local.get $i) (local.get $want_len)))))
+  (func (export "fs_links") (local $dir i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    ;; the target of a relative symlink, as the link holds it
+    (call $target_is (local.get $dir) (i32.const 320) (i32.const 2) (i32.const 300) (i32.const 5))
+    ;; a file is no symlink; a target that leaves the preopen is not shown
+    (call $readlink_at (local.get $dir) (i32.const 300) (i32.const 5) (i32.const 220))
+    (call $err (i32.const 224) (i32.const 12))
+    (call $readlink_at (local.get $dir) (i32.const 330) (i32.const 3) (i32.const 220))
+    (call $err (i32.const 224) (i32.const 31))
+    (call $readlink_at (local.get $dir) (i32.const 340) (i32.const 2) (i32.const 220))
+    (call $err (i32.const 224) (i32.const 31))
+    (call $readlink_at (local.get $dir) (i32.const 350) (i32.const 4) (i32.const 220))
+    (call $err (i32.const 224) (i32.const 20))
+    (call $readlink_at (local.get $dir) (i32.const 360) (i32.const 8) (i32.const 220))
+    (call $err (i32.const 224) (i32.const 31))
+    ;; following the symlink sets the times of its target
+    (call $touch (local.get $dir) (i32.const 1) (i32.const 320) (i32.const 2) (i64.const 1000000000) (i32.const 0))
+    (call $ok (i32.const 220))
+    ;; now for both, on g.txt (its modification time is set below)
+    (call $set_times_at (local.get $dir) (i32.const 1) (i32.const 310) (i32.const 5)
+                        (i32.const 1) (i64.const 0) (i32.const 0)
+                        (i32.const 1) (i64.const 0) (i32.const 0) (i32.const 220))
+    (call $ok (i32.const 220))
+    ;; without following, a file is set as it is; a symlink cannot be
+    (call $touch (local.get $dir) (i32.const 0) (i32.const 310) (i32.const 5) (i64.const 1500000000) (i32.const 0))
+    (call $ok (i32.const 220))
+    (call $touch (local.get $dir) (i32.const 0) (i32.const 320) (i32.const 2) (i64.const 1) (i32.const 0))
+    (call $err (i32.const 221) (i32.const 27))
+    ;; out-of-range nanoseconds, a missing path, and paths outside the preopen
+    (call $touch (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i64.const 5) (i32.const 1000000000))
+    (call $err (i32.const 221) (i32.const 12))
+    (call $touch (local.get $dir) (i32.const 1) (i32.const 350) (i32.const 4) (i64.const 5) (i32.const 0))
+    (call $err (i32.const 221) (i32.const 20))
+    (call $touch (local.get $dir) (i32.const 1) (i32.const 360) (i32.const 8) (i64.const 5) (i32.const 0))
+    (call $err (i32.const 221) (i32.const 31))
+    ;; a symlink that leads out is refused when followed (`abs`), or has nothing at its target (`up`)
+    (call $touch (local.get $dir) (i32.const 1) (i32.const 330) (i32.const 3) (i64.const 5) (i32.const 0))
+    (call $err (i32.const 221) (i32.const 31))
+    (call $touch (local.get $dir) (i32.const 1) (i32.const 340) (i32.const 2) (i64.const 5) (i32.const 0))
+    (call $err (i32.const 221) (i32.const 20)))
+  (func (export "fs_links_denied") (local $dir i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $touch (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i64.const 5) (i32.const 0))
+    (call $err (i32.const 221) (i32.const 33))
+    ;; reading a link changes nothing
+    (call $target_is (local.get $dir) (i32.const 320) (i32.const 2) (i32.const 300) (i32.const 5)))
+"#;
+
+/// A fresh root `wasm2rs_wasip2_<name>_root` of `root_with_file`, plus `g.txt` and the
+/// symlinks `ln` (to `f.txt`), `abs` (to an absolute path) and `up` (to `../x`).
+#[cfg(unix)]
+fn root_with_links(name: &str) -> std::path::PathBuf {
+    let root = root_with_file(name);
+    std::fs::write(root.join("g.txt"), "g").unwrap();
+    std::os::unix::fs::symlink("f.txt", root.join("ln")).unwrap();
+    std::os::unix::fs::symlink(std::env::temp_dir(), root.join("abs")).unwrap();
+    std::os::unix::fs::symlink("../x", root.join("up")).unwrap();
+    root
+}
+
+#[cfg(unix)]
+#[test]
+fn set_times_at_follows_symlinks_on_request_and_readlink_at_shows_relative_targets() {
+    let root = root_with_links("links");
+    let bin = compile(
+        "fs_links",
+        &hello_with(LINK_TIMES_IMPORTS, LINK_TIMES),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_links();",
+    );
+    run_ok(&bin);
+    let modified = |name: &str| {
+        std::fs::metadata(root.join(name))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    assert_eq!(epoch_secs(modified("f.txt")), 1_000_000_000);
+    // g.txt's times were set to now, then its modification time to 1_500_000_000
+    assert_eq!(epoch_secs(modified("g.txt")), 1_500_000_000);
+    let accessed = std::fs::metadata(root.join("g.txt"))
+        .unwrap()
+        .accessed()
+        .unwrap();
+    assert!(epoch_secs(accessed) > 1_600_000_000);
+    // the host directory `abs` leads to was not touched
+    let outside = std::fs::metadata(std::env::temp_dir())
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_ne!(epoch_secs(outside), 5);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_preopen_refuses_set_times_at_but_shows_links() {
+    let root = root_with_links("links_denied");
+    let before = std::fs::metadata(root.join("f.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let bin = compile(
+        "fs_links_denied",
+        &hello_with(LINK_TIMES_IMPORTS, LINK_TIMES),
+        &preopen_host(&root),
+        "inst.fs_links_denied();",
+    );
+    run_ok(&bin);
+    assert_eq!(
+        std::fs::metadata(root.join("f.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        before
+    );
+}
+
 /// The imports and paths of the test where a guest moves a directory under the path of a
 /// directory descriptor it holds. Calls that return `result<_, error-code>` put the tag
 /// at `ret` and the error's tag byte at `ret + 1`.
