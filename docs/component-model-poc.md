@@ -193,15 +193,19 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   file's (parent under the preopen; `..`, absolute paths and names ending in `/` or
   `/.` refused), and the entry itself is never followed: `unlink` removes a symlink,
   not its target, `remove-directory-at` on a symlink is `not-directory`, and a symlink
-  cannot be renamed (`not-permitted`: a descriptor's path is checked only when it is
-  opened, so a symlink moved onto it would lead it out of the preopen). Errors:
+  cannot be renamed (`not-permitted`: a symlink moved onto the path of an open descriptor
+  would lead it out of the preopen). A descriptor's path is resolved again on every use
+  and must still be under the preopen (`not-permitted` if not), which also covers a
+  directory holding a symlink that leads out being renamed over it; the check and the use
+  are separate steps, so a host that must resist a racing guest needs a handle per
+  descriptor instead. Errors:
   `exist`, `no-entry`, `is-directory`, `not-directory`, `not-empty`. On a read-only
   preopen all four are `read-only`.
 - `set-size` (needs a descriptor opened for `write`; a directory is `is-directory`),
-  `sync`, `sync-data` and `set-times` (`no-change`, `now` or a `timestamp`, on a file or
-  a directory; nanoseconds of a second or more are `invalid`) are done. On a read-only
+  `sync`, `sync-data` and `set-times` (`no-change`, `now` or a `timestamp`, on a directory or a file
+  opened for `write`; nanoseconds of a second or more are `invalid`) are done. On a read-only
   preopen `set-size` and `set-times` are `read-only`, while `sync` succeeds since it
-  changes nothing. `set-times-at` and the link operations are not done yet.
+  changes nothing. `set-times-at`, the link operations and sockets are not done yet.
 - Paths must stay under the preopen: an absolute path or any `..` is `not-permitted`
   (stricter than WASI, which allows `..` that stays inside), and so is a symlink that
   leads out (the resolved path is checked against the preopen). Path flags are
@@ -232,7 +236,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
    everything below. *Done: `named_imports` / `--named-imports`.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
-   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at` and the link operations are not. This is what makes a wasip2 hello-world run natively.
+   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at`, the link operations and sockets are not. This is what makes a wasip2 hello-world run natively.
 4. **Full component support** (very large): parse the component, resolve instances
    and `canon lift/lower` per the spec, and generate glue for arbitrary WIT worlds.
    Months of work; only worth it if general components are a goal.

@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-only by default. It also supports `create-directory-at`, `unlink-file-at`,
   `remove-directory-at` and `rename-at` (a symlink is removed or moved itself, never
   followed). `set-size`, `sync`, `sync-data` and `set-times` work too (`std::fs`'s
-  `set_len`, `sync_all`, `sync_data` and `set_times`); only `set-times-at` and the
-  link and socket operations are missing.
+  `set_len`, `sync_all`, `sync_data` and `set_times`); only `set-times-at`, the
+  link operations and sockets are missing.
 - `wasm2rs_macros::include_wasm!` accepts `named_imports`, `import_memory` and
   `reentrant_imports` (the `TranspileOptions` of the same name), so a host such as the
   WASI preview2 example can embed a module without a build script.

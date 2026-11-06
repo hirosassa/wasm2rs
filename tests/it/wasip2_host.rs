@@ -1116,7 +1116,8 @@ const TIMES_IMPORTS: &str = r#"
 
 /// `fs_times` runs on a writable root holding `f.txt` ("0123456789"). open-flags 0
 /// opens an existing file; descriptor-flags: read 1, write 2. Error codes:
-/// bad-descriptor 3, invalid 12, is-directory 14.
+/// bad-descriptor 3, invalid 12, is-directory 14, read-only 33. `fs_times_denied` runs
+/// on a read-only root.
 const TIMES: &str = r#"
   (func $ok (param $at i32)
     (if (i32.load8_u (local.get $at)) (then unreachable)))
@@ -1160,6 +1161,17 @@ const TIMES: &str = r#"
     (call $set_times (local.get $dir) (i32.const 2) (i64.const 2000000000) (i32.const 0)
                      (i32.const 2) (i64.const 2000000000) (i32.const 0) (i32.const 220))
     (call $ok (i32.const 220))
+    ;; a file opened for reading only keeps its times
+    (call $set_times (local.get $ro) (i32.const 1) (i64.const 0) (i32.const 0)
+                     (i32.const 1) (i64.const 0) (i32.const 0) (i32.const 220))
+    (call $err (i32.const 3))
+    ;; a tag that is none of the three, and seconds that overflow (-1 is 2^64 - 1)
+    (call $set_times (local.get $f) (i32.const 3) (i64.const 0) (i32.const 0)
+                     (i32.const 0) (i64.const 0) (i32.const 0) (i32.const 220))
+    (call $err (i32.const 12))
+    (call $set_times (local.get $f) (i32.const 0) (i64.const 0) (i32.const 0)
+                     (i32.const 2) (i64.const -1) (i32.const 0) (i32.const 220))
+    (call $err (i32.const 12))
     ;; nanoseconds out of range
     (call $set_times (local.get $f) (i32.const 0) (i64.const 0) (i32.const 0)
                      (i32.const 2) (i64.const 5) (i32.const 1000000000) (i32.const 220))
@@ -1188,7 +1200,7 @@ const TIMES: &str = r#"
 
 #[cfg(unix)]
 fn times_root(name: &str) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!("wasm2rs_wasip2_{name}"));
+    let root = std::env::temp_dir().join(format!("wasm2rs_wasip2_{name}_root"));
     std::fs::remove_dir_all(&root).ok();
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("f.txt"), "0123456789").unwrap();
@@ -1241,4 +1253,76 @@ fn a_read_only_preopen_refuses_to_resize_or_touch_files() {
     let meta = std::fs::metadata(root.join("f.txt")).unwrap();
     assert_eq!(meta.len(), 10);
     assert_eq!(meta.modified().unwrap(), before);
+}
+
+/// The imports and paths of the test where a guest moves a directory under the path of a
+/// descriptor it holds. Calls that return `result<_, error-code>` put the tag at `ret`
+/// and the error's tag byte at `ret + 1`.
+const MOVED_IMPORTS: &str = r#"
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.create-directory-at" (func $mkdir (param i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.unlink-file-at" (func $unlink (param i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.remove-directory-at" (func $rmdir (param i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.rename-at" (func $rename (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-size" (func $set_size (param i32 i64 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.sync" (func $sync (param i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-times" (func $set_times (param i32 i32 i64 i32 i32 i64 i32 i32)))
+  (data (i32.const 300) "d")
+  (data (i32.const 310) "d/f")
+  (data (i32.const 320) "e")
+"#;
+
+/// `fs_moved` runs on a writable root holding `e/f`, a symlink to a file outside the
+/// root. It opens `d/f`, then makes `d` the directory `e`, so the path the descriptor
+/// holds now leads outside the root. Error code not-permitted: 31.
+const MOVED: &str = r#"
+  (func $ok (param $at i32)
+    (if (i32.load8_u (local.get $at)) (then unreachable)))
+  (func $denied
+    (if (i32.ne (i32.load8_u (i32.const 220)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 221)) (i32.const 31)) (then unreachable)))
+  (func (export "fs_moved") (local $dir i32) (local $f i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $mkdir (local.get $dir) (i32.const 300) (i32.const 1) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 310) (i32.const 3) (i32.const 1) (i32.const 3) (i32.const 220))
+    (call $ok (i32.const 220))
+    (local.set $f (i32.load (i32.const 224)))
+    (call $unlink (local.get $dir) (i32.const 310) (i32.const 3) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $rmdir (local.get $dir) (i32.const 300) (i32.const 1) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $rename (local.get $dir) (i32.const 320) (i32.const 1) (local.get $dir) (i32.const 300) (i32.const 1) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $set_size (local.get $f) (i64.const 0) (i32.const 220))
+    (call $denied)
+    (call $sync (local.get $f) (i32.const 220))
+    (call $denied)
+    (call $set_times (local.get $f) (i32.const 1) (i64.const 0) (i32.const 0)
+                     (i32.const 1) (i64.const 0) (i32.const 0) (i32.const 220))
+    (call $denied))
+"#;
+
+#[cfg(unix)]
+#[test]
+fn a_descriptor_whose_path_was_moved_out_of_the_preopen_is_refused() {
+    let root = std::env::temp_dir().join("wasm2rs_wasip2_moved_root");
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::create_dir_all(root.join("e")).unwrap();
+    let outside = root
+        .parent()
+        .unwrap()
+        .join("wasm2rs_wasip2_moved_secret.txt");
+    std::fs::write(&outside, "secret").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("e/f")).unwrap();
+    let bin = compile(
+        "fs_moved",
+        &hello_with(MOVED_IMPORTS, MOVED),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_moved();",
+    );
+    run_ok(&bin);
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret");
 }

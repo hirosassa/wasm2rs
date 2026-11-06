@@ -167,10 +167,16 @@ impl P2Host {
         self.descriptors.get(descriptor as u32 as usize).ok_or(code::BAD_DESCRIPTOR)
     }
 
-    /// The path behind a descriptor handle, or `bad-descriptor`.
+    /// The path behind a descriptor handle, or `bad-descriptor`. The path was checked
+    /// when the descriptor was opened, but the directories above it can be moved since
+    /// (a directory holding a symlink that leads out can be renamed over it), so it is
+    /// resolved again and must still be under the preopen: `not-permitted` if not.
     #[allow(dead_code)]
-    fn descriptor(&self, descriptor: i32) -> Result<&Path, u8> {
-        self.open_descriptor(descriptor).map(|d| d.path.as_path())
+    fn descriptor(&self, descriptor: i32) -> Result<PathBuf, u8> {
+        let root = self.root.as_ref().ok_or(code::NOT_PERMITTED)?;
+        let path = &self.open_descriptor(descriptor)?.path;
+        let real = path.canonicalize().map_err(io_error_code)?;
+        if real.starts_with(root) { Ok(real) } else { Err(code::NOT_PERMITTED) }
     }
 
     /// Like `resolve`, for the path given as `(ptr, len)` in guest memory.
@@ -245,14 +251,15 @@ impl P2Host {
     #[allow(dead_code)]
     fn writable_file(&self, descriptor: i32, append: bool) -> Result<std::fs::File, u8> {
         self.require_writable()?;
-        let descriptor = self.open_descriptor(descriptor)?;
-        if descriptor.path.is_dir() {
+        let write = self.open_descriptor(descriptor)?.write;
+        let path = self.descriptor(descriptor)?;
+        if path.is_dir() {
             return Err(code::IS_DIRECTORY);
         }
-        if !descriptor.write {
+        if !write {
             return Err(code::BAD_DESCRIPTOR);
         }
-        let opened = std::fs::OpenOptions::new().write(true).append(append).open(&descriptor.path);
+        let opened = std::fs::OpenOptions::new().write(true).append(append).open(&path);
         opened.map_err(io_error_code)
     }
 
@@ -265,35 +272,39 @@ impl P2Host {
         synced.map_err(io_error_code)
     }
 
-    /// Sets the times of the file or directory behind a descriptor, each a
-    /// `(tag, seconds, nanoseconds)` `new-timestamp`: `no-change` 0, `now` 1, `timestamp` 2.
-    /// A preopen that is not writable is `read-only`; nanoseconds of a second or more are
-    /// `invalid`.
+    /// Sets the times of the file or directory behind a descriptor (see `set-times` for
+    /// the `(tag, seconds, nanoseconds)` of each). A preopen that is not writable is
+    /// `read-only`, a file not opened for `write` is `bad-descriptor`, and a tag that is
+    /// not 0 to 2, nanoseconds of a second or more, or a time before the epoch (or too
+    /// far ahead) is `invalid`.
     #[allow(dead_code)]
-    fn touch(
+    fn set_descriptor_times(
         &self,
         descriptor: i32,
         access: (i32, i64, i32),
         modification: (i32, i64, i32),
     ) -> Result<(), u8> {
-        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        use std::time::{SystemTime, UNIX_EPOCH};
         self.require_writable()?;
+        let write = self.open_descriptor(descriptor)?.write;
         let path = self.descriptor(descriptor)?;
+        if !write && !path.is_dir() {
+            return Err(code::BAD_DESCRIPTOR);
+        }
         let time = |(tag, seconds, nanos): (i32, i64, i32)| match tag {
             0 => Ok(None),
             1 => Ok(Some(SystemTime::now())),
-            _ if !(0..1_000_000_000).contains(&nanos) => Err(code::INVALID),
-            _ => {
+            2 if (0..1_000_000_000).contains(&nanos) => {
                 let since = Duration::new(seconds as u64, nanos as u32);
                 UNIX_EPOCH.checked_add(since).map(Some).ok_or(code::INVALID)
             }
+            _ => Err(code::INVALID),
         };
-        let (access, modification) = (time(access)?, time(modification)?);
         let mut times = std::fs::FileTimes::new();
-        if let Some(t) = access {
+        if let Some(t) = time(access)? {
             times = times.set_accessed(t);
         }
-        if let Some(t) = modification {
+        if let Some(t) = time(modification)? {
             times = times.set_modified(t);
         }
         let file = std::fs::File::open(path).map_err(io_error_code)?;
@@ -986,7 +997,7 @@ impl Imports for P2Host {
         if path.is_dir() {
             return fs_error(g, ret, 4, code::IS_DIRECTORY);
         }
-        let opened = std::fs::File::open(path).and_then(|mut file| {
+        let opened = std::fs::File::open(&path).and_then(|mut file| {
             file.seek(SeekFrom::Start(offset as u64))?;
             Ok(file)
         });
@@ -1114,9 +1125,9 @@ impl Imports for P2Host {
         let done = self.require_writable().and_then(|()| {
             let old = self.entry_at(g, dir, old_ptr, old_len)?;
             let new = self.entry_at(g, new_dir, new_ptr, new_len)?;
-            // Not a symlink: a descriptor's path is checked once, when it is opened, and
-            // stays valid because nothing a guest can do puts a symlink under a path it
-            // holds. Moving a symlink there would lead the descriptor out of the preopen.
+            // Not a symlink: moving one over the path of an open descriptor would lead it
+            // out of the preopen. (A directory that holds a symlink can still be moved
+            // there; `descriptor` resolves the path again on every use.)
             if old.symlink_metadata().map_err(io_error_code)?.file_type().is_symlink() {
                 return Err(code::NOT_PERMITTED);
             }
@@ -1163,7 +1174,8 @@ impl Imports for P2Host {
     // optional: wasi_filesystem_types_method_descriptor_set_times
     /// `set-times(access, modification)` -> `result<_, error-code>`. Each time is a
     /// `new-timestamp`, flattened to a tag (`no-change` 0, `now` 1, `timestamp` 2), the
-    /// seconds and the nanoseconds. Needs a writable preopen; works on files and directories.
+    /// seconds and the nanoseconds. Needs a writable preopen; a file must have been opened
+    /// for `write` (a directory needs nothing more).
     fn wasi_filesystem_types_method_descriptor_set_times(
         &mut self,
         g: &mut Guest,
@@ -1178,8 +1190,8 @@ impl Imports for P2Host {
     ) {
         let access = (access_tag, access_seconds, access_nanos);
         let modification = (modification_tag, modification_seconds, modification_nanos);
-        let touched = self.touch(descriptor, access, modification);
-        put_status(g, ret, touched);
+        let timed = self.set_descriptor_times(descriptor, access, modification);
+        put_status(g, ret, timed);
     }
     // end optional
 
@@ -1229,7 +1241,7 @@ impl Imports for P2Host {
     // optional: wasi_filesystem_types_method_descriptor_stat
     fn wasi_filesystem_types_method_descriptor_stat(&mut self, g: &mut Guest, d: i32, ret: i32) {
         match self.descriptor(d) {
-            Ok(path) => put_stat(g, ret, path),
+            Ok(path) => put_stat(g, ret, &path),
             Err(c) => fs_error(g, ret, 8, c),
         }
     }
@@ -1256,7 +1268,7 @@ impl Imports for P2Host {
     // optional: wasi_filesystem_types_method_descriptor_metadata_hash
     fn wasi_filesystem_types_method_descriptor_metadata_hash(&mut self, g: &mut Guest, d: i32, ret: i32) {
         match self.descriptor(d) {
-            Ok(path) => put_metadata_hash(g, ret, path),
+            Ok(path) => put_metadata_hash(g, ret, &path),
             Err(c) => fs_error(g, ret, 8, c),
         }
     }
