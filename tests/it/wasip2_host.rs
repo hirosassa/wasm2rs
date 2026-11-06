@@ -502,7 +502,9 @@ const STAT: &str = r#"
     (if (i32.ne (i32.load8_u (i32.const 608)) (i32.const 6)) (then unreachable))
     (if (i64.eqz (i64.load (i32.const 616))) (then unreachable))
     (if (i64.ne (i64.load (i32.const 624)) (i64.const 5)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 632)) (i32.const 1)) (then unreachable))
     (if (i32.ne (i32.load8_u (i32.const 656)) (i32.const 1)) (then unreachable))
+    (if (i32.load8_u (i32.const 680)) (then unreachable))
     (if (i64.lt_u (i64.load (i32.const 664)) (i64.const 1700000000)) (then unreachable))
     (if (i32.ge_u (i32.load (i32.const 672)) (i32.const 1000000000)) (then unreachable))
     ;; a directory by path, and the root descriptor itself
@@ -554,8 +556,12 @@ const STAT: &str = r#"
           (br $next))))
     (if (i32.ne (local.get $count) (i32.const 2)) (then unreachable))
     (if (i32.ne (local.get $sum) (i32.const 197)) (then unreachable))
-    ;; read-directory of a file is not-directory (24); open-at with the directory flag too
+    ;; open-at with the directory flag on a file, and read-directory of a file, are
+    ;; not-directory (24)
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 2) (i32.const 1) (i32.const 220))
+    (if (i32.ne (i32.load8_u (i32.const 224)) (i32.const 24)) (then unreachable))
     (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.load8_u (i32.const 220)) (then unreachable))
     (local.set $file (i32.load (i32.const 224)))
     (call $readdir (local.get $file) (i32.const 800))
     (if (i32.ne (i32.load8_u (i32.const 800)) (i32.const 1)) (then unreachable))
@@ -570,6 +576,7 @@ fn a_host_stats_files_and_lists_directories_under_its_preopen() {
     std::fs::write(root.join("a.txt"), "hello").unwrap();
     std::fs::write(root.join("sub/b.txt"), "b").unwrap();
     std::fs::write(root.join("sub/c.txt"), "c").unwrap();
+    // a file next to the root, which `../` would reach
     let secret = root
         .parent()
         .unwrap()

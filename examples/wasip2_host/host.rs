@@ -87,10 +87,17 @@ impl P2Host {
         self.files.get_mut(index)
     }
 
-    /// The path behind a descriptor handle.
+    /// The path behind a descriptor handle, or `bad-descriptor`.
     #[allow(dead_code)]
-    fn descriptor(&self, descriptor: i32) -> Option<&Path> {
-        self.descriptors.get(descriptor as u32 as usize).map(PathBuf::as_path)
+    fn descriptor(&self, descriptor: i32) -> Result<&Path, u8> {
+        let path = self.descriptors.get(descriptor as u32 as usize);
+        path.map(PathBuf::as_path).ok_or(code::BAD_DESCRIPTOR)
+    }
+
+    /// Like `resolve`, for the path given as `(ptr, len)` in guest memory.
+    #[allow(dead_code)]
+    fn resolve_at(&self, g: &mut Guest, dir: i32, ptr: i32, len: i32) -> Result<PathBuf, u8> {
+        self.resolve(dir, &get_str(g, ptr, len).ok_or(code::IO)?)
     }
 
     /// The path `path` names under the directory behind descriptor `dir`, or the
@@ -98,7 +105,7 @@ impl P2Host {
     #[allow(dead_code)]
     fn resolve(&self, dir: i32, path: &str) -> Result<PathBuf, u8> {
         let root = self.root.as_ref().ok_or(code::NOT_PERMITTED)?;
-        let base = self.descriptors.get(dir as u32 as usize).ok_or(code::BAD_DESCRIPTOR)?;
+        let base = self.descriptor(dir)?;
         let relative = Path::new(path);
         if relative.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
             return Err(code::NOT_PERMITTED);
@@ -251,11 +258,12 @@ fn put_datetime_option(g: &mut Guest, at: i32, time: std::io::Result<std::time::
             put(g, at + 8, &d.as_secs().to_le_bytes());
             put_u32(g, at + 16, d.subsec_nanos() as i32);
         }
-        None => put(g, at, &[0]),
+        None => zero_tag(g, at),
     }
 }
 
-/// The `descriptor-type` of a file type: directory 3, regular file 6, symlink 5.
+/// The `descriptor-type` of a file type: directory 3, regular file 6, symlink 5 (only
+/// directory entries are not followed), otherwise 0 (unknown).
 #[allow(dead_code)]
 fn descriptor_type(t: std::fs::FileType) -> u8 {
     if t.is_dir() {
@@ -281,18 +289,18 @@ fn put_stat(g: &mut Guest, ret: i32, path: &Path) {
     #[cfg(unix)]
     let links = std::os::unix::fs::MetadataExt::nlink(&meta);
     #[cfg(not(unix))]
-    let links = 1;
+    let links = 1u64;
     zero_tag(g, ret);
     put(g, ret + 8, &[descriptor_type(meta.file_type())]);
     put(g, ret + 16, &links.to_le_bytes());
     put(g, ret + 24, &meta.len().to_le_bytes());
     put_datetime_option(g, ret + 32, meta.accessed());
     put_datetime_option(g, ret + 56, meta.modified());
-    put(g, ret + 80, &[0]);
+    zero_tag(g, ret + 80); // the status-change time: none
 }
 
 /// `result<metadata-hash-value, error-code>` at `ret`: two `u64`s at `ret + 8`, a
-/// hash of the file's canonical path (the same file always gives the same value).
+/// hash of the file's canonical path (the same file gives the same value within one run).
 #[allow(dead_code)]
 fn put_metadata_hash(g: &mut Guest, ret: i32, path: &Path) {
     use std::hash::{DefaultHasher, Hash, Hasher};
@@ -595,10 +603,7 @@ impl Imports for P2Host {
         if open_flags & OPEN_CREATE_EXCLUSIVE_TRUNCATE != 0 || descriptor_flags & DESCRIPTOR_WRITE_MUTATE_DIRECTORY != 0 {
             return fs_error(g, ret, 4, code::READ_ONLY);
         }
-        let Some(path) = get_str(g, path_ptr, path_len) else {
-            return fs_error(g, ret, 4, code::IO);
-        };
-        match self.resolve(dir, &path) {
+        match self.resolve_at(g, dir, path_ptr, path_len) {
             Ok(full) if open_flags & OPEN_DIRECTORY != 0 && !full.is_dir() => {
                 fs_error(g, ret, 4, code::NOT_DIRECTORY)
             }
@@ -622,8 +627,9 @@ impl Imports for P2Host {
         ret: i32,
     ) {
         use std::io::{Seek, SeekFrom};
-        let Some(path) = self.descriptors.get(descriptor as u32 as usize) else {
-            return fs_error(g, ret, 4, code::BAD_DESCRIPTOR);
+        let path = match self.descriptor(descriptor) {
+            Ok(path) => path,
+            Err(c) => return fs_error(g, ret, 4, c),
         };
         if path.is_dir() {
             return fs_error(g, ret, 4, code::IS_DIRECTORY);
@@ -678,8 +684,9 @@ impl Imports for P2Host {
     /// `read-directory` -> `result<directory-entry-stream, error-code>`: a snapshot of
     /// the entries (without `.` and `..`), in the OS's order.
     fn wasi_filesystem_types_method_descriptor_read_directory(&mut self, g: &mut Guest, d: i32, ret: i32) {
-        let Some(path) = self.descriptor(d) else {
-            return fs_error(g, ret, 4, code::BAD_DESCRIPTOR);
+        let path = match self.descriptor(d) {
+            Ok(path) => path,
+            Err(c) => return fs_error(g, ret, 4, c),
         };
         if !path.is_dir() {
             return fs_error(g, ret, 4, code::NOT_DIRECTORY);
@@ -705,8 +712,8 @@ impl Imports for P2Host {
     // optional: wasi_filesystem_types_method_descriptor_stat
     fn wasi_filesystem_types_method_descriptor_stat(&mut self, g: &mut Guest, d: i32, ret: i32) {
         match self.descriptor(d) {
-            Some(path) => put_stat(g, ret, &path.to_path_buf()),
-            None => fs_error(g, ret, 8, code::BAD_DESCRIPTOR),
+            Ok(path) => put_stat(g, ret, path),
+            Err(c) => fs_error(g, ret, 8, c),
         }
     }
     // end optional
@@ -722,7 +729,7 @@ impl Imports for P2Host {
         len: i32,
         ret: i32,
     ) {
-        match get_str(g, ptr, len).ok_or(code::IO).and_then(|path| self.resolve(d, &path)) {
+        match self.resolve_at(g, d, ptr, len) {
             Ok(full) => put_stat(g, ret, &full),
             Err(c) => fs_error(g, ret, 8, c),
         }
@@ -732,8 +739,8 @@ impl Imports for P2Host {
     // optional: wasi_filesystem_types_method_descriptor_metadata_hash
     fn wasi_filesystem_types_method_descriptor_metadata_hash(&mut self, g: &mut Guest, d: i32, ret: i32) {
         match self.descriptor(d) {
-            Some(path) => put_metadata_hash(g, ret, &path.to_path_buf()),
-            None => fs_error(g, ret, 8, code::BAD_DESCRIPTOR),
+            Ok(path) => put_metadata_hash(g, ret, path),
+            Err(c) => fs_error(g, ret, 8, c),
         }
     }
     // end optional
@@ -748,7 +755,7 @@ impl Imports for P2Host {
         len: i32,
         ret: i32,
     ) {
-        match get_str(g, ptr, len).ok_or(code::IO).and_then(|path| self.resolve(d, &path)) {
+        match self.resolve_at(g, d, ptr, len) {
             Ok(full) => put_metadata_hash(g, ret, &full),
             Err(c) => fs_error(g, ret, 8, c),
         }
@@ -768,15 +775,14 @@ impl Imports for P2Host {
         let Some(Some(listing)) = self.listings.get_mut(stream as u32 as usize) else {
             return fs_error(g, ret, 4, code::BAD_DESCRIPTOR);
         };
-        let next = listing.next();
         zero_tag(g, ret);
-        match next {
+        match listing.next() {
             Some((kind, name)) => {
                 put(g, ret + 4, &[1]);
                 put(g, ret + 8, &[kind]);
                 put_string(g, ret + 12, &name);
             }
-            None => put(g, ret + 4, &[0]),
+            None => zero_tag(g, ret + 4),
         }
     }
     // end optional
