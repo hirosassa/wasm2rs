@@ -11,16 +11,18 @@ To add a file: copy it here and add one entry to the `spec_test!` list in
 
 The set also covers files from the merged proposals (bulk memory, memory64, multi-memory,
 reference types, the `*64.wast` variants). The harness skips what it cannot replay and
-reports it: modules with imports other than `spectest.print*` (replayed with a no-op host), `register`, `assert_invalid`/`assert_malformed`, multi-value
-results and GC reference types. If a state-changing call is skipped, the rest of that
-module's assertions are skipped too, so a skipped call never causes a false failure.
+reports it: modules importing anything but the standard `spectest` host (`print*`, the
+`global_*` constants, a 10-slot `table`, a 1-page `memory`, all replayed with a small
+host), `register` and the other modules' instances, `assert_invalid`/`assert_malformed`,
+multi-value results and GC reference types. A module-level `assert_trap (module ...)`
+is replayed as "instantiation traps". If a state-changing call is skipped, the rest of
+that module's assertions are skipped too, so a skipped call never causes a false failure.
 
 Not vendored yet: `memory_grow64` and `memory_size` (`memory.grow` does not honor a
-memory's declared maximum), and files whose modules mostly import from `spectest` or
-need `register` (`global`, `table`, `ref_func`, `return_call*`, ...). `elem` and `data` are vendored but replay
-only the modules without such imports, and only their `invoke`/`assert_return`/`assert_trap (invoke ...)`
-directives: a module-level `assert_trap (module ...)` (an instantiation trap) is not replayed yet,
-so the out-of-bounds segment checks are skipped and reported. `type` holds only `assert_malformed` and `names` is rejected by the `wast`
-parser's confusing-unicode lint, so neither is vendored.
+memory's declared maximum), `table` and `ref_func` (nothing would run: their modules
+need `register`, an imported table next to other tables, or typed reference tables),
+`return_call*`, `type` (only `assert_malformed`) and `names` (the `wast` parser's
+confusing-unicode lint rejects it). `global`, `elem` and `data` are vendored but
+replay only part of their assertions.
 
 `try_table` replays only 2 assertions: its main modules need imports, so the rest are skipped and reported.
