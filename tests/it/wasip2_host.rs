@@ -1098,3 +1098,231 @@ fn a_read_only_preopen_refuses_to_create_remove_and_rename() {
     }
     assert!(outside.join("file.txt").exists());
 }
+
+/// The imports of the tests that resize, sync and touch files. `set-size` takes the
+/// new size (`i64`); `set-times` takes two `new-timestamp`s, each flattened to a tag
+/// (no-change 0, now 1, timestamp 2), seconds (`i64`) and nanoseconds. Every call
+/// returns `result<_, error-code>`: the tag at `ret`, the error's tag byte at `ret + 1`.
+const TIMES_IMPORTS: &str = r#"
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[resource-drop]descriptor" (func $drop_fd (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-size" (func $set_size (param i32 i64 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.sync" (func $sync (param i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.sync-data" (func $sync_data (param i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-times" (func $set_times (param i32 i32 i64 i32 i32 i64 i32 i32)))
+  (data (i32.const 300) "f.txt")
+"#;
+
+/// `fs_times` runs on a writable root holding `f.txt` ("0123456789"). open-flags 0
+/// opens an existing file; descriptor-flags: read 1, write 2. Error codes:
+/// bad-descriptor 3, invalid 12, is-directory 14, read-only 33. `fs_times_denied` runs
+/// on a read-only root.
+const TIMES: &str = r#"
+  (func $ok (param $at i32)
+    (if (i32.load8_u (local.get $at)) (then unreachable)))
+  (func $err (param $code i32)
+    (if (i32.ne (i32.load8_u (i32.const 220)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 221)) (local.get $code)) (then unreachable)))
+  (func (export "fs_times") (local $dir i32) (local $f i32) (local $ro i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 0) (i32.const 3) (i32.const 220))
+    (call $ok (i32.const 220))
+    (local.set $f (i32.load (i32.const 224)))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 0) (i32.const 1) (i32.const 220))
+    (call $ok (i32.const 220))
+    (local.set $ro (i32.load (i32.const 224)))
+    ;; shrink, then extend (with zeros)
+    (call $set_size (local.get $f) (i64.const 4) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $set_size (local.get $f) (i64.const 8) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $sync (local.get $f) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $sync_data (local.get $f) (i32.const 220))
+    (call $ok (i32.const 220))
+    ;; a file opened for reading only cannot be resized; a directory is not a file
+    (call $set_size (local.get $ro) (i64.const 1) (i32.const 220))
+    (call $err (i32.const 3))
+    (call $set_size (local.get $dir) (i64.const 1) (i32.const 220))
+    (call $err (i32.const 14))
+    ;; a directory can be synced
+    (call $sync (local.get $dir) (i32.const 220))
+    (call $ok (i32.const 220))
+    ;; both times to now; then no change to the access time and a time for the file
+    (call $set_times (local.get $f) (i32.const 1) (i64.const 0) (i32.const 0)
+                     (i32.const 1) (i64.const 0) (i32.const 0) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $set_times (local.get $f) (i32.const 0) (i64.const 0) (i32.const 0)
+                     (i32.const 2) (i64.const 1000000000) (i32.const 500) (i32.const 220))
+    (call $ok (i32.const 220))
+    ;; a time for the directory
+    (call $set_times (local.get $dir) (i32.const 2) (i64.const 2000000000) (i32.const 0)
+                     (i32.const 2) (i64.const 2000000000) (i32.const 0) (i32.const 220))
+    (call $ok (i32.const 220))
+    ;; a file opened for reading only keeps its times
+    (call $set_times (local.get $ro) (i32.const 1) (i64.const 0) (i32.const 0)
+                     (i32.const 1) (i64.const 0) (i32.const 0) (i32.const 220))
+    (call $err (i32.const 3))
+    ;; a tag that is none of the three, and seconds that overflow (-1 is 2^64 - 1)
+    (call $set_times (local.get $f) (i32.const 3) (i64.const 0) (i32.const 0)
+                     (i32.const 0) (i64.const 0) (i32.const 0) (i32.const 220))
+    (call $err (i32.const 12))
+    (call $set_times (local.get $f) (i32.const 0) (i64.const 0) (i32.const 0)
+                     (i32.const 2) (i64.const -1) (i32.const 0) (i32.const 220))
+    (call $err (i32.const 12))
+    ;; nanoseconds out of range
+    (call $set_times (local.get $f) (i32.const 0) (i64.const 0) (i32.const 0)
+                     (i32.const 2) (i64.const 5) (i32.const 1000000000) (i32.const 220))
+    (call $err (i32.const 12))
+    (call $drop_fd (local.get $f))
+    (call $drop_fd (local.get $ro)))
+  (func (export "fs_times_denied") (local $dir i32) (local $f i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 0) (i32.const 1) (i32.const 220))
+    (call $ok (i32.const 220))
+    (local.set $f (i32.load (i32.const 224)))
+    (call $set_size (local.get $f) (i64.const 1) (i32.const 220))
+    (call $err (i32.const 33))
+    (call $set_times (local.get $f) (i32.const 1) (i64.const 0) (i32.const 0)
+                     (i32.const 1) (i64.const 0) (i32.const 0) (i32.const 220))
+    (call $err (i32.const 33))
+    (call $set_times (local.get $dir) (i32.const 1) (i64.const 0) (i32.const 0)
+                     (i32.const 1) (i64.const 0) (i32.const 0) (i32.const 220))
+    (call $err (i32.const 33))
+    ;; syncing changes nothing, so a read-only preopen allows it
+    (call $sync (local.get $f) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $drop_fd (local.get $f)))
+"#;
+
+#[cfg(unix)]
+fn times_root(name: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("wasm2rs_wasip2_{name}_root"));
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("f.txt"), "0123456789").unwrap();
+    root
+}
+
+#[cfg(unix)]
+fn epoch_secs(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_writable_preopen_resizes_syncs_and_sets_the_times_of_files() {
+    let root = times_root("times");
+    let bin = compile(
+        "fs_times",
+        &hello_with(TIMES_IMPORTS, TIMES),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_times();",
+    );
+    run_ok(&bin);
+    assert_eq!(std::fs::read(root.join("f.txt")).unwrap(), b"0123\0\0\0\0");
+    let modified = std::fs::metadata(root.join("f.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(epoch_secs(modified), 1_000_000_000);
+    let modified = std::fs::metadata(&root).unwrap().modified().unwrap();
+    assert_eq!(epoch_secs(modified), 2_000_000_000);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_preopen_refuses_to_resize_or_touch_files() {
+    let root = times_root("times_denied");
+    let before = std::fs::metadata(root.join("f.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let bin = compile(
+        "fs_times_denied",
+        &hello_with(TIMES_IMPORTS, TIMES),
+        &preopen_host(&root),
+        "inst.fs_times_denied();",
+    );
+    run_ok(&bin);
+    let meta = std::fs::metadata(root.join("f.txt")).unwrap();
+    assert_eq!(meta.len(), 10);
+    assert_eq!(meta.modified().unwrap(), before);
+}
+
+/// The imports and paths of the test where a guest moves a directory under the path of a
+/// descriptor it holds. Calls that return `result<_, error-code>` put the tag at `ret`
+/// and the error's tag byte at `ret + 1`.
+const MOVED_IMPORTS: &str = r#"
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.create-directory-at" (func $mkdir (param i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.unlink-file-at" (func $unlink (param i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.remove-directory-at" (func $rmdir (param i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.rename-at" (func $rename (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-size" (func $set_size (param i32 i64 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.sync" (func $sync (param i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-times" (func $set_times (param i32 i32 i64 i32 i32 i64 i32 i32)))
+  (data (i32.const 300) "d")
+  (data (i32.const 310) "d/f")
+  (data (i32.const 320) "e")
+"#;
+
+/// `fs_moved` runs on a writable root holding `e/f`, a symlink to a file outside the
+/// root. It opens `d/f`, then makes `d` the directory `e`, so the path the descriptor
+/// holds now leads outside the root. Error code not-permitted: 31.
+const MOVED: &str = r#"
+  (func $ok (param $at i32)
+    (if (i32.load8_u (local.get $at)) (then unreachable)))
+  (func $denied
+    (if (i32.ne (i32.load8_u (i32.const 220)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 221)) (i32.const 31)) (then unreachable)))
+  (func (export "fs_moved") (local $dir i32) (local $f i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $mkdir (local.get $dir) (i32.const 300) (i32.const 1) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 310) (i32.const 3) (i32.const 1) (i32.const 3) (i32.const 220))
+    (call $ok (i32.const 220))
+    (local.set $f (i32.load (i32.const 224)))
+    (call $unlink (local.get $dir) (i32.const 310) (i32.const 3) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $rmdir (local.get $dir) (i32.const 300) (i32.const 1) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $rename (local.get $dir) (i32.const 320) (i32.const 1) (local.get $dir) (i32.const 300) (i32.const 1) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $set_size (local.get $f) (i64.const 0) (i32.const 220))
+    (call $denied)
+    (call $sync (local.get $f) (i32.const 220))
+    (call $denied)
+    (call $set_times (local.get $f) (i32.const 1) (i64.const 0) (i32.const 0)
+                     (i32.const 1) (i64.const 0) (i32.const 0) (i32.const 220))
+    (call $denied))
+"#;
+
+#[cfg(unix)]
+#[test]
+fn a_descriptor_whose_path_was_moved_out_of_the_preopen_is_refused() {
+    let root = std::env::temp_dir().join("wasm2rs_wasip2_moved_root");
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::create_dir_all(root.join("e")).unwrap();
+    let outside = root
+        .parent()
+        .unwrap()
+        .join("wasm2rs_wasip2_moved_secret.txt");
+    std::fs::write(&outside, "secret").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("e/f")).unwrap();
+    let bin = compile(
+        "fs_moved",
+        &hello_with(MOVED_IMPORTS, MOVED),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_moved();",
+    );
+    run_ok(&bin);
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret");
+}
