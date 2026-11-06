@@ -142,6 +142,24 @@ fn run() -> Result<(), String> {
         if output.is_some() || funcs_per_file > 0 || max_bytes_per_file > 0 {
             return Err("--dump takes only the input file".to_string());
         }
+        let code_flags = [
+            (unsafe_memory, "--unsafe-memory"),
+            (named_exports, "--named-exports"),
+            (named_imports, "--named-imports"),
+            (import_memory, "--import-memory"),
+            (reentrant_imports, "--reentrant-imports"),
+            (split_dispatch > 0, "--split-dispatch"),
+            (jobs > 0, "--jobs"),
+            (entry_exports.is_some(), "--entry-exports"),
+        ];
+        if let Some(flag) = code_flags
+            .into_iter()
+            .find_map(|(given, flag)| given.then_some(flag))
+        {
+            return Err(format!(
+                "--dump takes only the input file; {flag} changes the generated code, which --dump does not generate"
+            ));
+        }
         let summary = wasm2rs::dump(&wasm).map_err(|e| e.to_string())?;
         print!("{summary}");
         return Ok(());
