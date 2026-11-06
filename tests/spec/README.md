@@ -17,9 +17,8 @@ module's assertions are skipped too, so a skipped call never causes a false fail
 
 Not vendored yet: `memory_grow64` and `memory_size` (`memory.grow` does not honor a
 memory's declared maximum), and files whose modules mostly import from `spectest` or
-need `register` (`global`, `table`, `ref_func`, `return_call*`, ...). `elem`, `data`, `ref_null`,
-`stack` and `unreached-valid` are vendored but replay only the modules without such
-imports. `type` holds only `assert_malformed` and `names` is rejected by the `wast`
+need `register` (`global`, `table`, `ref_func`, `return_call*`, ...). `elem` and `data` are vendored but replay
+only the modules without such imports. `type` holds only `assert_malformed` and `names` is rejected by the `wast`
 parser's confusing-unicode lint, so neither is vendored.
 
 `try_table` replays only 2 assertions: its main modules need imports, so the rest are skipped and reported.
