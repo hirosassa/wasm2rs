@@ -1508,9 +1508,9 @@ const STREAMS: &str = r#"
     (call $rename (local.get $dir) (i32.const 310) (i32.const 5) (local.get $dir) (i32.const 300) (i32.const 5) (i32.const 220))
     (call $ok (i32.const 220))
     ;; the descriptor still has the 10-byte file it opened, not the 14-byte one
-    (call $stat (local.get $old) (i32.const 400))
-    (call $ok (i32.const 400))
-    (if (i64.ne (i64.load (i32.const 424)) (i64.const 10)) (then unreachable))
+    (call $stat (local.get $old) (i32.const 600))
+    (call $ok (i32.const 600))
+    (if (i64.ne (i64.load (i32.const 624)) (i64.const 10)) (then unreachable))
     (call $rvs (local.get $old) (i64.const 0) (i32.const 240))
     (if (i32.ne (call $rd (call $handle)) (i32.const 0x3130)) (then unreachable)))
 "#;
