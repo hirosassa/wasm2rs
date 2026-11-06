@@ -101,3 +101,76 @@ fn an_anyref_only_as_a_block_result_still_gets_the_gc_value_model() {
         "let _ = func0 as fn() -> i32;\n let _ = func1 as fn(i32) -> i32;",
     );
 }
+
+#[test]
+fn ref_null_of_nocont_is_null_and_flows_into_a_concrete_cont_type() {
+    common::compile_run(
+        "bottom_ref_nocont",
+        r#"(module
+          (type $ft (func))
+          (type $ct (cont $ft))
+          (global $g nullcontref (ref.null nocont))
+          (func $id (param (ref null $ct)) (result i32) (ref.is_null (local.get 0)))
+          (func (export "direct") (result i32) (ref.is_null (ref.null nocont)))
+          (func (export "via_global") (result i32) (ref.is_null (global.get $g)))
+          (func (export "as_concrete") (result i32) (call $id (ref.null nocont))))"#,
+        "let mut inst = Instance::new();\n assert_eq!(inst.func1(), 1);\n \
+         assert_eq!(inst.func2(), 1);\n assert_eq!(inst.func3(), 1);",
+    );
+}
+
+#[test]
+fn ref_test_and_cast_on_u32_backed_hierarchies_decide_by_nullness() {
+    // Targets of the func/extern hierarchies: a top type holds every non-null
+    // value, a bottom type only null.
+    common::compile_run(
+        "ref_test_u32_hierarchy",
+        r#"(module
+          (func $f)
+          (elem declare func $f)
+          (func (export "func_nonnull") (result i32) (ref.test (ref func) (ref.func $f)))
+          (func (export "func_null") (result i32) (ref.test (ref func) (ref.null func)))
+          (func (export "func_null_ok") (result i32) (ref.test (ref null func) (ref.null func)))
+          (func (export "nofunc_on_func") (result i32) (ref.test (ref null nofunc) (ref.func $f)))
+          (func (export "nofunc_on_null") (result i32) (ref.test (ref null nofunc) (ref.null func)))
+          (func (export "nonnull_nofunc") (result i32) (ref.test (ref nofunc) (ref.null func)))
+          (func (export "noextern_on_null") (result i32) (ref.test (ref null noextern) (ref.null extern)))
+          (func (export "cast_ok") (result i32)
+            (ref.is_null (ref.cast (ref null nofunc) (ref.null func))))
+          (func (export "cast_trap") (result i32)
+            (ref.is_null (ref.cast (ref func) (ref.null func)))))"#,
+        "\
+         assert_eq!(func1(), 1);\n assert_eq!(func2(), 0);\n \
+         assert_eq!(func3(), 1);\n assert_eq!(func4(), 0);\n \
+         assert_eq!(func5(), 1);\n assert_eq!(func6(), 0);\n \
+         assert_eq!(func7(), 1);\n assert_eq!(func8(), 1);\n \
+         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func9()));\n \
+         assert!(r.is_err());",
+    );
+}
+
+#[test]
+fn br_on_cast_on_a_funcref_branches_on_nullness() {
+    common::compile_run(
+        "br_on_cast_funcref",
+        r#"(module
+          (func $f)
+          (elem declare func $f)
+          (func (export "nonnull") (result i32)
+            (block $b (result (ref func))
+              (br_on_cast $b funcref (ref func) (ref.func $f))
+              drop
+              (return (i32.const 0)))
+            drop
+            i32.const 1)
+          (func (export "null") (result i32)
+            (block $b (result (ref func))
+              (br_on_cast $b funcref (ref func) (ref.null func))
+              drop
+              (return (i32.const 0)))
+            drop
+            i32.const 1))"#,
+        "assert_eq!(func1(), 1);\n \
+         assert_eq!(func2(), 0);",
+    );
+}

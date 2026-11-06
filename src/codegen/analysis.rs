@@ -438,7 +438,10 @@ pub(crate) fn is_bottom_u32_heap(hty: HeapType) -> bool {
     matches!(
         hty,
         HeapType::Abstract {
-            ty: AbstractHeapType::NoFunc | AbstractHeapType::NoExtern | AbstractHeapType::NoExn,
+            ty: AbstractHeapType::NoFunc
+                | AbstractHeapType::NoExtern
+                | AbstractHeapType::NoExn
+                | AbstractHeapType::NoCont,
             ..
         }
     )

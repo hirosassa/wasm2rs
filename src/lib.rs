@@ -419,6 +419,7 @@ where
                     imported_globals: &mut imported_globals,
                     memories: &mut memories,
                     table: &mut table,
+                    extra_tables: &mut extra_tables,
                     tags: &mut tags,
                 };
                 for group in reader {
@@ -922,6 +923,7 @@ struct ImportSink<'a> {
     imported_globals: &'a mut Vec<codegen::ImportedGlobalInfo>,
     memories: &'a mut Vec<codegen::MemInfo>,
     table: &'a mut Option<codegen::TableInfo>,
+    extra_tables: &'a mut Vec<codegen::TableInfo>,
     tags: &'a mut Vec<codegen::TagInfo>,
 }
 
@@ -1011,24 +1013,26 @@ fn classify_import(
                     "table of a non-funcref/externref type".into(),
                 ));
             }
-            if table_ty.table64 || table_ty.shared {
-                return Err(TranspileError::Unsupported(
-                    "imported 64-bit or shared table".into(),
-                ));
-            }
-            if sink.table.is_some() {
-                return Err(TranspileError::Unsupported("multiple tables".into()));
+            if table_ty.shared {
+                return Err(TranspileError::Unsupported("imported shared table".into()));
             }
             let min = u32::try_from(table_ty.initial)
                 .map_err(|_| TranspileError::Unsupported("table too large".into()))?;
-            *sink.table = Some(codegen::TableInfo {
+            let info = codegen::TableInfo {
                 min,
                 max: table_ty.maximum.and_then(|m| u32::try_from(m).ok()),
                 imported: true,
-                table64: false,
+                table64: table_ty.table64,
                 element: ValType::Ref(table_ty.element_type),
                 init: None,
-            });
+            };
+            // The first table (imported or not) is table 0; imports come first in
+            // the index space, so any further imported table is `extra_tables[i - 1]`.
+            if sink.table.is_none() {
+                *sink.table = Some(info);
+            } else {
+                sink.extra_tables.push(info);
+            }
             Ok(())
         }
         TypeRef::Tag(tag_ty) => {

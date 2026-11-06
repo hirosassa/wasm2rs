@@ -9,11 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ref.null nocont` / `nullcontref`: the bottom of the continuation hierarchy lowers to the same
+  `u32` handle as a concrete continuation reference.
+- `ref.test`, `ref.cast` and `br_on_cast` accept the func/extern/exn hierarchies (and their bottom
+  types) as targets: a top type matches every non-null value, a bottom type only null. A test
+  against a concrete function type is still unsupported (a funcref handle has no runtime type).
+- A module may import several tables: each is host-owned and lent through its own accessor pair
+  (`table`/`table_mut` for table 0, `table1`/`table1_mut`, ... for the others). Active element
+  segments are copied in module order after construction. An imported `table i64` is supported.
+  Only an imported *shared* table remains unsupported.
 - The bottom reference types `nullfuncref`, `nullexternref` and `nullexnref` (and `ref.null nofunc`/`noextern`/`noexn`)
   are supported as value, global and table-element types; they lower like their top types.
 - A module may define tables next to an imported table: the imported table 0 stays host-owned
   (`Imports::table`/`table_mut`), the defined ones are `table1`, `table2`, ... fields of the
-  instance. Several imported tables are still unsupported.
+  instance.
 - `named_exports` / `--named-exports` also emits a getter `pub fn <name>(&self) -> T` for each
   exported numeric (`i32`/`i64`/`f32`/`f64`) global, e.g. `inst.stack_pointer()`, returning its
   current value (an imported global is read through the host). Reference-typed and `v128`
