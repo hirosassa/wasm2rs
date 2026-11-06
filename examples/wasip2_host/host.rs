@@ -40,9 +40,27 @@ enum Pollable {
     Ready,
     /// Ready at the instant.
     Deadline(Instant),
-    /// Ready when stdin has data or is at its end.
+    /// Ready when stdin has data or is at its end. Built only by the optional
+    /// `input-stream.subscribe` block.
     #[allow(dead_code)]
     Stdin,
+}
+
+impl Pollable {
+    fn is_ready(self, now: Instant, stdin: &StdinBuf) -> bool {
+        match self {
+            Pollable::Ready => true,
+            Pollable::Deadline(d) => d <= now,
+            Pollable::Stdin => !stdin.bytes.is_empty() || stdin.eof,
+        }
+    }
+
+    fn deadline(self) -> Option<Instant> {
+        match self {
+            Pollable::Deadline(d) => Some(d),
+            _ => None,
+        }
+    }
 }
 
 /// The bytes the stdin thread has read and not yet handed to the guest.
@@ -62,6 +80,7 @@ struct P2Host {
     pollables: Vec<Pollable>,
     /// Filled by the stdin thread, which `start_stdin` spawns on first use.
     stdin: SharedStdin,
+    /// Read only by `start_stdin`, which only the optional stdin blocks call.
     #[allow(dead_code)]
     stdin_started: bool,
     /// The monotonic clock's zero; read only by the optional clock blocks.
@@ -180,19 +199,21 @@ impl P2Host {
     #[allow(dead_code)]
     fn start_stdin(&mut self) {
         use std::io::Read;
-        if std::mem::replace(&mut self.stdin_started, true) {
+        if self.stdin_started {
             return;
         }
+        self.stdin_started = true;
         let shared = Arc::clone(&self.stdin);
         std::thread::spawn(move || {
             let mut chunk = [0u8; 4096];
             loop {
+                // a read error counts as the end of input
                 let n = std::io::stdin().read(&mut chunk).unwrap_or(0);
-                let (buf, ready) = &*shared;
+                let (buf, changed) = &*shared;
                 let mut buf = buf.lock().unwrap();
                 buf.bytes.extend(&chunk[..n]);
                 buf.eof = n == 0;
-                ready.notify_all();
+                changed.notify_all();
                 if n == 0 {
                     return;
                 }
@@ -203,28 +224,18 @@ impl P2Host {
     /// The positions in `handles` of the pollables that are ready, waiting until at
     /// least one is: on the stdin buffer's condition variable, with a timeout at the
     /// earliest deadline.
-    fn wait_ready(&self, handles: &[u32]) -> Vec<usize> {
+    fn wait_ready(&self, handles: &[u32]) -> Vec<i32> {
         let (buf, changed) = &*self.stdin;
         let mut buf = buf.lock().unwrap();
         loop {
             let now = Instant::now();
-            let ready: Vec<usize> = (0..handles.len())
-                .filter(|&i| match self.pollables[handles[i] as usize] {
-                    Pollable::Ready => true,
-                    Pollable::Deadline(d) => d <= now,
-                    Pollable::Stdin => !buf.bytes.is_empty() || buf.eof,
-                })
+            let ready: Vec<i32> = (0..handles.len() as i32)
+                .filter(|&i| self.pollables[handles[i as usize] as usize].is_ready(now, &buf))
                 .collect();
             if !ready.is_empty() {
                 return ready;
             }
-            let earliest = handles
-                .iter()
-                .filter_map(|&h| match self.pollables[h as usize] {
-                    Pollable::Deadline(d) => Some(d),
-                    _ => None,
-                })
-                .min();
+            let earliest = handles.iter().filter_map(|&h| self.pollables[h as usize].deadline()).min();
             buf = match earliest {
                 Some(d) => changed.wait_timeout(buf, d.saturating_duration_since(now)).unwrap().0,
                 None => changed.wait(buf).unwrap(),
@@ -463,15 +474,15 @@ impl Imports for P2Host {
     }
 
     /// `poll(in: list<borrow<pollable>>) -> list<u32>`: the indices of the ready
-    /// pollables, waiting until one is ready. An empty
-    /// list traps, as the interface specifies.
+    /// pollables, waiting until one is ready. An empty list traps, as the interface
+    /// specifies.
     fn wasi_io_poll_poll(&mut self, g: &mut Guest, list: i32, len: i32, ret: i32) {
         assert!(len > 0, "wasi:io/poll.poll: empty list");
         let handles: Vec<u32> = (0..len).map(|i| get_u32(g, list + 4 * i)).collect();
         let ready = self.wait_ready(&handles);
         let items = guest_list(g, ret, 4, ready.len() as i32);
         for (i, index) in ready.iter().enumerate() {
-            put_u32(g, items + 4 * i as i32, *index as i32);
+            put_u32(g, items + 4 * i as i32, *index);
         }
     }
 
@@ -533,31 +544,23 @@ impl Imports for P2Host {
         // `len` is a `u64`: a negative `i64` is a huge length, and 0 is an empty list.
         let want = (len as u64).min(4096) as usize;
         let mut buf = vec![0u8; want];
-        let n = if want == 0 {
-            0
+        // `None` is the end of input: `stream-error::closed`.
+        let read = if want == 0 {
+            Some(0)
         } else if stream == 0 {
             self.start_stdin();
             let mut shared = self.stdin.0.lock().unwrap();
-            let n = want.min(shared.bytes.len());
-            for (slot, byte) in buf.iter_mut().zip(shared.bytes.drain(..n)) {
-                *slot = byte;
-            }
-            if n == 0 && shared.eof {
-                put(g, ret, &[1]); // result::err
-                put(g, ret + 4, &[1]); // stream-error::closed
-                return;
-            }
-            n
+            let n = shared.bytes.read(&mut buf).unwrap(); // a `VecDeque` never fails
+            (n > 0 || !shared.eof).then_some(n)
         } else {
             let file = self.file_stream(stream).and_then(Option::as_mut);
-            match file.expect("read from an unknown or dropped stream").read(&mut buf) {
-                Ok(0) | Err(_) => {
-                    put(g, ret, &[1]);
-                    put(g, ret + 4, &[1]);
-                    return;
-                }
-                Ok(n) => n,
-            }
+            let file = file.expect("read from an unknown or dropped stream");
+            file.read(&mut buf).ok().filter(|&n| n > 0)
+        };
+        let Some(n) = read else {
+            put(g, ret, &[1]); // result::err
+            put(g, ret + 4, &[1]); // stream-error::closed
+            return;
         };
         zero_tag(g, ret);
         let ptr = if n == 0 { 4 } else { alloc(g, 1, n as i32) };

@@ -203,35 +203,30 @@ const STDIO_IMPORTS: &str = r#"
 const STDIO: &str = r#"
   ;; waits until stdin has data or is at its end: a fresh pollable, as `std` does
   (func $wait_stdin
-    (i32.store (i32.const 90) (call $sub_in (i32.const 0)))
-    (call $poll (i32.const 90) (i32.const 1) (i32.const 94)))
+    (i32.store (i32.const 112) (call $sub_in (i32.const 0)))
+    (call $poll (i32.const 112) (i32.const 1) (i32.const 116)))
+  ;; polls stdin and a pollable `ns` nanoseconds away: returns the one index that is ready
+  (func $poll_stdin_or_after (param $ns i64) (result i32)
+    (i32.store (i32.const 96) (call $sub_in (i32.const 0)))
+    (i32.store (i32.const 100) (call $sub_dur (local.get $ns)))
+    (call $poll (i32.const 96) (i32.const 2) (i32.const 104))
+    (if (i32.ne (i32.load (i32.const 108)) (i32.const 1)) (then unreachable))
+    (i32.load (i32.load (i32.const 104))))
   ;; nothing has been written to stdin (and it is still open): `read` returns an empty
   ;; list at once, and `poll` on it times out with the 30 ms deadline
   (func (export "idle_stdin")
     (call $read (i32.const 0) (i64.const 4) (i32.const 200))
     (if (i32.load8_u (i32.const 200)) (then unreachable))
     (if (i32.load (i32.const 208)) (then unreachable))
-    (i32.store (i32.const 96) (call $sub_in (i32.const 0)))
-    (i32.store (i32.const 100) (call $sub_dur (i64.const 30000000)))
-    (call $poll (i32.const 96) (i32.const 2) (i32.const 104))
-    (if (i32.ne (i32.load (i32.const 108)) (i32.const 1)) (then unreachable))
-    (if (i32.ne (i32.load (i32.load (i32.const 104))) (i32.const 1)) (then unreachable)))
+    (if (i32.ne (call $poll_stdin_or_after (i64.const 30000000)) (i32.const 1)) (then unreachable)))
   ;; nothing arrives for 200 ms: a 100 ms deadline wins (`[1]`). Then "x" arrives while
   ;; `poll` waits (the other pollable is ten seconds away), and the input ends:
   ;; `poll` returns for the end too, and `read` reports `closed`
   (func (export "wait_stdin_data")
     ;; tell the test (with "hi\n") that the program is running
     (call $write (call $stdout) (i32.const 64) (i32.const 3) (i32.const 32))
-    (i32.store (i32.const 96) (call $sub_in (i32.const 0)))
-    (i32.store (i32.const 100) (call $sub_dur (i64.const 100000000)))
-    (call $poll (i32.const 96) (i32.const 2) (i32.const 104))
-    (if (i32.ne (i32.load (i32.const 108)) (i32.const 1)) (then unreachable))
-    (if (i32.ne (i32.load (i32.load (i32.const 104))) (i32.const 1)) (then unreachable))
-    (i32.store (i32.const 96) (call $sub_in (i32.const 0)))
-    (i32.store (i32.const 100) (call $sub_dur (i64.const 10000000000)))
-    (call $poll (i32.const 96) (i32.const 2) (i32.const 104))
-    (if (i32.ne (i32.load (i32.const 108)) (i32.const 1)) (then unreachable))
-    (if (i32.load (i32.load (i32.const 104))) (then unreachable))
+    (if (i32.ne (call $poll_stdin_or_after (i64.const 100000000)) (i32.const 1)) (then unreachable))
+    (if (call $poll_stdin_or_after (i64.const 10000000000)) (then unreachable))
     (call $read (i32.const 0) (i64.const 16) (i32.const 200))
     (if (i32.load8_u (i32.const 200)) (then unreachable))
     (if (i32.ne (i32.load (i32.const 208)) (i32.const 1)) (then unreachable))
@@ -307,33 +302,20 @@ fn stdio_wat() -> String {
     hello_with(STDIO_IMPORTS, STDIO)
 }
 
-#[test]
-fn a_host_reads_stdin_and_reports_end_of_input_as_closed() {
-    use std::io::Write;
+/// Starts `bin` with all three standard streams piped.
+fn spawn_piped(bin: &std::path::Path) -> std::process::Child {
     use std::process::Stdio;
-    let bin = compile(
-        "stdin",
-        &stdio_wat(),
-        "P2Host::new(vec![], vec![])",
-        "inst.read_stdin();",
-    );
-    let mut child = Command::new(&bin)
+    Command::new(bin)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn generated binary");
-    child.stdin.take().unwrap().write_all(b"ab\ncd").unwrap();
-    let run = child.wait_with_output().expect("run generated binary");
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+        .expect("spawn generated binary")
 }
 
-/// Waits up to five seconds for `child`; kills it and fails if it does not exit.
-fn wait_within_five_seconds(mut child: std::process::Child) -> std::process::Output {
+/// Waits up to five seconds for `child` to exit successfully; kills it and fails if it
+/// does not exit, or fails.
+fn finish_within_five_seconds(mut child: std::process::Child) {
     let started = std::time::Instant::now();
     while child.try_wait().unwrap().is_none() {
         if started.elapsed() > std::time::Duration::from_secs(5) {
@@ -342,66 +324,64 @@ fn wait_within_five_seconds(mut child: std::process::Child) -> std::process::Out
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    child.wait_with_output().unwrap()
+    let run = child.wait_with_output().unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn a_host_reads_stdin_and_reports_end_of_input_as_closed() {
+    use std::io::Write;
+    let bin = compile(
+        "stdin",
+        &stdio_wat(),
+        "P2Host::new(vec![], vec![])",
+        "inst.read_stdin();",
+    );
+    let mut child = spawn_piped(&bin);
+    child.stdin.take().unwrap().write_all(b"ab\ncd").unwrap();
+    finish_within_five_seconds(child);
 }
 
 #[test]
 fn reading_an_idle_stdin_returns_an_empty_list_without_blocking() {
-    use std::process::Stdio;
     let bin = compile(
         "stdin_idle",
         &stdio_wat(),
         "P2Host::new(vec![], vec![])",
         "inst.idle_stdin();",
     );
-    let mut child = Command::new(&bin)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn generated binary");
+    let mut child = spawn_piped(&bin);
     // the write end stays open, so stdin is idle, not at its end
     let _stdin = child.stdin.take().unwrap();
-    let run = wait_within_five_seconds(child);
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    finish_within_five_seconds(child);
 }
 
 #[test]
 fn polling_stdin_wakes_when_data_arrives_and_at_the_end_of_input() {
     use std::io::{Read, Write};
-    use std::process::Stdio;
     let bin = compile(
         "stdin_wake",
         &stdio_wat(),
         "P2Host::new(vec![], vec![])",
         "inst.wait_stdin_data();",
     );
-    let mut child = Command::new(&bin)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn generated binary");
+    let mut child = spawn_piped(&bin);
     let mut stdin = child.stdin.take().unwrap();
     // the program is up (its first poll, with a 100 ms deadline, follows at once)
     let mut hi = [0u8; 3];
     child.stdout.as_mut().unwrap().read_exact(&mut hi).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // long enough for the 100 ms deadline to win even on a loaded machine
+    std::thread::sleep(std::time::Duration::from_millis(500));
     stdin.write_all(b"x").unwrap();
-    stdin.flush().unwrap();
+    // let the program read "x" before the input ends
     std::thread::sleep(std::time::Duration::from_millis(200));
     drop(stdin);
     // far less than the ten-second deadline `poll` also waits on
-    let run = wait_within_five_seconds(child);
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    finish_within_five_seconds(child);
 }
 
 #[test]
