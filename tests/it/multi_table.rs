@@ -104,9 +104,11 @@ fn a_single_table_keeps_its_names() {
 }
 
 #[test]
-fn an_imported_table_with_another_table_is_still_rejected() {
-    let wasm =
-        wat::parse_str(r#"(module (import "e" "t" (table 1 funcref)) (table 1 funcref))"#).unwrap();
+fn two_imported_tables_are_still_rejected() {
+    let wasm = wat::parse_str(
+        r#"(module (import "e" "a" (table 1 funcref)) (import "e" "b" (table 1 funcref)))"#,
+    )
+    .unwrap();
     let err = wasm2rs::transpile(&wasm).unwrap_err().to_string();
     assert!(err.contains("multiple tables"), "{err}");
 }
