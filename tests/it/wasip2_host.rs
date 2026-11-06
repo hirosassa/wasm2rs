@@ -179,12 +179,7 @@ fn a_host_builds_arguments_environment_and_poll_results_in_guest_memory() {
     );
     let host = r#"P2Host::new(vec!["prog".to_string(), "x".to_string()], vec![("K".to_string(), "VX".to_string())])"#;
     let bin = compile("with_arguments", &wat, host, "inst.args();");
-    let run = Command::new(&bin).output().expect("run generated binary");
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    run_ok(&bin);
 }
 
 /// Imports only some programs have: reading stdin and the clocks.
@@ -283,6 +278,28 @@ const STDIO: &str = r#"
     (if (i32.ge_u (i32.load (i32.const 128)) (i32.const 1000000000)) (then unreachable)))
 "#;
 
+/// Fails with `run`'s stderr unless it exited successfully.
+fn assert_succeeded(run: &std::process::Output) {
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// Runs `bin` and fails with its stderr unless it exits successfully.
+fn run_ok(bin: &std::path::Path) {
+    assert_succeeded(&Command::new(bin).output().expect("run generated binary"));
+}
+
+/// The host expression for a program that sees `root` as its read-only `/`.
+fn preopen_host(root: &std::path::Path) -> String {
+    format!(
+        "P2Host::new(vec![], vec![]).with_preopen(std::path::PathBuf::from({:?}))",
+        root.to_str().unwrap()
+    )
+}
+
 /// `HELLO` with extra imports (before its memory) and functions (before `bye`).
 fn hello_with(imports: &str, funcs: &str) -> String {
     HELLO
@@ -324,12 +341,7 @@ fn finish_within_30_seconds(mut child: std::process::Child) {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let run = child.wait_with_output().unwrap();
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    assert_succeeded(&child.wait_with_output().unwrap());
 }
 
 #[test]
@@ -394,12 +406,7 @@ fn polling_deadline_pollables_waits_for_the_clock() {
         "inst.use_clock();",
     );
     let started = std::time::Instant::now();
-    let run = Command::new(&bin).output().expect("run generated binary");
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    run_ok(&bin);
     // 50 ms + 30 ms of waiting, and not the ten-second deadline.
     assert!(started.elapsed() < std::time::Duration::from_secs(9));
 }
@@ -450,12 +457,7 @@ fn a_host_serves_random_bytes_numbers_and_the_insecure_seed() {
         "P2Host::new(vec![], vec![])",
         "inst.random();",
     );
-    let run = Command::new(&bin).output().expect("run generated binary");
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    run_ok(&bin);
 }
 
 /// The imports and path strings (at 300 to 400) a program needs to open a file and
@@ -541,22 +543,14 @@ fn a_host_opens_and_reads_files_under_its_preopened_directory() {
     let link = root.join("link.txt");
     std::fs::remove_file(&link).ok();
     std::os::unix::fs::symlink(&secret, &link).unwrap();
-    let init = format!(
-        "P2Host::new(vec![], vec![]).with_preopen(std::path::PathBuf::from({:?}))",
-        root.to_str().unwrap()
-    );
+    let init = preopen_host(&root);
     let bin = compile(
         "fs_read",
         &hello_with(FS_IMPORTS, FS),
         &init,
         "inst.fs_read();",
     );
-    let run = Command::new(&bin).output().expect("run generated binary");
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    run_ok(&bin);
 }
 
 /// The imports and path strings (at 300 to 340) the metadata and directory tests use.
@@ -679,22 +673,14 @@ fn a_host_stats_files_and_lists_directories_under_its_preopen() {
     let link = root.join("link.txt");
     std::fs::remove_file(&link).ok();
     std::os::unix::fs::symlink(&secret, &link).unwrap();
-    let init = format!(
-        "P2Host::new(vec![], vec![]).with_preopen(std::path::PathBuf::from({:?}))",
-        root.to_str().unwrap()
-    );
+    let init = preopen_host(&root);
     let bin = compile(
         "fs_stat",
         &hello_with(STAT_IMPORTS, STAT),
         &init,
         "inst.fs_stat();",
     );
-    let run = Command::new(&bin).output().expect("run generated binary");
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    run_ok(&bin);
 }
 
 /// What `fs_reuse` needs beyond `FS_IMPORTS`.
@@ -749,16 +735,8 @@ fn a_host_reuses_the_slots_of_dropped_handles() {
     let root = std::env::temp_dir().join("wasm2rs_wasip2_reuse_root");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("hello.txt"), "hello fs").unwrap();
-    let init = format!(
-        "P2Host::new(vec![], vec![]).with_preopen(std::path::PathBuf::from({:?}))",
-        root.to_str().unwrap()
-    );
+    let init = preopen_host(&root);
     let wat = hello_with(&format!("{FS_IMPORTS}{REUSE_IMPORTS}"), REUSE);
     let bin = compile("fs_reuse", &wat, &init, "inst.fs_reuse();");
-    let run = Command::new(&bin).output().expect("run generated binary");
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    run_ok(&bin);
 }
