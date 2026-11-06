@@ -70,8 +70,11 @@ pub(crate) struct ModuleCtx<'a> {
     /// once so each `ref.test`/`ref.cast` site looks it up instead of walking
     /// the whole hierarchy.
     descendants: Vec<Vec<u32>>,
-    /// See [`ModuleParts::plain_func_types`].
-    pub(crate) plain_func_types: bool,
+    /// See [`ModuleParts::type_rel`].
+    type_rel: Option<&'a TypeRel>,
+    /// The declared function type of every function in the index space, `None` for a
+    /// dead function (never a `ref.func` target).
+    func_decl_types: Vec<Option<u32>>,
     /// Per-imported-global `(type, mutable)`, occupying the low global indices.
     pub(crate) imported_globals: Vec<(ValType, bool)>,
     /// Per-defined-global `(type, mutable)`, indexed after the imported globals.
@@ -166,6 +169,21 @@ impl ModuleCtx<'_> {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// The full indices of every live function whose declared type is `target` or a
+    /// declared subtype of it, ascending: the funcrefs a test against the function
+    /// type `target` accepts. `None` when the type relation is unavailable.
+    pub(crate) fn funcs_of_subtype(&self, target: u32) -> Option<Vec<usize>> {
+        let rel = self.type_rel?;
+        Some(
+            self.func_decl_types
+                .iter()
+                .enumerate()
+                .filter(|(_, ty)| ty.is_some_and(|t| rel.is_subtype(t, target)))
+                .map(|(f, _)| f)
+                .collect(),
+        )
+    }
+
     /// A call to host method `name`. A re-entrant host also gets the instance; the
     /// arguments are then evaluated first, into a tuple, since they may borrow
     /// `self`, and the closure only captures the finished values.
@@ -223,9 +241,8 @@ pub(crate) struct ModuleParts<'a> {
     /// The declared direct supertype of every type index (`None` when none),
     /// parallel to `type_kinds`. Drives the runtime subtype checks.
     pub(crate) supers: &'a [Option<u32>],
-    /// Whether every function type is final, has no supertype and sits alone in its
-    /// rec group, so a function's signature identifies its type.
-    pub(crate) plain_func_types: bool,
+    /// The declared type relation, when the type section validated.
+    pub(crate) type_rel: Option<&'a TypeRel>,
     pub(crate) globals: &'a [GlobalInfo],
     /// Every linear memory, in index order (imported memories first, then
     /// defined). Empty when the module declares none.
@@ -274,7 +291,7 @@ pub(crate) fn build_ctx<'a>(
         types,
         type_kinds,
         supers,
-        plain_func_types,
+        type_rel,
         globals,
         memories,
         data,
@@ -404,6 +421,16 @@ pub(crate) fn build_ctx<'a>(
                     .map(|(f, live)| live.then_some((f.params, f.results))),
             ),
     );
+    let func_decl_types: Vec<Option<u32>> = imports
+        .iter()
+        .map(|im| Some(im.type_index))
+        .chain(
+            funcs
+                .iter()
+                .zip(parts.live)
+                .map(|(f, live)| live.then_some(f.type_index)),
+        )
+        .collect();
     let ctx = ModuleCtx {
         imports,
         funcs,
@@ -412,7 +439,8 @@ pub(crate) fn build_ctx<'a>(
         types,
         type_kinds,
         descendants: index_descendants(type_kinds, supers),
-        plain_func_types,
+        type_rel,
+        func_decl_types,
         imported_globals: imported_globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,

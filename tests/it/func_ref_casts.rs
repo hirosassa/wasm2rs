@@ -63,3 +63,63 @@ fn br_on_cast_to_a_concrete_function_type_branches_on_a_match() {
         "let mut inst = Instance::new();\n assert_eq!(inst.func8(), 1);\n assert_eq!(inst.func9(), 0);",
     );
 }
+
+// Declared subtyping and canonical equivalence decide the test, not signature
+// equality. Funcs: `$h`=0, `$x`=1, `$y`=2, `$k`=3, `$m`=4, then the exports.
+const SUBTYPING: &str = r#"(module
+  (type $f (sub (func (result funcref))))
+  (type $g (sub $f (func (result (ref func)))))
+  (type $gg (sub $g (func (result (ref func)))))
+  (type $a (sub (func)))
+  (type $b (func))
+  (type $s1 (struct)) (type $s2 (struct))
+  (type $p1 (func (param (ref null $s1))))
+  (type $p2 (func (param (ref null $s2))))
+  (rec (type $r1 (func)) (type $r2 (func (param i32))))
+  (rec (type $q1 (func)) (type $q2 (func (param i32))))
+  (func $h (type $gg) (ref.func $h))
+  (func $x (type $a))
+  (func $y (type $p1))
+  (func $k (type $r1))
+  (func $m (type $q2))
+  (elem declare func $h $x $y $k $m)
+  (func (export "sub_of_declared_super") (result i32) (ref.test (ref $f) (ref.func $h)))
+  (func (export "two_levels_down") (result i32) (ref.test (ref $g) (ref.func $h)))
+  (func (export "super_is_not_sub") (result i32) (ref.test (ref $gg) (ref.func $h)))
+  (func (export "final_vs_nonfinal") (result i32) (ref.test (ref $b) (ref.func $x)))
+  (func (export "same_sig_nonfinal") (result i32) (ref.test (ref $a) (ref.func $x)))
+  (func (export "equivalent_params") (result i32) (ref.test (ref $p2) (ref.func $y)))
+  (func (export "same_rec_group_shape") (result i32) (ref.test (ref $r1) (ref.func $k)))
+  (func (export "equivalent_rec_groups") (result i32) (ref.test (ref $r2) (ref.func $m)))
+  (func (export "cross_rec_member") (result i32) (ref.test (ref $r1) (ref.func $m))))"#;
+
+#[test]
+fn ref_test_follows_declared_function_subtyping() {
+    common::compile_run(
+        "func_sub_decl",
+        SUBTYPING,
+        "assert_eq!(func5(), 1);\n \
+         assert_eq!(func6(), 1);\n assert_eq!(func7(), 1);\n",
+    );
+}
+
+#[test]
+fn ref_test_distinguishes_final_and_open_function_types_of_one_signature() {
+    common::compile_run(
+        "func_sub_final",
+        SUBTYPING,
+        "assert_eq!(func8(), 0);\n \
+         assert_eq!(func9(), 1);\n",
+    );
+}
+
+#[test]
+fn ref_test_treats_equivalent_function_types_as_one() {
+    common::compile_run(
+        "func_sub_equiv",
+        SUBTYPING,
+        "assert_eq!(func10(), 1);\n \
+         assert_eq!(func11(), 1);\n assert_eq!(func12(), 1);\n \
+         assert_eq!(func13(), 0);\n",
+    );
+}

@@ -618,6 +618,7 @@ mod tests {
         let inputs: Vec<FuncInput<'_>> = bodies
             .iter()
             .map(|body| FuncInput {
+                type_index: 0,
                 params: &[],
                 results: &[],
                 body,

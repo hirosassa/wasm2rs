@@ -387,49 +387,6 @@ fn continuation_body_also_called_directly_is_rejected() {
 }
 
 #[test]
-fn ref_test_on_a_function_type_with_declared_subtyping_is_rejected() {
-    // Signature equality is the funcref type test only while every function type is
-    // final, has no supertype and sits alone in its rec group; a `sub` function
-    // type makes declared subtyping matter, which wasm2rs does not track.
-    assert_unsupported(
-        r#"(module
-             (type $f (sub (func (result funcref))))
-             (type $g (sub $f (func (result (ref func)))))
-             (func $h (type $g) (ref.func $h))
-             (elem declare func $h)
-             (func (result i32) (ref.test (ref $f) (ref.func $h))))"#,
-        "declared function subtyping",
-    );
-}
-
-#[test]
-fn ref_test_on_a_function_type_in_a_rec_group_is_rejected() {
-    assert_unsupported(
-        r#"(module
-             (rec (type $f (func)) (type $g (func (param i32))))
-             (func $h (type $f))
-             (elem declare func $h)
-             (func (result i32) (ref.test (ref $f) (ref.func $h))))"#,
-        "declared function subtyping",
-    );
-}
-
-#[test]
-fn ref_test_on_a_function_type_with_a_concrete_reference_in_its_signature_is_rejected() {
-    // Two structurally equal struct types are the same type, but their indices
-    // differ, so signature equality cannot compare concrete references.
-    assert_unsupported(
-        r#"(module
-             (type $s (struct))
-             (type $p (func (param (ref null $s))))
-             (func $h (type $p))
-             (elem declare func $h)
-             (func (result i32) (ref.test (ref $p) (ref.func $h))))"#,
-        "concrete reference in its signature",
-    );
-}
-
-#[test]
 fn ref_test_on_a_function_type_is_rejected_when_the_host_may_hand_out_funcrefs() {
     // A funcref the host registered is an external handle with no signature to
     // compare, so a module with a host cannot answer the test.

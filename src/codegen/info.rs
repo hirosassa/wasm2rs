@@ -169,6 +169,8 @@ pub(crate) struct GlobalExportInfo {
 /// of the function index space and are dispatched through the injected host,
 /// unless `wasi` recognises it as a natively-implemented WASI function.
 pub(crate) struct ImportInfo {
+    /// The declared function type index.
+    pub type_index: u32,
     pub params: Vec<ValType>,
     pub results: Vec<ValType>,
     /// Set when this import is a recognised `wasi_snapshot_preview1` function
@@ -203,7 +205,36 @@ pub(crate) struct TagInfo {
 
 /// One function to translate: its signature plus its body.
 pub(crate) struct FuncInput<'a> {
+    /// The declared function type index.
+    pub type_index: u32,
     pub params: &'a [ValType],
     pub results: &'a [ValType],
     pub body: &'a FunctionBody<'a>,
+}
+
+/// The declared type relation, taken from the validated type section: every type
+/// index's canonical id (two types are equivalent exactly when their ids are equal,
+/// whatever their rec group) and each canonical id's declared direct supertype.
+pub(crate) struct TypeRel {
+    pub canon: Vec<u32>,
+    pub canon_super: Vec<Option<u32>>,
+}
+
+impl TypeRel {
+    /// Whether type index `a` is `b` or was declared (transitively) a subtype of it.
+    pub(crate) fn is_subtype(&self, a: u32, b: u32) -> bool {
+        let (Some(&a), Some(&b)) = (self.canon.get(a as usize), self.canon.get(b as usize)) else {
+            return false;
+        };
+        let mut cur = Some(a);
+        // The chain is finite for a validated module; bound the walk anyway.
+        for _ in 0..=self.canon_super.len() {
+            match cur {
+                Some(c) if c == b => return true,
+                Some(c) => cur = self.canon_super.get(c as usize).copied().flatten(),
+                None => return false,
+            }
+        }
+        false
+    }
 }
