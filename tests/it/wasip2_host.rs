@@ -1199,7 +1199,8 @@ const TIMES: &str = r#"
 "#;
 
 #[cfg(unix)]
-fn times_root(name: &str) -> std::path::PathBuf {
+/// A fresh writable-test root `wasm2rs_wasip2_<name>_root` holding `f.txt` ("0123456789").
+fn root_with_file(name: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("wasm2rs_wasip2_{name}_root"));
     std::fs::remove_dir_all(&root).ok();
     std::fs::create_dir_all(&root).unwrap();
@@ -1217,7 +1218,7 @@ fn epoch_secs(time: std::time::SystemTime) -> u64 {
 #[cfg(unix)]
 #[test]
 fn a_writable_preopen_resizes_syncs_and_sets_the_times_of_files() {
-    let root = times_root("times");
+    let root = root_with_file("times");
     let bin = compile(
         "fs_times",
         &hello_with(TIMES_IMPORTS, TIMES),
@@ -1238,7 +1239,7 @@ fn a_writable_preopen_resizes_syncs_and_sets_the_times_of_files() {
 #[cfg(unix)]
 #[test]
 fn a_read_only_preopen_refuses_to_resize_or_touch_files() {
-    let root = times_root("times_denied");
+    let root = root_with_file("times_denied");
     let before = std::fs::metadata(root.join("f.txt"))
         .unwrap()
         .modified()
@@ -1325,22 +1326,27 @@ fn a_directory_descriptor_whose_path_was_moved_out_of_the_preopen_is_refused() {
     assert_eq!(after, before, "changed a directory outside the root");
 }
 
-/// The imports of the test where a path is reused after a descriptor was opened on it.
+/// The imports of the tests where a path is reused after a descriptor was opened on it.
 const REUSED_IMPORTS: &str = r#"
   (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.unlink-file-at" (func $unlink (param i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.create-directory-at" (func $mkdir (param i32 i32 i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-size" (func $set_size (param i32 i64 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.metadata-hash" (func $hash (param i32 i32)))
   (data (i32.const 300) "f.txt")
+  (data (i32.const 310) "x")
+  (data (i32.const 320) "w.txt")
 "#;
 
-/// `fs_reused` runs on a writable root holding `f.txt`. It opens the file, removes it,
-/// creates another file under the same name, then resizes the first one: a descriptor
-/// stays on the file it opened, not on whatever the path names now.
+/// `fs_reused` runs on a writable root holding `f.txt` and `w.txt` (write-only). It
+/// opens `f.txt`, removes it, creates another file under the same name, then resizes and
+/// hashes the first one: a descriptor stays on the file it opened, not on whatever the
+/// path names now. open-flags: create 1; descriptor-flags: read 1, write 2.
 const REUSED: &str = r#"
   (func $ok (param $at i32)
     (if (i32.load8_u (local.get $at)) (then unreachable)))
-  (func (export "fs_reused") (local $dir i32) (local $old i32)
+  (func (export "fs_reused") (local $dir i32) (local $old i32) (local $new i32) (local $h i64)
     (call $dirs (i32.const 200))
     (local.set $dir (i32.load (i32.load (i32.const 200))))
     (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 0) (i32.const 3) (i32.const 220))
@@ -1350,14 +1356,46 @@ const REUSED: &str = r#"
     (call $ok (i32.const 220))
     (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 1) (i32.const 3) (i32.const 220))
     (call $ok (i32.const 220))
+    (local.set $new (i32.load (i32.const 224)))
     (call $set_size (local.get $old) (i64.const 5) (i32.const 220))
+    (call $ok (i32.const 220))
+    ;; two files are not the same object, though they were opened under one path
+    (call $hash (local.get $old) (i32.const 240))
+    (call $ok (i32.const 240))
+    (local.set $h (i64.load (i32.const 248)))
+    (call $hash (local.get $new) (i32.const 240))
+    (call $ok (i32.const 240))
+    (if (i64.eq (local.get $h) (i64.load (i32.const 248))) (then unreachable))
+    ;; a descriptor for writing only opens a file that cannot be read
+    (call $open (local.get $dir) (i32.const 1) (i32.const 320) (i32.const 5) (i32.const 0) (i32.const 2) (i32.const 220))
     (call $ok (i32.const 220)))
+  ;; a file descriptor is not a directory, even when a directory now has its path
+  (func (export "fs_reused_dir") (local $dir i32) (local $old i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 0) (i32.const 3) (i32.const 220))
+    (call $ok (i32.const 220))
+    (local.set $old (i32.load (i32.const 224)))
+    (call $unlink (local.get $dir) (i32.const 300) (i32.const 5) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $mkdir (local.get $dir) (i32.const 300) (i32.const 5) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $open (local.get $old) (i32.const 1) (i32.const 310) (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 220))
+    (if (i32.ne (i32.load8_u (i32.const 220)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 224)) (i32.const 24)) (then unreachable)))
 "#;
 
 #[cfg(unix)]
 #[test]
 fn a_descriptor_stays_on_the_file_it_opened_when_its_path_is_reused() {
-    let root = times_root("reused");
+    let root = root_with_file("reused");
+    let write_only = root.join("w.txt");
+    std::fs::write(&write_only, "w").unwrap();
+    std::fs::set_permissions(
+        &write_only,
+        std::os::unix::fs::PermissionsExt::from_mode(0o200),
+    )
+    .unwrap();
     let bin = compile(
         "fs_reused",
         &hello_with(REUSED_IMPORTS, REUSED),
@@ -1367,4 +1405,17 @@ fn a_descriptor_stays_on_the_file_it_opened_when_its_path_is_reused() {
     run_ok(&bin);
     let len = std::fs::metadata(root.join("f.txt")).unwrap().len();
     assert_eq!(len, 0, "resized the new file instead of the one opened");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_descriptor_is_not_a_directory_when_a_directory_takes_its_path() {
+    let root = root_with_file("reused_dir");
+    let bin = compile(
+        "fs_reused_dir",
+        &hello_with(REUSED_IMPORTS, REUSED),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_reused_dir();",
+    );
+    run_ok(&bin);
 }

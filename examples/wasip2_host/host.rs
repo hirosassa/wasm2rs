@@ -27,10 +27,10 @@
 // must stay under it: absolute paths and `..` are refused (`not-permitted`), and so are
 // symlinks that lead out. A file descriptor holds the open `File` and every operation
 // goes through it (streams over a duplicate with their own position); a directory
-// descriptor resolves its path again on each use. Anything that would write is refused with `read-only`; with a
-// writable preopen, files can be created, written, appended to, truncated, removed and
-// renamed, and directories created and removed (symlinks are never followed for the
-// last name).
+// descriptor resolves its path again on each use. Anything that would write is refused
+// with `read-only`; with a writable preopen, files can be created, written, appended to,
+// truncated, removed and renamed, and directories created and removed (symlinks are
+// never followed for the last name).
 // `stat`, `get-flags`, `metadata-hash` and directory listings work on the same paths.
 // `resource-drop` frees a handle's slot, which the next resource of its kind reuses; a guest
 // must not use a handle after dropping it (see docs/component-model-poc.md).
@@ -169,14 +169,18 @@ impl P2Host {
         self.descriptors.get(descriptor as u32 as usize).ok_or(code::BAD_DESCRIPTOR)
     }
 
-    /// The path behind a descriptor handle, or `bad-descriptor`. The path was checked
+    /// The path behind a directory descriptor handle, or `bad-descriptor` (`not-directory`
+    /// for a file: a file descriptor stays on its file, not on its path). The path was checked
     /// when the descriptor was opened, but the directories above it can be moved since
     /// (a directory holding a symlink that leads out can be renamed over it), so it is
     /// resolved again and must still be under the preopen: `not-permitted` if not.
     #[allow(dead_code)]
     fn descriptor(&self, descriptor: i32) -> Result<PathBuf, u8> {
         let root = self.root.as_ref().ok_or(code::NOT_PERMITTED)?;
-        let path = &self.open_descriptor(descriptor)?.path;
+        let Descriptor { path, file, .. } = self.open_descriptor(descriptor)?;
+        if file.is_some() {
+            return Err(code::NOT_DIRECTORY);
+        }
         let real = path.canonicalize().map_err(io_error_code)?;
         if real.starts_with(root) { Ok(real) } else { Err(code::NOT_PERMITTED) }
     }
@@ -255,30 +259,45 @@ impl P2Host {
         self.open_descriptor(descriptor)?.file.as_ref().ok_or(code::IS_DIRECTORY)
     }
 
-    /// A stream over the file behind a descriptor opened for `write`, from `pos` (`append`:
-    /// always at its end), or the `error-code`: `read-only` unless the preopen is writable.
+    /// The open file behind a descriptor opened for `write`, or the `error-code`:
+    /// `read-only` unless the preopen is writable, `is-directory`, `bad-descriptor` if it
+    /// was not opened for `write`.
+    #[allow(dead_code)]
+    fn writable_descriptor_file(&self, descriptor: i32) -> Result<&std::fs::File, u8> {
+        self.require_writable()?;
+        let d = self.open_descriptor(descriptor)?;
+        let file = d.file.as_ref().ok_or(code::IS_DIRECTORY)?;
+        if d.write { Ok(file) } else { Err(code::BAD_DESCRIPTOR) }
+    }
+
+    /// A stream over `writable_descriptor_file`, from `pos` (`append`: always at its end).
     #[allow(dead_code)]
     fn writable_file(&self, descriptor: i32, pos: u64, append: bool) -> Result<FileStream, u8> {
-        self.require_writable()?;
-        let file = self.descriptor_file(descriptor)?;
-        if !self.open_descriptor(descriptor)?.write {
-            return Err(code::BAD_DESCRIPTOR);
-        }
-        let file = file.try_clone().map_err(io_error_code)?;
-        Ok(FileStream { file, pos, append })
+        FileStream::over(self.writable_descriptor_file(descriptor)?, pos, append)
+    }
+
+    /// Runs `op` on the open file behind a descriptor, or on a directory's (opened from its
+    /// path, resolved again).
+    #[allow(dead_code)]
+    fn with_descriptor_file<T>(
+        &self,
+        descriptor: i32,
+        op: impl FnOnce(&std::fs::File) -> std::io::Result<T>,
+    ) -> Result<T, u8> {
+        let done = match &self.open_descriptor(descriptor)?.file {
+            Some(file) => op(file),
+            None => op(&std::fs::File::open(self.descriptor(descriptor)?).map_err(io_error_code)?),
+        };
+        done.map_err(io_error_code)
     }
 
     /// Flushes the file or directory behind a descriptor to disk (`data_only`: without
     /// its metadata).
     #[allow(dead_code)]
     fn sync_descriptor(&self, descriptor: i32, data_only: bool) -> Result<(), u8> {
-        let synced = |file: &std::fs::File| if data_only { file.sync_data() } else { file.sync_all() };
-        match self.descriptor_file(descriptor) {
-            Ok(file) => synced(file),
-            Err(code::IS_DIRECTORY) => synced(&std::fs::File::open(self.descriptor(descriptor)?).map_err(io_error_code)?),
-            Err(c) => return Err(c),
-        }
-        .map_err(io_error_code)
+        self.with_descriptor_file(descriptor, |file| {
+            if data_only { file.sync_data() } else { file.sync_all() }
+        })
     }
 
     /// Sets the times of the file or directory behind a descriptor (see `set-times` for
@@ -295,6 +314,10 @@ impl P2Host {
     ) -> Result<(), u8> {
         use std::time::{SystemTime, UNIX_EPOCH};
         self.require_writable()?;
+        let d = self.open_descriptor(descriptor)?;
+        if d.file.is_some() && !d.write {
+            return Err(code::BAD_DESCRIPTOR);
+        }
         let time = |(tag, seconds, nanos): (i32, i64, i32)| match tag {
             0 => Ok(None),
             1 => Ok(Some(SystemTime::now())),
@@ -311,15 +334,7 @@ impl P2Host {
         if let Some(t) = time(modification)? {
             times = times.set_modified(t);
         }
-        let set = |file: &std::fs::File| file.set_times(times).map_err(io_error_code);
-        match self.descriptor_file(descriptor) {
-            Ok(file) if self.open_descriptor(descriptor)?.write => set(file),
-            Ok(_) => Err(code::BAD_DESCRIPTOR),
-            Err(code::IS_DIRECTORY) => {
-                set(&std::fs::File::open(self.descriptor(descriptor)?).map_err(io_error_code)?)
-            }
-            Err(c) => Err(c),
-        }
+        self.with_descriptor_file(descriptor, |file| file.set_times(times))
     }
 
     /// `result<output-stream, error-code>` at `ret`: a new stream over `opened`, or the error.
@@ -417,8 +432,9 @@ impl P2Host {
 
 /// What a descriptor handle names: a path under the preopen, whether the guest opened
 /// it for writing, and for a file the open `File` itself. Every operation on a file goes
-/// through that `File`, never through the path again, so a descriptor stays on the file
-/// it opened even if the path is unlinked, renamed over or reused. A directory has no
+/// through that `File` (reads, writes, `stat`, `sync`, `set-size`, `set-times`, `metadata-hash`),
+/// never through the path again, so a descriptor stays on the file it opened even if the
+/// path is unlinked, renamed over or reused. A directory has no
 /// `File`: std cannot open relative to one, so its operations resolve `path` again on
 /// each use (see `P2Host::descriptor`).
 #[allow(dead_code)]
@@ -428,10 +444,9 @@ struct Descriptor {
     file: Option<std::fs::File>,
 }
 
-/// A stream over a duplicate of a descriptor's `File`. A duplicate shares the file
-/// offset with the descriptor and with every other stream over it, so each stream keeps
-/// its own position and seeks to it before every read or write (the host runs one guest
-/// call at a time, so nothing interleaves).
+/// A stream over a duplicate of a descriptor's `File`. Duplicates share one file offset,
+/// so each stream keeps its own position and seeks to it before every read or write (the
+/// host runs one guest call at a time, so nothing interleaves).
 #[allow(dead_code)]
 struct FileStream {
     file: std::fs::File,
@@ -442,6 +457,11 @@ struct FileStream {
 
 #[allow(dead_code)]
 impl FileStream {
+    /// A stream over a duplicate of `file`, from `pos`.
+    fn over(file: &std::fs::File, pos: u64, append: bool) -> Result<Self, u8> {
+        Ok(FileStream { file: file.try_clone().map_err(io_error_code)?, pos, append })
+    }
+
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         use std::io::{Read, Seek, SeekFrom};
         self.file.seek(SeekFrom::Start(self.pos))?;
@@ -670,14 +690,27 @@ fn put_stat(g: &mut Guest, ret: i32, meta: std::io::Result<std::fs::Metadata>) {
     zero_tag(g, ret + 80); // the status-change time: none
 }
 
-/// `result<metadata-hash-value, error-code>` at `ret`: two `u64`s at `ret + 8`, a
-/// hash of the file's canonical path (the same file gives the same value within one run).
+/// `result<metadata-hash-value, error-code>` at `ret`: two `u64`s at `ret + 8`, a hash
+/// of the file's identity (device and inode; `path` where there are none), so the same
+/// file gives the same value within one run and two files never do, even under one name.
 #[allow(dead_code)]
-fn put_metadata_hash(g: &mut Guest, ret: i32, path: &Path) {
+fn put_metadata_hash(g: &mut Guest, ret: i32, meta: std::io::Result<std::fs::Metadata>, path: &Path) {
     use std::hash::{DefaultHasher, Hash, Hasher};
+    let meta = match meta {
+        Ok(meta) => meta,
+        Err(e) => return fs_error(g, ret, 8, io_error_code(e)),
+    };
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    };
+    #[cfg(not(unix))]
+    let identity = (0u64, path);
+    let _ = (&meta, path);
     let hash = |salt: u8| {
         let mut hasher = DefaultHasher::new();
-        (salt, path).hash(&mut hasher);
+        (salt, &identity).hash(&mut hasher);
         hasher.finish()
     };
     zero_tag(g, ret);
@@ -988,6 +1021,7 @@ impl Imports for P2Host {
         const OPEN_DIRECTORY: i32 = 2;
         const OPEN_EXCLUSIVE: i32 = 4;
         const OPEN_TRUNCATE: i32 = 8;
+        const DESCRIPTOR_READ: i32 = 1;
         const DESCRIPTOR_WRITE: i32 = 2;
         const DESCRIPTOR_MUTATE_DIRECTORY: i32 = 32;
         let (create, exclusive, truncate) =
@@ -1024,7 +1058,9 @@ impl Imports for P2Host {
         let file = if full.is_dir() {
             None
         } else {
-            match std::fs::OpenOptions::new().read(true).write(writes).open(&full) {
+            // a file that only writes need not be readable (and one with no flags reads)
+            let reads = descriptor_flags & DESCRIPTOR_READ != 0 || !writes;
+            match std::fs::OpenOptions::new().read(reads).write(writes).open(&full) {
                 Ok(file) => Some(file),
                 Err(e) => return fs_error(g, ret, 4, io_error_code(e)),
             }
@@ -1044,10 +1080,10 @@ impl Imports for P2Host {
         offset: i64,
         ret: i32,
     ) {
-        let opened = self.descriptor_file(descriptor).and_then(|file| file.try_clone().map_err(io_error_code));
+        let opened = self.descriptor_file(descriptor).and_then(|file| FileStream::over(file, offset as u64, false));
         match opened {
-            Ok(file) => {
-                let slot = self.files.insert(FileStream { file, pos: offset as u64, append: false });
+            Ok(stream) => {
+                let slot = self.files.insert(stream);
                 fs_ok_handle(g, ret, FIRST_FILE_STREAM + slot);
             }
             Err(c) => fs_error(g, ret, 4, c),
@@ -1188,8 +1224,8 @@ impl Imports for P2Host {
         ret: i32,
     ) {
         let resized = self
-            .writable_file(descriptor, 0, false)
-            .and_then(|stream| stream.file.set_len(size as u64).map_err(io_error_code));
+            .writable_descriptor_file(descriptor)
+            .and_then(|file| file.set_len(size as u64).map_err(io_error_code));
         put_status(g, ret, resized);
     }
     // end optional
@@ -1312,7 +1348,11 @@ impl Imports for P2Host {
     // optional: wasi_filesystem_types_method_descriptor_metadata_hash
     fn wasi_filesystem_types_method_descriptor_metadata_hash(&mut self, g: &mut Guest, d: i32, ret: i32) {
         match self.open_descriptor(d) {
-            Ok(descriptor) => put_metadata_hash(g, ret, &descriptor.path),
+            Ok(Descriptor { file: Some(file), path, .. }) => put_metadata_hash(g, ret, file.metadata(), path),
+            Ok(_) => match self.descriptor(d) {
+                Ok(path) => put_metadata_hash(g, ret, std::fs::metadata(&path), &path),
+                Err(c) => fs_error(g, ret, 8, c),
+            },
             Err(c) => fs_error(g, ret, 8, c),
         }
     }
@@ -1329,7 +1369,7 @@ impl Imports for P2Host {
         ret: i32,
     ) {
         match self.resolve_at(g, d, ptr, len) {
-            Ok(full) => put_metadata_hash(g, ret, &full),
+            Ok(full) => put_metadata_hash(g, ret, std::fs::metadata(&full), &full),
             Err(c) => fs_error(g, ret, 8, c),
         }
     }
