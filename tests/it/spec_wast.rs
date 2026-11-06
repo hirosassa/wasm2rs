@@ -305,8 +305,11 @@ fn no_op_host(generated: &str) -> String {
     format!("struct Host;\n#[allow(unused_variables)]\nimpl Imports for Host {{\n{methods}}}\n")
 }
 
-fn start_group(module: &mut QuoteWat<'_>) -> Result<Group, String> {
-    let wasm = module.encode().map_err(|e| format!("encode failed: {e}"))?;
+fn encode_module(module: &mut QuoteWat<'_>) -> Result<Vec<u8>, String> {
+    module.encode().map_err(|e| format!("encode failed: {e}"))
+}
+
+fn start_group(wasm: Vec<u8>) -> Result<Group, String> {
     // The spec's `spectest` host prints; only that import shape is replayed, with
     // a no-op host. Memory, global and table imports (and any other module) need
     // a real host and are skipped.
@@ -358,11 +361,39 @@ fn start_group(module: &mut QuoteWat<'_>) -> Result<Group, String> {
     })
 }
 
+/// A group for `(assert_trap (module ...) msg)`: the generated `main` only checks
+/// that building the instance traps. A module without an `Instance` (stateless) has
+/// no instantiation to trap, so it is skipped.
+fn trapping_instantiation(wasm: Vec<u8>, message: &str, ctx: &str) -> Result<Group, String> {
+    let mut group = start_group(wasm)?;
+    if !group.stateful {
+        return Err("a stateless module has no instantiation to trap".into());
+    }
+    // `start_group` ends the body with the instance construction; run it under
+    // `expect_trap` instead.
+    let at = group
+        .body
+        .rfind("let mut inst = ")
+        .ok_or("no constructor to run")?;
+    let ctor = group.body[at + "let mut inst = ".len()..]
+        .trim_end()
+        .trim_end_matches(';')
+        .to_string();
+    group.body.truncate(at);
+    let needles = format!("{:?}", trap_needles(message));
+    group.body.push_str(&format!(
+        "expect_trap(\"{ctx}\", &{needles}, || {{ let _ = {ctor}; }});\n"
+    ));
+    Ok(group)
+}
+
 fn run_wast(name: &str, src: &str) -> Report {
     let buf = ParseBuffer::new(src).expect("lex wast");
     let mut wast = parser::parse::<Wast>(&buf).expect("parse wast");
     let mut report = Report::default();
     let mut groups: Vec<Group> = Vec::new();
+    // Modules whose instantiation must trap. They never become the current module.
+    let mut trap_groups: Vec<Group> = Vec::new();
     // Whether the latest `module` was accepted (its group is `groups.last()`).
     let mut module_ok = false;
     for directive in &mut wast.directives {
@@ -372,7 +403,7 @@ fn run_wast(name: &str, src: &str) -> Report {
         let mut effect_only: Option<String> = None;
         let (kind, outcome): (&str, Result<Option<String>, String>) = match directive {
             WastDirective::Module(module) => {
-                match start_group(module) {
+                match encode_module(module).and_then(start_group) {
                     Ok(group) => {
                         groups.push(group);
                         module_ok = true;
@@ -407,6 +438,20 @@ fn run_wast(name: &str, src: &str) -> Report {
                         format!("expect_trap(\"{ctx}\", &{needles}, || {{ let _ = {c}; }});")
                     })
                 }),
+            ),
+            WastDirective::AssertTrap {
+                exec: WastExecute::Wat(wat),
+                message,
+                ..
+            } => (
+                "assert_trap",
+                wat.encode()
+                    .map_err(|e| format!("encode failed: {e}"))
+                    .and_then(|wasm| trapping_instantiation(wasm, message, &ctx))
+                    .map(|group| {
+                        trap_groups.push(group);
+                        None
+                    }),
             ),
             WastDirective::AssertException {
                 exec: WastExecute::Invoke(invoke),
@@ -465,6 +510,10 @@ fn run_wast(name: &str, src: &str) -> Report {
     for (i, group) in groups.iter().enumerate() {
         run_group(&format!("{name}_{i}"), group);
     }
+    for (i, group) in trap_groups.iter().enumerate() {
+        run_group(&format!("{name}_trap{i}"), group);
+    }
+    report.executed += trap_groups.len();
     eprintln!(
         "{name}: {} executed, {} skipped",
         report.executed,
@@ -576,6 +625,37 @@ fn a_spectest_print_import_is_replayed_with_a_no_op_host() {
     );
     assert_eq!(report.executed, 1);
     assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+fn a_module_level_assert_trap_expects_instantiation_to_trap() {
+    // The data segment does not fit the 1-page memory, so instantiation traps; the
+    // current module (`ok`) is untouched by it.
+    let report = run_wast(
+        "spec_assert_trap_module",
+        r#"
+(module (memory 1) (func (export "ok") (result i32) (i32.const 1)))
+(assert_trap
+  (module (memory 1) (data (i32.const 65536) "x"))
+  "out of bounds memory access")
+(assert_return (invoke "ok") (i32.const 1))
+"#,
+    );
+    assert_eq!(report.executed, 2);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+#[should_panic(expected = "expected a trap")]
+fn a_module_level_assert_trap_fails_when_instantiation_succeeds() {
+    run_wast(
+        "spec_assert_trap_module_no_trap",
+        r#"
+(assert_trap
+  (module (memory 1) (data (i32.const 0) "x"))
+  "out of bounds memory access")
+"#,
+    );
 }
 
 #[test]
