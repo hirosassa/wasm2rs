@@ -577,8 +577,10 @@ fn constructor_lines(
             .filter(|_| !table_imported)
             .into_iter()
             .chain(parts.extra_tables);
+        // An imported table 0 is not in `defined`, so the defined tables number from 1.
+        let first = usize::from(table_imported);
         for (i, t) in defined.enumerate() {
-            let i = index_u32(i)?;
+            let i = index_u32(first + i)?;
             let (field, _) = table_accessor(i);
             let fill = match t.init {
                 Some(TableFill::ImportedGlobal(global)) => {

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A module may define tables next to an imported table: the imported table 0 stays host-owned
+  (`Imports::table`/`table_mut`), the defined ones are `table1`, `table2`, ... fields of the
+  instance. Several imported tables are still unsupported.
 - `named_exports` / `--named-exports` also emits a getter `pub fn <name>(&self) -> T` for each
   exported numeric (`i32`/`i64`/`f32`/`f64`) global, e.g. `inst.stack_pointer()`, returning its
   current value (an imported global is read through the host). Reference-typed and `v128`

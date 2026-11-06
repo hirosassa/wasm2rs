@@ -1,6 +1,6 @@
 //! A module may define several tables. Table 0 keeps the `table` field and
-//! accessors; table `i > 0` gets `table{i}`. (An imported table together with
-//! other tables is not supported yet.)
+//! accessors; table `i > 0` gets `table{i}`. (An imported table next to defined
+//! ones is in `imported_table.rs`.)
 
 use crate::common;
 

@@ -504,14 +504,6 @@ where
                     if ty.shared {
                         return Err(TranspileError::Unsupported("shared table".into()));
                     }
-                    // An imported table is host-lent storage addressed through the
-                    // `Imports` trait; combining it with other tables is not
-                    // supported yet.
-                    if table.as_ref().is_some_and(|t| t.imported) {
-                        return Err(TranspileError::Unsupported(
-                            "multiple tables with an imported table".into(),
-                        ));
-                    }
                     // A `ref.null` table starts null (its entries come from active
                     // element segments); a `ref.func` one starts filled with that function.
                     // An expression is resolved once the globals it may read are known.

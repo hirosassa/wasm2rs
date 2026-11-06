@@ -370,3 +370,105 @@ fn imported_table_size_and_grow_track_host_buffer() {
     let run = Command::new(&bin).status().expect("run generated binary");
     assert!(run.success(), "imported table size/grow failed");
 }
+
+// An imported table (table 0, host-owned) next to a defined one (table 1, a field).
+const IMPORTED_AND_DEFINED: &str = r#"
+    (module
+      (type $ft (func (result i32)))
+      (import "env" "tbl" (table $t0 2 funcref))
+      (table $t1 3 funcref)
+      (func $a (result i32) i32.const 1)
+      (func $b (result i32) i32.const 2)
+      (func $c (result i32) i32.const 3)
+      (elem (table $t0) (i32.const 0) func $a $b)
+      (elem (table $t1) (i32.const 1) func $c $a)
+      (func (export "via0") (param i32) (result i32)
+        local.get 0 call_indirect $t0 (type $ft))
+      (func (export "via1") (param i32) (result i32)
+        local.get 0 call_indirect $t1 (type $ft))
+      (func (export "size1") (result i32) table.size $t1)
+      (func (export "copy_0_to_1") (param i32 i32 i32)
+        local.get 0 local.get 1 local.get 2 table.copy $t1 $t0)
+      (func (export "copy_1_to_0") (param i32 i32 i32)
+        local.get 0 local.get 1 local.get 2 table.copy $t0 $t1))
+    "#;
+
+#[test]
+fn an_imported_table_may_sit_next_to_a_defined_one() {
+    // `$a $b $c` are func0..2; via0 func3, via1 func4, size1 func5, copies func6/7.
+    // Table 0 is the host's, `[a, b]`; table 1 is the instance's, `[null, c, a]`.
+    let extra = format!(
+        "{HOST_TABLE}\n\
+         fn main() {{\n    \
+         let host = Host {{ table: vec![u32::MAX; 2] }};\n    \
+         let mut inst = Instance::new(host);\n    \
+         assert_eq!(inst.func3(0), 1);\n    \
+         assert_eq!(inst.func3(1), 2);\n    \
+         assert_eq!(inst.func4(1), 3);\n    \
+         assert_eq!(inst.func4(2), 1);\n    \
+         assert_eq!(inst.func5(), 3);\n    \
+         // table.copy $t1 <- $t0: slots 0..2 of the host table land in table 1.\n    \
+         inst.func6(0, 0, 2);\n    \
+         assert_eq!(inst.func4(0), 1);\n    \
+         assert_eq!(inst.func4(1), 2);\n    \
+         // table.copy $t0 <- $t1: table 1 slot 2 lands in host slot 0.\n    \
+         inst.func7(0, 2, 1);\n    \
+         assert_eq!(inst.func3(0), 1);\n    \
+         assert_eq!(inst.table_len_of_host(), 2);\n    \
+         }}\n\
+         impl<H: Imports> Instance<H> {{ fn table_len_of_host(&self) -> usize {{ self.table().len() }} }}"
+    );
+    let bin = compile("with_defined", IMPORTED_AND_DEFINED, &extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "imported table next to a defined one failed");
+}
+
+#[test]
+fn only_the_imported_table_is_lent_through_the_host_trait() {
+    let wasm = wat::parse_str(IMPORTED_AND_DEFINED).expect("valid wat");
+    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
+    let trait_start = generated.find("pub trait Imports").expect("trait");
+    let trait_end = trait_start + generated[trait_start..].find("\n}").expect("end of trait");
+    let host_trait = &generated[trait_start..trait_end];
+    assert!(host_trait.contains("fn table(&self)"), "{host_trait}");
+    assert!(!host_trait.contains("table1"), "{host_trait}");
+    assert!(generated.contains("table1: Vec<u32>"), "{generated}");
+}
+
+#[test]
+fn table_init_grow_and_fill_act_on_the_defined_table_not_the_imported_one() {
+    // func0 is `$a`; exports are func1..: init1, grow1, fill1, null1, size0.
+    let wat = r#"
+        (module
+          (import "env" "tbl" (table $t0 2 funcref))
+          (table $t1 1 funcref)
+          (func $a (result i32) i32.const 1)
+          (elem $p funcref (ref.func $a) (ref.func $a))
+          (func (export "init1") (table.init $t1 $p (i32.const 0) (i32.const 0) (i32.const 1)))
+          (func (export "grow1") (param i32) (result i32)
+            (table.grow $t1 (ref.func $a) (local.get 0)))
+          (func (export "fill1") (param i32 i32)
+            (table.fill $t1 (local.get 0) (ref.func $a) (local.get 1)))
+          (func (export "null1") (param i32) (result i32)
+            (ref.is_null (table.get $t1 (local.get 0))))
+          (func (export "size0") (result i32) (table.size $t0)))
+        "#;
+    let extra = format!(
+        "{HOST_TABLE}\n\
+         fn main() {{\n    \
+         let host = Host {{ table: vec![u32::MAX; 2] }};\n    \
+         let mut inst = Instance::new(host);\n    \
+         assert_eq!(inst.func4(0), 1);\n    \
+         inst.func1();\n    \
+         assert_eq!(inst.func4(0), 0);\n    \
+         assert_eq!(inst.func2(2), 1);\n    \
+         inst.func3(1, 2);\n    \
+         assert_eq!(inst.func4(2), 0);\n    \
+         assert_eq!(inst.func5(), 2);\n    \
+         assert!(inst.table().iter().all(|&s| s == u32::MAX));\n    \
+         }}"
+    );
+    let bin = compile("defined_ops", wat, &extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "table ops next to an imported table failed");
+}
