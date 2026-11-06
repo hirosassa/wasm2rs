@@ -128,9 +128,12 @@ fn run() -> Result<(), String> {
     let funcs_per_file = parse_usize_arg(args.next(), "funcs_per_file")?;
     let max_bytes_per_file = parse_usize_arg(args.next(), "max_bytes_per_file")?;
 
-    // The flags that only change generated code, which `--dump` and `--extract-core`
-    // do not generate: they refuse them instead of silently ignoring them.
-    let reject_code_flags = |mode: &str, takes: &str| {
+    // `--dump` and `--extract-core` generate no code, so they refuse extra arguments and
+    // the flags that only change generated code instead of silently ignoring them.
+    let refuse_extras = |mode: &str, takes: &str, extra_args: bool| {
+        if extra_args {
+            return Err(format!("{mode} takes only {takes}"));
+        }
         let code_flags = [
             (unsafe_memory, "--unsafe-memory"),
             (named_exports, "--named-exports"),
@@ -157,20 +160,20 @@ fn run() -> Result<(), String> {
         if dump {
             return Err("--extract-core cannot be combined with --dump".to_string());
         }
-        let takes = "the input file and the output directory";
         let dir = output.ok_or("--extract-core takes <input.wasm> <output dir>")?;
-        if funcs_per_file > 0 || max_bytes_per_file > 0 {
-            return Err(format!("--extract-core takes only {takes}"));
-        }
-        reject_code_flags("--extract-core", takes)?;
+        refuse_extras(
+            "--extract-core",
+            "the input file and the output directory",
+            funcs_per_file > 0 || max_bytes_per_file > 0,
+        )?;
         return extract_core_modules(&wasm, &dir);
     }
     if dump {
-        let takes = "the input file";
-        if output.is_some() || funcs_per_file > 0 || max_bytes_per_file > 0 {
-            return Err(format!("--dump takes only {takes}"));
-        }
-        reject_code_flags("--dump", takes)?;
+        refuse_extras(
+            "--dump",
+            "the input file",
+            output.is_some() || funcs_per_file > 0 || max_bytes_per_file > 0,
+        )?;
         let summary = wasm2rs::dump(&wasm).map_err(|e| e.to_string())?;
         print!("{summary}");
         return Ok(());

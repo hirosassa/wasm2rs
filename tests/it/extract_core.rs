@@ -111,13 +111,14 @@ fn the_cli_rejects_code_generation_flags_and_dump() {
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("c.wasm");
     std::fs::write(&input, wat::parse_str(COMPONENT).unwrap()).unwrap();
-    let run = |flag: &str, out: &std::path::Path| {
-        std::fs::remove_dir_all(out).ok();
+    let out = dir.join("out");
+    let run = |flag: &str| {
+        std::fs::remove_dir_all(&out).ok();
         Command::new(env!("CARGO_BIN_EXE_wasm2rs"))
             .arg("--extract-core")
             .arg(flag)
             .arg(&input)
-            .arg(out)
+            .arg(&out)
             .output()
             .unwrap()
     };
@@ -132,11 +133,10 @@ fn the_cli_rejects_code_generation_flags_and_dump() {
         "--entry-exports=a",
         "--dump",
     ] {
-        let out = dir.join("out");
-        let run = run(flag, &out);
-        let stderr = String::from_utf8_lossy(&run.stderr);
+        let output = run(flag);
+        let stderr = String::from_utf8_lossy(&output.stderr);
         let name = flag.split('=').next().unwrap();
-        assert!(!run.status.success(), "{flag} was accepted");
+        assert!(!output.status.success(), "{flag} was accepted");
         assert!(
             stderr.contains("--extract-core") && stderr.contains(name),
             "{flag}: {stderr}"
@@ -144,12 +144,12 @@ fn the_cli_rejects_code_generation_flags_and_dump() {
         assert!(!out.exists(), "{flag} wrote modules");
     }
     for flag in ["--jobs=0", "--split-dispatch=0"] {
-        let out = dir.join("out");
-        let run = run(flag, &out);
+        let output = run(flag);
         assert!(
-            run.status.success(),
+            output.status.success(),
             "{flag}: {}",
-            String::from_utf8_lossy(&run.stderr)
+            String::from_utf8_lossy(&output.stderr)
         );
+        assert!(out.join("module0.wasm").exists(), "{flag} wrote nothing");
     }
 }
