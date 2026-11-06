@@ -101,3 +101,55 @@ fn the_cli_writes_each_module_to_the_directory() {
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(stdout.contains("module0.wasm"), "{stdout}");
 }
+
+/// `--extract-core` writes the modules as they are, so it refuses the flags that only
+/// change generated code (and `--dump`) instead of silently ignoring them. The
+/// defaults `--jobs=0` and `--split-dispatch=0` change nothing and are accepted.
+#[test]
+fn the_cli_rejects_code_generation_flags_and_dump() {
+    let dir = std::env::temp_dir().join(format!("wasm2rs_extract_flags_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("c.wasm");
+    std::fs::write(&input, wat::parse_str(COMPONENT).unwrap()).unwrap();
+    let out = dir.join("out");
+    let run = |flag: &str| {
+        std::fs::remove_dir_all(&out).ok();
+        Command::new(env!("CARGO_BIN_EXE_wasm2rs"))
+            .arg("--extract-core")
+            .arg(flag)
+            .arg(&input)
+            .arg(&out)
+            .output()
+            .unwrap()
+    };
+    for flag in [
+        "--unsafe-memory",
+        "--named-exports",
+        "--named-imports",
+        "--import-memory",
+        "--reentrant-imports",
+        "--split-dispatch=4",
+        "--jobs=2",
+        "--entry-exports=a",
+        "--dump",
+    ] {
+        let output = run(flag);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let name = flag.split('=').next().unwrap();
+        assert!(!output.status.success(), "{flag} was accepted");
+        assert!(
+            stderr.contains("--extract-core") && stderr.contains(name),
+            "{flag}: {stderr}"
+        );
+        assert!(!out.exists(), "{flag} wrote modules");
+    }
+    for flag in ["--jobs=0", "--split-dispatch=0"] {
+        let output = run(flag);
+        assert!(
+            output.status.success(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(out.join("module0.wasm").exists(), "{flag} wrote nothing");
+    }
+}

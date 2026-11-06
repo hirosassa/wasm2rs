@@ -128,19 +128,11 @@ fn run() -> Result<(), String> {
     let funcs_per_file = parse_usize_arg(args.next(), "funcs_per_file")?;
     let max_bytes_per_file = parse_usize_arg(args.next(), "max_bytes_per_file")?;
 
-    let wasm = std::fs::read(&input).map_err(|e| format!("cannot read {input}: {e}"))?;
-    if extract_core {
-        let dir = output.ok_or("--extract-core takes <input.wasm> <output dir>")?;
-        if funcs_per_file > 0 || max_bytes_per_file > 0 {
-            return Err(
-                "--extract-core takes only the input file and the output directory".to_string(),
-            );
-        }
-        return extract_core_modules(&wasm, &dir);
-    }
-    if dump {
-        if output.is_some() || funcs_per_file > 0 || max_bytes_per_file > 0 {
-            return Err("--dump takes only the input file".to_string());
+    // `--dump` and `--extract-core` generate no code, so they refuse extra arguments and
+    // the flags that only change generated code instead of silently ignoring them.
+    let refuse_extras = |mode: &str, takes: &str, extra_args: bool| {
+        if extra_args {
+            return Err(format!("{mode} takes only {takes}"));
         }
         let code_flags = [
             (unsafe_memory, "--unsafe-memory"),
@@ -152,14 +144,36 @@ fn run() -> Result<(), String> {
             (jobs > 0, "--jobs"),
             (entry_exports.is_some(), "--entry-exports"),
         ];
-        if let Some(flag) = code_flags
+        match code_flags
             .into_iter()
             .find_map(|(given, flag)| given.then_some(flag))
         {
-            return Err(format!(
-                "--dump takes only the input file; {flag} changes the generated code, which --dump does not generate"
-            ));
+            Some(flag) => Err(format!(
+                "{mode} takes only {takes}; {flag} changes the generated code, which {mode} does not generate"
+            )),
+            None => Ok(()),
         }
+    };
+
+    let wasm = std::fs::read(&input).map_err(|e| format!("cannot read {input}: {e}"))?;
+    if extract_core {
+        if dump {
+            return Err("--extract-core cannot be combined with --dump".to_string());
+        }
+        let dir = output.ok_or("--extract-core takes <input.wasm> <output dir>")?;
+        refuse_extras(
+            "--extract-core",
+            "the input file and the output directory",
+            funcs_per_file > 0 || max_bytes_per_file > 0,
+        )?;
+        return extract_core_modules(&wasm, &dir);
+    }
+    if dump {
+        refuse_extras(
+            "--dump",
+            "the input file",
+            output.is_some() || funcs_per_file > 0 || max_bytes_per_file > 0,
+        )?;
         let summary = wasm2rs::dump(&wasm).map_err(|e| e.to_string())?;
         print!("{summary}");
         return Ok(());
