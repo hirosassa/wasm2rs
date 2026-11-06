@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `ref.test`, `ref.cast` and `br_on_cast` against a concrete function type: a funcref is a
-  function-index handle, so (as for `call_indirect`) it matches when its function's signature
-  equals the target's; null follows the target's nullability. This is exact only when every
-  function type is final, has no supertype and sits alone in its rec group, the target signature
-  has no concrete reference, and the module has no host (an external funcref carries no
-  signature); otherwise the cast is rejected as unsupported. A test against a concrete
-  continuation type is also unsupported.
+- `ref.test`, `ref.cast` and `br_on_cast` against a concrete function type: a non-null funcref
+  matches when its function's declared type is the target or a declared subtype of it
+  (`sub` chains, final vs. open types and equivalent types across rec groups included; the
+  relation comes from validating the type section). Null follows the target's nullability.
+  A module with a host is rejected (an external funcref carries no declared type), as is a test
+  against a concrete continuation type. `call_indirect`/`call_ref` dispatch follows the same
+  relation, so a function of a declared subtype is callable through its supertype.
 - The abstract `contref` type and `ref.null cont`: a `u32` handle like a concrete continuation
   reference.
 - `ref.null nocont` / `nullcontref`: the bottom of the continuation hierarchy lowers to the same
@@ -124,6 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already transpiles, and how far its preview2 imports are from the preview1 support.
 
 ### Fixed
+
+- A function reachable only through `array.new_elem`/`array.init_elem` was treated as dead when
+  `entry_exports` limited the roots.
 
 - A module whose only GC reference values come from types (an `anyref`/`nullref` global, parameter, result,
   local or table element, with no body creating one) now gets the managed `GcRef` model instead of failing

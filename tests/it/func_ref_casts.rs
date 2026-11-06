@@ -63,3 +63,103 @@ fn br_on_cast_to_a_concrete_function_type_branches_on_a_match() {
         "let mut inst = Instance::new();\n assert_eq!(inst.func8(), 1);\n assert_eq!(inst.func9(), 0);",
     );
 }
+
+// Declared subtyping and canonical equivalence decide the test, not signature
+// equality. Funcs: `$h`=0, `$x`=1, `$y`=2, `$k`=3, `$m`=4, then the exports from func5.
+const SUBTYPING: &str = r#"(module
+  (type $f (sub (func (result funcref))))
+  (type $g (sub $f (func (result (ref func)))))
+  (type $gg (sub $g (func (result (ref func)))))
+  (type $a (sub (func)))
+  (type $b (func))
+  (type $s1 (struct)) (type $s2 (struct))
+  (type $p1 (func (param (ref null $s1))))
+  (type $p2 (func (param (ref null $s2))))
+  (rec (type $r1 (func)) (type $r2 (func (param i32))))
+  (rec (type $q1 (func)) (type $q2 (func (param i32))))
+  (func $h (type $gg) (ref.func $h))
+  (func $x (type $a))
+  (func $y (type $p1))
+  (func $k (type $r1))
+  (func $m (type $q2))
+  (elem declare func $h $x $y $k $m)
+  (func (export "sub_of_declared_super") (result i32) (ref.test (ref $f) (ref.func $h)))
+  (func (export "two_levels_down") (result i32) (ref.test (ref $g) (ref.func $h)))
+  (func (export "super_is_not_sub") (result i32) (ref.test (ref $gg) (ref.func $h)))
+  (func (export "final_vs_nonfinal") (result i32) (ref.test (ref $b) (ref.func $x)))
+  (func (export "same_sig_nonfinal") (result i32) (ref.test (ref $a) (ref.func $x)))
+  (func (export "equivalent_params") (result i32) (ref.test (ref $p2) (ref.func $y)))
+  (func (export "same_rec_group_shape") (result i32) (ref.test (ref $r1) (ref.func $k)))
+  (func (export "equivalent_rec_groups") (result i32) (ref.test (ref $r2) (ref.func $m)))
+  (func (export "cross_rec_member") (result i32) (ref.test (ref $r1) (ref.func $m))))"#;
+
+#[test]
+fn ref_test_follows_declared_function_subtyping() {
+    common::compile_run(
+        "func_sub_decl",
+        SUBTYPING,
+        "assert_eq!(func5(), 1);\n \
+         assert_eq!(func6(), 1);\n assert_eq!(func7(), 1);\n",
+    );
+}
+
+#[test]
+fn ref_test_distinguishes_final_and_open_function_types_of_one_signature() {
+    common::compile_run(
+        "func_sub_final",
+        SUBTYPING,
+        "assert_eq!(func8(), 0);\n \
+         assert_eq!(func9(), 1);\n",
+    );
+}
+
+#[test]
+fn ref_test_treats_equivalent_function_types_as_one() {
+    common::compile_run(
+        "func_sub_equiv",
+        SUBTYPING,
+        "assert_eq!(func10(), 1);\n \
+         assert_eq!(func11(), 1);\n assert_eq!(func12(), 1);\n \
+         assert_eq!(func13(), 0);\n",
+    );
+}
+
+#[test]
+fn a_cast_funcref_can_be_called_through_the_supertype() {
+    // `$fq` is declared a subtype of `$p` with a covariant result, so the cast passes
+    // and `call_ref $p` must dispatch to it (not only to functions of `$p`'s exact
+    // signature).
+    common::compile_run(
+        "func_sub_call_ref",
+        r#"(module
+          (type $p (sub (func (result anyref))))
+          (type $q (sub $p (func (result eqref))))
+          (func $fq (type $q) (ref.i31 (i32.const 3)))
+          (elem declare func $fq)
+          (func (export "run") (result i32)
+            (i31.get_s (ref.cast (ref i31)
+              (call_ref $p (ref.cast (ref $p) (ref.func $fq)))))))"#,
+        "let mut inst = Instance::new();\n assert_eq!(inst.func1(), 3);",
+    );
+}
+
+#[test]
+fn a_function_only_an_element_segment_array_reaches_is_still_a_cast_target() {
+    // With `entry_exports` only `t` is a root. `$only_elem` is reached solely through
+    // `array.new_elem`, so it must still count as live for the test below.
+    let wat = r#"(module
+          (rec (type $a (sub (func (result i32)))) (type $b (sub $a (func (result i32)))))
+          (type $arr (array funcref))
+          (func $only_elem (type $b) (i32.const 9))
+          (elem $e func $only_elem)
+          (func (export "t") (result i32)
+            (ref.test (ref $a)
+              (array.get $arr (array.new_elem $arr $e (i32.const 0) (i32.const 1)) (i32.const 0)))))"#;
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    let opts = wasm2rs::TranspileOptions {
+        entry_exports: Some(vec!["t".to_string()]),
+        ..Default::default()
+    };
+    let out = wasm2rs::transpile_with_options(&wasm, &opts).expect("transpile ok");
+    assert!(out.contains("matches!(__f, 0u32)"), "{out}");
+}

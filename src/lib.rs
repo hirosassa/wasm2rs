@@ -305,10 +305,12 @@ where
     // declares no supertype), parallel to `type_kinds`. Drives the runtime
     // subtype checks emitted for `ref.test`/`ref.cast`/`br_on_cast`.
     let mut supers: Vec<Option<u32>> = Vec::new();
-    // Whether every function type is final, declares no supertype and sits alone in
-    // its rec group. Only then is a function's signature its whole type, which the
-    // funcref `ref.test`/`ref.cast` lowering relies on.
-    let mut plain_func_types = true;
+    // The type section run through the validator (types only, never the bodies), for
+    // the declared subtype relation behind funcref `ref.test`/`ref.cast`; `None` if
+    // it does not validate.
+    let mut type_validator = Some(wasmparser::Validator::new_with_features(
+        wasmparser::WasmFeatures::all(),
+    ));
     let mut func_type_indices: Vec<u32> = Vec::new();
     let mut bodies: Vec<wasmparser::FunctionBody> = Vec::new();
     let mut globals: Vec<codegen::GlobalInfo> = Vec::new();
@@ -341,17 +343,18 @@ where
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload? {
-            Payload::Version { encoding, .. } => reject_component(encoding)?,
+            Payload::Version {
+                num,
+                encoding,
+                range,
+            } => {
+                reject_component(encoding)?;
+                feed_validator(&mut type_validator, |v| v.version(num, encoding, &range));
+            }
             Payload::TypeSection(reader) => {
+                feed_validator(&mut type_validator, |v| v.type_section(&reader));
                 for group in reader {
-                    let group = group?;
-                    let lone = group.types().len() == 1;
-                    for sub in group.types() {
-                        if matches!(sub.composite_type.inner, CompositeInnerType::Func(_))
-                            && !(lone && sub.is_final && sub.supertype_idxs.is_empty())
-                        {
-                            plain_func_types = false;
-                        }
+                    for sub in group?.types() {
                         // Record the direct supertype (if any) before matching
                         // the kind, keeping `supers` aligned with the type index
                         // space so a subtype chain can be walked at codegen time.
@@ -777,6 +780,7 @@ where
             TranspileError::Unsupported("function type index out of range".into())
         })?;
         funcs.push(codegen::FuncInput {
+            type_index,
             params: &sig.params,
             results: &sig.results,
             body,
@@ -879,6 +883,7 @@ where
             ));
         }
     }
+    let type_rel = type_validator.as_ref().and_then(type_relation);
     let parts = codegen::ModuleParts {
         imports: &imports,
         imported_globals: &imported_globals,
@@ -887,7 +892,7 @@ where
         types: &types,
         type_kinds: &type_kinds,
         supers: &supers,
-        plain_func_types,
+        type_rel: type_rel.as_ref(),
         globals: &globals,
         memories: &memories,
         data: &data,
@@ -980,6 +985,7 @@ fn classify_import(
             let (module, name) = id;
             let wasi = codegen::WasiFn::recognise(module, name, &sig.params, &sig.results);
             sink.imports.push(codegen::ImportInfo {
+                type_index,
                 params: sig.params.clone(),
                 results: sig.results.clone(),
                 wasi,
@@ -1203,6 +1209,46 @@ fn eval_ref_const(
             "{what} that is not ref.func, ref.null or global.get"
         ))),
     }
+}
+
+/// Run one step on the type validator, dropping it (and with it the type relation) if
+/// the step fails.
+fn feed_validator(
+    validator: &mut Option<wasmparser::Validator>,
+    step: impl FnOnce(&mut wasmparser::Validator) -> wasmparser::Result<()>,
+) {
+    if validator.as_mut().is_some_and(|v| step(v).is_err()) {
+        *validator = None;
+    }
+}
+
+/// The declared type relation of a validator that has read the type section: each type
+/// index's canonical id (a `CoreTypeId`, shared by equivalent types) and each canonical
+/// id's declared direct supertype.
+fn type_relation(validator: &wasmparser::Validator) -> Option<codegen::TypeRel> {
+    let types = validator.types(0)?;
+    let mut ids = std::collections::HashMap::new();
+    let mut canon = Vec::new();
+    let mut canon_super: Vec<Option<wasmparser::types::CoreTypeId>> = Vec::new();
+    for i in 0..types.core_type_count_in_module() {
+        let id = types.core_type_at_in_module(i);
+        let next = u32::try_from(ids.len()).ok()?;
+        let dense = *ids.entry(id).or_insert_with(|| {
+            canon_super.push(
+                types[id]
+                    .supertype_idxs
+                    .first()
+                    .and_then(|p| p.as_core_type_id()),
+            );
+            next
+        });
+        canon.push(dense);
+    }
+    let canon_super = canon_super
+        .into_iter()
+        .map(|sup| sup.and_then(|id| ids.get(&id).copied()))
+        .collect();
+    Some(codegen::TypeRel { canon, canon_super })
 }
 
 #[cfg(test)]

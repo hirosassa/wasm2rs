@@ -634,7 +634,7 @@ impl super::FuncGen<'_> {
     /// (`any`/`eq`/`i31`/`struct`/`array`/`none`); the `i31`, `struct` and
     /// `array` cases separate the `GcRef::I31` and `GcRef::Obj` variants.
     /// `null_matches` picks how the null handle is classified (a nullable target
-    /// matches null). A concrete function type target compares signatures (see
+    /// matches null). A concrete function type target tests declared subtyping (see
     /// `func_heap_test`); a concrete continuation type target is unsupported, as a
     /// continuation handle carries no runtime type.
     fn gc_heap_test(
@@ -716,7 +716,7 @@ impl super::FuncGen<'_> {
     }
 
     /// The Rust condition testing that the `u32` funcref `ref_expr` is a function
-    /// whose signature equals the function type `idx` (or null, when
+    /// whose declared type is the function type `idx` or a declared subtype of it (or null, when
     /// `null_matches`).
     fn func_heap_test(
         &self,
@@ -724,24 +724,9 @@ impl super::FuncGen<'_> {
         idx: Option<u32>,
         null_matches: bool,
     ) -> Result<String, TranspileError> {
-        let sig = idx
-            .and_then(|i| self.ctx.types.get(i as usize))
+        let target = idx
+            .filter(|i| self.ctx.types.get(*i as usize).is_some())
             .ok_or_else(|| TranspileError::Unsupported("ref cast/test: unknown type".into()))?;
-        if !self.ctx.plain_func_types {
-            return Err(TranspileError::Unsupported(
-                "ref cast/test to a function type with declared function subtyping \
-                 (a `sub`, non-final or rec-grouped function type)"
-                    .into(),
-            ));
-        }
-        if sig.params.iter().chain(&sig.results).any(
-            |t| matches!(t, ValType::Ref(rt) if matches!(rt.heap_type(), HeapType::Concrete(_))),
-        ) {
-            return Err(TranspileError::Unsupported(
-                "ref cast/test to a function type with a concrete reference in its signature"
-                    .into(),
-            ));
-        }
         if self.ctx.has_imports {
             return Err(TranspileError::Unsupported(
                 "ref cast/test to a function type in a module with a host: external function \
@@ -749,12 +734,12 @@ impl super::FuncGen<'_> {
                     .into(),
             ));
         }
-        let targets: Vec<String> = self
-            .ctx
-            .funcs_with_sig(&sig.params, &sig.results)
-            .iter()
-            .map(|f| format!("{f}u32"))
-            .collect();
+        let funcs = self.ctx.funcs_of_subtype(target).ok_or_else(|| {
+            TranspileError::Unsupported(
+                "ref cast/test to a function type: the type section did not validate".into(),
+            )
+        })?;
+        let targets: Vec<String> = funcs.iter().map(|f| format!("{f}u32")).collect();
         let hit = if targets.is_empty() {
             "false".to_string()
         } else {

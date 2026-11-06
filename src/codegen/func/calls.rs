@@ -117,13 +117,9 @@ impl<'a> super::FuncGen<'a> {
             .ok_or_else(|| TranspileError::Unsupported("call_indirect: unknown type".into()))?;
         let results = sig.results.clone();
         // Whether any function in the index space (imports included, since a
-        // table entry may resolve to an imported function) has exactly the
-        // declared signature; there is no subtyping, so a structural match is
-        // a type match.
-        let has_targets = !self
-            .ctx
-            .funcs_with_sig(&sig.params, &sig.results)
-            .is_empty();
+        // table entry may resolve to an imported function) has the declared type
+        // or a declared subtype of it.
+        let has_targets = !self.ctx.dispatch_targets(type_index).is_empty();
 
         // The table index (top of stack) is consumed into the `entry` binding
         // below, which is emitted *before* the dispatch call — so only the index
