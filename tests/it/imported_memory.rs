@@ -301,3 +301,85 @@ fn import_memory_leaves_a_shared_memory_alone() {
     let run = Command::new(&bin).status().expect("run generated binary");
     assert!(run.success(), "a shared memory changed shape");
 }
+
+// A host whose storage outlives the instance (raw pointers), so a test can look at
+// it after `Instance::new` traps.
+const MEM_HOST: &str = r#"
+    struct Host { mem: *mut Vec<u8> }
+    impl Imports for Host {
+        fn memory(&self) -> &[u8] { unsafe { &*self.mem } }
+        fn memory_mut(&mut self) -> &mut Vec<u8> { unsafe { &mut *self.mem } }
+    }
+    fn leak<T>(value: T) -> *mut T { Box::leak(Box::new(value)) }
+"#;
+
+const MEM_AND_TABLE_HOST: &str = r#"
+    struct Host { mem: *mut Vec<u8>, table: *mut Vec<u32> }
+    impl Imports for Host {
+        fn memory(&self) -> &[u8] { unsafe { &*self.mem } }
+        fn memory_mut(&mut self) -> &mut Vec<u8> { unsafe { &mut *self.mem } }
+        fn table(&self) -> &[u32] { unsafe { &*self.table } }
+        fn table_mut(&mut self) -> &mut Vec<u32> { unsafe { &mut *self.table } }
+    }
+    fn leak<T>(value: T) -> *mut T { Box::leak(Box::new(value)) }
+"#;
+
+#[test]
+fn data_segments_apply_in_module_order_across_an_imported_and_a_defined_memory() {
+    // Segment 0 writes the host memory, segment 1 (memory 1) is out of bounds and
+    // traps: the spec applies segments in module order, so the host keeps segment
+    // 0's byte.
+    let wat = r#"
+        (module
+          (import "env" "mem" (memory $m0 1))
+          (memory $m1 1)
+          (data (memory $m0) (i32.const 0) "a")
+          (data (memory $m1) (i32.const 65536) "b"))
+        "#;
+    let extra = format!(
+        "{MEM_HOST}\n\
+         fn main() {{\n    \
+         let mem = leak(vec![0u8; 65536]);\n    \
+         std::panic::set_hook(Box::new(|_| {{}}));\n    \
+         let host = Host {{ mem }};\n    \
+         let r = std::panic::catch_unwind(move || {{ let _ = Instance::new(host); }});\n    \
+         assert!(r.is_err(), \"the out-of-bounds segment must trap\");\n    \
+         assert_eq!(unsafe {{ &*mem }}[0], b'a', \"segment 0 ran before the trap\");\n    \
+         }}"
+    );
+    let bin = compile("data_order", wat, &extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(
+        run.success(),
+        "data segments were not applied in module order"
+    );
+}
+
+#[test]
+fn elements_come_before_a_trapping_data_segment_of_a_defined_memory() {
+    // All active elements are applied before any data segment, so the host table
+    // already holds the element when the defined memory's segment traps.
+    let wat = r#"
+        (module
+          (import "env" "mem" (memory $m0 1))
+          (import "env" "tbl" (table $t0 1 funcref))
+          (memory $m1 1)
+          (func $f)
+          (elem (table $t0) (i32.const 0) func $f)
+          (data (memory $m1) (i32.const 65536) "b"))
+        "#;
+    let extra = format!(
+        "{MEM_AND_TABLE_HOST}\n\
+         fn main() {{\n    \
+         let table = leak(vec![u32::MAX; 1]);\n    \
+         std::panic::set_hook(Box::new(|_| {{}}));\n    \
+         let host = Host {{ mem: leak(vec![0u8; 65536]), table }};\n    \
+         let r = std::panic::catch_unwind(move || {{ let _ = Instance::new(host); }});\n    \
+         assert!(r.is_err(), \"the out-of-bounds segment must trap\");\n    \
+         assert_eq!(unsafe {{ &*table }}[0], 0, \"the element ran before the data trap\");\n    \
+         }}"
+    );
+    let bin = compile("elem_before_data", wat, &extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "an element did not precede the data trap");
+}
