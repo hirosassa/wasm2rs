@@ -190,7 +190,7 @@ fn numbered(name: &str, prefix: &str) -> bool {
 
 /// `Imports` method names for `(module, field, function index)` imports, in order
 /// (`TranspileOptions::named_imports`). Kept clear of keywords, the other trait
-/// members (`memory`, `table`, `get_global{k}`, `call_ref_t{n}`, ...; the `Instance`'s own
+/// members (`memory`, `table`, `table{i}`, `get_global{k}`, `call_ref_t{n}`, ...; the `Instance`'s own
 /// members are in another namespace and cannot clash) and each
 /// other.
 pub(crate) fn assign_import_names<'a>(
@@ -203,6 +203,8 @@ pub(crate) fn assign_import_names<'a>(
                 || ["memory", "memory_mut", "table", "table_mut"].contains(&n)
                 || numbered(n, "get_global")
                 || numbered(n, "set_global")
+                || numbered(n, "table")
+                || n.strip_suffix("_mut").is_some_and(|t| numbered(t, "table"))
                 || n.starts_with("call_ref_t")
         },
         |n| n.starts_with("call_ref_t"),
@@ -225,6 +227,18 @@ mod tests {
         assert_eq!(sanitize(""), "export");
         assert_eq!(sanitize("--"), "export");
         assert_eq!(sanitize("a.b"), "a_b");
+    }
+
+    #[test]
+    fn import_names_avoid_the_imported_table_methods() {
+        // Imported table `i > 0` adds `table{i}`/`table{i}_mut` to the `Imports` trait.
+        let names = assign_import_names([("table1", "", 0), ("table2", "mut", 1)]);
+        for n in &names {
+            assert!(
+                n != "table1" && n != "table2_mut",
+                "import named like a table method: {names:?}"
+            );
+        }
     }
 
     #[test]

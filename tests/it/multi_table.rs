@@ -102,13 +102,3 @@ fn a_single_table_keeps_its_names() {
     assert!(out.contains("table: Vec<u32>,"), "{out}");
     assert!(!out.contains("table1"), "{out}");
 }
-
-#[test]
-fn two_imported_tables_are_still_rejected() {
-    let wasm = wat::parse_str(
-        r#"(module (import "e" "a" (table 1 funcref)) (import "e" "b" (table 1 funcref)))"#,
-    )
-    .unwrap();
-    let err = wasm2rs::transpile(&wasm).unwrap_err().to_string();
-    assert!(err.contains("multiple tables"), "{err}");
-}

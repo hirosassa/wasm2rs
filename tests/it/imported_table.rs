@@ -507,3 +507,139 @@ fn active_elements_of_an_imported_and_a_defined_table_apply_in_module_order() {
         "elem segments were not applied in module order"
     );
 }
+
+const TWO_IMPORTED_AND_DEFINED: &str = r#"
+    (module
+      (type $ft (func (result i32)))
+      (import "env" "t0" (table $t0 2 funcref))
+      (import "env" "t1" (table $t1 3 funcref))
+      (table $t2 1 funcref)
+      (func $a (result i32) i32.const 1)
+      (func $b (result i32) i32.const 2)
+      (func $c (result i32) i32.const 3)
+      (elem (table $t0) (i32.const 0) func $a $b)
+      (elem (table $t1) (i32.const 1) func $c $a)
+      (elem (table $t2) (i32.const 0) func $b)
+      (func (export "via0") (param i32) (result i32)
+        local.get 0 call_indirect $t0 (type $ft))
+      (func (export "via1") (param i32) (result i32)
+        local.get 0 call_indirect $t1 (type $ft))
+      (func (export "via2") (param i32) (result i32)
+        local.get 0 call_indirect $t2 (type $ft))
+      (func (export "size1") (result i32) table.size $t1)
+      (func (export "grow1") (result i32) ref.null func i32.const 2 table.grow $t1)
+      (func (export "copy_0_to_1") (param i32 i32 i32)
+        local.get 0 local.get 1 local.get 2 table.copy $t1 $t0))
+    "#;
+
+const HOST_TWO_TABLES: &str = r#"
+    struct Host { t0: Vec<u32>, t1: Vec<u32> }
+    impl Imports for Host {
+        fn table(&self) -> &[u32] { &self.t0 }
+        fn table_mut(&mut self) -> &mut Vec<u32> { &mut self.t0 }
+        fn table1(&self) -> &[u32] { &self.t1 }
+        fn table1_mut(&mut self) -> &mut Vec<u32> { &mut self.t1 }
+    }
+"#;
+
+#[test]
+fn two_imported_tables_are_each_lent_through_the_host_trait() {
+    // `$a $b $c` are func0..2; via0..2 func3..5, size1 func6, grow1 func7, copy func8.
+    // Host table 0 `[a, b]`, host table 1 `[null, c, a]`, defined table 2 `[b]`.
+    let extra = format!(
+        "{HOST_TWO_TABLES}\n\
+         fn main() {{\n    \
+         let host = Host {{ t0: vec![u32::MAX; 2], t1: vec![u32::MAX; 3] }};\n    \
+         let mut inst = Instance::new(host);\n    \
+         assert_eq!(inst.func3(0), 1);\n    \
+         assert_eq!(inst.func3(1), 2);\n    \
+         assert_eq!(inst.func4(1), 3);\n    \
+         assert_eq!(inst.func4(2), 1);\n    \
+         assert_eq!(inst.func5(0), 2);\n    \
+         assert_eq!(inst.func6(), 3);\n    \
+         inst.func8(0, 0, 2);\n    \
+         assert_eq!(inst.func4(0), 1);\n    \
+         assert_eq!(inst.func4(1), 2);\n    \
+         assert_eq!(inst.func7(), 3);\n    \
+         assert_eq!(inst.func6(), 5);\n    \
+         assert_eq!(inst.table().len(), 2);\n    \
+         assert_eq!(inst.table1().len(), 5);\n    \
+         }}"
+    );
+    let bin = compile("two_imported", TWO_IMPORTED_AND_DEFINED, &extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "two imported tables failed");
+}
+
+#[test]
+fn a_trapping_element_of_the_second_imported_table_leaves_earlier_writes() {
+    // Segment 0 fits host table 0; segment 1 is out of bounds for host table 1, so
+    // instantiation traps, but table 0 keeps segment 0's write (module order).
+    let wat = r#"
+        (module
+          (import "env" "t0" (table 1 funcref))
+          (import "env" "t1" (table 1 funcref))
+          (func $a)
+          (elem (table 0) (i32.const 0) func $a)
+          (elem (table 1) (i32.const 1) func $a))
+        "#;
+    let extra = r#"
+        struct Host { t0: *mut Vec<u32>, t1: *mut Vec<u32> }
+        impl Imports for Host {
+            fn table(&self) -> &[u32] { unsafe { &*self.t0 } }
+            fn table_mut(&mut self) -> &mut Vec<u32> { unsafe { &mut *self.t0 } }
+            fn table1(&self) -> &[u32] { unsafe { &*self.t1 } }
+            fn table1_mut(&mut self) -> &mut Vec<u32> { unsafe { &mut *self.t1 } }
+        }
+        fn main() {
+            let t0: &'static mut Vec<u32> = Box::leak(Box::new(vec![u32::MAX; 1]));
+            let t1: &'static mut Vec<u32> = Box::leak(Box::new(vec![u32::MAX; 1]));
+            let (p0, p1): (*mut Vec<u32>, *mut Vec<u32>) = (t0, t1);
+            std::panic::set_hook(Box::new(|_| {}));
+            let r = std::panic::catch_unwind(|| { let _ = Instance::new(Host { t0: p0, t1: p1 }); });
+            assert!(r.is_err(), "the out-of-bounds segment must trap");
+            assert_eq!(unsafe { &*p0 }[0], 0, "segment 0 ran before the trap");
+            assert_eq!(unsafe { &*p1 }[0], u32::MAX, "segment 1 wrote nothing");
+        }
+    "#;
+    let bin = compile("two_imported_trap", wat, extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(
+        run.success(),
+        "elem segments were not applied in module order"
+    );
+}
+
+#[test]
+fn an_imported_table64_is_indexed_and_sized_by_i64() {
+    // A 64-bit imported table keeps the host's `Vec<u32>` storage; the module sees
+    // `i64` indices and sizes. Funcs: `$a`=0, call=1, size=2, grow=3.
+    let wat = r#"
+        (module
+          (type $ft (func (result i32)))
+          (import "env" "tbl" (table $t i64 2 funcref))
+          (elem (table $t) (i64.const 1) func $a)
+          (func $a (result i32) i32.const 7)
+          (func (export "call") (param i64) (result i32)
+            local.get 0 call_indirect $t (type $ft))
+          (func (export "size") (result i64) table.size $t)
+          (func (export "grow") (result i64) ref.null func i64.const 3 table.grow $t))
+        "#;
+    let extra = format!(
+        "{HOST_TABLE}\n\
+         fn main() {{\n    \
+         let host = Host {{ table: vec![u32::MAX; 2] }};\n    \
+         let mut inst = Instance::new(host);\n    \
+         assert_eq!(inst.func1(1), 7);\n    \
+         assert_eq!(inst.func2(), 2);\n    \
+         assert_eq!(inst.func3(), 2);\n    \
+         assert_eq!(inst.func2(), 5);\n    \
+         assert_eq!(inst.table().len(), 5);\n    \
+         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inst.func1(1 << 32)));\n    \
+         assert!(r.is_err(), \"an index above u32::MAX must trap\");\n    \
+         }}"
+    );
+    let bin = compile("table64", wat, &extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "imported table64 failed");
+}

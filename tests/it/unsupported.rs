@@ -390,10 +390,10 @@ fn continuation_body_also_called_directly_is_rejected() {
 fn ref_null_of_a_non_reference_heaptype_is_rejected() {
     // `funcref`/`externref`/`exnref` nulls (and their bottom types) lower to the
     // `u32::MAX` sentinel and the abstract GC heaptypes (`any`/`eq`/`struct`/
-    // `array`/`none`) lower to the managed `GcRef::Null`. A `nocont` null has
+    // `array`/`none`) lower to the managed `GcRef::Null`. The abstract `cont` null has
     // neither representation, so it is rejected by name rather than mistranslated.
     assert_unsupported(
-        r#"(module (func (result i32) (ref.is_null (ref.null nocont))))"#,
+        r#"(module (func (result i32) (ref.is_null (ref.null cont))))"#,
         "ref.null of unsupported type",
     );
 }
@@ -429,12 +429,10 @@ fn a_table_of_a_non_funcref_element_type_is_rejected() {
 }
 
 #[test]
-fn an_imported_sixty_four_bit_table_is_rejected() {
-    // A defined table64 is supported; an imported one is host-lent storage
-    // addressed through the `Imports` trait with `u32` indices.
+fn an_imported_shared_table_is_rejected() {
     assert_unsupported(
-        r#"(module (import "env" "t" (table i64 1 funcref)))"#,
-        "imported 64-bit or shared table",
+        r#"(module (import "env" "t" (table shared 1 1 funcref)))"#,
+        "imported shared table",
     );
 }
 
@@ -485,16 +483,17 @@ fn array_new_data_with_a_reference_element_is_rejected() {
 }
 
 #[test]
-fn ref_test_on_a_func_heaptype_is_rejected() {
-    // `ref.test` in wasm2rs is implemented for the managed GC hierarchy
-    // (`GcRef`). A test against the `func` heap type operates on the funcref
-    // hierarchy, which wasm2rs represents as opaque `u32` handles with no
-    // runtime type tag, so the operator is rejected rather than mistranslated.
+fn ref_test_on_a_concrete_function_type_is_rejected() {
+    // A test against the abstract `func`/`extern` types (and their bottoms) needs
+    // only a null check, but a test against a concrete function type needs the
+    // callee's runtime type. wasm2rs represents funcrefs as opaque `u32` handles
+    // with no runtime type tag, so it rejects rather than mistranslates.
     assert_unsupported(
         r#"(module
+             (type $ft (func))
              (func (param funcref) (result i32)
-               (ref.test (ref func) (local.get 0))))"#,
-        "func/extern heap type",
+               (ref.test (ref $ft) (local.get 0))))"#,
+        "non-struct/array concrete type",
     );
 }
 
@@ -624,15 +623,6 @@ fn return_call_into_a_suspending_function_is_rejected() {
     assert_unsupported(
         &cont_body_wat("return_call $s"),
         "return_call across a continuation",
-    );
-}
-
-#[test]
-fn a_second_imported_table_is_rejected() {
-    // Only one table is supported; the limit applies to imports too.
-    assert_unsupported(
-        r#"(module (import "e" "t0" (table 1 funcref)) (import "e" "t1" (table 1 funcref)))"#,
-        "multiple tables",
     );
 }
 

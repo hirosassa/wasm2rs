@@ -10,7 +10,7 @@
 
 use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, StorageType, ValType};
 
-use super::super::{CompositeKind, FieldInfo, Val};
+use super::super::{CompositeKind, FieldInfo, Val, is_bottom_u32_heap};
 use crate::TranspileError;
 
 /// Which slot variant backs a storage type, and how to wrap/unwrap it.
@@ -634,13 +634,26 @@ impl super::FuncGen<'_> {
     /// (`any`/`eq`/`i31`/`struct`/`array`/`none`); the `i31`, `struct` and
     /// `array` cases separate the `GcRef::I31` and `GcRef::Obj` variants.
     /// `null_matches` picks how the null handle is classified (a nullable target
-    /// matches null). A `func`/`extern` target is unsupported here.
+    /// matches null). A concrete function type target is unsupported here: a
+    /// `u32` handle carries no runtime type to compare against.
     fn gc_heap_test(
         &self,
         ref_expr: &str,
         hty: HeapType,
         null_matches: bool,
     ) -> Result<String, TranspileError> {
+        // The func/extern/exn hierarchies are `u32` handles (`u32::MAX` is null):
+        // a top type holds every non-null value and a bottom type only null, so
+        // the test needs nothing but the null check.
+        if let Some(top) = u32_hierarchy_top(hty) {
+            return Ok(if top {
+                format!("(({ref_expr}) != u32::MAX || {null_matches})")
+            } else if null_matches {
+                format!("(({ref_expr}) == u32::MAX)")
+            } else {
+                format!("(({ref_expr}) == u32::MAX && false)")
+            });
+        }
         // `(i31_arm, obj_arm)`: how a `GcRef::I31` payload and a `GcRef::Obj`
         // (whose runtime type id is bound as `ty`) each answer the test.
         let (i31_arm, obj_arm) = match hty {
@@ -674,7 +687,7 @@ impl super::FuncGen<'_> {
             }
             _ => {
                 return Err(TranspileError::Unsupported(
-                    "ref cast/test on a func/extern heap type".into(),
+                    "ref cast/test on an unexpected heap type".into(),
                 ));
             }
         };
@@ -740,7 +753,8 @@ impl super::FuncGen<'_> {
         // re-evaluating (and so re-allocating) the operand.
         let r = self.pop()?;
         let temp = self.fresh_temp();
-        self.line(format!("let {temp}: GcRef = {};", r.code));
+        let rust_ty = super::super::rust_type(r.ty, self.ctx.type_kinds)?;
+        self.line(format!("let {temp}: {rust_ty} = {};", r.code));
         // The condition tests the runtime type against `to_ref_type` (whose
         // nullability decides how null is treated). `br_on_cast` branches on a
         // match; `br_on_cast_fail` branches on the complement.
@@ -952,5 +966,19 @@ fn extend_packed(
             (format!("(({read}) & {mask:#X})"), ValType::I32)
         }
         _ => (read, ty),
+    }
+}
+
+/// For a heap type of a `u32`-handle hierarchy (func, extern, exn), whether it is
+/// the hierarchy's top (`Some(true)`) or bottom (`Some(false)`) type; `None` for
+/// anything else.
+fn u32_hierarchy_top(hty: HeapType) -> Option<bool> {
+    match hty {
+        HeapType::Abstract {
+            ty: AbstractHeapType::Func | AbstractHeapType::Extern | AbstractHeapType::Exn,
+            ..
+        } => Some(true),
+        hty if is_bottom_u32_heap(hty) => Some(false),
+        _ => None,
     }
 }
