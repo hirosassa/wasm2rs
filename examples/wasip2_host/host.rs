@@ -13,9 +13,10 @@
 // (see `keep_declared_methods` in `examples/wasip2_run.rs`).
 //
 // Handles: 0 = stdin, 1 = stdout, 2 = stderr; terminals are placeholders. A pollable
-// is an index into `pollables`: `None` is always ready (streams), `Some(deadline)`
-// becomes ready at the deadline (clocks); `poll` and `block` sleep until then.
-// `read` blocks on the real stdin, so an input stream is always ready too.
+// is an index into `pollables`: always ready (streams, files), ready at a deadline
+// (clocks), or ready when stdin has data or is at its end. A thread reads the real
+// stdin into a buffer, so `read` never blocks (an empty list means "nothing yet")
+// and `poll` and `block` wait on the buffer and the earliest deadline.
 // Random numbers come from a small non-cryptographic generator (splitmix64) seeded
 // from the OS-seeded `std` hasher: fine for `HashMap` seeds and examples, not for
 // keys or tokens.
@@ -27,15 +28,61 @@
 // `stat`, `get-flags`, `metadata-hash` and directory listings work on the same paths.
 // Not implemented: sockets.
 
+use std::collections::VecDeque;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+/// What a pollable waits for.
+#[derive(Clone, Copy)]
+enum Pollable {
+    /// Always ready.
+    Ready,
+    /// Ready at the instant.
+    Deadline(Instant),
+    /// Ready when stdin has data or is at its end. Built only by the optional
+    /// `input-stream.subscribe` block.
+    #[allow(dead_code)]
+    Stdin,
+}
+
+impl Pollable {
+    fn is_ready(self, now: Instant, stdin: &StdinBuf) -> bool {
+        match self {
+            Pollable::Ready => true,
+            Pollable::Deadline(d) => d <= now,
+            Pollable::Stdin => !stdin.bytes.is_empty() || stdin.eof,
+        }
+    }
+
+    fn deadline(self) -> Option<Instant> {
+        match self {
+            Pollable::Deadline(d) => Some(d),
+            _ => None,
+        }
+    }
+}
+
+/// The bytes the stdin thread has read and not yet handed to the guest.
+#[derive(Default)]
+struct StdinBuf {
+    bytes: VecDeque<u8>,
+    eof: bool,
+}
+
+type SharedStdin = Arc<(Mutex<StdinBuf>, Condvar)>;
 
 struct P2Host {
     /// Read only by the optional `get-arguments` block.
     #[allow(dead_code)]
     args: Vec<String>,
     env: Vec<(String, String)>,
-    pollables: Vec<Option<Instant>>,
+    pollables: Vec<Pollable>,
+    /// Filled by the stdin thread, which `start_stdin` spawns on first use.
+    stdin: SharedStdin,
+    /// Read only by `start_stdin`, which only the optional stdin blocks call.
+    #[allow(dead_code)]
+    stdin_started: bool,
     /// The monotonic clock's zero; read only by the optional clock blocks.
     #[allow(dead_code)]
     start: Instant,
@@ -61,7 +108,13 @@ type Guest = Instance<P2Host>;
 
 impl P2Host {
     fn new(args: Vec<String>, env: Vec<(String, String)>) -> Self {
-        P2Host { args, env, pollables: Vec::new(), start: Instant::now(),
+        P2Host {
+            args,
+            env,
+            pollables: Vec::new(),
+            stdin: SharedStdin::default(),
+            stdin_started: false,
+            start: Instant::now(),
             rng: os_seed(),
             root: None,
             descriptors: Vec::new(),
@@ -136,21 +189,57 @@ impl P2Host {
         put(g, ptr, &bytes);
     }
 
-    /// A new pollable that is ready at `deadline` (always, for `None`).
-    fn subscribe(&mut self, deadline: Option<Instant>) -> i32 {
-        self.pollables.push(deadline);
+    /// A new pollable.
+    fn subscribe(&mut self, pollable: Pollable) -> i32 {
+        self.pollables.push(pollable);
         self.pollables.len() as i32 - 1
     }
 
-    /// The pollable's deadline: `None` if it is always ready.
-    fn deadline(&self, pollable: u32) -> Option<Instant> {
-        self.pollables[pollable as usize]
+    /// Starts the thread that reads the real stdin into the buffer (once).
+    #[allow(dead_code)]
+    fn start_stdin(&mut self) {
+        use std::io::Read;
+        if self.stdin_started {
+            return;
+        }
+        self.stdin_started = true;
+        let shared = Arc::clone(&self.stdin);
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            loop {
+                // a read error counts as the end of input
+                let n = std::io::stdin().read(&mut chunk).unwrap_or(0);
+                let (buf, changed) = &*shared;
+                let mut buf = buf.lock().unwrap();
+                buf.bytes.extend(&chunk[..n]);
+                buf.eof = n == 0;
+                changed.notify_all();
+                if n == 0 {
+                    return;
+                }
+            }
+        });
     }
 
-    /// Sleeps until the pollable is ready.
-    fn block_on(&self, pollable: i32) {
-        if let Some(deadline) = self.deadline(pollable as u32) {
-            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    /// The positions in `handles` of the pollables that are ready, waiting until at
+    /// least one is: on the stdin buffer's condition variable, with a timeout at the
+    /// earliest deadline.
+    fn wait_ready(&self, handles: &[u32]) -> Vec<i32> {
+        let (buf, changed) = &*self.stdin;
+        let mut buf = buf.lock().unwrap();
+        loop {
+            let now = Instant::now();
+            let ready: Vec<i32> = (0..handles.len() as i32)
+                .filter(|&i| self.pollables[handles[i as usize] as usize].is_ready(now, &buf))
+                .collect();
+            if !ready.is_empty() {
+                return ready;
+            }
+            let earliest = handles.iter().filter_map(|&h| self.pollables[h as usize].deadline()).min();
+            buf = match earliest {
+                Some(d) => changed.wait_timeout(buf, d.saturating_duration_since(now)).unwrap().0,
+                None => changed.wait(buf).unwrap(),
+            };
         }
     }
 }
@@ -381,26 +470,16 @@ impl Imports for P2Host {
     }
 
     fn wasi_io_poll_method_pollable_block(&mut self, _g: &mut Guest, pollable: i32) {
-        self.block_on(pollable);
+        self.wait_ready(&[pollable as u32]);
     }
 
     /// `poll(in: list<borrow<pollable>>) -> list<u32>`: the indices of the ready
-    /// pollables, sleeping until the earliest deadline if none is ready yet. An empty
-    /// list traps, as the interface specifies.
+    /// pollables, waiting until one is ready. An empty list traps, as the interface
+    /// specifies.
     fn wasi_io_poll_poll(&mut self, g: &mut Guest, list: i32, len: i32, ret: i32) {
         assert!(len > 0, "wasi:io/poll.poll: empty list");
         let handles: Vec<u32> = (0..len).map(|i| get_u32(g, list + 4 * i)).collect();
-        let ready = loop {
-            let now = Instant::now();
-            let ready: Vec<i32> = (0..len)
-                .filter(|&i| self.deadline(handles[i as usize]).is_none_or(|d| d <= now))
-                .collect();
-            if !ready.is_empty() {
-                break ready;
-            }
-            let earliest = handles.iter().filter_map(|&h| self.deadline(h)).min().unwrap();
-            std::thread::sleep(earliest.saturating_duration_since(now));
-        };
+        let ready = self.wait_ready(&handles);
         let items = guest_list(g, ret, 4, ready.len() as i32);
         for (i, index) in ready.iter().enumerate() {
             put_u32(g, items + 4 * i as i32, *index);
@@ -446,13 +525,14 @@ impl Imports for P2Host {
         _g: &mut Guest,
         _stream: i32,
     ) -> i32 {
-        self.subscribe(None)
+        self.subscribe(Pollable::Ready)
     }
 
     // optional: wasi_io_streams_method_input_stream_read
     /// `result<list<u8>, stream-error>` at `ret`: the tag, then the list or, for the
     /// `closed` error at end of input (or a read error), the error's tag byte, both
-    /// at `ret + 4`. It blocks until at least one byte (or end of input) is available.
+    /// at `ret + 4`. Stdin never blocks: with nothing buffered yet the list is empty.
+    /// A file is read at once.
     fn wasi_io_streams_method_input_stream_read(
         &mut self,
         g: &mut Guest,
@@ -464,25 +544,23 @@ impl Imports for P2Host {
         // `len` is a `u64`: a negative `i64` is a huge length, and 0 is an empty list.
         let want = (len as u64).min(4096) as usize;
         let mut buf = vec![0u8; want];
-        let n = if want == 0 {
-            0
+        // `None` is the end of input: `stream-error::closed`.
+        let read = if want == 0 {
+            Some(0)
+        } else if stream == 0 {
+            self.start_stdin();
+            let mut shared = self.stdin.0.lock().unwrap();
+            let n = shared.bytes.read(&mut buf).unwrap(); // a `VecDeque` never fails
+            (n > 0 || !shared.eof).then_some(n)
         } else {
-            let read = match stream {
-                0 => std::io::stdin().read(&mut buf),
-                _ => self
-                    .file_stream(stream)
-                    .and_then(Option::as_mut)
-                    .expect("read from an unknown or dropped stream")
-                    .read(&mut buf),
-            };
-            match read {
-                Ok(0) | Err(_) => {
-                    put(g, ret, &[1]); // result::err
-                    put(g, ret + 4, &[1]); // stream-error::closed
-                    return;
-                }
-                Ok(n) => n,
-            }
+            let file = self.file_stream(stream).and_then(Option::as_mut);
+            let file = file.expect("read from an unknown or dropped stream");
+            file.read(&mut buf).ok().filter(|&n| n > 0)
+        };
+        let Some(n) = read else {
+            put(g, ret, &[1]); // result::err
+            put(g, ret + 4, &[1]); // stream-error::closed
+            return;
         };
         zero_tag(g, ret);
         let ptr = if n == 0 { 4 } else { alloc(g, 1, n as i32) };
@@ -493,8 +571,13 @@ impl Imports for P2Host {
     // end optional
 
     // optional: wasi_io_streams_method_input_stream_subscribe
-    fn wasi_io_streams_method_input_stream_subscribe(&mut self, _g: &mut Guest, _stream: i32) -> i32 {
-        self.subscribe(None)
+    /// Ready when stdin has data or is at its end; a file is always ready.
+    fn wasi_io_streams_method_input_stream_subscribe(&mut self, _g: &mut Guest, stream: i32) -> i32 {
+        if stream != 0 {
+            return self.subscribe(Pollable::Ready);
+        }
+        self.start_stdin();
+        self.subscribe(Pollable::Stdin)
     }
     // end optional
 
@@ -525,13 +608,13 @@ impl Imports for P2Host {
         when: i64,
     ) -> i32 {
         let deadline = Instant::now() + Duration::from_nanos(when as u64);
-        self.subscribe(Some(deadline))
+        self.subscribe(Pollable::Deadline(deadline))
     }
 
     // optional: wasi_clocks_monotonic_clock_subscribe_instant
     fn wasi_clocks_monotonic_clock_subscribe_instant(&mut self, _g: &mut Guest, when: i64) -> i32 {
         let deadline = self.start + Duration::from_nanos(when as u64);
-        self.subscribe(Some(deadline))
+        self.subscribe(Pollable::Deadline(deadline))
     }
     // end optional
 

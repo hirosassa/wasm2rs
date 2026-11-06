@@ -131,17 +131,21 @@ Beyond the hello-world set they add `input-stream.read`/`subscribe`,
 `monotonic-clock.now`/`subscribe-instant` and `wall-clock.now`, all optional blocks in
 the host.
 
-- Pollables are indices into a table: `None` is always ready (streams), `Some(deadline)`
-  is ready once the deadline passes. `poll` returns the ready indices and otherwise
-  sleeps until the earliest deadline; `pollable.block` sleeps until its deadline.
-- `input-stream.read` blocks on the real stdin until at least one byte or end of input
-  (`stream-error::closed`: result tag 1, error tag 1), so an input stream counts as
-  always ready. A non-blocking `read` that returns an empty list would need a reader
-  thread; not done.
+- Pollables are indices into a table: always ready (streams, files), ready once a
+  deadline passes (clocks), or ready when stdin has data or is at its end. `poll`
+  returns the ready indices and otherwise waits for the earliest deadline or for stdin
+  data, whichever comes first; `pollable.block` waits for its one pollable.
+- Stdin is read by a thread (started on first use) into a buffer, so `input-stream.read`
+  never blocks: it returns what is buffered, an empty list if nothing has arrived yet,
+  and `stream-error::closed` (result tag 1, error tag 1) at end of input. `std` waits on
+  the pollable before it reads, so a program can wait for stdin and a timer together.
+  (Before this, `read` blocked and stdin counted as always ready, which stalled a
+  program that also waited on a deadline.)
 - The monotonic clock counts from the host's creation; `wall-clock.now` writes
   `datetime { seconds: u64, nanoseconds: u32 }`.
-- `tests/it/wasip2_host.rs` covers all of it from WAT (piped stdin, deadline waits, a
-  ready pollable returning at once next to a ten-second deadline).
+- `tests/it/wasip2_host.rs` covers all of it from WAT (piped stdin, deadline
+  waits, a ready pollable returning at once next to a ten-second deadline, an idle
+  stdin read, and `poll` waking for stdin data and end of input).
 
 What it does not cover: sockets (random and files: Results 6 and 7); the `Imports` trait
 is generated per module, so the host has to match the module's import set (the example
