@@ -1419,3 +1419,131 @@ fn a_file_descriptor_is_not_a_directory_when_a_directory_takes_its_path() {
     );
     run_ok(&bin);
 }
+
+/// The imports of the tests of the streams over one descriptor. `read` returns
+/// `result<list<u8>, stream-error>` (tag at `ret`, list pointer at `ret + 4`, length at
+/// `ret + 8`); `stat` returns the size at `ret + 24`.
+const STREAMS_IMPORTS: &str = r#"
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[resource-drop]descriptor" (func $drop_fd (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.read-via-stream" (func $rvs (param i32 i64 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.write-via-stream" (func $wvs (param i32 i64 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.append-via-stream" (func $avs (param i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.rename-at" (func $rename (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.stat" (func $stat (param i32 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]input-stream.read" (func $read (param i32 i64 i32)))
+  (data (i32.const 300) "f.txt")
+  (data (i32.const 310) "g.txt")
+  (data (i32.const 500) "abCDefGHZZ")
+"#;
+
+/// `fs_streams` runs on a writable root holding `f.txt` ("0123456789"); `fs_renamed`
+/// also on `g.txt` (14 bytes). open-flags 0 opens an existing file; descriptor-flags:
+/// read 1, write 2. The 2-byte values are little-endian pairs of ASCII: "01" is 0x3130.
+const STREAMS: &str = r#"
+  (func $ok (param $at i32)
+    (if (i32.load8_u (local.get $at)) (then unreachable)))
+  ;; the stream behind the handle `result<handle, _>` just put at 244
+  (func $handle (result i32)
+    (call $ok (i32.const 240))
+    (i32.load (i32.const 244)))
+  ;; reads 2 bytes from an input stream
+  (func $rd (param $s i32) (result i32)
+    (call $read (local.get $s) (i64.const 2) (i32.const 260))
+    (call $ok (i32.const 260))
+    (if (i32.ne (i32.load (i32.const 268)) (i32.const 2)) (then unreachable))
+    (i32.load16_u (i32.load (i32.const 264))))
+  ;; writes `len` bytes from `ptr` to an output stream
+  (func $put (param $s i32) (param $ptr i32) (param $len i32)
+    (call $write (local.get $s) (local.get $ptr) (local.get $len) (i32.const 280))
+    (call $ok (i32.const 280)))
+  (func (export "fs_streams") (local $dir i32) (local $f i32) (local $a i32) (local $b i32)
+                             (local $w i32) (local $p i32) (local $r i32) (local $r2 i32) (local $n i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 0) (i32.const 3) (i32.const 220))
+    (call $ok (i32.const 220))
+    (local.set $f (i32.load (i32.const 224)))
+    ;; two input streams on one descriptor keep their own positions
+    (call $rvs (local.get $f) (i64.const 0) (i32.const 240))
+    (local.set $a (call $handle))
+    (call $rvs (local.get $f) (i64.const 5) (i32.const 240))
+    (local.set $b (call $handle))
+    (if (i32.ne (call $rd (local.get $a)) (i32.const 0x3130)) (then unreachable))
+    (if (i32.ne (call $rd (local.get $b)) (i32.const 0x3635)) (then unreachable))
+    (if (i32.ne (call $rd (local.get $a)) (i32.const 0x3332)) (then unreachable))
+    (if (i32.ne (call $rd (local.get $b)) (i32.const 0x3837)) (then unreachable))
+    ;; a stream writing from offset 2 and an appending one, used in turn
+    (call $wvs (local.get $f) (i64.const 2) (i32.const 240))
+    (local.set $w (call $handle))
+    (call $avs (local.get $f) (i32.const 240))
+    (local.set $p (call $handle))
+    (call $put (local.get $w) (i32.const 500) (i32.const 2))
+    (call $put (local.get $p) (i32.const 502) (i32.const 2))
+    (call $put (local.get $w) (i32.const 504) (i32.const 2))
+    (call $put (local.get $p) (i32.const 506) (i32.const 2))
+    ;; another stream sees all of it: 01abef6789CDGH
+    (call $rvs (local.get $f) (i64.const 0) (i32.const 240))
+    (local.set $r (call $handle))
+    (call $read (local.get $r) (i64.const 100) (i32.const 260))
+    (call $ok (i32.const 260))
+    (local.set $n (i32.load (i32.const 268)))
+    (if (i32.ne (local.get $n) (i32.const 14)) (then unreachable))
+    (if (i32.ne (i32.load16_u offset=2 (i32.load (i32.const 264))) (i32.const 0x6261)) (then unreachable))
+    (if (i32.ne (i32.load16_u offset=12 (i32.load (i32.const 264))) (i32.const 0x4847)) (then unreachable))
+    ;; the streams outlive the descriptor
+    (call $rvs (local.get $f) (i64.const 6) (i32.const 240))
+    (local.set $r2 (call $handle))
+    (call $drop_fd (local.get $f))
+    (call $put (local.get $w) (i32.const 508) (i32.const 2))
+    (if (i32.ne (call $rd (local.get $r2)) (i32.const 0x5a5a)) (then unreachable)))
+  (func (export "fs_renamed") (local $dir i32) (local $old i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 0) (i32.const 1) (i32.const 220))
+    (call $ok (i32.const 220))
+    (local.set $old (i32.load (i32.const 224)))
+    ;; another file takes the name `f.txt`
+    (call $rename (local.get $dir) (i32.const 310) (i32.const 5) (local.get $dir) (i32.const 300) (i32.const 5) (i32.const 220))
+    (call $ok (i32.const 220))
+    ;; the descriptor still has the 10-byte file it opened, not the 14-byte one
+    (call $stat (local.get $old) (i32.const 600))
+    (call $ok (i32.const 600))
+    (if (i64.ne (i64.load (i32.const 624)) (i64.const 10)) (then unreachable))
+    (call $rvs (local.get $old) (i64.const 0) (i32.const 240))
+    (if (i32.ne (call $rd (call $handle)) (i32.const 0x3130)) (then unreachable)))
+"#;
+
+#[cfg(unix)]
+#[test]
+fn streams_over_one_descriptor_keep_their_own_positions_and_outlive_it() {
+    let root = root_with_file("streams");
+    let bin = compile(
+        "fs_streams",
+        &hello_with(STREAMS_IMPORTS, STREAMS),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_streams();",
+    );
+    run_ok(&bin);
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "01abefZZ89CDGH"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_descriptor_stays_on_its_file_when_another_file_is_renamed_over_its_path() {
+    let root = root_with_file("renamed");
+    std::fs::write(root.join("g.txt"), "GGGGGGGGGGGGGG").unwrap();
+    let bin = compile(
+        "fs_renamed",
+        &hello_with(STREAMS_IMPORTS, STREAMS),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_renamed();",
+    );
+    run_ok(&bin);
+    let now = std::fs::read_to_string(root.join("f.txt")).unwrap();
+    assert_eq!(now, "GGGGGGGGGGGGGG");
+}
