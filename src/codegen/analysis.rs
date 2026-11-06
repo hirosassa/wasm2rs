@@ -2,7 +2,7 @@ use super::*;
 
 use std::collections::{HashMap, HashSet};
 
-use wasmparser::{AbstractHeapType, HeapType, Operator, ValType};
+use wasmparser::{AbstractHeapType, BlockType, HeapType, Operator, ValType};
 
 use crate::TranspileError;
 
@@ -14,11 +14,44 @@ pub(crate) fn declares_gc_types(type_kinds: &[CompositeKind]) -> bool {
         .any(|k| matches!(k, CompositeKind::Struct(_) | CompositeKind::Array(_)))
 }
 /// Whether the managed value model ([`GCREF_DEF`]) must be emitted: either the
-/// module declares a struct/array type, or a body introduces an abstract GC
-/// reference (e.g. `ref.null any`), which also lowers to a `GcRef` even without
-/// any concrete GC type declared.
+/// module declares a struct/array type, a body introduces an abstract GC
+/// reference (e.g. `ref.null any`), or one appears only in a type (a global,
+/// signature, table element or local: [`abstract_gc_in_types`]); the last two
+/// also lower to a `GcRef` even without any concrete GC type declared.
 pub(crate) fn needs_gc_types(parts: &ModuleParts<'_>) -> Result<bool, TranspileError> {
-    Ok(declares_gc_types(parts.type_kinds) || uses_abstract_gc(parts.funcs)?)
+    Ok(declares_gc_types(parts.type_kinds)
+        || abstract_gc_in_types(parts)?
+        || uses_abstract_gc(parts.funcs)?)
+}
+/// Whether an abstract GC reference type (`anyref`, `nullref`, ...) appears in a
+/// signature, a global, a table element or a local, so a value of it exists even
+/// when no body creates one.
+fn abstract_gc_in_types(parts: &ModuleParts<'_>) -> Result<bool, TranspileError> {
+    let is_gc = |ty: &ValType| matches!(ty, ValType::Ref(rt) if abstract_is_gc(rt.heap_type()));
+    if parts.globals.iter().any(|g| is_gc(&g.ty))
+        || parts.imported_globals.iter().any(|g| is_gc(&g.ty))
+        // Every function signature (defined or imported, and the one behind a
+        // `call_ref`) is in the type section.
+        || parts
+            .types
+            .iter()
+            .any(|t| t.params.iter().chain(&t.results).any(is_gc))
+        || parts
+            .table
+            .into_iter()
+            .chain(parts.extra_tables)
+            .any(|t| is_gc(&t.element))
+    {
+        return Ok(true);
+    }
+    for input in parts.funcs {
+        for local in input.body.get_locals_reader()? {
+            if is_gc(&local?.1) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 /// Whether any function body contains an operator matching `pred`.
 ///
@@ -47,6 +80,15 @@ pub(crate) fn any_body_op(
 pub(crate) fn uses_abstract_gc(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
     any_body_op(funcs, |op| {
         matches!(op, Operator::RefNull { hty } if abstract_is_gc(*hty))
+            // A single-value block result (`(block (result anyref) ..)`).
+            || matches!(
+                op,
+                Operator::Block { blockty: BlockType::Type(ValType::Ref(rt)) }
+                    | Operator::Loop { blockty: BlockType::Type(ValType::Ref(rt)) }
+                    | Operator::If { blockty: BlockType::Type(ValType::Ref(rt)) }
+                    | Operator::TryTable { try_table: wasmparser::TryTable { ty: BlockType::Type(ValType::Ref(rt)), .. } }
+                    if abstract_is_gc(rt.heap_type())
+            )
             || matches!(
                 op,
                 Operator::RefI31 | Operator::AnyConvertExtern | Operator::ExternConvertAny
@@ -363,11 +405,7 @@ pub(crate) fn rust_type(
         // A `funcref` is a function index and an `externref` is an opaque host
         // handle; both are represented as a `u32` (`u32::MAX` is null), matching
         // the table's element representation.
-        ValType::Ref(rt)
-            if rt.is_func_ref() || rt.is_extern_ref() || is_exn_heap(rt.heap_type()) =>
-        {
-            Ok("u32")
-        }
+        ValType::Ref(rt) if is_abstract_u32_ref(rt) => Ok("u32"),
         // An abstract GC reference (`any`/`eq`/`i31`/`struct`/`array`/`none`) is a
         // managed `GcRef` handle. An `i31ref` rides as the `GcRef::I31` variant so
         // it can flow through an `anyref`/`eqref` alongside heap objects.
@@ -392,6 +430,26 @@ pub(crate) fn rust_type(
 /// `exnref`, a function or continuation reference) rather than a managed `GcRef`.
 pub(crate) fn is_u32_ref(ty: ValType, kinds: &[CompositeKind]) -> Result<bool, TranspileError> {
     Ok(matches!(ty, ValType::Ref(_)) && rust_type(ty, kinds)? == "u32")
+}
+/// Whether a heap type is one of the bottom types `nofunc`/`noextern`/`noexn`: a
+/// reference of that type can only be null, and lowers like its top type (a `u32`
+/// handle, `u32::MAX` null).
+pub(crate) fn is_bottom_u32_heap(hty: HeapType) -> bool {
+    matches!(
+        hty,
+        HeapType::Abstract {
+            ty: AbstractHeapType::NoFunc | AbstractHeapType::NoExtern | AbstractHeapType::NoExn,
+            ..
+        }
+    )
+}
+/// Whether a reference type lowers to a plain `u32` handle (`u32::MAX` is null): a
+/// `funcref`, `externref`, `exnref` or one of their bottom types.
+pub(crate) fn is_abstract_u32_ref(rt: wasmparser::RefType) -> bool {
+    rt.is_func_ref()
+        || rt.is_extern_ref()
+        || is_exn_heap(rt.heap_type())
+        || is_bottom_u32_heap(rt.heap_type())
 }
 /// Whether a heap type is the abstract `exn` type: an `exnref` is a `u32` handle
 /// into the exception store.
@@ -468,10 +526,7 @@ pub(crate) fn default_value(ty: ValType, kinds: &[CompositeKind]) -> &'static st
         // A default `funcref`/`externref` (and any concrete typed funcref) is
         // null.
         ValType::Ref(rt)
-            if rt.is_func_ref()
-                || rt.is_extern_ref()
-                || is_exn_heap(rt.heap_type())
-                || matches!(rt.heap_type(), HeapType::Concrete(_)) =>
+            if is_abstract_u32_ref(rt) || matches!(rt.heap_type(), HeapType::Concrete(_)) =>
         {
             "u32::MAX"
         }

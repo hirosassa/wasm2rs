@@ -1,7 +1,7 @@
 use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, ValType};
 
 use super::super::helpers::{mem_accessor, table_accessor};
-use super::super::{CompositeKind, Helper, Val};
+use super::super::{CompositeKind, Helper, Val, is_bottom_u32_heap};
 use crate::TranspileError;
 
 impl<'a> super::FuncGen<'a> {
@@ -375,6 +375,13 @@ impl<'a> super::FuncGen<'a> {
                 ty: AbstractHeapType::Exn,
                 ..
             } => ValType::EXNREF,
+            // A bottom type holds only null: keep its own type (it lowers like the
+            // top type of its hierarchy).
+            hty if is_bottom_u32_heap(hty) => {
+                ValType::Ref(RefType::new(true, hty).ok_or_else(|| {
+                    TranspileError::Unsupported("ref.null: bottom reference type".into())
+                })?)
+            }
             // A concrete funcref/contref type index: form the nullable concrete
             // ref type and carry the `u32::MAX` handle. (Struct/array indices are
             // handled earlier by `ref_null_gc`, so anything reaching here is a

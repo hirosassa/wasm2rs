@@ -7,6 +7,7 @@
 //! Run a single former file with `cargo test --test it <name>` (the module
 //! name prefixes each test, e.g. `cont::`).
 
+mod bottom_ref_types;
 mod common;
 
 mod active_segment_init;

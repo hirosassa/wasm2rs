@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The bottom reference types `nullfuncref`, `nullexternref` and `nullexnref` (and `ref.null nofunc`/`noextern`/`noexn`)
+  are supported as value, global and table-element types; they lower like their top types.
 - A module may define tables next to an imported table: the imported table 0 stays host-owned
   (`Imports::table`/`table_mut`), the defined ones are `table1`, `table2`, ... fields of the
   instance. Several imported tables are still unsupported.
@@ -105,6 +107,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A module whose only GC reference values come from types (an `anyref`/`nullref` global, parameter, result,
+  local or table element, with no body creating one) now gets the managed `GcRef` model instead of failing
+  to compile.
 - With an imported memory 0 next to a defined memory, the active data segments are applied after
   construction in module order, and after the active elements, so a trapping segment leaves the
   earlier writes (and the elements) in the host storage as the spec says.
