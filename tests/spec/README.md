@@ -14,8 +14,10 @@ reference types, the `*64.wast` variants). The harness skips what it cannot repl
 reports it: modules importing anything but the standard `spectest` host (`print*`, the
 `global_*` constants, a 10-slot `table`, a 1-page `memory`, all replayed with a small
 host), `register` and the other modules' instances, `assert_invalid`/`assert_malformed`,
-multi-value results and GC reference types. A module-level `assert_trap (module ...)`
-is replayed as "instantiation traps". If a state-changing call is skipped, the rest of
+multi-value results and GC reference types. A module that grows an imported
+`spectest` table or memory is skipped (the host does not enforce their maximums). A
+module-level `assert_trap (module ...)` is replayed as "instantiation traps" (a stateless
+module has no instantiation, so it is skipped). If a state-changing call is skipped, the rest of
 that module's assertions are skipped too, so a skipped call never causes a false failure.
 
 Not vendored yet: `memory_grow64` and `memory_size` (`memory.grow` does not honor a

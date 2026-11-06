@@ -415,6 +415,33 @@ fn spectest_host(generated: &str, spectest: &SpectestImports) -> String {
     )
 }
 
+/// Whether a function body runs `table.grow` / `memory.grow` while the module
+/// imports `spectest.table` / `spectest.memory`. The host is a plain vector, so the
+/// real maximum (20 slots, 2 pages) is not enforced and the spec's failing grow
+/// would not be reproduced.
+fn grows_imported_spectest(wasm: &[u8], spectest: &SpectestImports) -> bool {
+    use wasmparser::{Operator, Payload};
+    wasmparser::Parser::new(0)
+        .parse_all(wasm)
+        .filter_map(Result::ok)
+        .filter_map(|payload| match payload {
+            Payload::CodeSectionEntry(body) => Some(body),
+            _ => None,
+        })
+        .flat_map(|body| {
+            body.get_operators_reader()
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>()
+        })
+        .any(|op| match op {
+            Operator::TableGrow { .. } => spectest.table,
+            Operator::MemoryGrow { .. } => spectest.memory,
+            _ => false,
+        })
+}
+
 fn encode_module(module: &mut QuoteWat<'_>) -> Result<Vec<u8>, String> {
     module.encode().map_err(|e| format!("encode failed: {e}"))
 }
@@ -449,6 +476,9 @@ fn start_group(wasm: Vec<u8>) -> Result<Group, String> {
     }
     if has_imports && !all_replayable {
         return Err("module has imports".into());
+    }
+    if (spectest.table || spectest.memory) && grows_imported_spectest(&wasm, &spectest) {
+        return Err("grows an imported spectest table or memory: its limit is not enforced".into());
     }
     let generated = wasm2rs::transpile(&wasm).map_err(|e| format!("transpile failed: {e:?}"))?;
     let stateful = generated.contains("pub struct Instance");
@@ -554,7 +584,9 @@ fn run_wast(name: &str, src: &str) -> Report {
                 message,
                 ..
             } => (
-                "assert_trap",
+                // Not a `state_call`: the trapping instance has its own host and
+                // cannot change the current module.
+                "assert_trap_module",
                 wat.encode()
                     .map_err(|e| format!("encode failed: {e}"))
                     .and_then(|wasm| trapping_instantiation(wasm, message, &ctx))
@@ -793,18 +825,98 @@ fn spectest_globals_are_replayed_with_their_standard_values() {
 }
 
 #[test]
-fn a_spectest_table_import_starts_with_its_declared_minimum_of_null_slots() {
+fn spectest_table_and_memory_have_their_actual_sizes_whatever_the_declared_minimum() {
     let report = run_wast(
-        "spec_spectest_table",
+        "spec_spectest_table_memory",
         r#"
 (module
-  (import "spectest" "table" (table 10 20 funcref))
-  (func (export "size") (result i32) (table.size 0)))
-(assert_return (invoke "size") (i32.const 10))
+  (import "spectest" "table" (table 0 funcref))
+  (import "spectest" "memory" (memory 0))
+  (func (export "table_size") (result i32) (table.size 0))
+  (func (export "memory_size") (result i32) (memory.size)))
+(assert_return (invoke "table_size") (i32.const 10))
+(assert_return (invoke "memory_size") (i32.const 1))
+"#,
+    );
+    assert_eq!(report.executed, 2);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+fn a_spectest_import_the_real_host_would_not_link_is_skipped() {
+    // The actual table is (10 20) and the memory (1 2): a larger minimum, or a
+    // maximum below the actual one, does not link.
+    for (i, import) in [
+        r#"(import "spectest" "table" (table 11 funcref))"#,
+        r#"(import "spectest" "table" (table 0 19 funcref))"#,
+        r#"(import "spectest" "memory" (memory 2))"#,
+        r#"(import "spectest" "memory" (memory 0 1))"#,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let report = run_wast(
+            &format!("spec_spectest_unlinkable_{i}"),
+            &format!(
+                "(module {import} (func (export \"f\") (result i32) (i32.const 1)))\n(assert_return (invoke \"f\") (i32.const 1))"
+            ),
+        );
+        assert_eq!(report.executed, 0, "{import}");
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.contains("module has imports")),
+            "{import}: {:?}",
+            report.skipped
+        );
+    }
+}
+
+#[test]
+fn growing_an_imported_spectest_table_or_memory_is_skipped() {
+    // The host is a plain vector, so the real maximum (20 slots, 2 pages) is not
+    // enforced and the spec's `-1` would not be reproduced.
+    for (i, wat) in [
+        r#"(import "spectest" "table" (table 10 funcref))
+           (func (export "g") (result i32) (table.grow (ref.null func) (i32.const 11)))"#,
+        r#"(import "spectest" "memory" (memory 1))
+           (func (export "g") (result i32) (memory.grow (i32.const 2)))"#,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let report = run_wast(
+            &format!("spec_spectest_grow_{i}"),
+            &format!("(module {wat})\n(assert_return (invoke \"g\") (i32.const -1))"),
+        );
+        assert_eq!(report.executed, 0, "{wat}");
+        assert!(
+            report.skipped.iter().any(|s| s.contains("limit")),
+            "{wat}: {:?}",
+            report.skipped
+        );
+    }
+}
+
+#[test]
+fn a_skipped_module_level_assert_trap_does_not_taint_the_current_module() {
+    let report = run_wast(
+        "spec_skipped_trap_module_no_taint",
+        r#"
+(module (func (export "f") (result i32) i32.const 1))
+(assert_trap
+  (module (import "env" "x" (func)) (func unreachable) (start 1))
+  "unreachable")
+(assert_return (invoke "f") (i32.const 1))
 "#,
     );
     assert_eq!(report.executed, 1);
-    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    assert!(
+        report.skipped.iter().any(|s| s.starts_with("assert_trap")),
+        "{:?}",
+        report.skipped
+    );
 }
 
 #[test]
