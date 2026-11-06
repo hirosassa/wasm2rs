@@ -892,3 +892,200 @@ fn a_writable_preopen_creates_writes_appends_and_truncates_files() {
         "created a file through a linked directory"
     );
 }
+
+/// The imports and path strings (at 300 to 507) of the tests that create, remove and
+/// rename entries. Each of these calls returns `result<_, error-code>`: the tag at
+/// `ret`, the error's tag byte at `ret + 1`.
+const REMOVE_IMPORTS: &str = r#"
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.create-directory-at" (func $mkdir_at (param i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.remove-directory-at" (func $rmdir_at (param i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.unlink-file-at" (func $unlink_at (param i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.rename-at" (func $rename_at (param i32 i32 i32 i32 i32 i32 i32)))
+  (data (i32.const 300) "made")
+  (data (i32.const 306) "nodir/child")
+  (data (i32.const 319) "outdir/evil")
+  (data (i32.const 332) "../wasm2rs_b_x")
+  (data (i32.const 348) "sub/")
+  (data (i32.const 354) "del.txt")
+  (data (i32.const 363) "emptydir")
+  (data (i32.const 373) "link_out")
+  (data (i32.const 383) "outdir/victim.txt")
+  (data (i32.const 402) "fulldir")
+  (data (i32.const 411) "ren_a.txt")
+  (data (i32.const 422) "outdir")
+  (data (i32.const 430) "fulldir/")
+  (data (i32.const 440) "ren_b.txt")
+  (data (i32.const 451) "made/in.txt")
+  (data (i32.const 464) "outdir/stolen.txt")
+  (data (i32.const 483) "mine.txt")
+  (data (i32.const 493) "missing")
+  (data (i32.const 502) "x.txt")
+"#;
+
+/// `fs_remove` runs on a writable root holding `del.txt`, `emptydir/`, `fulldir/f.txt`,
+/// `ren_a.txt`, a symlink `link_out` to a file outside the root and a symlink `outdir`
+/// to a directory outside it (holding `victim.txt`). Error codes: exist 7, invalid 12,
+/// is-directory 14, no-entry 20, not-directory 24, not-empty 25, not-permitted 31,
+/// read-only 33. `fs_denied` makes the same calls on a read-only root.
+const REMOVE: &str = r#"
+  (func $expect (param $code i32)
+    (if (i32.eqz (local.get $code))
+      (then (if (i32.load8_u (i32.const 220)) (then unreachable)))
+      (else
+        (if (i32.ne (i32.load8_u (i32.const 220)) (i32.const 1)) (then unreachable))
+        (if (i32.ne (i32.load8_u (i32.const 221)) (local.get $code)) (then unreachable)))))
+  (func $mkdir (param $dir i32) (param $p i32) (param $n i32) (param $ret i32)
+    (call $mkdir_at (local.get $dir) (local.get $p) (local.get $n) (local.get $ret)))
+  (func $rmdir (param $dir i32) (param $p i32) (param $n i32) (param $ret i32)
+    (call $rmdir_at (local.get $dir) (local.get $p) (local.get $n) (local.get $ret)))
+  (func $unlink (param $dir i32) (param $p i32) (param $n i32) (param $ret i32)
+    (call $unlink_at (local.get $dir) (local.get $p) (local.get $n) (local.get $ret)))
+  (func $rename (param $dir i32) (param $p i32) (param $n i32) (param $to i32) (param $q i32) (param $m i32) (param $ret i32)
+    (call $rename_at (local.get $dir) (local.get $p) (local.get $n) (local.get $to) (local.get $q) (local.get $m) (local.get $ret)))
+  (func (export "fs_remove") (local $dir i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $mkdir (local.get $dir) (i32.const 300) (i32.const 4) (i32.const 220))
+    (call $expect (i32.const 0))
+    (call $mkdir (local.get $dir) (i32.const 300) (i32.const 4) (i32.const 220))
+    (call $expect (i32.const 7))
+    (call $mkdir (local.get $dir) (i32.const 306) (i32.const 11) (i32.const 220))
+    (call $expect (i32.const 20))
+    (call $mkdir (local.get $dir) (i32.const 319) (i32.const 11) (i32.const 220))
+    (call $expect (i32.const 31))
+    (call $mkdir (local.get $dir) (i32.const 332) (i32.const 14) (i32.const 220))
+    (call $expect (i32.const 31))
+    (call $mkdir (local.get $dir) (i32.const 348) (i32.const 4) (i32.const 220))
+    (call $expect (i32.const 12))
+    (call $unlink (local.get $dir) (i32.const 354) (i32.const 7) (i32.const 220))
+    (call $expect (i32.const 0))
+    (call $unlink (local.get $dir) (i32.const 354) (i32.const 7) (i32.const 220))
+    (call $expect (i32.const 20))
+    (call $unlink (local.get $dir) (i32.const 363) (i32.const 8) (i32.const 220))
+    (call $expect (i32.const 14))
+    (call $unlink (local.get $dir) (i32.const 373) (i32.const 8) (i32.const 220))
+    (call $expect (i32.const 0))
+    (call $unlink (local.get $dir) (i32.const 383) (i32.const 17) (i32.const 220))
+    (call $expect (i32.const 31))
+    (call $unlink (local.get $dir) (i32.const 332) (i32.const 14) (i32.const 220))
+    (call $expect (i32.const 31))
+    (call $rmdir (local.get $dir) (i32.const 363) (i32.const 8) (i32.const 220))
+    (call $expect (i32.const 0))
+    (call $rmdir (local.get $dir) (i32.const 402) (i32.const 7) (i32.const 220))
+    (call $expect (i32.const 25))
+    (call $rmdir (local.get $dir) (i32.const 411) (i32.const 9) (i32.const 220))
+    (call $expect (i32.const 24))
+    (call $rmdir (local.get $dir) (i32.const 422) (i32.const 6) (i32.const 220))
+    (call $expect (i32.const 24))
+    (call $rmdir (local.get $dir) (i32.const 430) (i32.const 8) (i32.const 220))
+    (call $expect (i32.const 12))
+    (call $rename (local.get $dir) (i32.const 411) (i32.const 9) (local.get $dir) (i32.const 440) (i32.const 9) (i32.const 220))
+    (call $expect (i32.const 0))
+    (call $rename (local.get $dir) (i32.const 440) (i32.const 9) (local.get $dir) (i32.const 451) (i32.const 11) (i32.const 220))
+    (call $expect (i32.const 0))
+    (call $rename (local.get $dir) (i32.const 451) (i32.const 11) (local.get $dir) (i32.const 464) (i32.const 17) (i32.const 220))
+    (call $expect (i32.const 31))
+    (call $rename (local.get $dir) (i32.const 383) (i32.const 17) (local.get $dir) (i32.const 483) (i32.const 8) (i32.const 220))
+    (call $expect (i32.const 31))
+    (call $rename (local.get $dir) (i32.const 493) (i32.const 7) (local.get $dir) (i32.const 502) (i32.const 5) (i32.const 220))
+    (call $expect (i32.const 20)))
+  (func (export "fs_denied") (local $dir i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $mkdir (local.get $dir) (i32.const 300) (i32.const 4) (i32.const 220))
+    (call $expect (i32.const 33))
+    (call $unlink (local.get $dir) (i32.const 354) (i32.const 7) (i32.const 220))
+    (call $expect (i32.const 33))
+    (call $rmdir (local.get $dir) (i32.const 363) (i32.const 8) (i32.const 220))
+    (call $expect (i32.const 33))
+    (call $rename (local.get $dir) (i32.const 411) (i32.const 9) (local.get $dir) (i32.const 502) (i32.const 5) (i32.const 220))
+    (call $expect (i32.const 33)))
+"#;
+
+/// A root for the remove/rename tests, and the files and directories outside it that
+/// they must not touch: `outside/wasm2rs_b_outfile.txt` (behind `link_out`) and
+/// `outside/wasm2rs_b_outdir/victim.txt` (behind `outdir`).
+#[cfg(unix)]
+fn remove_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let root = std::env::temp_dir().join(format!("wasm2rs_wasip2_{name}_root"));
+    let outside = std::env::temp_dir().join(format!("wasm2rs_wasip2_{name}_outside"));
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(&outside).ok();
+    std::fs::create_dir_all(root.join("emptydir")).unwrap();
+    std::fs::create_dir_all(root.join("fulldir")).unwrap();
+    std::fs::create_dir_all(outside.join("dir")).unwrap();
+    std::fs::write(root.join("del.txt"), "d").unwrap();
+    std::fs::write(root.join("fulldir/f.txt"), "f").unwrap();
+    std::fs::write(root.join("ren_a.txt"), "moved").unwrap();
+    std::fs::write(outside.join("file.txt"), "keep").unwrap();
+    std::fs::write(outside.join("dir/victim.txt"), "keep").unwrap();
+    std::os::unix::fs::symlink(outside.join("file.txt"), root.join("link_out")).unwrap();
+    std::os::unix::fs::symlink(outside.join("dir"), root.join("outdir")).unwrap();
+    (root, outside)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_writable_preopen_creates_and_removes_directories_and_renames_entries() {
+    let (root, outside) = remove_fixture("remove");
+    let bin = compile(
+        "fs_remove",
+        &hello_with(REMOVE_IMPORTS, REMOVE),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_remove();",
+    );
+    run_ok(&bin);
+    assert!(root.join("made").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(root.join("made/in.txt")).unwrap(),
+        "moved"
+    );
+    for gone in ["del.txt", "emptydir", "ren_a.txt", "ren_b.txt", "link_out"] {
+        assert!(
+            root.join(gone).symlink_metadata().is_err(),
+            "{gone} is still there"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("fulldir/f.txt")).unwrap(),
+        "f"
+    );
+    // nothing outside the root changed, and the link to the directory is still a link
+    assert_eq!(
+        std::fs::read_to_string(outside.join("file.txt")).unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.join("dir/victim.txt")).unwrap(),
+        "keep"
+    );
+    assert_eq!(std::fs::read_dir(outside.join("dir")).unwrap().count(), 1);
+    assert!(
+        root.join("outdir")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!root.join("mine.txt").exists());
+    assert!(!outside.parent().unwrap().join("wasm2rs_b_x").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_preopen_refuses_to_create_remove_and_rename() {
+    let (root, outside) = remove_fixture("denied");
+    let bin = compile(
+        "fs_denied",
+        &hello_with(REMOVE_IMPORTS, REMOVE),
+        &preopen_host(&root),
+        "inst.fs_denied();",
+    );
+    run_ok(&bin);
+    assert!(!root.join("made").exists());
+    for kept in ["del.txt", "emptydir", "ren_a.txt", "fulldir"] {
+        assert!(root.join(kept).exists(), "{kept} was removed");
+    }
+    assert!(outside.join("file.txt").exists());
+}

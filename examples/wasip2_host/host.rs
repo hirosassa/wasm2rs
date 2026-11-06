@@ -26,8 +26,9 @@
 // its output stream the same into `outputs`. Paths are resolved against the preopen and
 // must stay under it: absolute paths and `..` are refused (`not-permitted`), and so are
 // symlinks that lead out. Anything that would write is refused with `read-only`; with a
-// writable preopen, files can be created, written, appended to and truncated (not yet
-// removed or renamed).
+// writable preopen, files can be created, written, appended to, truncated, removed and
+// renamed, and directories created and removed (symlinks are never followed for the
+// last name).
 // `stat`, `get-flags`, `metadata-hash` and directory listings work on the same paths.
 // `resource-drop` frees a handle's slot, which the next resource of its kind reuses; a guest
 // must not use a handle after dropping it (see docs/component-model-poc.md).
@@ -192,31 +193,51 @@ impl P2Host {
         if full.starts_with(root) { Ok(full) } else { Err(code::NOT_PERMITTED) }
     }
 
+    /// The entry `path` names under the directory behind descriptor `dir`, without
+    /// following it if it is a symlink: its parent directory must exist and resolve
+    /// under the preopen, and the name is joined to it. The entry itself need not
+    /// exist. Absolute paths and `..` are `not-permitted`; a name ending in `/` or `/.`
+    /// names a directory, which `file_name` would silently drop, so it is `invalid`.
+    #[allow(dead_code)]
+    fn resolve_entry(&self, dir: i32, path: &str) -> Result<PathBuf, u8> {
+        let root = self.root.as_ref().ok_or(code::NOT_PERMITTED)?;
+        let base = self.descriptor(dir)?;
+        let relative = Path::new(path);
+        if relative.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
+            return Err(code::NOT_PERMITTED);
+        }
+        if path.ends_with('/') || path.ends_with("/.") {
+            return Err(code::INVALID);
+        }
+        let name = relative.file_name().ok_or(code::INVALID)?;
+        let parent = relative.parent().unwrap_or(Path::new(""));
+        let parent = base.join(parent).canonicalize().map_err(io_error_code)?;
+        if parent.starts_with(root) { Ok(parent.join(name)) } else { Err(code::NOT_PERMITTED) }
+    }
+
     /// Like `resolve`, for a file that `open-at` may create: if `path` does not exist,
-    /// its parent directory must exist under the preopen, and the file is named there.
-    /// A symlink that leads nowhere (or out of the preopen) is `not-permitted`, not a
-    /// place to create a file.
+    /// it is named in its parent directory (see `resolve_entry`). A symlink that leads
+    /// nowhere (or out of the preopen) is `not-permitted`, not a place to create a file.
     #[allow(dead_code)]
     fn resolve_to_create(&self, dir: i32, path: &str) -> Result<PathBuf, u8> {
         match self.resolve(dir, path) {
             Err(code::NO_ENTRY) => {}
             found => return found,
         }
-        let root = self.root.as_ref().ok_or(code::NOT_PERMITTED)?;
-        // `resolve` has already refused `..` and absolute paths. A name that ends in `/`
-        // or `/.` names a directory, which `file_name` would silently drop.
-        if path.ends_with('/') || path.ends_with("/.") {
-            return Err(code::INVALID);
-        }
-        let relative = Path::new(path);
-        let name = relative.file_name().ok_or(code::INVALID)?;
-        let parent = relative.parent().unwrap_or(Path::new(""));
-        let parent = self.descriptor(dir)?.join(parent).canonicalize().map_err(io_error_code)?;
-        let full = parent.join(name);
-        if !parent.starts_with(root) || full.symlink_metadata().is_ok() {
-            return Err(code::NOT_PERMITTED);
-        }
-        Ok(full)
+        let full = self.resolve_entry(dir, path)?;
+        if full.symlink_metadata().is_ok() { Err(code::NOT_PERMITTED) } else { Ok(full) }
+    }
+
+    /// `Ok` if the preopen is writable, else `read-only`.
+    #[allow(dead_code)]
+    fn require_writable(&self) -> Result<(), u8> {
+        if self.writable { Ok(()) } else { Err(code::READ_ONLY) }
+    }
+
+    /// Like `resolve_entry`, for the path given as `(ptr, len)` in guest memory.
+    #[allow(dead_code)]
+    fn entry_at(&self, g: &mut Guest, dir: i32, ptr: i32, len: i32) -> Result<PathBuf, u8> {
+        self.resolve_entry(dir, &get_str(g, ptr, len).ok_or(code::IO)?)
     }
 
     /// The file behind a descriptor opened for `write`, opened for writing (`append`:
@@ -406,6 +427,7 @@ mod code {
     pub const IS_DIRECTORY: u8 = 14;
     pub const NO_ENTRY: u8 = 20;
     pub const NOT_DIRECTORY: u8 = 24;
+    pub const NOT_EMPTY: u8 = 25;
     pub const NOT_PERMITTED: u8 = 31;
     pub const READ_ONLY: u8 = 33;
 }
@@ -417,6 +439,9 @@ fn io_error_code(e: std::io::Error) -> u8 {
         NotFound => code::NO_ENTRY,
         PermissionDenied => code::ACCESS,
         AlreadyExists => code::EXIST,
+        DirectoryNotEmpty => code::NOT_EMPTY,
+        NotADirectory => code::NOT_DIRECTORY,
+        IsADirectory => code::IS_DIRECTORY,
         _ => code::IO,
     }
 }
@@ -474,6 +499,15 @@ fn zero_tag(g: &mut Guest, ptr: i32) {
 fn fs_error(g: &mut Guest, ret: i32, payload: i32, code: u8) {
     put(g, ret, &[1]);
     put(g, ret + payload, &[code]);
+}
+
+/// `result<_, error-code>` at `ret`: the error's tag byte is at `ret + 1`.
+#[allow(dead_code)]
+fn put_status(g: &mut Guest, ret: i32, status: Result<(), u8>) {
+    match status {
+        Ok(()) => zero_tag(g, ret),
+        Err(c) => fs_error(g, ret, 1, c),
+    }
 }
 
 /// `result<handle, error-code>::ok` at `ret`.
@@ -955,6 +989,92 @@ impl Imports for P2Host {
     ) {
         let opened = self.writable_file(descriptor, true);
         self.put_output_stream(g, ret, opened);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_create_directory_at
+    /// `create-directory-at(path)` -> `result<_, error-code>`: `exist` if it is there.
+    /// This and the three below change the preopen: `read-only` unless it is writable,
+    /// and a symlink is never followed to its target.
+    fn wasi_filesystem_types_method_descriptor_create_directory_at(
+        &mut self,
+        g: &mut Guest,
+        dir: i32,
+        ptr: i32,
+        len: i32,
+        ret: i32,
+    ) {
+        let done = self
+            .require_writable()
+            .and_then(|()| self.entry_at(g, dir, ptr, len))
+            .and_then(|entry| std::fs::create_dir(entry).map_err(io_error_code));
+        put_status(g, ret, done);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_unlink_file_at
+    /// `unlink-file-at(path)`: removes a file or a symlink (the link, not its target);
+    /// a directory is `is-directory`.
+    fn wasi_filesystem_types_method_descriptor_unlink_file_at(
+        &mut self,
+        g: &mut Guest,
+        dir: i32,
+        ptr: i32,
+        len: i32,
+        ret: i32,
+    ) {
+        let done = self.require_writable().and_then(|()| self.entry_at(g, dir, ptr, len)).and_then(|entry| {
+            if entry.symlink_metadata().map_err(io_error_code)?.is_dir() {
+                return Err(code::IS_DIRECTORY);
+            }
+            std::fs::remove_file(entry).map_err(io_error_code)
+        });
+        put_status(g, ret, done);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_remove_directory_at
+    /// `remove-directory-at(path)`: an empty directory only (`not-empty`); anything else,
+    /// a symlink to a directory included, is `not-directory`.
+    fn wasi_filesystem_types_method_descriptor_remove_directory_at(
+        &mut self,
+        g: &mut Guest,
+        dir: i32,
+        ptr: i32,
+        len: i32,
+        ret: i32,
+    ) {
+        let done = self.require_writable().and_then(|()| self.entry_at(g, dir, ptr, len)).and_then(|entry| {
+            if !entry.symlink_metadata().map_err(io_error_code)?.is_dir() {
+                return Err(code::NOT_DIRECTORY);
+            }
+            std::fs::remove_dir(entry).map_err(io_error_code)
+        });
+        put_status(g, ret, done);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_rename_at
+    /// `rename-at(old-path, new-descriptor, new-path)`: both names are checked like any
+    /// other entry; an existing target file is replaced.
+    fn wasi_filesystem_types_method_descriptor_rename_at(
+        &mut self,
+        g: &mut Guest,
+        dir: i32,
+        old_ptr: i32,
+        old_len: i32,
+        new_dir: i32,
+        new_ptr: i32,
+        new_len: i32,
+        ret: i32,
+    ) {
+        let done = self.require_writable().and_then(|()| {
+            let old = self.entry_at(g, dir, old_ptr, old_len)?;
+            let new = self.entry_at(g, new_dir, new_ptr, new_len)?;
+            old.symlink_metadata().map_err(io_error_code)?;
+            std::fs::rename(old, new).map_err(io_error_code)
+        });
+        put_status(g, ret, done);
     }
     // end optional
 

@@ -185,9 +185,16 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   leads nowhere or out (even a dangling one) is `not-permitted`, not a place to create
   a file. The path is checked when the file is opened, not held open: a program that
   swaps a directory for a symlink between the check and the open can escape, so only
-  preopen a directory you trust the program with. Deleting, `create-directory-at`,
-  `rename-at`, `set-times`, `sync` and the like are not done yet (`unsupported` or
-  `read-only`).
+  preopen a directory you trust the program with.
+- With a writable preopen, `create-directory-at`, `unlink-file-at`,
+  `remove-directory-at` and `rename-at` work too (`std::fs::create_dir(_all)`,
+  `remove_file`, `remove_dir(_all)`, `rename`). The name is resolved like a created
+  file's (parent under the preopen; `..`, absolute paths and names ending in `/` or
+  `/.` refused), and the entry itself is never followed: `unlink` removes a symlink,
+  not its target, and `remove-directory-at` on a symlink is `not-directory`. Errors:
+  `exist`, `no-entry`, `is-directory`, `not-directory`, `not-empty`. On a read-only
+  preopen all four are `read-only`. `set-times`, `set-size`, `sync` and the like are
+  not done yet.
 - Paths must stay under the preopen: an absolute path or any `..` is `not-permitted`
   (stricter than WASI, which allows `..` that stays inside), and so is a symlink that
   leads out (the resolved path is checked against the preopen). Path flags are
@@ -218,7 +225,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
    everything below. *Done: `named_imports` / `--named-imports`.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
-   generated or companion module, with a handle table. Writing files is partly done (Result 7); removing and renaming are further steps. This is what makes a wasip2 hello-world run natively.
+   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times` and `sync` are not. This is what makes a wasip2 hello-world run natively.
 4. **Full component support** (very large): parse the component, resolve instances
    and `canon lift/lower` per the spec, and generate glue for arbitrary WIT worlds.
    Months of work; only worth it if general components are a goal.
