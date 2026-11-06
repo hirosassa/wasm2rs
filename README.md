@@ -89,7 +89,7 @@ wasm2rs --extract-core <component.wasm> <output dir>
 | `--import-memory` | Make the module's own (defined, non-shared) memory 0 host-owned, like an imported memory: the host lends the buffer through `Imports::memory`/`memory_mut` (at least the declared minimum number of pages), so its own methods can read and write guest memory. Active data segments are written into it at instantiation and `memory.grow` resizes it. Needed for imports that take pointers into linear memory, such as the lowered functions of a WASI preview2 component. No effect on a shared memory, a module that already imports its memory, or one without memory. |
 | `--reentrant-imports` | Let the host call back into the guest while an import runs: every `Imports` method takes the `Instance` as its second parameter (`g: &mut Instance<Self>`), so it can call guest functions (`g.func{N}(..)`, e.g. a canonical-ABI `cabi_realloc`) and read or write guest memory (`g.memory()`). The host is lent out for the call, so a guest function reached from inside an import that calls an import again traps. Cannot be combined with `--import-memory`, an imported memory, table or global, or the native `wasi::thread-spawn`. No effect without a host function import. Changes every `Imports` method signature, so it is off by default. |
 | `--extract-core` | Write the core modules of a WebAssembly component to `<output dir>/module{n}.wasm` (in order, nested components included) and list their sizes; each one is a plain module that wasm2rs can transpile. Takes the input and the directory. A component is not transpiled directly. |
-| `--dump` | Print a summary of the module (function/import/export counts, how each import resolves — native WASI or host trait —, memory limits, proposals in use, whether a host `Imports` implementation is needed) and generate no code. Takes only the input file. Works for modules the transpiler would reject. |
+| `--dump` | Print a summary of the module (function/import/export counts, how each import resolves — native WASI or host trait —, memory limits, proposals in use, whether a host `Imports` implementation is needed) and generate no code. Takes only the input file (the flags that change the generated code are refused, not ignored). Works for modules the transpiler would reject. |
 
 ### Examples
 
@@ -173,7 +173,7 @@ mod foo {
 }
 ```
 
-The path (a plain or raw string literal) is relative to `CARGO_MANIFEST_DIR` (a leading `$OUT_DIR/` refers to a file a build script wrote). The options are `named_exports` and `unsafe_memory`. The generated source is parsed into tokens at compile time, so for very large modules prefer `build.rs` with `include!`.
+The path (a plain or raw string literal) is relative to `CARGO_MANIFEST_DIR` (a leading `$OUT_DIR/` refers to a file a build script wrote). The options are `named_exports`, `unsafe_memory`, `named_imports`, `import_memory` and `reentrant_imports`, with the meaning of the CLI flags of the same name (an invalid combination is a compile error). The generated source is parsed into tokens at compile time, so for very large modules prefer `build.rs` with `include!`.
 
 The `mimalloc` allocator is behind the default `cli` feature. Depend on the crate with `default-features = false` to use it as a library without compiling mimalloc.
 

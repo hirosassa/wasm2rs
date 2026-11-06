@@ -202,6 +202,38 @@ fn the_dump_flag_rejects_an_output_path() {
     );
 }
 
+/// Every flag that only changes the generated code: `--dump` generates none, so it
+/// refuses them instead of silently ignoring them.
+#[test]
+fn the_dump_flag_rejects_code_generation_flags() {
+    let input = write_wasm("cli_flags");
+    for flag in [
+        "--unsafe-memory",
+        "--named-exports",
+        "--named-imports",
+        "--import-memory",
+        "--reentrant-imports",
+        "--split-dispatch=4",
+        "--jobs=2",
+        "--entry-exports=a",
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_wasm2rs"))
+            .arg("--dump")
+            .arg(flag)
+            .arg(&input)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{flag} was accepted");
+        let name = flag.split('=').next().unwrap();
+        assert!(
+            stderr.contains("--dump") && stderr.contains(name),
+            "{flag}: {stderr}"
+        );
+        assert!(out.stdout.is_empty(), "{flag} printed a summary");
+    }
+}
+
 #[test]
 fn an_imported_tag_is_listed_but_does_not_need_the_host_trait() {
     let text = summary(r#"(module (import "env" "e" (tag (param i32))))"#);
