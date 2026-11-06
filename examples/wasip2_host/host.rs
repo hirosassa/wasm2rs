@@ -256,6 +256,50 @@ impl P2Host {
         opened.map_err(io_error_code)
     }
 
+    /// Flushes the file or directory behind a descriptor to disk (`data_only`: without
+    /// its metadata).
+    #[allow(dead_code)]
+    fn sync_descriptor(&self, descriptor: i32, data_only: bool) -> Result<(), u8> {
+        let file = std::fs::File::open(self.descriptor(descriptor)?).map_err(io_error_code)?;
+        let synced = if data_only { file.sync_data() } else { file.sync_all() };
+        synced.map_err(io_error_code)
+    }
+
+    /// Sets the times of the file or directory behind a descriptor, each a
+    /// `(tag, seconds, nanoseconds)` `new-timestamp`: `no-change` 0, `now` 1, `timestamp` 2.
+    /// A preopen that is not writable is `read-only`; nanoseconds of a second or more are
+    /// `invalid`.
+    #[allow(dead_code)]
+    fn touch(
+        &self,
+        descriptor: i32,
+        access: (i32, i64, i32),
+        modification: (i32, i64, i32),
+    ) -> Result<(), u8> {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        self.require_writable()?;
+        let path = self.descriptor(descriptor)?;
+        let time = |(tag, seconds, nanos): (i32, i64, i32)| match tag {
+            0 => Ok(None),
+            1 => Ok(Some(SystemTime::now())),
+            _ if !(0..1_000_000_000).contains(&nanos) => Err(code::INVALID),
+            _ => {
+                let since = Duration::new(seconds as u64, nanos as u32);
+                UNIX_EPOCH.checked_add(since).map(Some).ok_or(code::INVALID)
+            }
+        };
+        let (access, modification) = (time(access)?, time(modification)?);
+        let mut times = std::fs::FileTimes::new();
+        if let Some(t) = access {
+            times = times.set_accessed(t);
+        }
+        if let Some(t) = modification {
+            times = times.set_modified(t);
+        }
+        let file = std::fs::File::open(path).map_err(io_error_code)?;
+        file.set_times(times).map_err(io_error_code)
+    }
+
     /// `result<output-stream, error-code>` at `ret`: a new stream over `opened`, or the error.
     #[allow(dead_code)]
     fn put_output_stream(&mut self, g: &mut Guest, ret: i32, opened: Result<std::fs::File, u8>) {
@@ -1079,6 +1123,63 @@ impl Imports for P2Host {
             std::fs::rename(old, new).map_err(io_error_code)
         });
         put_status(g, ret, done);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_set_size
+    /// `set-size(size)` -> `result<_, error-code>`: truncates or zero-extends the file.
+    /// Like writing, it needs a writable preopen and a descriptor opened for `write`.
+    fn wasi_filesystem_types_method_descriptor_set_size(
+        &mut self,
+        g: &mut Guest,
+        descriptor: i32,
+        size: i64,
+        ret: i32,
+    ) {
+        let resized = self
+            .writable_file(descriptor, false)
+            .and_then(|file| file.set_len(size as u64).map_err(io_error_code));
+        put_status(g, ret, resized);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_sync
+    /// `sync` -> `result<_, error-code>`: flushes the file or directory to disk. It
+    /// changes nothing, so a read-only preopen allows it.
+    fn wasi_filesystem_types_method_descriptor_sync(&mut self, g: &mut Guest, d: i32, ret: i32) {
+        let synced = self.sync_descriptor(d, false);
+        put_status(g, ret, synced);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_sync_data
+    /// `sync-data` -> `result<_, error-code>`: like `sync`, without the metadata.
+    fn wasi_filesystem_types_method_descriptor_sync_data(&mut self, g: &mut Guest, d: i32, ret: i32) {
+        let synced = self.sync_descriptor(d, true);
+        put_status(g, ret, synced);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_set_times
+    /// `set-times(access, modification)` -> `result<_, error-code>`. Each time is a
+    /// `new-timestamp`, flattened to a tag (`no-change` 0, `now` 1, `timestamp` 2), the
+    /// seconds and the nanoseconds. Needs a writable preopen; works on files and directories.
+    fn wasi_filesystem_types_method_descriptor_set_times(
+        &mut self,
+        g: &mut Guest,
+        descriptor: i32,
+        access_tag: i32,
+        access_seconds: i64,
+        access_nanos: i32,
+        modification_tag: i32,
+        modification_seconds: i64,
+        modification_nanos: i32,
+        ret: i32,
+    ) {
+        let access = (access_tag, access_seconds, access_nanos);
+        let modification = (modification_tag, modification_seconds, modification_nanos);
+        let touched = self.touch(descriptor, access, modification);
+        put_status(g, ret, touched);
     }
     // end optional
 
