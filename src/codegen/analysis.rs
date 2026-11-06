@@ -455,6 +455,7 @@ pub(crate) fn is_abstract_u32_ref(rt: wasmparser::RefType) -> bool {
         || is_cont_heap(rt.heap_type())
         || is_bottom_u32_heap(rt.heap_type())
 }
+
 /// Whether a heap type is the abstract `cont` type: a `contref` is a `u32` handle
 /// into the continuation store, like a concrete continuation reference.
 pub(crate) fn is_cont_heap(hty: HeapType) -> bool {

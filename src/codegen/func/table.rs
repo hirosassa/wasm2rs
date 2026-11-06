@@ -379,7 +379,7 @@ impl<'a> super::FuncGen<'a> {
             // hierarchy) and `contref` is a `u32` handle: keep the type as written.
             hty if is_bottom_u32_heap(hty) || is_cont_heap(hty) => {
                 ValType::Ref(RefType::new(true, hty).ok_or_else(|| {
-                    TranspileError::Unsupported("ref.null: bottom reference type".into())
+                    TranspileError::Unsupported("ref.null: reference type".into())
                 })?)
             }
             // A concrete funcref/contref type index: form the nullable concrete

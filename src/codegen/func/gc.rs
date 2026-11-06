@@ -634,8 +634,9 @@ impl super::FuncGen<'_> {
     /// (`any`/`eq`/`i31`/`struct`/`array`/`none`); the `i31`, `struct` and
     /// `array` cases separate the `GcRef::I31` and `GcRef::Obj` variants.
     /// `null_matches` picks how the null handle is classified (a nullable target
-    /// matches null). A concrete function type target is unsupported here: a
-    /// `u32` handle carries no runtime type to compare against.
+    /// matches null). A concrete function type target compares signatures (see
+    /// `func_heap_test`); a concrete continuation type target is unsupported, as a
+    /// continuation handle carries no runtime type.
     fn gc_heap_test(
         &self,
         ref_expr: &str,
@@ -681,14 +682,7 @@ impl super::FuncGen<'_> {
             // function's signature (as for `call_indirect`), so a concrete function
             // type matches exactly the functions of that signature. An external
             // handle (high bit set) is no local index and never matches.
-            HeapType::Concrete(idx)
-                if idx.as_module_index().is_some_and(|i| {
-                    matches!(
-                        self.ctx.type_kinds.get(i as usize),
-                        Some(CompositeKind::Func)
-                    )
-                }) =>
-            {
+            HeapType::Concrete(idx) if self.is_func_type(idx.as_module_index()) => {
                 return self.func_heap_test(ref_expr, idx.as_module_index(), null_matches);
             }
             HeapType::Concrete(_) => {
@@ -711,6 +705,16 @@ impl super::FuncGen<'_> {
         ))
     }
 
+    /// Whether the type index names a function type.
+    fn is_func_type(&self, idx: Option<u32>) -> bool {
+        idx.is_some_and(|i| {
+            matches!(
+                self.ctx.type_kinds.get(i as usize),
+                Some(CompositeKind::Func)
+            )
+        })
+    }
+
     /// The Rust condition testing that the `u32` funcref `ref_expr` is a function
     /// whose signature equals the function type `idx` (or null, when
     /// `null_matches`).
@@ -723,6 +727,28 @@ impl super::FuncGen<'_> {
         let sig = idx
             .and_then(|i| self.ctx.types.get(i as usize))
             .ok_or_else(|| TranspileError::Unsupported("ref cast/test: unknown type".into()))?;
+        if !self.ctx.plain_func_types {
+            return Err(TranspileError::Unsupported(
+                "ref cast/test to a function type with declared function subtyping \
+                 (a `sub`, non-final or rec-grouped function type)"
+                    .into(),
+            ));
+        }
+        if sig.params.iter().chain(&sig.results).any(
+            |t| matches!(t, ValType::Ref(rt) if matches!(rt.heap_type(), HeapType::Concrete(_))),
+        ) {
+            return Err(TranspileError::Unsupported(
+                "ref cast/test to a function type with a concrete reference in its signature"
+                    .into(),
+            ));
+        }
+        if self.ctx.has_imports {
+            return Err(TranspileError::Unsupported(
+                "ref cast/test to a function type in a module with a host: external function \
+                 handles carry no signature"
+                    .into(),
+            ));
+        }
         let targets: Vec<String> = self
             .ctx
             .funcs_with_sig(&sig.params, &sig.results)

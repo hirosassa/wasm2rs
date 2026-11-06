@@ -11,8 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `ref.test`, `ref.cast` and `br_on_cast` against a concrete function type: a funcref is a
   function-index handle, so (as for `call_indirect`) it matches when its function's signature
-  equals the target's; null follows the target's nullability and an external handle never matches.
-  A test against a concrete continuation type is still unsupported.
+  equals the target's; null follows the target's nullability. This is exact only when every
+  function type is final, has no supertype and sits alone in its rec group, the target signature
+  has no concrete reference, and the module has no host (an external funcref carries no
+  signature); otherwise the cast is rejected as unsupported. A test against a concrete
+  continuation type is also unsupported.
 - The abstract `contref` type and `ref.null cont`: a `u32` handle like a concrete continuation
   reference.
 - `ref.null nocont` / `nullcontref`: the bottom of the continuation hierarchy lowers to the same

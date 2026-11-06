@@ -5,6 +5,7 @@
 
 use crate::common;
 
+// Funcs: `$inc`=0, `$nop`=1, then the exports from func2.
 const MODULE: &str = r#"(module
   (type $unary (func (param i32) (result i32)))
   (type $nullary (func))
@@ -36,7 +37,6 @@ const MODULE: &str = r#"(module
 
 #[test]
 fn ref_test_on_a_concrete_function_type_compares_signatures() {
-    // Funcs: `$inc`=0, `$nop`=1, then the exports from func2.
     common::compile_run(
         "func_cast_test",
         MODULE,

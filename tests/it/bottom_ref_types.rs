@@ -183,7 +183,9 @@ fn the_abstract_contref_type_is_a_u32_handle_like_a_concrete_cont() {
           (type $ft (func))
           (type $ct (cont $ft))
           (global $g (mut contref) (ref.null cont))
-          (func $id (param contref) (result contref) (local $l contref) (local.get 0))
+          (func $id (param contref) (result contref)
+            (local $l contref) ;; a contref local starts null
+            (local.get 0))
           (func (export "null_is_null") (result i32) (ref.is_null (ref.null cont)))
           (func (export "via_global") (result i32) (ref.is_null (global.get $g)))
           (func (export "via_param") (result i32) (ref.is_null (call $id (ref.null cont))))

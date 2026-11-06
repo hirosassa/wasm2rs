@@ -70,6 +70,8 @@ pub(crate) struct ModuleCtx<'a> {
     /// once so each `ref.test`/`ref.cast` site looks it up instead of walking
     /// the whole hierarchy.
     descendants: Vec<Vec<u32>>,
+    /// See [`ModuleParts::plain_func_types`].
+    pub(crate) plain_func_types: bool,
     /// Per-imported-global `(type, mutable)`, occupying the low global indices.
     pub(crate) imported_globals: Vec<(ValType, bool)>,
     /// Per-defined-global `(type, mutable)`, indexed after the imported globals.
@@ -221,6 +223,9 @@ pub(crate) struct ModuleParts<'a> {
     /// The declared direct supertype of every type index (`None` when none),
     /// parallel to `type_kinds`. Drives the runtime subtype checks.
     pub(crate) supers: &'a [Option<u32>],
+    /// Whether every function type is final, has no supertype and sits alone in its
+    /// rec group, so a function's signature identifies its type.
+    pub(crate) plain_func_types: bool,
     pub(crate) globals: &'a [GlobalInfo],
     /// Every linear memory, in index order (imported memories first, then
     /// defined). Empty when the module declares none.
@@ -269,6 +274,7 @@ pub(crate) fn build_ctx<'a>(
         types,
         type_kinds,
         supers,
+        plain_func_types,
         globals,
         memories,
         data,
@@ -406,6 +412,7 @@ pub(crate) fn build_ctx<'a>(
         types,
         type_kinds,
         descendants: index_descendants(type_kinds, supers),
+        plain_func_types,
         imported_globals: imported_globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,
