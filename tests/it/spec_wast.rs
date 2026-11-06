@@ -820,6 +820,11 @@ macro_rules! spec_known_gap {
 
 spec_test! {
     spec_br_table => "br_table",
+    spec_elem => "elem",
+    spec_data => "data",
+    spec_ref_null => "ref_null",
+    spec_unreached_valid => "unreached-valid",
+    spec_stack => "stack",
     spec_i32 => "i32",
     spec_i64 => "i64",
     spec_f32 => "f32",
