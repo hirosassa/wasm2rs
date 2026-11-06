@@ -22,8 +22,7 @@ that module's assertions are skipped too, so a skipped call never causes a false
 
 Not vendored yet: `memory_grow64` and `memory_size` (`memory.grow` does not honor a
 memory's declared maximum), `table` and `ref_func` (nothing would run: their modules
-need `register`, an imported table next to other tables, or typed reference tables),
-`return_call*`, `type` (only `assert_malformed`) and `names` (the `wast` parser's
+need `register`), `return_call*`, `type` (only `assert_malformed`) and `names` (the `wast` parser's
 confusing-unicode lint rejects it). `global`, `elem` and `data` are vendored but
 replay only part of their assertions.
 

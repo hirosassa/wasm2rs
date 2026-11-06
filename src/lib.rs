@@ -935,7 +935,10 @@ fn is_supported_table_element(
     element: wasmparser::RefType,
     type_kinds: &[codegen::CompositeKind],
 ) -> bool {
-    if element.is_func_ref() || element.is_extern_ref() || codegen::is_exn_heap(element.heap_type())
+    if element.is_func_ref()
+        || element.is_extern_ref()
+        || codegen::is_exn_heap(element.heap_type())
+        || codegen::is_bottom_u32_heap(element.heap_type())
     {
         return true;
     }

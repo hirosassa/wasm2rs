@@ -18,7 +18,41 @@ pub(crate) fn declares_gc_types(type_kinds: &[CompositeKind]) -> bool {
 /// reference (e.g. `ref.null any`), which also lowers to a `GcRef` even without
 /// any concrete GC type declared.
 pub(crate) fn needs_gc_types(parts: &ModuleParts<'_>) -> Result<bool, TranspileError> {
-    Ok(declares_gc_types(parts.type_kinds) || uses_abstract_gc(parts.funcs)?)
+    Ok(declares_gc_types(parts.type_kinds)
+        || abstract_gc_in_types(parts)?
+        || uses_abstract_gc(parts.funcs)?)
+}
+/// Whether an abstract GC reference type (`anyref`, `nullref`, ...) appears in a
+/// signature, a global, a table element or a local, so a value of it exists even
+/// when no body creates one.
+fn abstract_gc_in_types(parts: &ModuleParts<'_>) -> Result<bool, TranspileError> {
+    let is_gc = |ty: &ValType| matches!(ty, ValType::Ref(rt) if abstract_is_gc(rt.heap_type()));
+    if parts.globals.iter().any(|g| is_gc(&g.ty))
+        || parts.imported_globals.iter().any(|g| is_gc(&g.ty))
+        || parts
+            .imports
+            .iter()
+            .any(|i| i.params.iter().chain(&i.results).any(is_gc))
+        || parts
+            .funcs
+            .iter()
+            .any(|f| f.params.iter().chain(f.results).any(is_gc))
+        || parts
+            .table
+            .into_iter()
+            .chain(parts.extra_tables)
+            .any(|t| is_gc(&t.element))
+    {
+        return Ok(true);
+    }
+    for input in parts.funcs {
+        for local in input.body.get_locals_reader()? {
+            if is_gc(&local?.1) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 /// Whether any function body contains an operator matching `pred`.
 ///
@@ -364,7 +398,10 @@ pub(crate) fn rust_type(
         // handle; both are represented as a `u32` (`u32::MAX` is null), matching
         // the table's element representation.
         ValType::Ref(rt)
-            if rt.is_func_ref() || rt.is_extern_ref() || is_exn_heap(rt.heap_type()) =>
+            if rt.is_func_ref()
+                || rt.is_extern_ref()
+                || is_exn_heap(rt.heap_type())
+                || is_bottom_u32_heap(rt.heap_type()) =>
         {
             Ok("u32")
         }
@@ -392,6 +429,18 @@ pub(crate) fn rust_type(
 /// `exnref`, a function or continuation reference) rather than a managed `GcRef`.
 pub(crate) fn is_u32_ref(ty: ValType, kinds: &[CompositeKind]) -> Result<bool, TranspileError> {
     Ok(matches!(ty, ValType::Ref(_)) && rust_type(ty, kinds)? == "u32")
+}
+/// Whether a heap type is one of the bottom types `nofunc`/`noextern`/`noexn`: a
+/// reference of that type can only be null, and lowers like its top type (a `u32`
+/// handle, `u32::MAX` null).
+pub(crate) fn is_bottom_u32_heap(hty: HeapType) -> bool {
+    matches!(
+        hty,
+        HeapType::Abstract {
+            ty: AbstractHeapType::NoFunc | AbstractHeapType::NoExtern | AbstractHeapType::NoExn,
+            ..
+        }
+    )
 }
 /// Whether a heap type is the abstract `exn` type: an `exnref` is a `u32` handle
 /// into the exception store.
@@ -471,6 +520,7 @@ pub(crate) fn default_value(ty: ValType, kinds: &[CompositeKind]) -> &'static st
             if rt.is_func_ref()
                 || rt.is_extern_ref()
                 || is_exn_heap(rt.heap_type())
+                || is_bottom_u32_heap(rt.heap_type())
                 || matches!(rt.heap_type(), HeapType::Concrete(_)) =>
         {
             "u32::MAX"

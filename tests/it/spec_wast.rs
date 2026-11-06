@@ -97,6 +97,14 @@ fn expect_exception<R>(ctx: &str, f: impl FnOnce() -> R) {
 }
 ";
 
+/// Emitted after [`TRAP_HELPER`]: whether a reference result is null, for the
+/// result types the harness cannot name (`u32` handles, and the managed `GcRef`
+/// when the generated module defines it).
+const NULL_REF_HELPER: &str = "#[allow(dead_code)]
+trait NullRef { fn is_null_ref(&self) -> bool; }
+impl NullRef for u32 { fn is_null_ref(&self) -> bool { *self == u32::MAX } }
+";
+
 /// Substrings of the generated code's panic message that correspond to a spec
 /// trap message. Rust's own panics cover division and out-of-range memory, and
 /// an out-of-range or null `call_indirect` slot reports a type mismatch, so those
@@ -193,9 +201,12 @@ fn return_assertion(call: &str, ret: &WastRet<'_>, ctx: &str) -> Result<String, 
             "0x7ff8_0000_0000_0000",
             pattern,
         )),
-        WastRet::Core(WastRetCore::RefNull(Some(ty))) if is_func_or_extern(ty) => {
-            Ok(format!("assert_eq!({call}, u32::MAX, \"{ctx}\");"))
-        }
+        // A `(ref.null)`, typed or not, is a null reference: the result is a `u32`
+        // handle (`func`/`extern`/`exn` and the bottom types) or a `GcRef`, so ask the
+        // `NullRef` helper.
+        WastRet::Core(WastRetCore::RefNull(_)) => Ok(format!(
+            "assert!(NullRef::is_null_ref(&{call}), \"{ctx}\");"
+        )),
         WastRet::Core(WastRetCore::RefExtern(Some(n))) => {
             Ok(format!("assert_eq!({call}, {n}u32, \"{ctx}\");"))
         }
@@ -483,6 +494,12 @@ fn start_group(wasm: Vec<u8>) -> Result<Group, String> {
     let generated = wasm2rs::transpile(&wasm).map_err(|e| format!("transpile failed: {e:?}"))?;
     let stateful = generated.contains("pub struct Instance");
     let mut body = String::from(TRAP_HELPER);
+    body.push_str(NULL_REF_HELPER);
+    if generated.contains("enum GcRef") {
+        body.push_str(
+            "impl NullRef for GcRef { fn is_null_ref(&self) -> bool { matches!(self, GcRef::Null) } }\n",
+        );
+    }
     let ctor = if has_imports {
         body.push_str(&spectest_host(&generated, &spectest));
         Some(format!("Instance::new({})", spectest.host_init()))
@@ -938,6 +955,38 @@ fn an_unknown_global_import_is_still_skipped() {
             .any(|s| s.contains("module has imports")),
         "{:?}",
         report.skipped
+    );
+}
+
+#[test]
+fn an_untyped_ref_null_expectation_checks_for_null_whatever_the_reference_type() {
+    let report = run_wast(
+        "spec_untyped_ref_null",
+        r#"
+(module
+  (func (export "func") (result funcref) (ref.null func))
+  (func (export "any") (result anyref) (ref.null any))
+  (func (export "nonnull") (result funcref) (ref.func 0)))
+(assert_return (invoke "func") (ref.null))
+(assert_return (invoke "any") (ref.null))
+"#,
+    );
+    assert_eq!(report.executed, 2);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
+#[should_panic(expected = "generated program assertions failed")]
+fn an_untyped_ref_null_expectation_fails_for_a_non_null_reference() {
+    run_wast(
+        "spec_untyped_ref_null_fails",
+        r#"
+(module
+  (func $f)
+  (elem declare func $f)
+  (func (export "nonnull") (result funcref) (ref.func $f)))
+(assert_return (invoke "nonnull") (ref.null))
+"#,
     );
 }
 
