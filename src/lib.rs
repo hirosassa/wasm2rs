@@ -313,7 +313,7 @@ where
     // proposal allows more than one.
     let mut memories: Vec<codegen::MemInfo> = Vec::new();
     let mut table: Option<codegen::TableInfo> = None;
-    // Further defined tables (index 1..), after table 0.
+    // Tables 1.. (imported ones first, then defined ones), after table 0.
     let mut extra_tables: Vec<codegen::TableInfo> = Vec::new();
     // Table initializer expressions (`None` = the primary table, `Some(i)` = `extra_tables[i]`),
     // resolved after the loop because the table section precedes the global section.

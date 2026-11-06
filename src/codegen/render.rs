@@ -22,7 +22,7 @@ const EXTERNAL_HANDLE_SLOT_MASK: &str = "0x7fff_ffffu32";
 
 /// The layout flags derived once and shared across every `Instance` render
 /// section: whether the module needs an injected host trait, whether memory 0 /
-/// the table are host-owned (so the instance stores no field for them), whether
+/// any table are host-owned (so the instance stores no field for them), whether
 /// any file-backed WASI import is present (so the `wasi_fds` table exists), and
 /// the global-index base past the imported globals.
 struct Layout {
@@ -196,7 +196,7 @@ pub(super) fn render_module_head(
         inner.extend(with_host_lines());
     }
     inner.extend(memory_accessor_lines(parts, ctx));
-    inner.extend(table_accessor_lines(parts));
+    inner.extend(table_accessor_lines(parts)?);
     inner.extend(wasi_method_lines(parts.imports, &layout, ctx.memory_shared));
     inner.extend(helper_method_lines(
         used,
@@ -465,8 +465,10 @@ fn constructor_lines(
     // Imported memory/table are host-owned, so their active data/elements cannot
     // be written into a `memory`/`table` field literal; instead the instance is
     // bound and the segments are copied into the host storage through
-    // `mem_mut()`/`table_mut()` after construction. Only memory 0 can be
-    // imported, so only its segments need post-construction copying, unless a
+    // `mem_mut()`/`table{i}_mut()` after construction. With any imported table, every
+    // active element segment is applied that way in module order (a trap then leaves
+    // the earlier segments' writes in the host tables, as the spec says). Only
+    // memory 0 can be imported, so only its segments need post-construction copying, unless a
     // segment also targets a defined memory: then every data segment is applied
     // after construction, in module order (a trap leaves the earlier segments'
     // writes in the host memory, and the elements are already in place), as for
@@ -599,19 +601,15 @@ fn constructor_lines(
                 copy_elem_seg(lines, seg, target, imports, indent);
             }
         };
-    // With an imported table 0 and a segment for a defined table, every segment is
-    // applied after construction, in module order: a trap then leaves the earlier
-    // segments' writes in the host table, as the spec says.
-    let elems_in_module_order = post_init_elem;
 
     // The non-memory field initialisers (table, globals, wasi_fds, the retained
     // passive segments, and `imports` last), pushed identically by both
     // `Instance::new` and — for a shared module — `with_memory`. Only the memory
     // field differs between the two, so factoring the rest keeps them in lock-step.
     let push_common_fields = |inner: &mut Vec<String>| -> Result<(), TranspileError> {
-        // An imported table 0 is host-owned (see the post-construction elem copy), so
+        // An imported table is host-owned (see the post-construction elem copy), so
         // it has no field. Table 0 keeps the `table` field and table `i > 0` is
-        // `table{i}`; the defined tables number from 1 when table 0 is imported.
+        // `table{i}`, numbered by its index in the module's table index space.
         for (i, t) in table.into_iter().chain(parts.extra_tables).enumerate() {
             if t.imported {
                 continue;
@@ -625,7 +623,7 @@ fn constructor_lines(
                 Some(TableFill::Func(f)) => format!("{f}u32"),
                 None => "u32::MAX".to_string(),
             };
-            if elems_in_module_order || !active_elem.iter().any(|seg| seg.table == i) {
+            if post_init_elem || !active_elem.iter().any(|seg| seg.table == i) {
                 inner.push(format!("        {field}: vec![{fill}; {}],", t.min));
             } else {
                 // Start every slot at the table's initializer (null unless it is
@@ -966,7 +964,7 @@ fn memory_accessor_lines(parts: &ModuleParts<'_>, ctx: &ModuleCtx<'_>) -> Vec<St
 /// The uniform table accessors (`table`/`table_mut`), mirroring the memory ones:
 /// a defined table is a field, an imported one is lent by the host through the
 /// `Imports` trait. Empty when the module declares no table.
-fn table_accessor_lines(parts: &ModuleParts<'_>) -> Vec<String> {
+fn table_accessor_lines(parts: &ModuleParts<'_>) -> Result<Vec<String>, TranspileError> {
     let mut inner: Vec<String> = Vec::new();
     for (i, t) in parts
         .table
@@ -974,7 +972,7 @@ fn table_accessor_lines(parts: &ModuleParts<'_>) -> Vec<String> {
         .chain(parts.extra_tables)
         .enumerate()
     {
-        let (get, get_mut) = table_accessor(u32::try_from(i).unwrap_or(u32::MAX));
+        let (get, get_mut) = table_accessor(index_u32(i)?);
         let (borrow, borrow_mut) = if t.imported {
             (
                 format!("self.imports.{get}()"),
@@ -989,7 +987,7 @@ fn table_accessor_lines(parts: &ModuleParts<'_>) -> Vec<String> {
             "fn {get_mut}(&mut self) -> &mut Vec<u32> {{ {borrow_mut} }}"
         ));
     }
-    inner
+    Ok(inner)
 }
 
 /// The native WASI functions as inherent methods backed by `self.mem()`, each

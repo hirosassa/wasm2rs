@@ -361,8 +361,10 @@ fn replay_spectest_import(
             out.globals.push(value);
             true
         }
+        // A module importing the (single) spectest table twice is not replayable.
         TypeRef::Table(t)
             if import.name == "table"
+                && !out.table
                 && !t.table64
                 && t.element_type.is_func_ref()
                 && t.initial <= SPECTEST_TABLE_LEN
@@ -868,6 +870,9 @@ fn a_spectest_import_the_real_host_would_not_link_is_skipped() {
         r#"(import "spectest" "table" (table 0 19 funcref))"#,
         r#"(import "spectest" "memory" (memory 2))"#,
         r#"(import "spectest" "memory" (memory 0 1))"#,
+        // The host has one table: a second import of it is not replayable as a
+        // separate host table.
+        r#"(import "spectest" "table" (table 10 funcref)) (import "spectest" "table" (table 10 funcref))"#,
     ]
     .iter()
     .enumerate()
