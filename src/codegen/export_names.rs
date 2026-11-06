@@ -24,6 +24,8 @@ const FIXED: &[&str] = &[
     "with_memory",
     "with_host",
     "memory",
+    "shared_memory",
+    "with_preopen_root",
     "imports",
     "main",
     "mem",
@@ -77,14 +79,20 @@ pub(super) fn is_reserved(name: &str) -> bool {
     if KEYWORDS.contains(&name) || FIXED.contains(&name) {
         return true;
     }
-    // `func{N}`, `import{N}`, `mem{N}`/`mem{N}_mut`, `table{N}`/`table{N}_mut`.
+    // `func{N}` (and its `func{N}_part{k}` dispatch parts), `import{N}`,
+    // `mem{N}`/`mem{N}_mut`, `memory{N}`, `table{N}`/`table{N}_mut`.
+    let all_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let numbered = |prefix: &str| {
         name.strip_prefix(prefix).is_some_and(|rest| {
-            let digits = rest.strip_suffix("_mut").unwrap_or(rest);
-            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+            let rest = rest.strip_suffix("_mut").unwrap_or(rest);
+            let rest = match rest.split_once("_part") {
+                Some((index, part)) if prefix == "func" && all_digits(part) => index,
+                _ => rest,
+            };
+            all_digits(rest)
         })
     };
-    if ["func", "import", "mem", "table"]
+    if ["func", "import", "mem", "memory", "table"]
         .iter()
         .any(|p| numbered(p))
     {

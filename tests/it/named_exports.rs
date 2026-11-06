@@ -181,3 +181,40 @@ fn an_exported_imported_global_reads_through_the_host_and_non_numeric_ones_are_s
         "{generated}"
     );
 }
+
+#[test]
+fn a_global_named_like_a_memory_accessor_stays_clear_of_it() {
+    run_named(
+        "named_global_memory1",
+        r#"(module
+            (memory 1) (memory 1)
+            (global (export "memory1") i32 (i32.const 8)))"#,
+        "let mut inst = Instance::new();\n \
+         assert_eq!(inst.memory1_(), 8);\n \
+         assert_eq!(inst.memory1().len(), 65536);",
+    );
+}
+
+#[test]
+fn a_global_named_shared_memory_stays_clear_of_the_shared_accessor() {
+    run_named(
+        "named_global_shared_memory",
+        r#"(module
+            (memory 1 1 shared)
+            (global (export "shared_memory") i32 (i32.const 8)))"#,
+        "let inst = Instance::new();\n \
+         assert_eq!(inst.shared_memory_(), 8);",
+    );
+}
+
+#[test]
+fn a_global_named_like_a_split_dispatch_part_stays_clear_of_it() {
+    // `func0_part0` is a generated sibling function name, not just a member.
+    let wasm =
+        wat::parse_str(r#"(module (global (export "func0_part0") i32 (i32.const 1)))"#).unwrap();
+    let generated = transpile_with_options(&wasm, &named()).unwrap();
+    assert!(
+        generated.contains("pub fn func0_part0_(&self)"),
+        "{generated}"
+    );
+}
