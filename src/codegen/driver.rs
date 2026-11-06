@@ -234,6 +234,8 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) tags: &'a [TagInfo],
     /// The module's function exports, in declaration order.
     pub(crate) exports: &'a [ExportInfo],
+    /// The module's global exports, in declaration order (getters under `named_exports`).
+    pub(crate) global_exports: &'a [GlobalExportInfo],
     /// The module's `start` function index, run at the end of every instantiation.
     pub(crate) start: Option<u32>,
     /// Opt-in unchecked linear-memory access (see [`ModuleCtx::unsafe_memory`]).

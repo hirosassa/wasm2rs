@@ -158,6 +158,13 @@ pub(crate) struct ExportInfo {
     pub func_index: u32,
 }
 
+/// A global the module exports: its export name and full global index
+/// (imported globals first).
+pub(crate) struct GlobalExportInfo {
+    pub name: String,
+    pub global_index: u32,
+}
+
 /// An imported function: its signature. Imported functions occupy the low end
 /// of the function index space and are dispatched through the injected host,
 /// unless `wasi` recognises it as a natively-implemented WASI function.

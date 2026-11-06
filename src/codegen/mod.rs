@@ -49,9 +49,9 @@ pub(crate) use self::const_expr::{
 };
 pub(crate) use self::export_names::assign_import_names;
 pub(crate) use self::info::{
-    CompositeKind, DataSegment, ElemSegment, ExportInfo, FieldInfo, FuncInput, GlobalInfo,
-    ImportInfo, ImportedGlobalInfo, MemInfo, SegOffset, TableFill, TableInfo, TagInfo, TypeSig,
-    WASM_MAX_PAGES, WASM_PAGE_SIZE,
+    CompositeKind, DataSegment, ElemSegment, ExportInfo, FieldInfo, FuncInput, GlobalExportInfo,
+    GlobalInfo, ImportInfo, ImportedGlobalInfo, MemInfo, SegOffset, TableFill, TableInfo, TagInfo,
+    TypeSig, WASM_MAX_PAGES, WASM_PAGE_SIZE,
 };
 pub(crate) use self::reach::{ReachInput, live_functions};
 pub(crate) use self::wasi::WasiFn;
