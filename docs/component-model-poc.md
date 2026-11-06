@@ -183,9 +183,11 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   handles `3..`; a failed write answers `closed`). A new file is named under an
   existing directory that must itself resolve under the preopen, and a symlink that
   leads nowhere or out (even a dangling one) is `not-permitted`, not a place to create
-  a file. The path is checked when the file is opened, not held open: a program that
-  swaps a directory for a symlink between the check and the open can escape, so only
-  preopen a directory you trust the program with.
+  a file. The path is checked when the file is opened, and a file descriptor then
+  holds the open `File`: every operation on it goes through that `File`, so it stays on
+  the file it opened even if the path is unlinked, renamed over or reused. A program
+  that swaps a directory for a symlink between the check and the open can still escape,
+  so only preopen a directory you trust the program with.
 - With a writable preopen, `create-directory-at`, `unlink-file-at`,
   `remove-directory-at` and `rename-at` work too (`std::fs::create_dir`,
   `remove_file`, `remove_dir`, `rename`; `create_dir_all` and `remove_dir_all` are built
@@ -194,11 +196,12 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   `/.` refused), and the entry itself is never followed: `unlink` removes a symlink,
   not its target, `remove-directory-at` on a symlink is `not-directory`, and a symlink
   cannot be renamed (`not-permitted`: a symlink moved onto the path of an open descriptor
-  would lead it out of the preopen). A descriptor's path is resolved again on every use
-  and must still be under the preopen (`not-permitted` if not), which also covers a
-  directory holding a symlink that leads out being renamed over it; the check and the use
-  are separate steps, so a host that must resist a racing guest needs a handle per
-  descriptor instead. Errors:
+  would lead it out of the preopen). A directory descriptor has no `File` (std cannot
+  open relative to a directory), so its path is resolved again on every use and must
+  still be under the preopen (`not-permitted` if not), which covers a directory holding
+  a symlink that leads out being renamed over it; the check and the use are separate
+  steps, so a host that must resist a racing guest needs `openat` and friends (a crate
+  such as `rustix`). Errors:
   `exist`, `no-entry`, `is-directory`, `not-directory`, `not-empty`. On a read-only
   preopen all four are `read-only`.
 - `set-size` (needs a descriptor opened for `write`; a directory is `is-directory`),

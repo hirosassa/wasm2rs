@@ -1256,67 +1256,64 @@ fn a_read_only_preopen_refuses_to_resize_or_touch_files() {
 }
 
 /// The imports and paths of the test where a guest moves a directory under the path of a
-/// descriptor it holds. Calls that return `result<_, error-code>` put the tag at `ret`
-/// and the error's tag byte at `ret + 1`.
+/// directory descriptor it holds. Calls that return `result<_, error-code>` put the tag
+/// at `ret` and the error's tag byte at `ret + 1`.
 const MOVED_IMPORTS: &str = r#"
   (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.create-directory-at" (func $mkdir (param i32 i32 i32 i32)))
-  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.unlink-file-at" (func $unlink (param i32 i32 i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.remove-directory-at" (func $rmdir (param i32 i32 i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.rename-at" (func $rename (param i32 i32 i32 i32 i32 i32 i32)))
-  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-size" (func $set_size (param i32 i64 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.sync" (func $sync (param i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-times" (func $set_times (param i32 i32 i64 i32 i32 i64 i32 i32)))
   (data (i32.const 300) "d")
-  (data (i32.const 310) "d/f")
+  (data (i32.const 310) "d/sub")
   (data (i32.const 320) "e")
 "#;
 
-/// `fs_moved` runs on a writable root holding `e/f`, a symlink to a file outside the
-/// root. It opens `d/f`, then makes `d` the directory `e`, so the path the descriptor
-/// holds now leads outside the root. Error code not-permitted: 31.
+/// `fs_moved` runs on a writable root holding `e/sub`, a symlink to a directory outside
+/// the root. It opens the directory `d/sub`, then makes `d` the directory `e`, so the
+/// path the descriptor holds now leads outside the root. Error code not-permitted: 31.
 const MOVED: &str = r#"
   (func $ok (param $at i32)
     (if (i32.load8_u (local.get $at)) (then unreachable)))
   (func $denied
     (if (i32.ne (i32.load8_u (i32.const 220)) (i32.const 1)) (then unreachable))
     (if (i32.ne (i32.load8_u (i32.const 221)) (i32.const 31)) (then unreachable)))
-  (func (export "fs_moved") (local $dir i32) (local $f i32)
+  (func (export "fs_moved") (local $dir i32) (local $sub i32)
     (call $dirs (i32.const 200))
     (local.set $dir (i32.load (i32.load (i32.const 200))))
     (call $mkdir (local.get $dir) (i32.const 300) (i32.const 1) (i32.const 220))
     (call $ok (i32.const 220))
-    (call $open (local.get $dir) (i32.const 1) (i32.const 310) (i32.const 3) (i32.const 1) (i32.const 3) (i32.const 220))
+    (call $mkdir (local.get $dir) (i32.const 310) (i32.const 5) (i32.const 220))
     (call $ok (i32.const 220))
-    (local.set $f (i32.load (i32.const 224)))
-    (call $unlink (local.get $dir) (i32.const 310) (i32.const 3) (i32.const 220))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 310) (i32.const 5) (i32.const 2) (i32.const 1) (i32.const 220))
+    (call $ok (i32.const 220))
+    (local.set $sub (i32.load (i32.const 224)))
+    (call $rmdir (local.get $dir) (i32.const 310) (i32.const 5) (i32.const 220))
     (call $ok (i32.const 220))
     (call $rmdir (local.get $dir) (i32.const 300) (i32.const 1) (i32.const 220))
     (call $ok (i32.const 220))
     (call $rename (local.get $dir) (i32.const 320) (i32.const 1) (local.get $dir) (i32.const 300) (i32.const 1) (i32.const 220))
     (call $ok (i32.const 220))
-    (call $set_size (local.get $f) (i64.const 0) (i32.const 220))
+    (call $sync (local.get $sub) (i32.const 220))
     (call $denied)
-    (call $sync (local.get $f) (i32.const 220))
-    (call $denied)
-    (call $set_times (local.get $f) (i32.const 1) (i64.const 0) (i32.const 0)
-                     (i32.const 1) (i64.const 0) (i32.const 0) (i32.const 220))
+    (call $set_times (local.get $sub) (i32.const 2) (i64.const 1000000000) (i32.const 0)
+                     (i32.const 2) (i64.const 1000000000) (i32.const 0) (i32.const 220))
     (call $denied))
 "#;
 
 #[cfg(unix)]
 #[test]
-fn a_descriptor_whose_path_was_moved_out_of_the_preopen_is_refused() {
+fn a_directory_descriptor_whose_path_was_moved_out_of_the_preopen_is_refused() {
     let root = std::env::temp_dir().join("wasm2rs_wasip2_moved_root");
     std::fs::remove_dir_all(&root).ok();
     std::fs::create_dir_all(root.join("e")).unwrap();
-    let outside = root
-        .parent()
-        .unwrap()
-        .join("wasm2rs_wasip2_moved_secret.txt");
-    std::fs::write(&outside, "secret").unwrap();
-    std::os::unix::fs::symlink(&outside, root.join("e/f")).unwrap();
+    let outside = root.parent().unwrap().join("wasm2rs_wasip2_moved_outside");
+    std::fs::remove_dir_all(&outside).ok();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("e/sub")).unwrap();
+    let before = std::fs::metadata(&outside).unwrap().modified().unwrap();
     let bin = compile(
         "fs_moved",
         &hello_with(MOVED_IMPORTS, MOVED),
@@ -1324,5 +1321,50 @@ fn a_descriptor_whose_path_was_moved_out_of_the_preopen_is_refused() {
         "inst.fs_moved();",
     );
     run_ok(&bin);
-    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret");
+    let after = std::fs::metadata(&outside).unwrap().modified().unwrap();
+    assert_eq!(after, before, "changed a directory outside the root");
+}
+
+/// The imports of the test where a path is reused after a descriptor was opened on it.
+const REUSED_IMPORTS: &str = r#"
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.unlink-file-at" (func $unlink (param i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-size" (func $set_size (param i32 i64 i32)))
+  (data (i32.const 300) "f.txt")
+"#;
+
+/// `fs_reused` runs on a writable root holding `f.txt`. It opens the file, removes it,
+/// creates another file under the same name, then resizes the first one: a descriptor
+/// stays on the file it opened, not on whatever the path names now.
+const REUSED: &str = r#"
+  (func $ok (param $at i32)
+    (if (i32.load8_u (local.get $at)) (then unreachable)))
+  (func (export "fs_reused") (local $dir i32) (local $old i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 0) (i32.const 3) (i32.const 220))
+    (call $ok (i32.const 220))
+    (local.set $old (i32.load (i32.const 224)))
+    (call $unlink (local.get $dir) (i32.const 300) (i32.const 5) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 5) (i32.const 1) (i32.const 3) (i32.const 220))
+    (call $ok (i32.const 220))
+    (call $set_size (local.get $old) (i64.const 5) (i32.const 220))
+    (call $ok (i32.const 220)))
+"#;
+
+#[cfg(unix)]
+#[test]
+fn a_descriptor_stays_on_the_file_it_opened_when_its_path_is_reused() {
+    let root = times_root("reused");
+    let bin = compile(
+        "fs_reused",
+        &hello_with(REUSED_IMPORTS, REUSED),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_reused();",
+    );
+    run_ok(&bin);
+    let len = std::fs::metadata(root.join("f.txt")).unwrap().len();
+    assert_eq!(len, 0, "resized the new file instead of the one opened");
 }
