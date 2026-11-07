@@ -51,8 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_len`, `sync_all`, `sync_data` and `set_times`). `set-times-at` follows a symlink only
   with `symlink-follow` (`unsupported` for a symlink itself, which `std` cannot set), and
   `readlink-at` returns the target of a symlink unless it is absolute or has a `..`
-  (`not-permitted`, so no host path leaks); only `symlink-at`, `link-at` and sockets are
-  missing.
+  (`not-permitted`, so no host path leaks). `symlink-at` makes only such links, and `link-at`
+  makes hard links (a symlink is followed with `symlink-follow`, else `unsupported`; a
+  directory is `not-permitted`); only sockets are missing.
   A file descriptor now holds the open file, so it stays on the file it opened when
   the path is unlinked, renamed over or reused; a directory descriptor's path is checked
   again on every use.

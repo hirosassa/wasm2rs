@@ -1421,6 +1421,143 @@ fn a_read_only_preopen_refuses_set_times_at_but_shows_links() {
     );
 }
 
+/// The imports and paths of the test of `symlink-at` and `link-at`. Both return
+/// `result<_, error-code>`: the tag at 220, the error's tag byte at 221.
+const MAKE_LINKS_IMPORTS: &str = r#"
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.symlink-at" (func $symlink_at (param i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.link-at" (func $link_at (param i32 i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.readlink-at" (func $readlink_at (param i32 i32 i32 i32)))
+  (data (i32.const 300) "f.txt")
+  (data (i32.const 310) "ln")
+  (data (i32.const 320) "new_ln")
+  (data (i32.const 330) "s2")
+  (data (i32.const 340) "../x")
+  (data (i32.const 350) "/etc")
+  (data (i32.const 360) "../h")
+  (data (i32.const 370) "h.txt")
+  (data (i32.const 380) "h2.txt")
+  (data (i32.const 390) "h3")
+  (data (i32.const 400) "h4")
+  (data (i32.const 410) "d")
+  (data (i32.const 420) "../f.txt")
+  (data (i32.const 430) "nope")
+  (data (i32.const 440) "abs")
+  (data (i32.const 450) "up")
+"#;
+
+/// `fs_make_links` runs on a writable root holding `f.txt`, `g.txt`, `ln` (a symlink to
+/// `f.txt`) and the directory `d`; `fs_make_links_denied` on a read-only one. Error
+/// codes: exist 7, no-entry 20, unsupported 27, not-permitted 31, read-only 33.
+/// Path-flags: symlink-follow 1.
+const MAKE_LINKS: &str = r#"
+  (func $ok
+    (if (i32.load8_u (i32.const 220)) (then unreachable)))
+  (func $err (param $code i32)
+    (if (i32.ne (i32.load8_u (i32.const 220)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 221)) (local.get $code)) (then unreachable)))
+  ;; `symlink-at` of the target at (old, old_len) as the name at (new, new_len)
+  (func $sym (param $dir i32) (param $old i32) (param $old_len i32) (param $new i32) (param $new_len i32)
+    (call $symlink_at (local.get $dir) (local.get $old) (local.get $old_len)
+                      (local.get $new) (local.get $new_len) (i32.const 220)))
+  ;; `link-at` of the path at (old, old_len) as the name at (new, new_len)
+  (func $hard (param $dir i32) (param $flags i32) (param $old i32) (param $old_len i32) (param $new i32) (param $new_len i32)
+    (call $link_at (local.get $dir) (local.get $flags) (local.get $old) (local.get $old_len)
+                   (local.get $dir) (local.get $new) (local.get $new_len) (i32.const 220)))
+  (func (export "fs_make_links") (local $dir i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    ;; a symlink to `f.txt`, which `readlink-at` shows as written
+    (call $sym (local.get $dir) (i32.const 300) (i32.const 5) (i32.const 320) (i32.const 6))
+    (call $ok)
+    (call $readlink_at (local.get $dir) (i32.const 320) (i32.const 6) (i32.const 224))
+    (if (i32.load8_u (i32.const 224)) (then unreachable))
+    (if (i32.ne (i32.load (i32.const 232)) (i32.const 5)) (then unreachable))
+    ;; a target that is absolute or has `..`, an empty target, a taken name, a name outside
+    (call $sym (local.get $dir) (i32.const 340) (i32.const 4) (i32.const 330) (i32.const 2))
+    (call $err (i32.const 31))
+    (call $sym (local.get $dir) (i32.const 350) (i32.const 4) (i32.const 330) (i32.const 2))
+    (call $err (i32.const 31))
+    (call $sym (local.get $dir) (i32.const 300) (i32.const 0) (i32.const 330) (i32.const 2))
+    (call $err (i32.const 20))
+    (call $sym (local.get $dir) (i32.const 300) (i32.const 5) (i32.const 320) (i32.const 6))
+    (call $err (i32.const 7))
+    (call $sym (local.get $dir) (i32.const 300) (i32.const 5) (i32.const 360) (i32.const 4))
+    (call $err (i32.const 31))
+    ;; a hard link to a file, and through a symlink when following it
+    (call $hard (local.get $dir) (i32.const 0) (i32.const 300) (i32.const 5) (i32.const 370) (i32.const 5))
+    (call $ok)
+    (call $hard (local.get $dir) (i32.const 1) (i32.const 310) (i32.const 2) (i32.const 380) (i32.const 6))
+    (call $ok)
+    ;; not a symlink itself, not a directory, not over a name, not from or to outside, not nothing
+    (call $hard (local.get $dir) (i32.const 0) (i32.const 310) (i32.const 2) (i32.const 390) (i32.const 2))
+    (call $err (i32.const 27))
+    (call $hard (local.get $dir) (i32.const 0) (i32.const 410) (i32.const 1) (i32.const 400) (i32.const 2))
+    (call $err (i32.const 31))
+    (call $hard (local.get $dir) (i32.const 0) (i32.const 300) (i32.const 5) (i32.const 370) (i32.const 5))
+    (call $err (i32.const 7))
+    (call $hard (local.get $dir) (i32.const 0) (i32.const 300) (i32.const 5) (i32.const 360) (i32.const 4))
+    (call $err (i32.const 31))
+    (call $hard (local.get $dir) (i32.const 0) (i32.const 420) (i32.const 8) (i32.const 400) (i32.const 2))
+    (call $err (i32.const 31))
+    (call $hard (local.get $dir) (i32.const 0) (i32.const 430) (i32.const 4) (i32.const 400) (i32.const 2))
+    (call $err (i32.const 20))
+    ;; following a symlink that leads out of the preopen, or to nothing
+    (call $hard (local.get $dir) (i32.const 1) (i32.const 440) (i32.const 3) (i32.const 400) (i32.const 2))
+    (call $err (i32.const 31))
+    (call $hard (local.get $dir) (i32.const 1) (i32.const 450) (i32.const 2) (i32.const 400) (i32.const 2))
+    (call $err (i32.const 20)))
+  (func (export "fs_make_links_denied") (local $dir i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $sym (local.get $dir) (i32.const 300) (i32.const 5) (i32.const 320) (i32.const 6))
+    (call $err (i32.const 33))
+    (call $hard (local.get $dir) (i32.const 0) (i32.const 300) (i32.const 5) (i32.const 370) (i32.const 5))
+    (call $err (i32.const 33)))
+"#;
+
+#[cfg(unix)]
+#[test]
+fn a_writable_preopen_creates_symlinks_and_hard_links_under_it() {
+    use std::os::unix::fs::MetadataExt;
+    let root = root_with_links("make_links");
+    std::fs::create_dir(root.join("d")).unwrap();
+    let bin = compile(
+        "fs_make_links",
+        &hello_with(MAKE_LINKS_IMPORTS, MAKE_LINKS),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_make_links();",
+    );
+    run_ok(&bin);
+    assert_eq!(
+        std::fs::read_link(root.join("new_ln")).unwrap(),
+        std::path::Path::new("f.txt")
+    );
+    let ino = |name: &str| std::fs::metadata(root.join(name)).unwrap().ino();
+    assert_eq!(ino("h.txt"), ino("f.txt"));
+    assert_eq!(ino("h2.txt"), ino("f.txt"));
+    for refused in ["s2", "h3", "h4"] {
+        assert!(root.join(refused).symlink_metadata().is_err(), "{refused}");
+    }
+    assert!(!root.parent().unwrap().join("h").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_preopen_refuses_symlink_at_and_link_at() {
+    let root = root_with_links("make_links_denied");
+    let bin = compile(
+        "fs_make_links_denied",
+        &hello_with(MAKE_LINKS_IMPORTS, MAKE_LINKS),
+        &preopen_host(&root),
+        "inst.fs_make_links_denied();",
+    );
+    run_ok(&bin);
+    for refused in ["new_ln", "h.txt"] {
+        assert!(root.join(refused).symlink_metadata().is_err(), "{refused}");
+    }
+}
+
 /// The imports and paths of the test where a guest moves a directory under the path of a
 /// directory descriptor it holds. Calls that return `result<_, error-code>` put the tag
 /// at `ret` and the error's tag byte at `ret + 1`.
