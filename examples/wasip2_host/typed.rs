@@ -1748,11 +1748,13 @@ impl Host for TypedHost {
     // end optional
 
     // optional: wasi_io_streams_method_output_stream_write
+    /// Writes without flushing. `contents` over 4096 bytes (what `check-write` returns) traps.
     fn wasi_io_streams_method_output_stream_write(
         &mut self,
         self_: OutputStream,
         contents: Vec<u8>,
     ) -> Result<(), StreamError> {
+        assert!(contents.len() <= 4096, "write: more than check-write allows");
         self.write_stream(self_.0, &contents)
     }
     // end optional
