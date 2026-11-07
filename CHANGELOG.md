@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-08
+
+Only `wasm2rs-macros` is released as 0.3.1; `wasm2rs` stays at 0.3.0.
+
+### Added
+
+- `wasm2rs-macros` has a README, so its crates.io page is no longer empty.
+
 ## [0.3.0] - 2026-11-08
 
 ### Migrating from 0.2.0
@@ -572,6 +580,7 @@ bounds checks, and trap behaviour).
   becomes undefined behaviour instead of a wasm trap).
 
 [Unreleased]: https://github.com/hirosassa/wasm2rs/compare/v0.3.0...HEAD
+[0.3.1]: https://github.com/hirosassa/wasm2rs/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/hirosassa/wasm2rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hirosassa/wasm2rs/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/hirosassa/wasm2rs/compare/v0.1.0...v0.1.1
