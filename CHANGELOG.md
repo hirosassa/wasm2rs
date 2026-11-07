@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `examples/wasip2_host/typed.rs`: a TCP output stream has a host-side send queue (64 KiB).
+  `write` appends to it and moves what the non-blocking socket takes, never waiting;
+  `check-write` drains the queue first and returns `min(4096, room)` (0 when full), and a
+  `write` or `write-zeroes` over that traps; the output-stream `subscribe` is ready while the queue
+  has room (or the connection failed). `blocking-write-and-flush`, `blocking-write-zeroes-and-flush`,
+  `splice`, `blocking-splice` and `blocking-flush` empty the queue first (waiting for the peer, so
+  the bytes stay in order); `flush` only drains as far as the socket takes. Dropping the output
+  stream or `shutdown` of the send side flushes the queue first (waiting for a peer that is
+  alive but not reading; a dead peer discards it); `exit` and dropping the host (`wasip2_run` does so before it exits) do the same for every connection, waiting up to 5 seconds in all. After a `flush` that left bytes queued, `check-write` is 0 and the pollable not ready until they are sent. stdout, stderr and files still permit 4096.
+  Tests in `tests/it/wasip2_typed_send_queue.rs`.
 - `examples/wasip2_host/typed.rs`: `output-stream.splice` and `blocking-splice`, the last
   `wasi:io/streams` methods: they move at most `min(len, 4096)` bytes from an input stream
   (a file, a connection or stdin) to the output stream and return the count. `splice` does not

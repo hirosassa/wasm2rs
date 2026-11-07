@@ -30,7 +30,7 @@
 // It also serves TCP over loopback (`wasi:sockets` network, instance-network, tcp,
 // tcp-create-socket) with these semantics: an address outside
 // 127.0.0.0/8 and ::1 is `access-denied` unless `with_external_network` was called, `finish-bind`
-// binds and listens, `start-connect` connects at once, `read` never blocks (`blocking-read` and `blocking-skip` wait) and a socket's
+// binds and listens, `start-connect` connects at once, `read` never blocks (`blocking-read` and `blocking-skip` wait), `write` never waits (a connection's output stream has a 64 KiB send queue: `check-write` is 0 and its pollable not ready while a peer that does not read keeps it full; a write over `check-write` traps) and a socket's
 // pollable is polled every millisecond; a connection's streams are `TCP_STREAM + slot`.
 // UDP (`udp`, `udp-create-socket`) works the same way over loopback: `finish-bind` binds a
 // non-blocking `std` socket (an address outside loopback is `access-denied`), `stream` (callable on a
@@ -125,8 +125,9 @@ struct TypedHost {
     sockets: Slab<NetSocket>,
     /// Input streams of connections, behind the input-stream handles `TCP_STREAM..`.
     tcp_in: Slab<TcpStream>,
-    /// Output streams of connections, behind the output-stream handles `TCP_STREAM..`.
-    tcp_out: Slab<TcpStream>,
+    /// Output streams of connections, behind the output-stream handles `TCP_STREAM..`, each
+    /// with its send queue.
+    tcp_out: Slab<TcpOut>,
     /// UDP sockets behind `udp-socket` handles.
     udp_sockets: Slab<UdpSock>,
     /// Incoming datagram streams, behind `incoming-datagram-stream` handles.
@@ -135,6 +136,12 @@ struct TypedHost {
     udp_out: Slab<UdpEnd>,
     /// The addresses still to be read from `resolve-address-stream` handles.
     resolutions: Slab<VecDeque<IpAddr>>,
+}
+
+impl Drop for TypedHost {
+    fn drop(&mut self) {
+        self.flush_all_connections();
+    }
 }
 
 #[allow(dead_code)]
@@ -379,7 +386,7 @@ impl TypedHost {
     }
     // end optional
 
-    // optional: wasi_io_poll_resource_drop_pollable | wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_blocking_skip | wasi_io_streams_method_output_stream_blocking_splice
+    // optional: wasi_io_poll_resource_drop_pollable | wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_blocking_skip | wasi_io_streams_method_output_stream_blocking_splice | wasi_io_streams_method_output_stream_subscribe
     fn subscribe(&mut self, deadline: Option<Instant>) -> Pollable {
         self.subscribe_wait(deadline.map_or(Wait::Ready, Wait::Deadline))
     }
@@ -612,6 +619,9 @@ enum Wait {
     TcpAccept(usize),
     /// Ready when the stream in `tcp_in` at the slot has data, is at its end or failed.
     TcpReadable(usize),
+    /// Ready when the stream in `tcp_out` at the slot has room in its send queue (after it
+    /// was drained as far as the socket takes) or failed.
+    TcpWritable(usize),
     /// Ready when the stream in `udp_in` at the slot has a datagram it would return (or failed).
     UdpReadable(usize),
 }
@@ -625,13 +635,17 @@ impl Wait {
             Wait::Stdin => !stdin.bytes.is_empty() || stdin.eof,
             Wait::TcpAccept(slot) => host.accept_ready(slot),
             Wait::TcpReadable(slot) => host.readable(slot),
+            Wait::TcpWritable(slot) => host.tcp_writable(slot),
             Wait::UdpReadable(slot) => host.udp_readable(slot),
         }
     }
 
     /// Whether readiness can only be found by asking the socket again.
     fn polls_socket(self) -> bool {
-        matches!(self, Wait::TcpAccept(_) | Wait::TcpReadable(_) | Wait::UdpReadable(_))
+        matches!(
+            self,
+            Wait::TcpAccept(_) | Wait::TcpReadable(_) | Wait::TcpWritable(_) | Wait::UdpReadable(_)
+        )
     }
 
     fn deadline(self) -> Option<Instant> {
@@ -751,23 +765,126 @@ struct NetSocket {
     options: TcpOptions,
 }
 
-/// Writes all of `bytes`, waiting (a millisecond at a time) while the send buffer is full.
+/// How many bytes a connection's send queue holds at most.
 #[allow(dead_code)]
-fn write_all_waiting(stream: &mut TcpStream, mut bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::ErrorKind;
-    while !bytes.is_empty() {
-        match stream.write(bytes) {
-            Ok(0) => return Err(ErrorKind::WriteZero.into()),
-            Ok(n) => bytes = &bytes[n..],
-            Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(1))
-            }
-            Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
+const SEND_QUEUE_CAPACITY: usize = 64 * 1024;
+
+/// The output side of a connection: the non-blocking socket and the host's send queue in front
+/// of it. Bytes a guest writes are appended to the queue and moved to the socket as far as it
+/// takes them, so a peer that does not read fills the queue (`check-write` reports 0, the
+/// pollable is not ready) instead of making `write` wait. A failure of the socket (a dead
+/// peer) marks the stream failed and drops the queue; the stream then answers `closed`. The
+/// flushing methods (`flush_waiting`, `flush_until`) wait for the peer to read, so they do not
+/// return while a live peer never does. The queue is behind a `RefCell` because a pollable
+/// asks for readiness through `&TypedHost`.
+#[allow(dead_code)]
+struct TcpOut {
+    stream: TcpStream,
+    queue: std::cell::RefCell<VecDeque<u8>>,
+    /// The socket failed: the stream is marked failed and the queue was dropped.
+    failed: std::cell::Cell<bool>,
+    /// A `flush` found bytes still queued: until they are all sent, `check-write` is 0.
+    flush_pending: std::cell::Cell<bool>,
+}
+
+#[allow(dead_code)]
+impl TcpOut {
+    fn new(stream: TcpStream) -> Self {
+        TcpOut {
+            stream,
+            queue: std::cell::RefCell::new(VecDeque::new()),
+            failed: std::cell::Cell::new(false),
+            flush_pending: std::cell::Cell::new(false),
         }
     }
-    Ok(())
+
+    /// Moves as much of the queue to the socket as it takes now.
+    fn drain(&self) {
+        use std::io::ErrorKind;
+        let mut queue = self.queue.borrow_mut();
+        while !queue.is_empty() {
+            let result = (&self.stream).write(queue.as_slices().0);
+            match result {
+                Ok(0) => return self.fail(&mut queue),
+                Ok(n) => drop(queue.drain(..n)),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(_) => return self.fail(&mut queue),
+            }
+        }
+        self.flush_pending.set(false);
+    }
+
+    fn fail(&self, queue: &mut VecDeque<u8>) {
+        queue.clear();
+        self.failed.set(true);
+    }
+
+    /// What `check-write` permits after a drain: 4096 at most, less with bytes queued, 0 while
+    /// the queue is full or a flush is pending; `None` once the stream failed.
+    fn permit(&self) -> Option<u64> {
+        self.drain();
+        if self.failed.get() {
+            return None;
+        }
+        if self.flush_pending.get() {
+            return Some(0);
+        }
+        let room = SEND_QUEUE_CAPACITY.saturating_sub(self.queue.borrow().len());
+        Some(room.min(4096) as u64)
+    }
+
+    /// Appends `bytes` behind the ones queued, then drains. Never waits.
+    fn push(&self, bytes: &[u8]) {
+        if !self.failed.get() {
+            self.queue.borrow_mut().extend(bytes);
+            self.drain();
+        }
+    }
+
+    /// `flush`: drains as far as the socket takes; if bytes remain the flush is pending.
+    fn flush(&self) {
+        self.drain();
+        if !self.failed.get() && !self.queue.borrow().is_empty() {
+            self.flush_pending.set(true);
+        }
+    }
+
+    /// Drains the whole queue, waiting while the socket is full, until `deadline` if there is
+    /// one (what is left stays queued).
+    fn flush_until(&self, deadline: Option<Instant>) {
+        loop {
+            self.drain();
+            if self.failed.get() || self.queue.borrow().is_empty() {
+                return;
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn flush_waiting(&self) {
+        self.flush_until(None);
+    }
+
+    /// Whether this is the output side of the connection `other` is a handle of.
+    fn is_connection_of(&self, other: &TcpStream) -> bool {
+        self.stream.local_addr().ok() == other.local_addr().ok()
+            && self.stream.peer_addr().ok() == other.peer_addr().ok()
+    }
 }
+
+// optional: wasi_io_streams_method_output_stream_write | wasi_io_streams_method_output_stream_blocking_write_and_flush | wasi_io_streams_method_output_stream_write_zeroes | wasi_io_streams_method_output_stream_blocking_write_zeroes_and_flush | wasi_io_streams_method_output_stream_splice | wasi_io_streams_method_output_stream_blocking_splice | wasi_io_streams_method_output_stream_blocking_flush | wasi_io_streams_method_output_stream_flush
+#[allow(dead_code)]
+impl TcpOut {
+    /// `Err(closed)` once the stream failed.
+    fn status(&self) -> Result<(), StreamError> {
+        if self.failed.get() { Err(StreamError::Closed) } else { Ok(()) }
+    }
+}
+// end optional
 
 #[allow(dead_code)]
 impl TypedHost {
@@ -868,16 +985,36 @@ impl TypedHost {
         }
     }
 
+    /// Traps if a non-blocking write of `len` bytes to a connection is more than `check-write`
+    /// permits now (its send queue's room, up to 4096); `closed` for a connection that is gone.
+    /// The other streams are not checked here.
+    fn assert_within_permit(&self, stream: u32, len: u64, op: &str) -> Result<(), StreamError> {
+        if let Some(slot) = tcp_slot(stream) {
+            let permit = self.tcp_permit(slot).ok_or(StreamError::Closed)?;
+            assert!(len <= permit, "{op}: more than check-write allows");
+        }
+        Ok(())
+    }
+
     /// Writes all of `contents` to a stream: the one write path of `write`,
     /// `blocking-write-and-flush`, `write-zeroes`, `blocking-write-zeroes-and-flush`,
-    /// `splice` and `blocking-splice`. A failed write ends the stream. A connection is written
-    /// with `write_all_waiting`: this waits for the peer to read, it never returns early.
-    fn write_stream(&mut self, stream: u32, contents: &[u8]) -> Result<(), StreamError> {
+    /// `splice` and `blocking-splice`. A failed write ends the stream. A connection's bytes go
+    /// through its send queue (see `TcpOut`), so their order is kept: with `wait` false
+    /// (`write`) they are queued and sent as far as the socket takes them; with `wait` the
+    /// queue is then emptied, waiting for the peer to read.
+    fn write_stream(
+        &mut self,
+        stream: u32,
+        contents: &[u8],
+        wait: bool,
+    ) -> Result<(), StreamError> {
         let written = if let Some(slot) = tcp_slot(stream) {
-            match self.tcp_out.get_mut(slot) {
-                Some(conn) => write_all_waiting(conn, contents),
-                None => Err(std::io::ErrorKind::BrokenPipe.into()),
+            let conn = self.tcp_out.get(slot).ok_or(StreamError::Closed)?;
+            conn.push(contents);
+            if wait {
+                conn.flush_waiting();
             }
+            return conn.status();
         } else {
             match (stream, file_index(stream)) {
                 (_, Some(index)) => match self.outputs.get_mut(index) {
@@ -893,10 +1030,21 @@ impl TypedHost {
     // end optional
 
     // optional: wasi_io_streams_method_output_stream_blocking_flush | wasi_io_streams_method_output_stream_flush | wasi_io_streams_method_output_stream_blocking_write_and_flush | wasi_io_streams_method_output_stream_blocking_write_zeroes_and_flush
-    /// Flushes a stream; only stdout buffers anything.
-    fn flush_stream(&mut self, stream: u32) -> Result<(), StreamError> {
+    /// Flushes a stream; only stdout and a connection's send queue buffer anything. With `wait`
+    /// (`blocking-flush`, and what a blocking write ends with) the queue is emptied; without
+    /// it (`flush`) it is drained as far as the socket takes now and the flush stays pending.
+    fn flush_stream(&mut self, stream: u32, wait: bool) -> Result<(), StreamError> {
+        if let Some(slot) = tcp_slot(stream) {
+            let conn = self.tcp_out.get(slot).ok_or(StreamError::Closed)?;
+            if wait {
+                conn.flush_waiting();
+            } else {
+                conn.flush();
+            }
+            return conn.status();
+        }
         if stream != 1 {
-            return Ok(()); // a connection, file and (unbuffered in `std`) stderr hold nothing
+            return Ok(()); // a file and (unbuffered in `std`) stderr hold nothing
         }
         std::io::stdout().flush().map_err(|_| StreamError::Closed)
     }
@@ -937,6 +1085,26 @@ impl TypedHost {
         }
     }
 
+    /// What `check-write` of the output stream in `tcp_out` at `slot` permits (see
+    /// `TcpOut::permit`); `None` when the stream is dropped or failed.
+    fn tcp_permit(&self, slot: usize) -> Option<u64> {
+        self.tcp_out.get(slot)?.permit()
+    }
+
+    /// Best effort, at exit and when the host is dropped: sends what the connections' send
+    /// queues still hold, waiting for the peers to read for up to 5 seconds in all.
+    fn flush_all_connections(&self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for conn in self.tcp_out.slots.iter().flatten() {
+            conn.flush_until(Some(deadline));
+        }
+    }
+
+    /// Whether the output stream in `tcp_out` at `slot` is writable (or failed or dropped).
+    fn tcp_writable(&self, slot: usize) -> bool {
+        self.tcp_out.get(slot).is_none() || self.tcp_permit(slot) != Some(0)
+    }
+
     /// The socket behind a handle.
     fn socket(&mut self, handle: u32) -> &mut NetSocket {
         self.sockets.get_mut(handle as usize).expect("unknown or dropped tcp-socket")
@@ -975,6 +1143,7 @@ impl TypedHost {
     fn open_tcp_streams(&mut self, stream: &TcpStream) -> Result<(usize, usize), Net> {
         let dup = |s: &TcpStream| s.try_clone().map_err(|e| net_error(&e));
         let (input, output) = (dup(stream)?, dup(stream)?);
+        let output = TcpOut::new(output);
         Ok((TCP_STREAM + self.tcp_in.insert(input), TCP_STREAM + self.tcp_out.insert(output)))
     }
 
@@ -1104,10 +1273,20 @@ impl TypedHost {
     }
 
     fn tcp_shutdown(&mut self, handle: u32, how: Shutdown) -> Result<(), Net> {
-        match &self.socket(handle).state {
-            NetState::Connected(stream) => stream.shutdown(how).map_err(|e| net_error(&e)),
-            _ => Err(Net::InvalidState),
+        let stream = match &self.socket(handle).state {
+            NetState::Connected(stream) => stream.try_clone().map_err(|e| net_error(&e))?,
+            _ => return Err(Net::InvalidState),
+        };
+        if matches!(how, Shutdown::Write | Shutdown::Both) {
+            // what the guest wrote before still reaches the peer, in order (a dead peer
+            // discards it)
+            for conn in self.tcp_out.slots.iter().flatten() {
+                if conn.is_connection_of(&stream) {
+                    conn.flush_waiting();
+                }
+            }
         }
+        stream.shutdown(how).map_err(|e| net_error(&e))
     }
 }
 
@@ -1620,9 +1799,11 @@ impl Host for TypedHost {
     // end optional
 
     // optional: wasi_cli_exit_exit
-    /// `exit(status: result)`: `ok` is 0, `error` is 1.
+    /// `exit(status: result)`: `ok` is 0, `error` is 1. The send queues of the connections are
+    /// flushed first (see `flush_all_connections`).
     fn wasi_cli_exit_exit(&mut self, status: Result<(), ()>) {
         std::io::stdout().flush().ok();
+        self.flush_all_connections();
         std::process::exit(i32::from(status.is_err()));
     }
     // end optional
@@ -1725,6 +1906,10 @@ impl Host for TypedHost {
     // optional: wasi_io_streams_resource_drop_output_stream
     fn wasi_io_streams_resource_drop_output_stream(&mut self, handle: OutputStream) {
         if let Some(slot) = tcp_slot(handle.0) {
+            // what the guest wrote still reaches the peer (see `TcpOut`)
+            if let Some(conn) = self.tcp_out.get(slot) {
+                conn.flush_waiting();
+            }
             self.tcp_out.remove(slot);
         } else if let Some(index) = file_index(handle.0) {
             self.outputs.remove(index);
@@ -1739,11 +1924,16 @@ impl Host for TypedHost {
     // end optional
 
     // optional: wasi_io_streams_method_output_stream_check_write
+    /// 4096, except for a connection: its send queue is drained first and the permit is what
+    /// still fits it (up to 4096), so 0 while the peer does not read.
     fn wasi_io_streams_method_output_stream_check_write(
         &mut self,
-        _self_: OutputStream,
+        self_: OutputStream,
     ) -> Result<u64, StreamError> {
-        Ok(4096)
+        match tcp_slot(self_.0) {
+            Some(slot) => self.tcp_permit(slot).ok_or(StreamError::Closed),
+            None => Ok(4096),
+        }
     }
     // end optional
 
@@ -1755,7 +1945,8 @@ impl Host for TypedHost {
         contents: Vec<u8>,
     ) -> Result<(), StreamError> {
         assert!(contents.len() <= 4096, "write: more than check-write allows");
-        self.write_stream(self_.0, &contents)
+        self.assert_within_permit(self_.0, contents.len() as u64, "write")?;
+        self.write_stream(self_.0, &contents, false)
     }
     // end optional
 
@@ -1764,44 +1955,47 @@ impl Host for TypedHost {
         &mut self,
         self_: OutputStream,
     ) -> Result<(), StreamError> {
-        self.flush_stream(self_.0)
+        self.flush_stream(self_.0, true)
     }
     // end optional
 
     // optional: wasi_io_streams_method_output_stream_flush
-    /// Flushes at once: the same as `blocking-flush` (nothing is left to wait for).
+    /// Drains a connection's send queue as far as the socket takes now, without waiting
+    /// (`blocking-flush` waits until the queue is empty); the other streams hold nothing.
     fn wasi_io_streams_method_output_stream_flush(
         &mut self,
         self_: OutputStream,
     ) -> Result<(), StreamError> {
-        self.flush_stream(self_.0)
+        self.flush_stream(self_.0, false)
     }
     // end optional
 
     // optional: wasi_io_streams_method_output_stream_blocking_write_and_flush
     /// Writes then flushes. `contents` over 4096 bytes (what `check-write` returns) traps.
-    /// A connection is written with `write_all_waiting`, which waits for the peer to read
-    /// and so does not return while it never does.
+    /// A connection's send queue is emptied first and then the bytes are sent, waiting for the
+    /// peer to read, so this does not return while it never does.
     fn wasi_io_streams_method_output_stream_blocking_write_and_flush(
         &mut self,
         self_: OutputStream,
         contents: Vec<u8>,
     ) -> Result<(), StreamError> {
         assert!(contents.len() <= 4096, "blocking-write-and-flush: more than check-write allows");
-        self.write_stream(self_.0, &contents)?;
-        self.flush_stream(self_.0)
+        self.write_stream(self_.0, &contents, true)?;
+        self.flush_stream(self_.0, true)
     }
     // end optional
 
     // optional: wasi_io_streams_method_output_stream_write_zeroes
-    /// Writes `len` zero bytes; a `len` over 4096 (what `check-write` returns) traps.
+    /// Writes `len` zero bytes; a `len` over 4096 or over what `check-write` permits a
+    /// connection (see `write`) traps.
     fn wasi_io_streams_method_output_stream_write_zeroes(
         &mut self,
         self_: OutputStream,
         len: u64,
     ) -> Result<(), StreamError> {
         assert!(len <= 4096, "write-zeroes: more than check-write allows");
-        self.write_stream(self_.0, &vec![0u8; len as usize])
+        self.assert_within_permit(self_.0, len, "write-zeroes")?;
+        self.write_stream(self_.0, &vec![0u8; len as usize], false)
     }
     // end optional
 
@@ -1814,8 +2008,8 @@ impl Host for TypedHost {
         len: u64,
     ) -> Result<(), StreamError> {
         assert!(len <= 4096, "blocking-write-zeroes-and-flush: more than check-write allows");
-        self.write_stream(self_.0, &vec![0u8; len as usize])?;
-        self.flush_stream(self_.0)
+        self.write_stream(self_.0, &vec![0u8; len as usize], true)?;
+        self.flush_stream(self_.0, true)
     }
     // end optional
 
@@ -1823,8 +2017,8 @@ impl Host for TypedHost {
     /// Moves at most `min(len, 4096)` bytes from `src` to this stream and returns how many:
     /// a dropped output is `closed` first (before anything is read), then `read`, then
     /// `write` (a zero `len` is ok while both are open). It does not wait for `src`: `src` at
-    /// its end is `closed`, nothing available yet is `ok(0)`. The write does wait for room:
-    /// a connection is written like `write` (the peer must read). A failed write ends the
+    /// its end is `closed`, nothing available yet is `ok(0)`. The write waits for the peer to
+    /// read (see `write_stream`). A failed write ends the
     /// output stream. Known limitation: the bytes already read from `src` are lost then.
     fn wasi_io_streams_method_output_stream_splice(
         &mut self,
@@ -1837,7 +2031,7 @@ impl Host for TypedHost {
         }
         let data = self.read_stream(src.0, len)?;
         if !data.is_empty() {
-            self.write_stream(self_.0, &data)?;
+            self.write_stream(self_.0, &data, true)?;
         }
         Ok(data.len() as u64)
     }
@@ -1857,15 +2051,19 @@ impl Host for TypedHost {
         }
         let data = self.read_stream_waiting(src.0, len)?;
         if !data.is_empty() {
-            self.write_stream(self_.0, &data)?;
+            self.write_stream(self_.0, &data, true)?;
         }
         Ok(data.len() as u64)
     }
     // end optional
 
     // optional: wasi_io_streams_method_output_stream_subscribe
-    fn wasi_io_streams_method_output_stream_subscribe(&mut self, _self_: OutputStream) -> Pollable {
-        self.subscribe(None)
+    /// Ready at once, except for a connection: it is ready while its send queue has room.
+    fn wasi_io_streams_method_output_stream_subscribe(&mut self, self_: OutputStream) -> Pollable {
+        match tcp_slot(self_.0) {
+            Some(slot) => self.subscribe_wait(Wait::TcpWritable(slot)),
+            None => self.subscribe(None),
+        }
     }
     // end optional
 

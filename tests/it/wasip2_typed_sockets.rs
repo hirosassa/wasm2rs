@@ -4,7 +4,7 @@
 
 use crate::wasip2_typed_host::{assert_succeeded, component_from_wit, run_program};
 
-const IO: &str = r#"
+pub(crate) const IO: &str = r#"
 package wasi:io@0.2.0;
 interface error {
   resource error;
@@ -36,7 +36,7 @@ interface streams {
 }
 "#;
 
-const SOCKETS: &str = r#"
+pub(crate) const SOCKETS: &str = r#"
 package wasi:sockets@0.2.0;
 interface network {
   resource network;
@@ -84,7 +84,7 @@ interface tcp-create-socket {
 }
 "#;
 
-const WORLD: &str = r#"
+pub(crate) const WORLD: &str = r#"
 package test:t;
 world w {
   import wasi:io/streams@0.2.0;
@@ -95,7 +95,7 @@ world w {
 }
 "#;
 
-const CORE: &str = r#"
+pub(crate) const CORE: &str = r#"
 (module
   (import "wasi:io/error@0.2.0" "[resource-drop]error" (func (param i32)))
   (import "wasi:io/poll@0.2.0" "[resource-drop]pollable" (func $drop_pollable (param i32)))
@@ -403,7 +403,7 @@ fn a_dropped_socket_frees_its_handle_for_the_next_one() {
 
 /// Guest-side helpers for the bodies of the tests below: `serve` makes a listening socket
 /// and returns its port; `read_all` polls `read` until `n` bytes arrived.
-const HELPERS: &str = r#"
+pub(crate) const HELPERS: &str = r#"
 #[allow(dead_code)]
 fn serve(inst: &mut Instance<Glue<TypedHost>>) -> (i32, u16) {
     let s = inst.create(0);
