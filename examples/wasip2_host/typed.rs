@@ -1114,9 +1114,17 @@ impl From<Fs> for FsErrorCode {
 }
 // end optional
 
+// optional: wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_descriptor_metadata_hash_at
+/// Whether `path` ends in a real name that `symlink-follow` can apply to: not empty, not
+/// `.` and without a trailing `/` or `/.` (those name a directory, which is never a link).
+fn names_an_entry(path: &str) -> bool {
+    !(path.is_empty() || path == "." || path.ends_with('/') || path.ends_with("/."))
+}
+// end optional
+
 // optional: wasi_filesystem_types_method_descriptor_stat | wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_directory_entry_stream_read_directory_entry
-/// Directory 3, regular file 6, symlink 5 (only directory entries are not followed),
-/// otherwise unknown.
+/// Directory 3, regular file 6, symlink 5 (seen only for a directory entry or a
+/// `symlink_metadata` lookup), otherwise unknown.
 fn descriptor_type(t: std::fs::FileType) -> DescriptorType {
     if t.is_dir() {
         DescriptorType::Directory
@@ -2194,15 +2202,21 @@ impl Host for TypedHost {
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_stat_at
-    /// Like `stat`, for a path under the descriptor (links are followed).
+    /// Like `stat`, for a path under the descriptor. With `symlink-follow` a symlink is
+    /// followed to its target; without it the link itself is described (type
+    /// `symbolic-link`), and a link that leads out of the preopen is not an error.
     fn wasi_filesystem_types_method_descriptor_stat_at(
         &mut self,
         self_: Descriptor,
-        _path_flags: PathFlags,
+        path_flags: PathFlags,
         path: String,
     ) -> Result<DescriptorStat, FsErrorCode> {
-        let full = self.resolve(self_.0, &path)?;
-        Ok(descriptor_stat(std::fs::metadata(full).map_err(io_error_code)?))
+        let meta = if path_flags.contains(PathFlags::SYMLINK_FOLLOW) || !names_an_entry(&path) {
+            std::fs::metadata(self.resolve(self_.0, &path)?)
+        } else {
+            std::fs::symlink_metadata(self.resolve_entry(self_.0, &path)?)
+        };
+        Ok(descriptor_stat(meta.map_err(io_error_code)?))
     }
     // end optional
 
@@ -2217,15 +2231,26 @@ impl Host for TypedHost {
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_metadata_hash_at
+    /// `metadata-hash` for a path under the descriptor. With `symlink-follow` a symlink is
+    /// followed to its target (and hashes like it); without it the link's own identity is
+    /// hashed. `.`, the empty path and a trailing `/` or `/.` name the directory itself,
+    /// which is always resolved.
     fn wasi_filesystem_types_method_descriptor_metadata_hash_at(
         &mut self,
         self_: Descriptor,
-        _path_flags: PathFlags,
+        path_flags: PathFlags,
         path: String,
     ) -> Result<MetadataHashValue, FsErrorCode> {
-        let full = self.resolve(self_.0, &path)?;
-        let meta = std::fs::metadata(&full).map_err(io_error_code)?;
-        Ok(metadata_hash(&meta, &full))
+        let (full, meta) = if path_flags.contains(PathFlags::SYMLINK_FOLLOW) || !names_an_entry(&path) {
+            let full = self.resolve(self_.0, &path)?;
+            let meta = std::fs::metadata(&full);
+            (full, meta)
+        } else {
+            let full = self.resolve_entry(self_.0, &path)?;
+            let meta = std::fs::symlink_metadata(&full);
+            (full, meta)
+        };
+        Ok(metadata_hash(&meta.map_err(io_error_code)?, &full))
     }
     // end optional
 

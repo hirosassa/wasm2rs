@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stdin, a connection or a file succeeds (empty) only while the stream is open and is `closed` at its
   end (as `wasi:io` 0.2 specifies); the host probes without consuming data. The blocking variants
   still do not wait for readiness when the length is 0.
+- `examples/wasip2_host/typed.rs`: `descriptor.stat-at` and `descriptor.metadata-hash-at` honor
+  `symlink-follow`. Without it they describe the symlink itself (type `symbolic-link`, the link's own
+  metadata hash) instead of its target, and a link that leads out of the preopen is not an error then.
 - `wit_host_trait` / `wit_host_glue` / `wit_functions` (and `--wit-host`, `--glue`) declare
   `[resource-drop]<r>` only for resources whose `canon resource.drop` the component lowers (with no
   top-level core module, a nested component that lowers a drop, or an unresolvable drop, every drop is kept). A `wasm32-wasip2` program using
