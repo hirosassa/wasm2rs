@@ -17,14 +17,14 @@ pub(crate) struct GlobalInfo {
     pub init: String,
 }
 
-/// Metadata about the module's linear memory. The declared maximum is only
-/// tracked for a shared memory (it sizes the reservation); other memories'
-/// `memory.grow` only enforces the wasm32 hard cap of 65536 pages.
+/// Metadata about one of the module's linear memories. The declared maximum
+/// bounds `memory.grow` (together with the wasm32 hard cap of 65536 pages) and,
+/// for a shared memory, also sizes the reservation.
 /// When `imported`, the host owns the buffer (lent through the `Imports` trait)
 /// and the instance carries no `memory` field of its own.
 pub(crate) struct MemInfo {
     pub min_pages: u64,
-    /// The declared maximum, in pages.
+    /// The declared maximum, in pages (`memory.grow` fails past it).
     pub max_pages: Option<u64>,
     pub imported: bool,
     /// Whether the memory is declared `shared` (threads proposal). A single

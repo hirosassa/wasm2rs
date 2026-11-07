@@ -38,8 +38,8 @@ About 1500 modules compared equal. Findings:
 1. **A trapping operation whose value is discarded by a function-level `br` is
    dropped**, so the trap never happens (`i32.const 1; i32.load; br 0` on an empty
    memory). Most mismatches (seeds 162, 282, 316, 1046, 1346, 1358) are this.
-2. **`memory.grow` ignores the declared maximum**; it only enforces 65536 pages
-   (seeds 796, 1080).
+2. **`memory.grow` ignored the declared maximum**; it only enforced 65536 pages
+   (seeds 796, 1080). Fixed: each memory's grow is bounded by its own maximum.
 3. Two runs hang in wasm2rs after a first call that traps (seeds 973, 1010); not
    yet reduced, possibly related to 1.
 4. `unsupported` (about 5%): active element/data segments used by

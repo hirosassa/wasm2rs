@@ -124,6 +124,27 @@ fn growing_beyond_any_possible_size_returns_minus_one() {
 }
 
 #[test]
+fn memory64_grow_respects_the_declared_maximum() {
+    // `(memory i64 1 2)`: growing to exactly two pages works, one more fails and
+    // preserves the size; grow by zero returns the current size.
+    compile_run(
+        "mem64_grow_max",
+        r#"(module
+            (memory i64 1 2)
+            (func (export "grow") (param i64) (result i64)
+              local.get 0 memory.grow)
+            (func (export "size") (result i64) memory.size))"#,
+        "let mut inst = Instance::new(); \
+         assert_eq!(inst.func0(2), -1); \
+         assert_eq!(inst.func1(), 1); \
+         assert_eq!(inst.func0(1), 1); \
+         assert_eq!(inst.func0(0), 2); \
+         assert_eq!(inst.func0(1), -1); \
+         assert_eq!(inst.func1(), 2);",
+    );
+}
+
+#[test]
 fn memory_fill_and_copy_take_i64_operands() {
     compile_run(
         "mem64_bulk",

@@ -779,10 +779,9 @@ mod tests {
         assert_eq!(v, Verdict::Match);
     }
 
-    /// Found by seeds 796 and 1080: `memory.grow` only enforces the 65536-page limit,
-    /// not the memory's declared maximum, so growth that must fail (-1) succeeds.
+    /// Found by seeds 796 and 1080: `memory.grow` only enforced the 65536-page limit,
+    /// not the memory's declared maximum, so growth that must fail (-1) succeeded.
     #[test]
-    #[ignore = "known wasm2rs bug: memory.grow ignores the declared maximum"]
     fn memory_grow_respects_the_declared_maximum() {
         let v = check(
             "grow_max",

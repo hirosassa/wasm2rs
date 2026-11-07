@@ -114,7 +114,7 @@ Findings:
 - Real modules seldom declare `min == max`: the googlesql module (557 pages) has no
   maximum, and Rust and growable Emscripten builds declare none or a larger one.
 - A fixed-size memory also cannot be an imported or shared one, and the change touches
-  the `memory.grow` helper that bug B (declared maximum) needs to rework.
+  the `memory.grow` helper (which now also enforces the declared maximum).
 
 Decision: not implemented. Revisit with a profile of a real module that declares
 `min == max` and spends its time in bounded-address loops.

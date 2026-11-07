@@ -197,6 +197,69 @@ fn imported_memory_grow_extends_the_host_buffer() {
     assert!(run.success(), "imported memory grow failed");
 }
 
+#[test]
+fn imported_memory_grow_respects_module_declared_maximum() {
+    // The host `Vec` has no wasm maximum of its own; the module's declared
+    // maximum of two pages still bounds `memory.grow`, which fails before
+    // touching the host buffer.
+    let wat = r#"
+        (module
+          (import "env" "mem" (memory 1 2))
+          (func (param i32) (result i32) (memory.grow (local.get 0)))
+          (func (result i32) (memory.size))
+          (func (param i32 i32) (i32.store8 (local.get 0) (local.get 1)))
+          (func (param i32) (result i32) (i32.load8_u (local.get 0))))
+        "#;
+    let extra = format!(
+        "{HOST_1_PAGE}\n\
+         fn main() {{\n    \
+         let mut inst = Instance::new(Host {{ mem: vec![0u8; 65536] }});\n    \
+         inst.func2(0, 0x5A);\n    \
+         assert_eq!(inst.func0(2), -1);\n    \
+         assert_eq!(inst.func1(), 1);\n    \
+         assert_eq!(inst.imports.mem.len(), 65536);\n    \
+         assert_eq!(inst.func0(1), 1);\n    \
+         assert_eq!(inst.func1(), 2);\n    \
+         assert_eq!(inst.func0(0), 2);\n    \
+         assert_eq!(inst.func0(1), -1);\n    \
+         assert_eq!(inst.func1(), 2);\n    \
+         assert_eq!(inst.imports.mem.len(), 2 * 65536);\n    \
+         assert_eq!(inst.func3(0), 0x5A);\n    \
+         }}"
+    );
+    let bin = compile("grow_declared_maximum", wat, &extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "imported memory maximum was not enforced");
+}
+
+#[test]
+fn import_memory_option_keeps_the_defined_memorys_maximum() {
+    // With `import_memory` a defined `(memory 1 2)` becomes host-owned but its
+    // declared maximum still applies.
+    let wat = r#"
+        (module
+          (memory 1 2)
+          (func (param i32) (result i32) (memory.grow (local.get 0)))
+          (func (result i32) (memory.size)))
+        "#;
+    let extra = format!(
+        "{HOST_1_PAGE}\n\
+         fn main() {{\n    \
+         let mut inst = Instance::new(Host {{ mem: vec![0u8; 65536] }});\n    \
+         assert_eq!(inst.func0(2), -1);\n    \
+         assert_eq!(inst.func0(1), 1);\n    \
+         assert_eq!(inst.func0(1), -1);\n    \
+         assert_eq!(inst.func1(), 2);\n    \
+         }}"
+    );
+    let bin = compile_with("import_memory_max", wat, &extra, &import_memory());
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(
+        run.success(),
+        "defined-then-imported memory maximum ignored"
+    );
+}
+
 fn import_memory() -> wasm2rs::TranspileOptions {
     wasm2rs::TranspileOptions {
         import_memory: true,
