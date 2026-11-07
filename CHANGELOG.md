@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `examples/wasip2_host/typed.rs`: `output-stream.splice` and `blocking-splice`, the last
+  `wasi:io/streams` methods: they move at most `min(len, 4096)` bytes from an input stream
+  (a file, a connection or stdin) to the output stream and return the count. `splice` does not
+  wait for the source (`ok(0)` while an open source has nothing yet, `closed` at its end; a
+  zero `len` is ok while both streams are open); `blocking-splice` waits for at least one
+  byte. A dropped output is `closed` before anything is read. The write itself waits for room,
+  so a splice to a connection waits for the peer to read, like `write`. Known limitation:
+  the bytes already read from the source are lost if the write then fails. Tests in
+  `tests/it/wasip2_typed_splice.rs`.
 - `examples/wasip2_host/typed.rs`: the TCP socket options (`is-listening`, `set-listen-backlog-size`,
   keep-alive enabled/idle-time/interval/count, `hop-limit`, `receive-buffer-size`,
   `send-buffer-size`) are recorded per socket with default values, validated (zero is
