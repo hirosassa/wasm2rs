@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `examples/wasip2_host/typed.rs`: a WASI preview2 host written against the generated typed `Host`
+  trait (no canonical-ABI code): stdout/stderr, stdin, the environment, exit, output streams,
+  pollables, `poll`, monotonic-clock timers and the terminal queries, enough for a real
+  `wasm32-wasip2` `println!` program (checked by hand with one, and by tests that declare the
+  imports in a component). The filesystem, sockets and random interfaces still live in the
+  hand-written `host.rs`.
 - `wit_host_glue` and `--wit-host --glue`: the glue from the typed `Host` trait to the flat
   reentrant `Imports` trait of the core module (`pub struct Glue<H: Host>(pub H)` with
   `impl<H: Host> Imports for Glue<H>`; each method has the name of the `Host` method it

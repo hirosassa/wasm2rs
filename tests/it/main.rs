@@ -117,6 +117,7 @@ mod wasi_sdk_e2e;
 mod wasi_shared_memory;
 mod wasi_threads;
 mod wasip2_host;
+mod wasip2_typed_host;
 mod wit_glue;
 mod wit_glue_memory;
 mod wit_host;

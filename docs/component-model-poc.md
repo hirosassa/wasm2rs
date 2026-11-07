@@ -246,7 +246,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
    version (`@0.2.0`) differs from the component import's (`@0.2.12`) and `named_imports` drops the version suffix.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
-   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at` and `readlink-at` are done too; `symlink-at` and `link-at` are done too; so are TCP sockets over loopback (UDP and `ip-name-lookup` are not). This is what makes a wasip2 hello-world run natively.
+   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at` and `readlink-at` are done too; `symlink-at` and `link-at` are done too; so are TCP sockets over loopback (UDP and `ip-name-lookup` are not). This is what makes a wasip2 hello-world run natively. `examples/wasip2_host/typed.rs` redoes the `println!` subset (stdio, environment, exit, streams, pollables, `poll`, timers, terminal queries) against the generated typed `Host` and glue, without canonical-ABI code; the rest (files, sockets, random) is still in `host.rs`.
 4. **Full component support** (very large): parse the component, resolve instances
    and `canon lift/lower` per the spec, and generate glue for arbitrary WIT worlds.
    Months of work; only worth it if general components are a goal.
