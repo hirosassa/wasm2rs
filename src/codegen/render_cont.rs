@@ -101,7 +101,7 @@ fn frame_start_literal(ctx: &ModuleCtx<'_>, n: u32) -> String {
 /// (advanced) object only while it is still suspended, dropping it on return.
 pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
     let mut lines = vec![
-        "pub fn cont_new(&mut self, __funcidx: u32) -> u32 {".to_string(),
+        "pub fn cont_new(&mut self, __funcidx: u32, __ty: u32) -> u32 {".to_string(),
         "    let __obj = match __funcidx {".to_string(),
     ];
     for n in &ctx.cont.bodies {
@@ -114,6 +114,7 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "        _ => panic!(\"cont.new: not a continuation function\"),".to_string(),
         "    };".to_string(),
         "    self.conts.push(Some(__obj));".to_string(),
+        "    self.cont_types.push(__ty);".to_string(),
         "    (self.conts.len() - 1) as u32".to_string(),
         "}".to_string(),
         String::new(),
@@ -159,7 +160,7 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         // handle back typed as the partially-applied continuation. The next
         // resume prepends the prefix to its own arguments (see `cont_step`).
         "#[allow(dead_code)]".to_string(),
-        "pub fn cont_bind(&mut self, __h: u32, __prefix: &[i64]) -> u32 {".to_string(),
+        "pub fn cont_bind(&mut self, __h: u32, __prefix: &[i64], __ty: u32) -> u32 {".to_string(),
         "    match self.conts[__h as usize]".to_string(),
         "        .as_mut()".to_string(),
         "        .expect(\"cont.bind of a consumed continuation\")".to_string(),
@@ -170,6 +171,11 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
             "        ContObj::C{n}(__f) => __f.bound.extend_from_slice(__prefix),"
         ));
     }
-    lines.extend(["    };".to_string(), "    __h".to_string(), "}".to_string()]);
+    lines.extend([
+        "    };".to_string(),
+        "    self.cont_types[__h as usize] = __ty;".to_string(),
+        "    __h".to_string(),
+        "}".to_string(),
+    ]);
     lines
 }

@@ -401,20 +401,6 @@ fn ref_test_on_a_function_type_is_rejected_when_the_host_may_hand_out_funcrefs()
 }
 
 #[test]
-fn ref_test_on_a_concrete_continuation_type_is_rejected() {
-    // A test against a concrete function type compares signatures, but a
-    // continuation handle carries no runtime type, so a test against a concrete
-    // continuation type is rejected rather than mistranslated.
-    assert_unsupported(
-        r#"(module
-             (type $ft (func))
-             (type $ct (cont $ft))
-             (func (result i32) (ref.test (ref $ct) (ref.null cont))))"#,
-        "non-struct/array concrete type",
-    );
-}
-
-#[test]
 fn call_indirect_without_a_table_is_rejected() {
     // `call_indirect` needs a table to resolve the callee. A module that uses it
     // with no table defined still assembles as valid wasm, but wasm2rs has
@@ -697,5 +683,34 @@ fn a_try_table_clause_branching_to_a_try_whose_handler_it_is_in_is_rejected() {
               end
               i32.const 1))"#,
         "branch out of a try handler",
+    );
+}
+
+#[test]
+fn a_cast_to_a_continuation_type_in_a_module_with_a_switch_is_rejected() {
+    // A `switch` gives a continuation a type that the handle's recorded type does
+    // not follow, so the cast could answer wrongly.
+    assert_unsupported(
+        r#"(module
+            (type $ht (func (result i32)))
+            (tag $t (type $ht))
+            (type $fa (func (result i32)))
+            (type $ca (cont $fa))
+            (type $fa_s (func (result i32)))
+            (type $ca_s (cont $fa_s))
+            (type $fb (func (param i32) (param (ref $ca_s)) (result i32)))
+            (type $cb (cont $fb))
+            (func $a (type $fa)
+              i32.const 11
+              ref.func $b cont.new $cb
+              switch $cb $t
+              i32.const 999)
+            (func $b (type $fb)
+              local.get 0 i32.const 2 i32.add)
+            (func (export "run") (type $fa)
+              ref.func $a cont.new $ca
+              resume $ca (on $t switch))
+            (func (export "t") (result i32) (ref.test (ref $ca) (ref.null $ca))))"#,
+        "continuation type in a module with a switch",
     );
 }

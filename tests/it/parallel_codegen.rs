@@ -95,10 +95,11 @@ fn split_output_is_identical_for_any_job_count() {
 #[test]
 fn a_failing_function_reports_the_same_error_for_any_job_count() {
     // Function 30 is the only one the transpiler rejects.
-    let mut wat = String::from("(module (tag $e) (type $ft (func)) (type $ct (cont $ft))\n");
+    // A funcref test in a module with a host is the rejected operation.
+    let mut wat = String::from("(module (import \"e\" \"h\" (func)) (tag $e) (type $ft (func))\n");
     for i in 0..40 {
         if i == 30 {
-            wat.push_str("(func (result i32) (ref.test (ref $ct) (ref.null cont)))\n");
+            wat.push_str("(func (result i32) (ref.test (ref $ft) (ref.null func)))\n");
         } else {
             wat.push_str(&format!("(func (result i32) (i32.const {i}))\n"));
         }

@@ -1,11 +1,11 @@
 use std::mem;
 
-use wasmparser::{BlockType, ValType};
+use wasmparser::{BlockType, HeapType, ValType};
 
 use super::super::{
-    BrArm, BranchEscape, CatchArm, CatchKind, EXC_TYPE, Frame, FrameKind, Node, RegionNode, Rt,
-    TableCatch, TryRegionNode, TryState, Val, condition_code, decode_exc_value, default_value,
-    encode_exc_value, index_u32, reachable_after, rust_type,
+    BrArm, BranchEscape, CatchArm, CatchKind, CompositeKind, EXC_TYPE, Frame, FrameKind, Node,
+    RegionNode, Rt, TableCatch, TryRegionNode, TryState, Val, condition_code, decode_exc_value,
+    default_value, encode_exc_value, index_u32, reachable_after, rust_type,
 };
 use super::{CatchPhase, TryBarrier};
 use crate::TranspileError;
@@ -645,10 +645,35 @@ impl<'a> super::FuncGen<'a> {
         self.assign_decoded(&vars, &payload_tys, "__pl")?;
         let cont_var = vars.last().ok_or(TranspileError::StackUnderflow)?;
         self.line(format!("{cont_var} = {handle_var};"));
+        // The handler block gives the suspended continuation its own type.
+        if let Some(ty) = self.label_cont_type(label_depth) {
+            self.line(format!("self.cont_types[{handle_var} as usize] = {ty}u32;"));
+        }
         let keyword = if is_loop { "continue" } else { "break" };
         self.line(format!("{keyword} 'l{label};"));
         self.line("}");
         Ok(())
+    }
+
+    /// The continuation type index a branch target's last value has, if it is a
+    /// reference to a concrete continuation type.
+    fn label_cont_type(&self, label_depth: u32) -> Option<u32> {
+        let frame = &self.frames[self.frame_index(label_depth)?];
+        let (_, ty) = if frame.kind == FrameKind::Loop {
+            frame.loop_params.last()?
+        } else {
+            frame.results.last()?
+        };
+        let ValType::Ref(rt) = ty else { return None };
+        let HeapType::Concrete(idx) = rt.heap_type() else {
+            return None;
+        };
+        let idx = idx.as_module_index()?;
+        matches!(
+            self.ctx.type_kinds.get(idx as usize),
+            Some(CompositeKind::Cont(_))
+        )
+        .then_some(idx)
     }
 
     pub(super) fn branch_table(

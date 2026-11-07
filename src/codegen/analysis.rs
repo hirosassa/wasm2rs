@@ -115,6 +115,9 @@ pub(crate) struct BodyScan {
     /// Per defined function (0-based): whether its own body has a `suspend`/
     /// `switch` control transfer. Seeds the `can_suspend` fixpoint.
     pub(crate) suspends: Vec<bool>,
+    /// Whether any body has a `switch`, which hands a continuation a new type that
+    /// the `cont_types` table does not follow.
+    pub(crate) uses_switch: bool,
     /// Per defined function (0-based): the callees of its direct
     /// `call`/`return_call` edges (full index space). Shared by the `can_suspend`
     /// and `step_functions` fixpoints so neither re-scans.
@@ -163,6 +166,7 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
         suspends: vec![false; funcs.len()],
         calls: vec![Vec::new(); funcs.len()],
         uses_extern_box: false,
+        uses_switch: false,
         uses_call_ref: false,
         uses_array_segment_ops: false,
     };
@@ -191,7 +195,11 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
                 Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
                     mutated.insert(local_index);
                 }
-                Operator::Suspend { .. } | Operator::Switch { .. } => scan.suspends[i] = true,
+                Operator::Suspend { .. } => scan.suspends[i] = true,
+                Operator::Switch { .. } => {
+                    scan.suspends[i] = true;
+                    scan.uses_switch = true;
+                }
                 Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
                     scan.calls[i].push(function_index);
                 }

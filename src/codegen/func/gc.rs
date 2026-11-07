@@ -635,8 +635,8 @@ impl super::FuncGen<'_> {
     /// `array` cases separate the `GcRef::I31` and `GcRef::Obj` variants.
     /// `null_matches` picks how the null handle is classified (a nullable target
     /// matches null). A concrete function type target tests declared subtyping (see
-    /// `func_heap_test`); a concrete continuation type target is unsupported, as a
-    /// continuation handle carries no runtime type.
+    /// `func_heap_test`); a concrete continuation type target tests the handle's declared type (see
+    /// `cont_heap_test`).
     fn gc_heap_test(
         &self,
         ref_expr: &str,
@@ -684,6 +684,9 @@ impl super::FuncGen<'_> {
             // handle (high bit set) is no local index and never matches.
             HeapType::Concrete(idx) if self.is_func_type(idx.as_module_index()) => {
                 return self.func_heap_test(ref_expr, idx.as_module_index(), null_matches);
+            }
+            HeapType::Concrete(idx) if self.is_cont_type(idx.as_module_index()) => {
+                return self.cont_heap_test(ref_expr, idx.as_module_index(), null_matches);
             }
             HeapType::Concrete(_) => {
                 let target = self.gc_type_index(hty).ok_or_else(|| {
@@ -747,6 +750,57 @@ impl super::FuncGen<'_> {
         };
         Ok(format!(
             "{{ let __f: u32 = ({ref_expr}); if __f == u32::MAX {{ {null_matches} }} else {{ {hit} }} }}"
+        ))
+    }
+
+    fn is_cont_type(&self, idx: Option<u32>) -> bool {
+        idx.is_some_and(|i| {
+            matches!(
+                self.ctx.type_kinds.get(i as usize),
+                Some(CompositeKind::Cont(_))
+            )
+        })
+    }
+
+    /// A test of a continuation handle against the concrete continuation type `idx`:
+    /// null answers `null_matches`, any other handle matches when its declared type
+    /// (`cont_types`, kept by `cont.new`, `cont.bind` and `resume` handlers) is `idx`
+    /// or a declared subtype of it. A `switch` retypes a continuation without
+    /// updating that table, so a module with one is rejected.
+    fn cont_heap_test(
+        &self,
+        ref_expr: &str,
+        idx: Option<u32>,
+        null_matches: bool,
+    ) -> Result<String, TranspileError> {
+        let target = idx
+            .filter(|i| self.ctx.types.get(*i as usize).is_some())
+            .ok_or_else(|| TranspileError::Unsupported("ref cast/test: unknown type".into()))?;
+        if self.ctx.cont.uses_switch {
+            return Err(TranspileError::Unsupported(
+                "ref cast/test to a continuation type in a module with a switch: a switch \
+                 retypes a continuation"
+                    .into(),
+            ));
+        }
+        let types = self.ctx.cont_types_of_subtype(target).ok_or_else(|| {
+            TranspileError::Unsupported(
+                "ref cast/test to a continuation type: the type section did not validate".into(),
+            )
+        })?;
+        let arms: Vec<String> = types.iter().map(|t| format!("{t}u32")).collect();
+        // Without a `cont.new` there is no handle table: no non-null handle can name a
+        // continuation, so only null can match.
+        let hit = if arms.is_empty() || self.ctx.cont.bodies.is_empty() {
+            "false".to_string()
+        } else {
+            format!(
+                "matches!(self.cont_types[__c as usize], {})",
+                arms.join(" | ")
+            )
+        };
+        Ok(format!(
+            "{{ let __c: u32 = ({ref_expr}); if __c == u32::MAX {{ {null_matches} }} else {{ {hit} }} }}"
         ))
     }
 

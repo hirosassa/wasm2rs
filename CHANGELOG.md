@@ -13,9 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matches when its function's declared type is the target or a declared subtype of it
   (`sub` chains, final vs. open types and equivalent types across rec groups included; the
   relation comes from validating the type section). Null follows the target's nullability.
-  A module with a host is rejected (an external funcref carries no declared type), as is a test
-  against a concrete continuation type. `call_indirect`/`call_ref` dispatch follows the same
+  A module with a host is rejected (an external funcref carries no declared type).
+  `call_indirect`/`call_ref` dispatch follows the same
   relation, so a function of a declared subtype is callable through its supertype.
+- `ref.test`, `ref.cast` and `br_on_cast` against a concrete continuation type: the instance
+  records each continuation's declared type (`cont.new`, `cont.bind`, and the type a `resume`
+  handler block gives a suspended continuation) and a test matches the target or a declared
+  subtype of it. A module with a `switch` is rejected, as the table does not follow its retyping.
 - The abstract `contref` type and `ref.null cont`: a `u32` handle like a concrete continuation
   reference.
 - `ref.null nocont` / `nullcontref`: the bottom of the continuation hierarchy lowers to the same
