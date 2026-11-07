@@ -21,7 +21,10 @@
 //! directory `$WASIP2_PREOPEN`, if set, as its `/`: read-only, or also writable if
 //! `$WASIP2_PREOPEN_WRITABLE=1`. A component that imports a function `typed.rs` does
 //! not implement does not build: rustc's errors are shown (E0046, missing trait items)
-//! and this program exits with 2. See `docs/component-model-poc.md`.
+//! and this program exits with 2. The program is dropped before a normal exit, which sends
+//! what the connections' send queues still hold (up to 5 seconds); after a trap (134) it is
+//! not. Addresses outside loopback stay `access-denied` (`with_external_network` is not
+//! called here). See `docs/component-model-poc.md` and `docs/typed-host-design.md`.
 
 use std::process::Command;
 
