@@ -170,10 +170,10 @@ const CORE: &str = r#"
     (if (result i64) (i32.load8_u (i32.const 640))
       (then (i64.const -1))
       (else (i64.load (i32.const 664)))))
-  ;; the lower half of the metadata hash, or 0
+  ;; the lower half of the metadata hash; an error traps, so it cannot pass for a hash
   (func (export "fs_hash") (param $h i32) (result i64)
     (call $hash (local.get $h) (i32.const 720))
-    (if (result i64) (i32.load8_u (i32.const 720)) (then (i64.const 0)) (else (i64.load (i32.const 728)))))
+    (if (result i64) (i32.load8_u (i32.const 720)) (then unreachable) (else (i64.load (i32.const 728)))))
   ;; the three streams: the stream handle, or 1000 + the error code
   (func (export "fs_rstream") (param $h i32) (param $offset i64) (result i32)
     (call $rvs (local.get $h) (local.get $offset) (i32.const 740))
@@ -294,6 +294,8 @@ fn a_descriptor_stays_on_the_file_it_opened_when_its_path_is_reused() {
     assert_eq!(std::fs::metadata(root.join("f.txt")).unwrap().len(), 0);
 }
 
+// needs POSIX semantics: a file unlinked or replaced while open stays reachable
+#[cfg(unix)]
 #[test]
 fn a_file_descriptor_is_not_a_directory_when_a_directory_takes_its_path() {
     let root = fresh_root("identity_not_dir");
@@ -353,6 +355,8 @@ fn streams_over_one_descriptor_keep_their_own_positions_and_outlive_it() {
     );
 }
 
+// needs POSIX semantics: a file unlinked or replaced while open stays reachable
+#[cfg(unix)]
 #[test]
 fn a_descriptor_stays_on_its_file_when_another_file_is_renamed_over_its_path() {
     let root = fresh_root("identity_renamed");
