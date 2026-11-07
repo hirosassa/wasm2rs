@@ -8,9 +8,9 @@
 //! the core import that lowers it (module = the interface, field = the function name).
 //!
 //! Supported types: integers, floats, `bool`, `char`, `string`, `list`, `option`,
-//! `result`, `tuple`, `record` and resource handles (`own`/`borrow`). A function that uses
-//! anything else (`variant`, `enum`, `flags`, `future`, `stream`,
-//! `error-context`, ...) is an [`Unsupported`](TranspileError::Unsupported) error naming
+//! `result`, `tuple`, `record`, `variant`, `enum`, `flags` (at most 32) and resource handles
+//! (`own`/`borrow`). A function that uses anything else (`future`, `stream`,
+//! `error-context`, more than 32 flags, ...) is an [`Unsupported`](TranspileError::Unsupported) error naming
 //! the type, never silently dropped. A type that no function uses is not checked.
 
 use std::cell::Cell;
@@ -56,6 +56,9 @@ pub enum WitType {
     },
     Tuple(Vec<Arc<WitType>>),
     Record(WitRecord),
+    Variant(WitVariant),
+    Enum(WitEnum),
+    Flags(WitFlags),
     /// `own<R>`: a handle the callee takes over.
     Own(Arc<WitResource>),
     /// `borrow<R>`: a handle lent for the call.
@@ -82,6 +85,33 @@ pub struct WitRecord {
     pub name: String,
     /// The field names and types, in order.
     pub fields: Vec<(String, Arc<WitType>)>,
+}
+
+/// A WIT variant: its name (as the interface exports it, kebab-case) and its cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitVariant {
+    /// The variant's name, e.g. `stream-error`.
+    pub name: String,
+    /// The case names and their payload types (`None` for a case without payload), in order.
+    pub cases: Vec<(String, Option<Arc<WitType>>)>,
+}
+
+/// A WIT enum: its name and its case names, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitEnum {
+    /// The enum's name, e.g. `error-code`.
+    pub name: String,
+    /// The case names, in order.
+    pub cases: Vec<String>,
+}
+
+/// A WIT flags type: its name and its flag names, in order (at most 32).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitFlags {
+    /// The flags type's name, e.g. `descriptor-flags`.
+    pub name: String,
+    /// The flag names, in order; flag `i` is bit `i`.
+    pub flags: Vec<String>,
 }
 
 /// A function of an imported interface instance.
@@ -239,9 +269,29 @@ fn defined(scope: &Scope, d: &ComponentDefinedType<'_>) -> Soft<WitType> {
             ok: opt_val(scope, *ok)?,
             err: opt_val(scope, *err)?,
         },
-        ComponentDefinedType::Variant(_) => return Err("variant".into()),
-        ComponentDefinedType::Enum(_) => return Err("enum".into()),
-        ComponentDefinedType::Flags(_) => return Err("flags".into()),
+        ComponentDefinedType::Variant(cases) => WitType::Variant(WitVariant {
+            name: format!("variant{}", scope.types.len()),
+            cases: cases
+                .iter()
+                .map(|c| Ok((c.name.to_string(), opt_val(scope, c.ty)?)))
+                .collect::<Soft<Vec<_>>>()?,
+        }),
+        ComponentDefinedType::Enum(cases) => WitType::Enum(WitEnum {
+            name: format!("enum{}", scope.types.len()),
+            cases: cases.iter().map(|c| (*c).to_string()).collect(),
+        }),
+        ComponentDefinedType::Flags(names) => {
+            if names.len() > MAX_FLAGS {
+                return Err(format!(
+                    "flags with {} flags (at most {MAX_FLAGS} are supported)",
+                    names.len()
+                ));
+            }
+            WitType::Flags(WitFlags {
+                name: format!("flags{}", scope.types.len()),
+                flags: names.iter().map(|n| (*n).to_string()).collect(),
+            })
+        }
         ComponentDefinedType::Own(i) => WitType::Own(resource_at(scope, *i)?),
         ComponentDefinedType::Borrow(i) => WitType::Borrow(resource_at(scope, *i)?),
         ComponentDefinedType::Future(_) => return Err("future".into()),
@@ -250,6 +300,9 @@ fn defined(scope: &Scope, d: &ComponentDefinedType<'_>) -> Soft<WitType> {
         ComponentDefinedType::FixedLengthList(..) => return Err("fixed-length list".into()),
     })
 }
+
+/// The most flags one `flags` type may have: one `u32` of the canonical ABI.
+const MAX_FLAGS: usize = 32;
 
 fn func_sig(scope: &Scope, f: &ComponentFuncType<'_>) -> Soft<Sig> {
     if f.async_ {
@@ -278,16 +331,31 @@ fn component_type(stack: &mut Vec<Scope>, ty: &ComponentType<'_>) -> Result<Def,
     })
 }
 
-/// The definition an `eq`-bounded exported type gets: the same type, and a record takes
-/// the exported name.
+/// The definition an `eq`-bounded exported type gets: the same type, and a record,
+/// variant, enum or flags type takes the exported name.
 fn export_type(def: Def, name: &str) -> Def {
-    if let Def::Val(Ok(ty)) = &def
-        && let WitType::Record(r) = &**ty
-    {
-        return Def::Val(Ok(Arc::new(WitType::Record(WitRecord {
-            name: name.to_string(),
-            fields: r.fields.clone(),
-        }))));
+    if let Def::Val(Ok(ty)) = &def {
+        let name = name.to_string();
+        let renamed = match &**ty {
+            WitType::Record(r) => WitType::Record(WitRecord {
+                name,
+                fields: r.fields.clone(),
+            }),
+            WitType::Variant(v) => WitType::Variant(WitVariant {
+                name,
+                cases: v.cases.clone(),
+            }),
+            WitType::Enum(e) => WitType::Enum(WitEnum {
+                name,
+                cases: e.cases.clone(),
+            }),
+            WitType::Flags(f) => WitType::Flags(WitFlags {
+                name,
+                flags: f.flags.clone(),
+            }),
+            _ => return def,
+        };
+        return Def::Val(Ok(Arc::new(renamed)));
     }
     def
 }
@@ -420,6 +488,14 @@ impl Subst {
                     .fields
                     .iter()
                     .map(|(n, t)| (n.clone(), self.arc(t)))
+                    .collect(),
+            }),
+            WitType::Variant(v) => WitType::Variant(WitVariant {
+                name: v.name.clone(),
+                cases: v
+                    .cases
+                    .iter()
+                    .map(|(n, t)| (n.clone(), self.opt(t)))
                     .collect(),
             }),
             WitType::Own(r) => WitType::Own(self.resource(r)),
@@ -709,18 +785,38 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
 /// past this the trait is refused instead.
 const NODE_BUDGET: usize = 200_000;
 
-/// The records and resources the trait's functions use, with the Rust names they were
-/// given (one namespace).
+/// A named compound type the trait declares once.
+enum Decl {
+    Record(WitRecord),
+    Variant(WitVariant),
+    Enum(WitEnum),
+    Flags(WitFlags),
+}
+
+impl Decl {
+    /// The WIT name of the declared type.
+    fn name(&self) -> &str {
+        match self {
+            Decl::Record(r) => &r.name,
+            Decl::Variant(v) => &v.name,
+            Decl::Enum(e) => &e.name,
+            Decl::Flags(f) => &f.name,
+        }
+    }
+}
+
+/// The records, variants, enums, flags and resources the trait's functions use, with the
+/// Rust names they were given (one namespace).
 #[derive(Default)]
 struct Records {
     /// Resource ids and their Rust names.
     resource_names: HashMap<u32, String>,
     /// The resources in the order they must be emitted, with their Rust names.
     resources: Vec<String>,
-    /// Each distinct record (by name and rendered fields) and its Rust name.
+    /// Each distinct declared type (by kind, name and rendered members) and its Rust name.
     names: HashMap<String, String>,
-    /// The records in the order they must be emitted, with their Rust names.
-    list: Vec<(WitRecord, String)>,
+    /// The declared types in the order they must be emitted, with their Rust names.
+    list: Vec<(Decl, String)>,
     /// Type nodes visited so far, against [`NODE_BUDGET`].
     visited: Cell<usize>,
 }
@@ -742,7 +838,29 @@ fn type_name(name: &str) -> String {
     if out.starts_with(|c: char| c.is_ascii_digit()) {
         out.insert(0, 'T');
     }
-    if ["Host", "String", "Vec", "Option", "Result", "Self", "Box"].contains(&out.as_str()) {
+    // The std names the generated code uses, and the prelude items a `struct Some(..)` or
+    // `trait Default` would shadow in a module that also holds the user's `impl Host`.
+    const RESERVED: [&str; 18] = [
+        "Host",
+        "String",
+        "Vec",
+        "Option",
+        "Result",
+        "Self",
+        "Box",
+        "Some",
+        "None",
+        "Ok",
+        "Err",
+        "Default",
+        "Clone",
+        "Copy",
+        "Eq",
+        "PartialEq",
+        "Drop",
+        "Send",
+    ];
+    if RESERVED.contains(&out.as_str()) {
         out.push('_');
     }
     out
@@ -760,32 +878,65 @@ impl Records {
         Ok(())
     }
 
-    /// What identifies a record: its name and its fields as rendered.
-    fn key(&self, record: &WitRecord) -> Result<String, TranspileError> {
-        let mut key = record.name.clone();
-        for (name, ty) in &record.fields {
-            let _ = write!(key, "|{name}:{}", self.rust(ty)?);
+    /// What identifies a declared type: its kind, name and members as rendered.
+    fn key(&self, decl: &Decl) -> Result<String, TranspileError> {
+        let mut key = String::new();
+        match decl {
+            Decl::Record(r) => {
+                let _ = write!(key, "record|{}", r.name);
+                for (name, ty) in &r.fields {
+                    let _ = write!(key, "|{name}:{}", self.rust(ty)?);
+                }
+            }
+            Decl::Variant(v) => {
+                let _ = write!(key, "variant|{}", v.name);
+                for (name, ty) in &v.cases {
+                    let payload = match ty {
+                        Some(t) => self.rust(t)?,
+                        None => String::new(),
+                    };
+                    let _ = write!(key, "|{name}:{payload}");
+                }
+            }
+            Decl::Enum(e) => {
+                let _ = write!(key, "enum|{}", e.name);
+                for name in &e.cases {
+                    let _ = write!(key, "|{name}");
+                }
+            }
+            Decl::Flags(f) => {
+                let _ = write!(key, "flags|{}", f.name);
+                for name in &f.flags {
+                    let _ = write!(key, "|{name}");
+                }
+            }
         }
         Ok(key)
     }
 
-    /// Registers `record` (after the records its fields contain), giving it a Rust
-    /// name that no other, different record has.
-    fn add(&mut self, record: &WitRecord) -> Result<(), TranspileError> {
-        for (_, ty) in &record.fields {
-            self.add_in(ty)?;
+    /// Registers `decl` (after the types its members contain), giving it a Rust name
+    /// that no other, different declared type has.
+    fn add(&mut self, decl: Decl) -> Result<(), TranspileError> {
+        match &decl {
+            Decl::Record(r) => r.fields.iter().try_for_each(|(_, ty)| self.add_in(ty))?,
+            Decl::Variant(v) => v
+                .cases
+                .iter()
+                .filter_map(|(_, t)| t.as_ref())
+                .try_for_each(|ty| self.add_in(ty))?,
+            Decl::Enum(_) | Decl::Flags(_) => {}
         }
-        let key = self.key(record)?;
+        let key = self.key(&decl)?;
         if self.names.contains_key(&key) {
             return Ok(());
         }
-        let name = self.fresh_name(&record.name);
-        self.names.insert(key, name.clone());
-        self.list.push((record.clone(), name));
+        let rust_name = self.fresh_name(decl.name());
+        self.names.insert(key, rust_name.clone());
+        self.list.push((decl, rust_name));
         Ok(())
     }
 
-    /// A Rust type name for `wit_name` that no record or resource has yet.
+    /// A Rust type name for `wit_name` that no declared type or resource has yet.
     fn fresh_name(&self, wit_name: &str) -> String {
         let base = type_name(wit_name);
         let mut name = base.clone();
@@ -816,13 +967,24 @@ impl Records {
                 Ok(())
             }
             WitType::Tuple(ts) => ts.iter().try_for_each(|t| self.add_in(t)),
-            WitType::Record(r) => self.add(r),
+            WitType::Record(r) => self.add(Decl::Record(r.clone())),
+            WitType::Variant(v) => self.add(Decl::Variant(v.clone())),
+            WitType::Enum(e) => self.add(Decl::Enum(e.clone())),
+            WitType::Flags(f) => self.add(Decl::Flags(f.clone())),
             WitType::Own(r) | WitType::Borrow(r) => {
                 self.add_resource(r);
                 Ok(())
             }
             _ => Ok(()),
         }
+    }
+
+    /// The Rust name of an already registered declared type.
+    fn declared(&self, decl: Decl) -> Result<String, TranspileError> {
+        Ok(match self.names.get(&self.key(&decl)?) {
+            Some(name) => name.clone(),
+            None => type_name(decl.name()),
+        })
     }
 
     fn rust(&self, ty: &WitType) -> Result<String, TranspileError> {
@@ -858,10 +1020,10 @@ impl Records {
                     many => format!("({})", many.join(", ")),
                 }
             }
-            WitType::Record(r) => match self.names.get(&self.key(r)?) {
-                Some(name) => name.clone(),
-                None => type_name(&r.name),
-            },
+            WitType::Record(r) => self.declared(Decl::Record(r.clone()))?,
+            WitType::Variant(v) => self.declared(Decl::Variant(v.clone()))?,
+            WitType::Enum(e) => self.declared(Decl::Enum(e.clone()))?,
+            WitType::Flags(f) => self.declared(Decl::Flags(f.clone()))?,
             WitType::Own(r) | WitType::Borrow(r) => match self.resource_names.get(&r.id) {
                 Some(name) => name.clone(),
                 None => type_name(&r.name),
@@ -870,21 +1032,84 @@ impl Records {
     }
 }
 
-/// Identifiers for `names`, made unique by appending `_{n}` to a repeat.
-fn unique_idents<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+/// One identifier per name from `ident`, made unique by appending `_{n}` to a repeat.
+fn dedup_idents<'a>(
+    names: impl Iterator<Item = &'a str>,
+    ident: impl Fn(&str) -> String,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (i, name) in names.enumerate() {
-        let mut ident = plain_ident(name);
-        while out.contains(&ident) {
-            ident = format!("{ident}_{i}");
+        let mut id = ident(name);
+        while out.contains(&id) {
+            id = format!("{id}_{i}");
         }
-        out.push(ident);
+        out.push(id);
     }
     out
 }
 
+/// Field and parameter identifiers.
+fn unique_idents<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    dedup_idents(names, plain_ident)
+}
+
+/// `kebab-case` as `CamelCase` enum case names that are valid, distinct and not `Self`.
+fn case_idents<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    dedup_idents(names, |name| {
+        let ident = type_name(name);
+        if ident == "Record" && !name.eq_ignore_ascii_case("record") {
+            "Case".to_string()
+        } else {
+            ident
+        }
+    })
+}
+
+/// `kebab-case` as `UPPER_SNAKE_CASE` associated constant names, distinct from each other.
+fn flag_idents<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    dedup_idents(names, |name| {
+        let words: Vec<String> = name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_ascii_uppercase)
+            .collect();
+        let mut ident = if words.is_empty() {
+            "FLAG".to_string()
+        } else {
+            words.join("_")
+        };
+        if ident.starts_with(|c: char| c.is_ascii_digit()) {
+            ident.insert(0, 'F');
+        }
+        ident
+    })
+}
+
+/// A flags type as `pub struct Name(pub u8|u16|u32)` (the canonical ABI's size: flag `i`
+/// is bit `i`) with one associated constant per flag, `contains` and `union`.
+fn write_flags(out: &mut String, name: &str, flags: &WitFlags) {
+    let int = match flags.flags.len() {
+        0..=8 => "u8",
+        9..=16 => "u16",
+        _ => "u32",
+    };
+    let _ = writeln!(
+        out,
+        "\n#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\npub struct {name}(pub {int});\n\nimpl {name} {{"
+    );
+    for (i, ident) in flag_idents(flags.flags.iter().map(String::as_str))
+        .iter()
+        .enumerate()
+    {
+        let _ = writeln!(out, "    pub const {ident}: Self = Self(1 << {i});");
+    }
+    out.push_str(
+        "    pub fn contains(self, other: Self) -> bool {\n        self.0 & other.0 == other.0\n    }\n\n    pub fn union(self, other: Self) -> Self {\n        Self(self.0 | other.0)\n    }\n}\n",
+    );
+}
+
 /// Rust source for a `pub trait Host` with one method per function of every interface
-/// the component imports, plus the structs of the records they use (`std` only).
+/// the component imports, plus the types of the records, variants, enums and flags they use (`std` only).
 ///
 /// A method `fn <name>(&mut self, <params>) -> <result>;` is named as the
 /// [`named_imports`](crate::TranspileOptions::named_imports) method of the core import
@@ -894,6 +1119,13 @@ fn unique_idents<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
 /// `()`), `tuple` to a Rust tuple, `record` to a struct (named after the record, its
 /// fields snake_case, emitted once however many functions use it) and the integers,
 /// floats, `bool` and `char` to their Rust types.
+///
+/// A `variant` becomes a Rust `enum` (`Case(T)` for a case with a payload, `Case` without;
+/// `#[derive(Debug, Clone, PartialEq)]`), an `enum` a fieldless Rust `enum` (also `Copy`, `Eq`),
+/// and `flags` a `#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)] pub struct F(pub u8)`
+/// (`u16` for 9 to 16 flags, `u32` for 17 to 32; more than 32 is an error) whose flag `i` is bit
+/// `i`, with an associated constant per flag (`F::READ`) and `contains`/`union`. Case names are
+/// `CamelCase`d; flag constants are `UPPER_SNAKE_CASE`d. Like records, each is emitted once.
 ///
 /// A resource `r` becomes one `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub struct R(pub u32);`
 /// handle (however many interfaces use it); `own<r>` and `borrow<r>` are both `R`, since the
@@ -933,16 +1165,50 @@ pub fn wit_host_trait(component: &[u8]) -> Result<String, TranspileError> {
             "\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct {name}(pub u32);"
         );
     }
-    for (record, name) in &records.list {
-        let idents = unique_idents(record.fields.iter().map(|(n, _)| n.as_str()));
-        let _ = writeln!(
-            out,
-            "\n#[derive(Debug, Clone, PartialEq)]\npub struct {name} {{"
-        );
-        for (ident, (_, ty)) in idents.iter().zip(&record.fields) {
-            let _ = writeln!(out, "    pub {ident}: {},", records.rust(ty)?);
+    for (decl, name) in &records.list {
+        match decl {
+            Decl::Record(record) => {
+                let idents = unique_idents(record.fields.iter().map(|(n, _)| n.as_str()));
+                let _ = writeln!(
+                    out,
+                    "\n#[derive(Debug, Clone, PartialEq)]\npub struct {name} {{"
+                );
+                for (ident, (_, ty)) in idents.iter().zip(&record.fields) {
+                    let _ = writeln!(out, "    pub {ident}: {},", records.rust(ty)?);
+                }
+                out.push_str("}\n");
+            }
+            Decl::Variant(variant) => {
+                let idents = case_idents(variant.cases.iter().map(|(n, _)| n.as_str()));
+                let _ = writeln!(
+                    out,
+                    "\n#[derive(Debug, Clone, PartialEq)]\npub enum {name} {{"
+                );
+                for (ident, (_, ty)) in idents.iter().zip(&variant.cases) {
+                    match ty {
+                        Some(t) => {
+                            let _ = writeln!(out, "    {ident}({}),", records.rust(t)?);
+                        }
+                        None => {
+                            let _ = writeln!(out, "    {ident},");
+                        }
+                    }
+                }
+                out.push_str("}\n");
+            }
+            Decl::Enum(e) => {
+                let idents = case_idents(e.cases.iter().map(String::as_str));
+                let _ = writeln!(
+                    out,
+                    "\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum {name} {{"
+                );
+                for ident in &idents {
+                    let _ = writeln!(out, "    {ident},");
+                }
+                out.push_str("}\n");
+            }
+            Decl::Flags(f) => write_flags(&mut out, name, f),
         }
-        out.push_str("}\n");
     }
     out.push_str("\npub trait Host {\n");
     for (f, name) in funcs.iter().zip(&names) {
