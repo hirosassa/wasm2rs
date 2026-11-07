@@ -43,8 +43,13 @@
 // permits (1024) traps. Name lookup (`ip-name-lookup`): `localhost` (both loopback addresses) and
 // numeric IPv4 and IPv6 addresses resolve locally; any other name needs `with_external_network`
 // (then `std`'s resolver runs at `resolve-addresses`) and is `permanent-resolver-failure` without it;
-// a name that is not a host name is `invalid-argument`. The socket options (hop limit,
-// buffer sizes, `ipv6-only`) answer `not-supported`; the TCP ones are not implemented.
+// a name that is not a host name is `invalid-argument`. The TCP socket options (keep-alive
+// enabled, idle time, interval and count, hop limit, receive and send buffer sizes, listen
+// backlog size) are only recorded, not applied to the OS socket: a socket starts with the
+// defaults, a set value is read back, zero is `invalid-argument` (so the backlog size, which
+// is also `invalid-state` once a connection is started or made, and ignored while listening),
+// and an accepted socket inherits the listener's values. The UDP ones (hop limit, buffer sizes, `ipv6-only`) answer
+// `not-supported`.
 //
 // A component that imports both filesystem and sockets gets two `error-code` enums, which the
 // generator spells `ErrorCode` and `ErrorCode2` in an order that follows the imports. The host
@@ -705,10 +710,42 @@ enum NetState {
     Closed,
 }
 
+/// The TCP socket options a guest can set and read back. They are only recorded: `std::net`
+/// has no API for most of them, so none reaches the OS socket. The defaults are the usual
+/// ones of a Linux socket.
+#[allow(dead_code)]
+#[derive(Clone)]
+struct TcpOptions {
+    keep_alive_enabled: bool,
+    /// Nanoseconds.
+    keep_alive_idle_time: u64,
+    /// Nanoseconds.
+    keep_alive_interval: u64,
+    keep_alive_count: u32,
+    hop_limit: u8,
+    receive_buffer_size: u64,
+    send_buffer_size: u64,
+}
+
+impl Default for TcpOptions {
+    fn default() -> Self {
+        TcpOptions {
+            keep_alive_enabled: false,
+            keep_alive_idle_time: 7200 * 1_000_000_000,
+            keep_alive_interval: 75 * 1_000_000_000,
+            keep_alive_count: 9,
+            hop_limit: 64,
+            receive_buffer_size: 65536,
+            send_buffer_size: 65536,
+        }
+    }
+}
+
 #[allow(dead_code)]
 struct NetSocket {
     ipv6: bool,
     state: NetState,
+    options: TcpOptions,
 }
 
 /// Writes all of `bytes`, waiting (a millisecond at a time) while the send buffer is full.
@@ -1002,6 +1039,7 @@ impl TypedHost {
     fn tcp_accept(&mut self, handle: u32) -> Result<(usize, usize, usize), Net> {
         let socket = self.socket(handle);
         let ipv6 = socket.ipv6;
+        let options = socket.options.clone();
         let NetState::Listening { listener, pending } = &socket.state else {
             return Err(Net::InvalidState);
         };
@@ -1012,7 +1050,7 @@ impl TypedHost {
         };
         stream.set_nonblocking(true).map_err(|e| net_error(&e))?;
         let (input, output) = self.open_tcp_streams(&stream)?;
-        let slot = self.sockets.insert(NetSocket { ipv6, state: NetState::Connected(stream) });
+        let slot = self.sockets.insert(NetSocket { ipv6, state: NetState::Connected(stream), options });
         Ok((slot, input, output))
     }
 
@@ -2255,7 +2293,7 @@ impl Host for TypedHost {
         address_family: IpAddressFamily,
     ) -> Result<TcpSocket, NetErrorCode> {
         let ipv6 = address_family == IpAddressFamily::Ipv6;
-        let slot = self.sockets.insert(NetSocket { ipv6, state: NetState::Unbound });
+        let slot = self.sockets.insert(NetSocket { ipv6, state: NetState::Unbound, options: TcpOptions::default() });
         Ok(TcpSocket(slot as u32))
     }
     // end optional
@@ -2375,6 +2413,190 @@ impl Host for TypedHost {
         }
         self.start_stdin();
         self.subscribe_wait(Wait::Stdin)
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_is_listening
+    fn wasi_sockets_tcp_method_tcp_socket_is_listening(&mut self, self_: TcpSocket) -> bool {
+        matches!(self.socket(self_.0).state, NetState::Listening { .. })
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_set_listen_backlog_size
+    fn wasi_sockets_tcp_method_tcp_socket_set_listen_backlog_size(
+        &mut self,
+        self_: TcpSocket,
+        value: u64,
+    ) -> Result<(), NetErrorCode> {
+        if value == 0 {
+            return Err(Net::InvalidArgument.into());
+        }
+        // `std` listens with its own backlog; the size is checked, not applied. While
+        // listening it is ignored (as the spec allows), not an error.
+        match self.socket(self_.0).state {
+            NetState::ConnectStarted(_) | NetState::Connected(_) | NetState::Closed => {
+                Err(Net::InvalidState.into())
+            }
+            _ => Ok(()),
+        }
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_keep_alive_enabled
+    fn wasi_sockets_tcp_method_tcp_socket_keep_alive_enabled(
+        &mut self,
+        self_: TcpSocket,
+    ) -> Result<bool, NetErrorCode> {
+        Ok(self.socket(self_.0).options.keep_alive_enabled)
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_set_keep_alive_enabled
+    fn wasi_sockets_tcp_method_tcp_socket_set_keep_alive_enabled(
+        &mut self,
+        self_: TcpSocket,
+        value: bool,
+    ) -> Result<(), NetErrorCode> {
+        self.socket(self_.0).options.keep_alive_enabled = value;
+        Ok(())
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_keep_alive_idle_time
+    fn wasi_sockets_tcp_method_tcp_socket_keep_alive_idle_time(
+        &mut self,
+        self_: TcpSocket,
+    ) -> Result<u64, NetErrorCode> {
+        Ok(self.socket(self_.0).options.keep_alive_idle_time)
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_set_keep_alive_idle_time
+    fn wasi_sockets_tcp_method_tcp_socket_set_keep_alive_idle_time(
+        &mut self,
+        self_: TcpSocket,
+        value: u64,
+    ) -> Result<(), NetErrorCode> {
+        if value == 0 {
+            return Err(Net::InvalidArgument.into());
+        }
+        self.socket(self_.0).options.keep_alive_idle_time = value;
+        Ok(())
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_keep_alive_interval
+    fn wasi_sockets_tcp_method_tcp_socket_keep_alive_interval(
+        &mut self,
+        self_: TcpSocket,
+    ) -> Result<u64, NetErrorCode> {
+        Ok(self.socket(self_.0).options.keep_alive_interval)
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_set_keep_alive_interval
+    fn wasi_sockets_tcp_method_tcp_socket_set_keep_alive_interval(
+        &mut self,
+        self_: TcpSocket,
+        value: u64,
+    ) -> Result<(), NetErrorCode> {
+        if value == 0 {
+            return Err(Net::InvalidArgument.into());
+        }
+        self.socket(self_.0).options.keep_alive_interval = value;
+        Ok(())
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_keep_alive_count
+    fn wasi_sockets_tcp_method_tcp_socket_keep_alive_count(
+        &mut self,
+        self_: TcpSocket,
+    ) -> Result<u32, NetErrorCode> {
+        Ok(self.socket(self_.0).options.keep_alive_count)
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_set_keep_alive_count
+    fn wasi_sockets_tcp_method_tcp_socket_set_keep_alive_count(
+        &mut self,
+        self_: TcpSocket,
+        value: u32,
+    ) -> Result<(), NetErrorCode> {
+        if value == 0 {
+            return Err(Net::InvalidArgument.into());
+        }
+        self.socket(self_.0).options.keep_alive_count = value;
+        Ok(())
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_hop_limit
+    fn wasi_sockets_tcp_method_tcp_socket_hop_limit(
+        &mut self,
+        self_: TcpSocket,
+    ) -> Result<u8, NetErrorCode> {
+        Ok(self.socket(self_.0).options.hop_limit)
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_set_hop_limit
+    fn wasi_sockets_tcp_method_tcp_socket_set_hop_limit(
+        &mut self,
+        self_: TcpSocket,
+        value: u8,
+    ) -> Result<(), NetErrorCode> {
+        if value == 0 {
+            return Err(Net::InvalidArgument.into());
+        }
+        self.socket(self_.0).options.hop_limit = value;
+        Ok(())
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_receive_buffer_size
+    fn wasi_sockets_tcp_method_tcp_socket_receive_buffer_size(
+        &mut self,
+        self_: TcpSocket,
+    ) -> Result<u64, NetErrorCode> {
+        Ok(self.socket(self_.0).options.receive_buffer_size)
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_set_receive_buffer_size
+    fn wasi_sockets_tcp_method_tcp_socket_set_receive_buffer_size(
+        &mut self,
+        self_: TcpSocket,
+        value: u64,
+    ) -> Result<(), NetErrorCode> {
+        if value == 0 {
+            return Err(Net::InvalidArgument.into());
+        }
+        self.socket(self_.0).options.receive_buffer_size = value;
+        Ok(())
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_send_buffer_size
+    fn wasi_sockets_tcp_method_tcp_socket_send_buffer_size(
+        &mut self,
+        self_: TcpSocket,
+    ) -> Result<u64, NetErrorCode> {
+        Ok(self.socket(self_.0).options.send_buffer_size)
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_set_send_buffer_size
+    fn wasi_sockets_tcp_method_tcp_socket_set_send_buffer_size(
+        &mut self,
+        self_: TcpSocket,
+        value: u64,
+    ) -> Result<(), NetErrorCode> {
+        if value == 0 {
+            return Err(Net::InvalidArgument.into());
+        }
+        self.socket(self_.0).options.send_buffer_size = value;
+        Ok(())
     }
     // end optional
 

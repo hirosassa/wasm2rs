@@ -10,8 +10,13 @@
 //! host (reduced to the methods the component declares) and a `main` calling the
 //! `wasi:cli/run` export are appended, and the result is built with
 //! `rustc -C opt-level=1` and run with `args` as the program's arguments and this
-//! process's environment; its exit code is this program's (0 when `run` returns ok, 1
-//! on an error result or `wasi:cli/exit` with an error). The build goes in
+//! process's environment. The guest's `argv[0]` is `<component.wasm>` as given on the command
+//! line (like a real process's), followed by `args`.
+//!
+//! Exit codes: 0 when `run` returns ok, 1 on an error result or `wasi:cli/exit` with an
+//! error, 2 when the build fails, 134 when a panic occurs during the `run` call (a guest trap,
+//! or a panic inside a host import it calls: the panic message is printed, then
+//! `wasip2_run: the program trapped`); panics outside the call (host setup) stay 101. The build goes in
 //! `$WASIP2_WORK_DIR` (default: a temporary directory). The program sees the
 //! directory `$WASIP2_PREOPEN`, if set, as its `/`: read-only, or also writable if
 //! `$WASIP2_PREOPEN_WRITABLE=1`. A component that imports a function `typed.rs` does
@@ -73,16 +78,21 @@ fn main() {
     };
     let generated = transpile_with_options(&wasm, &opts).expect("transpile");
     // `run` returns the lowered `result`: 0 is ok, 1 is error.
+    let argv0 = &input;
     let main = format!(
         "fn main() {{\n    \
-         let args = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();\n    \
+         let args = std::iter::once({argv0:?}.to_string()).chain(std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned())).collect();\n    \
          let env = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();\n    \
          let mut host = TypedHost::new(env).with_arguments(args);\n    \
          if let Some(dir) = std::env::var_os(\"WASIP2_PREOPEN\") {{\n        \
          let writable = std::env::var_os(\"WASIP2_PREOPEN_WRITABLE\").is_some_and(|v| v == \"1\");\n        \
          host = if writable {{ host.with_writable_preopen(dir.into()) }} else {{ host.with_preopen(dir.into()) }};\n    }}\n    \
          let mut inst = Instance::new(Glue(host));\n    \
-         let status = inst.func{run}();\n    \
+         // A guest trap is a Rust panic (its message is printed by the panic hook); a panic\n    \
+         // during the `run` call (also inside a host import it calls) becomes the trap exit code.\n    \
+         let status = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inst.func{run}())) {{\n        \
+         Ok(status) => status,\n        \
+         Err(_) => {{ eprintln!(\"wasip2_run: the program trapped\"); std::process::exit(134) }}\n    }};\n    \
          std::process::exit(status);\n    \
          }}"
     );

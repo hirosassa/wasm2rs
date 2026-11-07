@@ -19,9 +19,9 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use wasmparser::{
-    ComponentAlias, ComponentDefinedType, ComponentExternalKind, ComponentFuncType,
-    ComponentOuterAliasKind, ComponentType, ComponentTypeRef, ComponentValType, Encoding,
-    InstanceTypeDeclaration, Parser, Payload, PrimitiveValType, TypeBounds, Validator,
+    CanonicalFunction, ComponentAlias, ComponentDefinedType, ComponentExternalKind,
+    ComponentFuncType, ComponentOuterAliasKind, ComponentType, ComponentTypeRef, ComponentValType,
+    Encoding, InstanceTypeDeclaration, Parser, Payload, PrimitiveValType, TypeBounds, Validator,
     WasmFeatures,
 };
 
@@ -634,6 +634,12 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
     let mut stack = vec![Scope::default()];
     let mut imports: Vec<(String, Arc<Instance>)> = Vec::new();
     let mut first = true;
+    // The resources whose `canon resource.drop` the component body lowers, whether it has
+    // a core module at the top level, and whether some drop could not be tied to a resource
+    // (or a nested component lowers some drop).
+    let mut dropped: Vec<u32> = Vec::new();
+    let mut has_core = false;
+    let mut unmapped_drop = false;
     // The payloads of nested components and modules come inline; only the outermost
     // component's own imports are the host's.
     let mut depth = 0usize;
@@ -641,6 +647,15 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
         let payload = payload?;
         if depth > 0 {
             match payload {
+                // A nested component's own `canon resource.drop`s are not mapped to
+                // resources (its index spaces are not read), so any drop may be lowered there.
+                Payload::ComponentCanonicalSection(reader) => {
+                    for func in reader {
+                        if matches!(func?, CanonicalFunction::ResourceDrop { .. }) {
+                            unmapped_drop = true;
+                        }
+                    }
+                }
                 Payload::ModuleSection { .. } | Payload::ComponentSection { .. } => {
                     depth = depth.saturating_add(1);
                 }
@@ -658,7 +673,21 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
                     ));
                 }
             }
-            Payload::ModuleSection { .. } | Payload::ComponentSection { .. } => depth = 1,
+            Payload::ModuleSection { .. } => {
+                has_core = true;
+                depth = 1;
+            }
+            Payload::ComponentSection { .. } => depth = 1,
+            Payload::ComponentCanonicalSection(reader) => {
+                for func in reader {
+                    if let CanonicalFunction::ResourceDrop { resource } = func? {
+                        match def_at(innermost(&stack)?, resource) {
+                            Ok(Def::Resource(r)) => dropped.push(r.id),
+                            _ => unmapped_drop = true,
+                        }
+                    }
+                }
+            }
             Payload::ComponentTypeSection(reader) => {
                 for ty in reader {
                     let def = component_type(&mut stack, &ty?)?;
@@ -769,8 +798,15 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
             });
         }
         // The core module imports `[resource-drop]<name>` from the interface that defines
-        // the resource (`canon resource.drop` is in the component body, not its type).
+        // the resource, but only if the component body lowers a `canon resource.drop` for it
+        // (it is in the body, not in the type): a program that never drops e.g. `network`
+        // has no such import. A component without a top-level core module (just its types),
+        // with a nested component that lowers a drop, or with a drop that cannot be tied to a resource, keeps
+        // every drop.
         for r in &inst.resources {
+            if has_core && !unmapped_drop && !dropped.contains(&r.id) {
+                continue;
+            }
             funcs.push(WitFunc {
                 interface: interface.clone(),
                 name: format!("[resource-drop]{}", r.name),
@@ -1151,7 +1187,11 @@ fn write_flags(out: &mut String, name: &str, flags: &WitFlags) {
 /// methods named like the core imports with those field names (a method's `self` parameter
 /// is `self_`). The interface that defines the resource also gets
 /// `fn <module>_resource_drop_r(&mut self, handle: R);`, named like the core import
-/// `[resource-drop]r` that the lowered `resource.drop` becomes.
+/// `[resource-drop]r` that the lowered `resource.drop` becomes, but only if the component
+/// lowers a `resource.drop` of `r` (a program that never drops `r` has no such core import).
+/// Every resource's drop is declared if the component has no core module at the top level
+/// (only its types), has a nested component that lowers a `resource.drop` (it is not mapped), or has a
+/// `resource.drop` that cannot be tied to a resource.
 ///
 /// # Errors
 ///

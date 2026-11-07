@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `examples/wasip2_host/typed.rs`: the TCP socket options (`is-listening`, `set-listen-backlog-size`,
+  keep-alive enabled/idle-time/interval/count, `hop-limit`, `receive-buffer-size`,
+  `send-buffer-size`) are recorded per socket with default values, validated (zero is
+  `invalid-argument`; the backlog size is `invalid-state` once a connection is started or made),
+  read back and inherited by accepted sockets, but not applied to the OS socket. A real `std::net` TCP program now builds.
+
+### Fixed
+
+- `wit_host_trait` / `wit_host_glue` / `wit_functions` (and `--wit-host`, `--glue`) declare
+  `[resource-drop]<r>` only for resources whose `canon resource.drop` the component lowers (with no
+  top-level core module, a nested component that lowers a drop, or an unresolvable drop, every drop is kept). A `wasm32-wasip2` program using
+  `std::net` never drops `network`, so its glue no longer fails with E0407 (a method that is
+  not a member of `Imports`).
+- `examples/wasip2_run.rs`: a panic during the `run` call (a guest trap, or a panic inside a
+  host import it calls) exits with code 134 and `wasip2_run: the program trapped` after its
+  panic message, instead of a second host-side panic (101); panics outside the call (host
+  setup) stay 101. The guest's `argv[0]` is the component path as given on the command
+  line (it was `<work dir>/program`).
+
 ### Removed
 
 - The hand-written WASI preview2 host `examples/wasip2_host/host.rs` (`P2Host`, written against
