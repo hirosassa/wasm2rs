@@ -16,10 +16,11 @@
 // `wasi:filesystem`: read-only with `with_preopen`, writable with `with_writable_preopen`.
 // Reading: `preopens.get-directories`, `descriptor.open-at`, `read-via-stream`, `stat`,
 // `stat-at`, `get-flags`, `read-directory`, `readlink-at`, `metadata-hash` (and `-at`),
-// `directory-entry-stream.read-directory-entry` and file `input-stream.read`
-// (`blocking-read` and `skip` are not implemented). Writing (`read-only` on a read-only
+// `directory-entry-stream.read-directory-entry` and file `input-stream` `read`, `blocking-read`,
+// `skip` and `blocking-skip`. Writing (`read-only` on a read-only
 // preopen): `open-at` with create/exclusive/truncate and `write`, `write-via-stream`,
-// `append-via-stream`, file `output-stream` `write`/`check-write`/`blocking-flush`,
+// `append-via-stream`, file `output-stream` `write`/`check-write`/`flush`/`blocking-flush`/
+// `blocking-write-and-flush`/`write-zeroes`/`blocking-write-zeroes-and-flush`,
 // `create-directory-at`, `remove-directory-at`, `unlink-file-at`, `rename-at`, `symlink-at`,
 // `link-at`, `set-size`, `sync`, `sync-data`, `set-times` and `set-times-at`. The semantics:
 // one preopened directory shown as "/", descriptors and streams in
@@ -29,7 +30,7 @@
 // It also serves TCP over loopback (`wasi:sockets` network, instance-network, tcp,
 // tcp-create-socket) with these semantics: an address outside
 // 127.0.0.0/8 and ::1 is `access-denied` unless `with_external_network` was called, `finish-bind`
-// binds and listens, `start-connect` connects at once, reads never block and a socket's
+// binds and listens, `start-connect` connects at once, `read` never blocks (`blocking-read` and `blocking-skip` wait) and a socket's
 // pollable is polled every millisecond; a connection's streams are `TCP_STREAM + slot`.
 // UDP, ip-name-lookup and the socket options are not implemented.
 //
@@ -319,7 +320,7 @@ impl TypedHost {
             .collect()
     }
 
-    // optional: wasi_io_poll_resource_drop_pollable
+    // optional: wasi_io_poll_resource_drop_pollable | wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_blocking_skip
     fn subscribe(&mut self, deadline: Option<Instant>) -> Pollable {
         self.subscribe_wait(deadline.map_or(Wait::Ready, Wait::Deadline))
     }
@@ -363,19 +364,24 @@ impl TypedHost {
     /// is: on the stdin buffer's condition variable, with a timeout at the earliest deadline
     /// (and every millisecond while a socket is among them, which nothing wakes it for).
     fn wait_ready(&self, pollables: &[Pollable]) -> Vec<u32> {
+        let waits: Vec<Wait> = pollables.iter().map(|&p| self.wait_of(p)).collect();
+        self.wait_any(&waits)
+    }
+
+    /// `wait_ready` for the conditions themselves (a blocking call has no pollable).
+    fn wait_any(&self, waits: &[Wait]) -> Vec<u32> {
         let (buf, changed) = &*self.stdin;
         let mut buf = buf.lock().unwrap();
         loop {
             let now = Instant::now();
-            let ready: Vec<u32> = (0..pollables.len() as u32)
-                .filter(|&i| self.wait_of(pollables[i as usize]).is_ready(now, &buf, self))
+            let ready: Vec<u32> = (0..waits.len() as u32)
+                .filter(|&i| waits[i as usize].is_ready(now, &buf, self))
                 .collect();
             if !ready.is_empty() {
                 return ready;
             }
-            let mut earliest =
-                pollables.iter().filter_map(|&p| self.wait_of(p).deadline()).min();
-            if pollables.iter().any(|&p| self.wait_of(p).polls_socket()) {
+            let mut earliest = waits.iter().filter_map(|w| w.deadline()).min();
+            if waits.iter().any(|w| w.polls_socket()) {
                 let soon = now + Duration::from_millis(1);
                 earliest = Some(earliest.map_or(soon, |d| d.min(soon)));
             }
@@ -692,6 +698,107 @@ fn write_all_waiting(stream: &mut TcpStream, mut bytes: &[u8]) -> std::io::Resul
 
 #[allow(dead_code)]
 impl TypedHost {
+    // optional: wasi_io_streams_method_input_stream_read | wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_skip | wasi_io_streams_method_input_stream_blocking_skip
+    /// Reads at most 4096 bytes of a stream without waiting: the one read path of `read`,
+    /// `blocking-read`, `skip` and `blocking-skip`.
+    fn read_stream(&mut self, stream: u32, len: u64) -> Result<Vec<u8>, StreamError> {
+        let mut buf = vec![0u8; len.min(4096) as usize];
+        if stream == 0 {
+            if buf.is_empty() {
+                return Ok(buf);
+            }
+            self.start_stdin();
+            let mut shared = self.stdin.0.lock().unwrap();
+            let n = std::io::Read::read(&mut shared.bytes, &mut buf).unwrap_or(0); // a `VecDeque` never fails
+            if n == 0 && shared.eof {
+                return Err(StreamError::Closed);
+            }
+            buf.truncate(n);
+            return Ok(buf);
+        }
+        if let Some(slot) = tcp_slot(stream) {
+            // never blocks: an empty list means "nothing yet"
+            let stream = self.tcp_in.get_mut(slot).expect("read from an unknown or dropped stream");
+            return match std::io::Read::read(stream, &mut buf) {
+                Ok(0) if !buf.is_empty() => Err(StreamError::Closed),
+                Ok(n) => {
+                    buf.truncate(n);
+                    Ok(buf)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
+                Err(_) => Err(StreamError::Closed),
+            };
+        }
+        let Some(index) = file_index(stream) else {
+            return Err(StreamError::Closed);
+        };
+        let file = self.files.get_mut(index).expect("read from an unknown or dropped stream");
+        if buf.is_empty() {
+            return Ok(buf);
+        }
+        match file.read(&mut buf) {
+            Ok(n) if n > 0 => {
+                buf.truncate(n);
+                Ok(buf)
+            }
+            _ => Err(StreamError::Closed),
+        }
+    }
+    // end optional
+
+    // optional: wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_blocking_skip
+    /// `read_stream`, but waits (as the stream's `subscribe` would) while an open stream has
+    /// nothing yet: stdin and connections; a file never waits.
+    fn read_stream_waiting(&mut self, stream: u32, len: u64) -> Result<Vec<u8>, StreamError> {
+        loop {
+            let data = self.read_stream(stream, len)?;
+            if !data.is_empty() || len == 0 {
+                return Ok(data);
+            }
+            let wait = match tcp_slot(stream) {
+                Some(slot) => Wait::TcpReadable(slot),
+                None if stream == 0 => Wait::Stdin,
+                None => return Ok(data),
+            };
+            self.wait_any(&[wait]);
+        }
+    }
+    // end optional
+
+    // optional: wasi_io_streams_method_output_stream_write | wasi_io_streams_method_output_stream_blocking_write_and_flush | wasi_io_streams_method_output_stream_write_zeroes | wasi_io_streams_method_output_stream_blocking_write_zeroes_and_flush
+    /// Writes all of `contents` to a stream: the one write path of `write`,
+    /// `blocking-write-and-flush`, `write-zeroes` and `blocking-write-zeroes-and-flush`.
+    /// A failed write ends the stream.
+    fn write_stream(&mut self, stream: u32, contents: &[u8]) -> Result<(), StreamError> {
+        let written = if let Some(slot) = tcp_slot(stream) {
+            match self.tcp_out.get_mut(slot) {
+                Some(conn) => write_all_waiting(conn, contents),
+                None => Err(std::io::ErrorKind::BrokenPipe.into()),
+            }
+        } else {
+            match (stream, file_index(stream)) {
+                (_, Some(index)) => match self.outputs.get_mut(index) {
+                    Some(file) => file.write_all(contents),
+                    None => Err(std::io::ErrorKind::NotFound.into()),
+                },
+                (2, None) => std::io::stderr().write_all(contents),
+                (_, None) => std::io::stdout().write_all(contents),
+            }
+        };
+        written.map_err(|_| StreamError::Closed)
+    }
+    // end optional
+
+    // optional: wasi_io_streams_method_output_stream_blocking_flush | wasi_io_streams_method_output_stream_flush | wasi_io_streams_method_output_stream_blocking_write_and_flush | wasi_io_streams_method_output_stream_blocking_write_zeroes_and_flush
+    /// Flushes a stream; only stdout buffers anything.
+    fn flush_stream(&mut self, stream: u32) -> Result<(), StreamError> {
+        if stream != 1 {
+            return Ok(()); // a connection, file and (unbuffered in `std`) stderr hold nothing
+        }
+        std::io::stdout().flush().map_err(|_| StreamError::Closed)
+    }
+    // end optional
+
     /// Lets the guest use addresses outside loopback (the default is 127.0.0.0/8 and ::1).
     fn with_external_network(mut self) -> Self {
         self.external_network = true;
@@ -1216,23 +1323,7 @@ impl Host for TypedHost {
         self_: OutputStream,
         contents: Vec<u8>,
     ) -> Result<(), StreamError> {
-        let written = if let Some(slot) = tcp_slot(self_.0) {
-            match self.tcp_out.get_mut(slot) {
-                Some(stream) => write_all_waiting(stream, &contents),
-                None => Err(std::io::ErrorKind::BrokenPipe.into()),
-            }
-        } else {
-            match (self_.0, file_index(self_.0)) {
-                (_, Some(index)) => match self.outputs.get_mut(index) {
-                    Some(file) => file.write_all(&contents),
-                    None => Err(std::io::ErrorKind::NotFound.into()),
-                },
-                (2, None) => std::io::stderr().write_all(&contents),
-                (_, None) => std::io::stdout().write_all(&contents),
-            }
-        };
-        // a failed write ends the stream
-        written.map_err(|_| StreamError::Closed)
+        self.write_stream(self_.0, &contents)
     }
     // end optional
 
@@ -1241,11 +1332,58 @@ impl Host for TypedHost {
         &mut self,
         self_: OutputStream,
     ) -> Result<(), StreamError> {
-        if tcp_slot(self_.0).is_some() {
-            return Ok(()); // nothing is buffered on a connection
-        }
-        // stderr is unbuffered in `std`, so only stdout has anything to flush
-        std::io::stdout().flush().map_err(|_| StreamError::Closed)
+        self.flush_stream(self_.0)
+    }
+    // end optional
+
+    // optional: wasi_io_streams_method_output_stream_flush
+    /// Flushes at once: the same as `blocking-flush` (nothing is left to wait for).
+    fn wasi_io_streams_method_output_stream_flush(
+        &mut self,
+        self_: OutputStream,
+    ) -> Result<(), StreamError> {
+        self.flush_stream(self_.0)
+    }
+    // end optional
+
+    // optional: wasi_io_streams_method_output_stream_blocking_write_and_flush
+    /// Writes then flushes. `contents` over 4096 bytes (what `check-write` returns) traps.
+    /// A connection is written with `write_all_waiting`, which waits for the peer to read
+    /// and so does not return while it never does.
+    fn wasi_io_streams_method_output_stream_blocking_write_and_flush(
+        &mut self,
+        self_: OutputStream,
+        contents: Vec<u8>,
+    ) -> Result<(), StreamError> {
+        assert!(contents.len() <= 4096, "blocking-write-and-flush: more than check-write allows");
+        self.write_stream(self_.0, &contents)?;
+        self.flush_stream(self_.0)
+    }
+    // end optional
+
+    // optional: wasi_io_streams_method_output_stream_write_zeroes
+    /// Writes `len` zero bytes; a `len` over 4096 (what `check-write` returns) traps.
+    fn wasi_io_streams_method_output_stream_write_zeroes(
+        &mut self,
+        self_: OutputStream,
+        len: u64,
+    ) -> Result<(), StreamError> {
+        assert!(len <= 4096, "write-zeroes: more than check-write allows");
+        self.write_stream(self_.0, &vec![0u8; len as usize])
+    }
+    // end optional
+
+    // optional: wasi_io_streams_method_output_stream_blocking_write_zeroes_and_flush
+    /// `write-zeroes` then flush; a `len` over 4096 traps. Waits on a connection like
+    /// `blocking-write-and-flush`.
+    fn wasi_io_streams_method_output_stream_blocking_write_zeroes_and_flush(
+        &mut self,
+        self_: OutputStream,
+        len: u64,
+    ) -> Result<(), StreamError> {
+        assert!(len <= 4096, "blocking-write-zeroes-and-flush: more than check-write allows");
+        self.write_stream(self_.0, &vec![0u8; len as usize])?;
+        self.flush_stream(self_.0)
     }
     // end optional
 
@@ -1711,47 +1849,42 @@ impl Host for TypedHost {
         self_: InputStream,
         len: u64,
     ) -> Result<Vec<u8>, StreamError> {
-        let mut buf = vec![0u8; len.min(4096) as usize];
-        if self_.0 == 0 {
-            if buf.is_empty() {
-                return Ok(buf);
-            }
-            self.start_stdin();
-            let mut shared = self.stdin.0.lock().unwrap();
-            let n = std::io::Read::read(&mut shared.bytes, &mut buf).unwrap_or(0); // a `VecDeque` never fails
-            if n == 0 && shared.eof {
-                return Err(StreamError::Closed);
-            }
-            buf.truncate(n);
-            return Ok(buf);
-        }
-        if let Some(slot) = tcp_slot(self_.0) {
-            // never blocks: an empty list means "nothing yet"
-            let stream = self.tcp_in.get_mut(slot).expect("read from an unknown or dropped stream");
-            return match std::io::Read::read(stream, &mut buf) {
-                Ok(0) if !buf.is_empty() => Err(StreamError::Closed),
-                Ok(n) => {
-                    buf.truncate(n);
-                    Ok(buf)
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
-                Err(_) => Err(StreamError::Closed),
-            };
-        }
-        let Some(index) = file_index(self_.0) else {
-            return Err(StreamError::Closed);
-        };
-        let file = self.files.get_mut(index).expect("read from an unknown or dropped stream");
-        if buf.is_empty() {
-            return Ok(buf);
-        }
-        match file.read(&mut buf) {
-            Ok(n) if n > 0 => {
-                buf.truncate(n);
-                Ok(buf)
-            }
-            _ => Err(StreamError::Closed),
-        }
+        self.read_stream(self_.0, len)
+    }
+    // end optional
+
+    // optional: wasi_io_streams_method_input_stream_blocking_read
+    /// Like `read`, but waits while stdin or a connection has nothing yet, so the list is
+    /// never empty for a `len` over 0; `closed` at the end.
+    fn wasi_io_streams_method_input_stream_blocking_read(
+        &mut self,
+        self_: InputStream,
+        len: u64,
+    ) -> Result<Vec<u8>, StreamError> {
+        self.read_stream_waiting(self_.0, len)
+    }
+    // end optional
+
+    // optional: wasi_io_streams_method_input_stream_skip
+    /// Reads and discards at most 4096 bytes, returning how many (0 while a connection or
+    /// stdin has nothing yet); `closed` at the end.
+    fn wasi_io_streams_method_input_stream_skip(
+        &mut self,
+        self_: InputStream,
+        len: u64,
+    ) -> Result<u64, StreamError> {
+        Ok(self.read_stream(self_.0, len)?.len() as u64)
+    }
+    // end optional
+
+    // optional: wasi_io_streams_method_input_stream_blocking_skip
+    /// Like `skip`, but waits while stdin or a connection has nothing yet.
+    fn wasi_io_streams_method_input_stream_blocking_skip(
+        &mut self,
+        self_: InputStream,
+        len: u64,
+    ) -> Result<u64, StreamError> {
+        Ok(self.read_stream_waiting(self_.0, len)?.len() as u64)
     }
     // end optional
 

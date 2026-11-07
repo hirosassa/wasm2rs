@@ -23,6 +23,9 @@ interface streams {
   variant stream-error { last-operation-failed(error), closed }
   resource input-stream {
     read: func(len: u64) -> result<list<u8>, stream-error>;
+    blocking-read: func(len: u64) -> result<list<u8>, stream-error>;
+    skip: func(len: u64) -> result<u64, stream-error>;
+    blocking-skip: func(len: u64) -> result<u64, stream-error>;
     subscribe: func() -> pollable;
   }
   resource output-stream {
@@ -70,6 +73,9 @@ const CORE: &str = r#"
   (import "wasi:io/streams@0.2.0" "[resource-drop]input-stream" (func (param i32)))
   (import "wasi:io/streams@0.2.0" "[resource-drop]output-stream" (func (param i32)))
   (import "wasi:io/streams@0.2.0" "[method]input-stream.read" (func $read (param i32 i64 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]input-stream.blocking-read" (func $bread (param i32 i64 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]input-stream.skip" (func $skip (param i32 i64 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]input-stream.blocking-skip" (func $bskip (param i32 i64 i32)))
   (import "wasi:io/streams@0.2.0" "[method]input-stream.subscribe" (func $sub_in (param i32) (result i32)))
   (import "wasi:io/streams@0.2.0" "[method]output-stream.write" (func $write (param i32 i32 i32 i32)))
   (import "wasi:cli/stdin@0.2.0" "get-stdin" (func $stdin (result i32)))
@@ -117,6 +123,34 @@ const CORE: &str = r#"
     (call $read (call $stdin) (i64.const 16) (i32.const 200))
     (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable))
     (if (i32.ne (i32.load8_u (i32.const 204)) (i32.const 1)) (then unreachable)))
+  ;; `blocking-read` waits for the data the test sends after "hi\n" (here "xyz"), then reports
+  ;; the end of the input as `closed`
+  (func (export "blocking_read_stdin")
+    (call $write (call $stdout) (i32.const 64) (i32.const 3) (i32.const 32))
+    (call $bread (call $stdin) (i64.const 16) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (if (i32.ne (i32.load (i32.const 208)) (i32.const 3)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.load (i32.const 204))) (i32.const 120)) (then unreachable))
+    (call $bread (call $stdin) (i64.const 16) (i32.const 200))
+    (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 204)) (i32.const 1)) (then unreachable)))
+  ;; `skip` on an idle stdin discards nothing at once (ok 0); `blocking-skip` waits for
+  ;; "xyz" and returns 3; at the end of the input both say `closed` (result tag 1, error
+  ;; tag 1 at 208)
+  (func (export "skip_stdin")
+    (call $skip (call $stdin) (i64.const 16) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (if (i64.ne (i64.load (i32.const 208)) (i64.const 0)) (then unreachable))
+    (call $write (call $stdout) (i32.const 64) (i32.const 3) (i32.const 32))
+    (call $bskip (call $stdin) (i64.const 16) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (if (i64.ne (i64.load (i32.const 208)) (i64.const 3)) (then unreachable))
+    (call $bskip (call $stdin) (i64.const 16) (i32.const 200))
+    (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 208)) (i32.const 1)) (then unreachable))
+    (call $skip (call $stdin) (i64.const 16) (i32.const 200))
+    (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 208)) (i32.const 1)) (then unreachable)))
   ;; stdin holds "ab\ncd": reads it, then end of input is `closed` (error tag 1 at 204)
   (func (export "read_stdin")
     (call $wait_stdin)
@@ -205,4 +239,28 @@ fn polling_stdin_wakes_when_data_arrives_and_at_the_end_of_input() {
     // a `poll` that missed the data would wait out its ten-second timer and the guest's
     // checks would fail
     finish_within_30_seconds(child);
+}
+
+/// Runs `body` (which writes "hi\n" once it is about to block), sends "xyz" after a pause
+/// long enough for the guest to be blocked, then ends the input.
+fn run_with_late_data(body: &str) {
+    use std::io::{Read, Write};
+    let mut child = spawn(body);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut hi = [0u8; 3];
+    child.stdout.as_mut().unwrap().read_exact(&mut hi).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    stdin.write_all(b"xyz").unwrap();
+    drop(stdin);
+    finish_within_30_seconds(child);
+}
+
+#[test]
+fn blocking_read_waits_for_stdin_data_and_reports_the_end_as_closed() {
+    run_with_late_data("inst.blocking_read_stdin();");
+}
+
+#[test]
+fn skip_discards_without_waiting_and_blocking_skip_waits_for_stdin_data() {
+    run_with_late_data("inst.skip_stdin();");
 }
