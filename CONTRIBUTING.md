@@ -122,7 +122,7 @@ Commit messages: a short imperative summary, optionally with a `feat:` / `fix:` 
 ## Releasing (maintainers)
 
 1. Move `[Unreleased]` entries in `CHANGELOG.md` under the new version heading.
-2. Bump `version` in `Cargo.toml`.
+2. Bump `version` in `Cargo.toml` and in `wasm2rs-macros/Cargo.toml` (its own version and its `wasm2rs` dependency), then refresh `Cargo.lock`.
 3. Tag the release; `.github/workflows/release.yaml` builds the prebuilt binaries.
 
 ## License
