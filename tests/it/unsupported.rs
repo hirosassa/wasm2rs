@@ -685,3 +685,26 @@ fn a_try_table_clause_branching_to_a_try_whose_handler_it_is_in_is_rejected() {
         "branch out of a try handler",
     );
 }
+
+#[test]
+fn return_call_from_a_continuation_body_with_a_suspend_inside_a_block_is_rejected() {
+    // The sibling test above covers the plain lowering; here a `suspend` nested in a `block` makes
+    // the body a pc state machine, which has its own `return_call` check.
+    assert_unsupported(
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              (block
+                i32.const 1 suspend $yield)
+              return_call $inner)
+            (func $inner (result i32)
+              i32.const 7 suspend $yield
+              i32.const 100)
+            (func (export "run") (result i32)
+              ref.func $gen cont.new $ct drop
+              i32.const 0))"#,
+        "return_call across a continuation",
+    );
+}

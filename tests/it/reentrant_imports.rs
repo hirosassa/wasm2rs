@@ -244,3 +244,26 @@ fn an_export_named_like_the_host_helper_does_not_clash() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn reentrant_imports_cannot_be_combined_with_wasi_thread_spawn() {
+    // A reentrant import lends the host out of `imports` while it runs, so a
+    // `wasi.thread-spawn` (which hands the host to the new thread) cannot share
+    // the module. The module needs a non-wasi import for the option to apply.
+    let wasm = wat::parse_str(
+        r#"(module
+            (import "env" "ask" (func (param i32) (result i32)))
+            (import "wasi" "thread-spawn" (func (param i32) (result i32)))
+            (memory 1 1 shared))"#,
+    )
+    .expect("valid wat");
+    match wasm2rs::transpile_with_options(&wasm, &options()) {
+        Err(wasm2rs::TranspileError::Unsupported(msg)) => {
+            assert!(
+                msg.contains("reentrant_imports with wasi thread-spawn"),
+                "{msg}"
+            );
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}

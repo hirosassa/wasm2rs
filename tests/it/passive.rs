@@ -24,6 +24,14 @@
 
 use std::process::Command;
 
+/// Run `bin`, assert it traps, and assert the panic text on stderr contains `needle`.
+fn assert_traps_with(bin: &std::path::Path, needle: &str) {
+    let run = Command::new(bin).output().expect("run generated binary");
+    assert!(!run.status.success(), "expected a trap");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains(needle), "expected {needle:?} in:\n{stderr}");
+}
+
 fn compile(test: &str, wat: &str, main_body: &str) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
@@ -172,10 +180,29 @@ fn table_init_out_of_bounds_source_traps() {
         ELEM_M,
         "let mut inst = Instance::new(); inst.func2(0, 0, 3);",
     );
-    let run = Command::new(&bin).output().expect("run generated binary");
-    assert!(
-        !run.status.success(),
-        "expected a trap reading past the element segment"
+    assert_traps_with(&bin, "range end index 3 out of range for slice of length 2");
+}
+
+#[test]
+fn table_init_out_of_bounds_dest_traps() {
+    // dest=3, len=2 writes slots 3 and 4 of a 4-slot table; the source range is fine.
+    let bin = compile(
+        "table_init_dest_oob",
+        ELEM_M,
+        "let mut inst = Instance::new(); inst.func2(3, 0, 2);",
+    );
+    assert_traps_with(&bin, "range end index 5 out of range for slice of length 4");
+}
+
+#[test]
+fn table_init_zero_len_at_the_table_end_does_not_trap() {
+    // A zero-length init at dest == table size is in bounds and changes nothing.
+    transpile_compile_run(
+        "table_init_zero_len",
+        ELEM_M,
+        "let mut inst = Instance::new();\n    \
+         inst.func2(4, 0, 0);\n    \
+         inst.func2(0, 2, 0);",
     );
 }
 
