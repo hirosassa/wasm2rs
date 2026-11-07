@@ -97,6 +97,15 @@ struct TypedHost {
     start: Instant,
     /// Filled by the stdin thread, which `start_stdin` spawns on first use.
     stdin: SharedStdin,
+    /// The messages behind the live `error` handles (`last-operation-failed`); a dropped
+    /// handle frees its slot.
+    errors: Slab<String>,
+    /// The input streams (handles) whose failure was reported: they answer `closed` from then
+    /// on. A dropped stream is forgotten.
+    failed_in: std::collections::HashSet<u32>,
+    /// Like `failed_in`, for the output streams that are not connections (a connection keeps
+    /// it in its `TcpOut`).
+    failed_out: std::collections::HashSet<u32>,
     /// Whether the stdin thread was started.
     stdin_started: bool,
     /// The generator state (splitmix64, seeded from the OS-seeded `std` hasher): fine for
@@ -154,6 +163,9 @@ impl TypedHost {
             env,
             start: Instant::now(),
             stdin: SharedStdin::default(),
+            errors: Slab::new(),
+            failed_in: std::collections::HashSet::new(),
+            failed_out: std::collections::HashSet::new(),
             stdin_started: false,
             rng: os_seed(),
             pollables: Vec::new(),
@@ -779,7 +791,8 @@ const SEND_QUEUE_CAPACITY: usize = 64 * 1024;
 /// of it. Bytes a guest writes are appended to the queue and moved to the socket as far as it
 /// takes them, so a peer that does not read fills the queue (`check-write` reports 0, the
 /// pollable is not ready) instead of making `write` wait. A failure of the socket (a dead
-/// peer) marks the stream failed and drops the queue; the stream then answers `closed`. The
+/// peer) marks the stream failed and drops the queue; the first operation that finds out answers
+/// `last-operation-failed` (with an `error` handle), then the stream answers `closed`. The
 /// flushing methods (`flush_waiting`, `flush_until`) wait for the peer to read, so they do not
 /// return while a live peer never does. The queue is behind a `RefCell` because a pollable
 /// asks for readiness through `&TypedHost`.
@@ -789,8 +802,12 @@ struct TcpOut {
     id: u64,
     stream: TcpStream,
     queue: std::cell::RefCell<VecDeque<u8>>,
-    /// The socket failed: the stream is marked failed and the queue was dropped.
-    failed: std::cell::Cell<bool>,
+    /// Why the socket failed: the stream is marked failed (this is `Some`) and the queue was
+    /// dropped. The first operation that finds out takes it and answers
+    /// `last-operation-failed`.
+    failure: std::cell::RefCell<Option<String>>,
+    /// The failure was reported: from then on the stream answers `closed`.
+    reported: std::cell::Cell<bool>,
     /// A `flush` found bytes still queued: until they are all sent, `check-write` is 0.
     flush_pending: std::cell::Cell<bool>,
 }
@@ -802,7 +819,8 @@ impl TcpOut {
             id,
             stream,
             queue: std::cell::RefCell::new(VecDeque::new()),
-            failed: std::cell::Cell::new(false),
+            failure: std::cell::RefCell::new(None),
+            reported: std::cell::Cell::new(false),
             flush_pending: std::cell::Cell::new(false),
         }
     }
@@ -814,26 +832,41 @@ impl TcpOut {
         while !queue.is_empty() {
             let result = (&self.stream).write(queue.as_slices().0);
             match result {
-                Ok(0) => return self.fail(&mut queue),
+                Ok(0) => return self.fail(&mut queue, "the connection accepts no more bytes".into()),
                 Ok(n) => drop(queue.drain(..n)),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return,
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                Err(_) => return self.fail(&mut queue),
+                Err(e) => return self.fail(&mut queue, e.to_string()),
             }
         }
         self.flush_pending.set(false);
     }
 
-    fn fail(&self, queue: &mut VecDeque<u8>) {
+    fn fail(&self, queue: &mut VecDeque<u8>, why: String) {
         queue.clear();
-        self.failed.set(true);
+        *self.failure.borrow_mut() = Some(why);
+    }
+
+    /// Why the socket failed, once: the first call after the failure returns the reason (the
+    /// caller answers `last-operation-failed`), then the stream is `closed`.
+    fn take_failure(&self) -> Option<String> {
+        let why = self.failure.borrow_mut().take();
+        if why.is_some() {
+            self.reported.set(true);
+        }
+        why
+    }
+
+    /// Whether the socket failed (reported or not).
+    fn failed(&self) -> bool {
+        self.failure.borrow().is_some() || self.reported.get()
     }
 
     /// What `check-write` permits after a drain: 4096 at most, less with bytes queued, 0 while
     /// the queue is full or a flush is pending; `None` once the stream failed.
     fn permit(&self) -> Option<u64> {
         self.drain();
-        if self.failed.get() {
+        if self.failed() {
             return None;
         }
         if self.flush_pending.get() {
@@ -845,7 +878,7 @@ impl TcpOut {
 
     /// Appends `bytes` behind the ones queued, then drains. Never waits.
     fn push(&self, bytes: &[u8]) {
-        if !self.failed.get() {
+        if !self.failed() {
             self.queue.borrow_mut().extend(bytes);
             self.drain();
         }
@@ -854,7 +887,7 @@ impl TcpOut {
     /// `flush`: drains as far as the socket takes; if bytes remain the flush is pending.
     fn flush(&self) {
         self.drain();
-        if !self.failed.get() && !self.queue.borrow().is_empty() {
+        if !self.failed() && !self.queue.borrow().is_empty() {
             self.flush_pending.set(true);
         }
     }
@@ -864,7 +897,7 @@ impl TcpOut {
     fn flush_until(&self, deadline: Option<Instant>) {
         loop {
             self.drain();
-            if self.failed.get() || self.queue.borrow().is_empty() {
+            if self.failed() || self.queue.borrow().is_empty() {
                 return;
             }
             if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -879,12 +912,45 @@ impl TcpOut {
     }
 }
 
-// optional: wasi_io_streams_method_output_stream_write | wasi_io_streams_method_output_stream_blocking_write_and_flush | wasi_io_streams_method_output_stream_write_zeroes | wasi_io_streams_method_output_stream_blocking_write_zeroes_and_flush | wasi_io_streams_method_output_stream_splice | wasi_io_streams_method_output_stream_blocking_splice | wasi_io_streams_method_output_stream_blocking_flush | wasi_io_streams_method_output_stream_flush
+// optional: wasi_io_streams_method_input_stream_read | wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_skip | wasi_io_streams_method_input_stream_blocking_skip | wasi_io_streams_method_output_stream_check_write | wasi_io_streams_method_output_stream_write | wasi_io_streams_method_output_stream_blocking_write_and_flush | wasi_io_streams_method_output_stream_write_zeroes | wasi_io_streams_method_output_stream_blocking_write_zeroes_and_flush | wasi_io_streams_method_output_stream_splice | wasi_io_streams_method_output_stream_blocking_splice | wasi_io_streams_method_output_stream_blocking_flush | wasi_io_streams_method_output_stream_flush
 #[allow(dead_code)]
-impl TcpOut {
-    /// `Err(closed)` once the stream failed.
-    fn status(&self) -> Result<(), StreamError> {
-        if self.failed.get() { Err(StreamError::Closed) } else { Ok(()) }
+impl TypedHost {
+    /// `last-operation-failed` for a failure of the last operation on a stream: a fresh
+    /// `error` handle (one per call, live until the guest drops it) that carries `message`.
+    /// The caller reports it once: the stream is `closed` from then on.
+    fn last_operation_failed(&mut self, message: impl std::fmt::Display) -> StreamError {
+        StreamError::LastOperationFailed(Error(self.errors.insert(message.to_string()) as u32))
+    }
+
+    /// The first read failure of the input stream `stream` is `last-operation-failed`; the
+    /// stream is `closed` after it (see `read_stream`).
+    fn fail_input(&mut self, stream: u32, e: &std::io::Error) -> StreamError {
+        self.failed_in.insert(stream);
+        self.last_operation_failed(e)
+    }
+
+    /// `fail_input` for the output stream `stream` that is not a connection.
+    fn fail_output(&mut self, stream: u32, e: &std::io::Error) -> StreamError {
+        self.failed_out.insert(stream);
+        self.last_operation_failed(e)
+    }
+
+    /// Why the output stream in `tcp_out` at `slot` cannot be written: `last-operation-failed`
+    /// the first time after its socket failed, `closed` after that and when it was dropped.
+    fn tcp_out_error(&mut self, slot: usize) -> StreamError {
+        match self.tcp_out.get(slot).and_then(TcpOut::take_failure) {
+            Some(why) => self.last_operation_failed(why),
+            None => StreamError::Closed,
+        }
+    }
+
+    /// `Ok` while the connection in `tcp_out` at `slot` has not failed, else its error (see
+    /// `tcp_out_error`).
+    fn tcp_status(&mut self, slot: usize) -> Result<(), StreamError> {
+        match self.tcp_out.get(slot) {
+            Some(conn) if !conn.failed() => Ok(()),
+            _ => Err(self.tcp_out_error(slot)),
+        }
     }
 }
 // end optional
@@ -910,26 +976,30 @@ impl TypedHost {
             buf.truncate(n);
             return Ok(buf);
         }
+        if self.failed_in.contains(&stream) {
+            // a failure was reported: the stream is closed, a zero-length read included
+            return Err(StreamError::Closed);
+        }
         if let Some(slot) = tcp_slot(stream) {
             // never blocks: an empty list means "nothing yet"
-            let stream = self.tcp_in.get_mut(slot).expect("read from an unknown or dropped stream");
+            let conn = self.tcp_in.get_mut(slot).expect("read from an unknown or dropped stream");
             if buf.is_empty() {
                 // a zero length succeeds only while the connection is open: peek, consume nothing
-                return match stream.peek(&mut [0u8; 1]) {
+                return match conn.peek(&mut [0u8; 1]) {
                     Ok(0) => Err(StreamError::Closed),
                     Ok(_) => Ok(buf),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(buf),
-                    Err(_) => Err(StreamError::Closed),
+                    Err(e) => Err(self.fail_input(stream, &e)),
                 };
             }
-            return match std::io::Read::read(stream, &mut buf) {
+            return match std::io::Read::read(conn, &mut buf) {
                 Ok(0) => Err(StreamError::Closed),
                 Ok(n) => {
                     buf.truncate(n);
                     Ok(buf)
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
-                Err(_) => Err(StreamError::Closed),
+                Err(e) => Err(self.fail_input(stream, &e)),
             };
         }
         let Some(index) = file_index(stream) else {
@@ -946,7 +1016,8 @@ impl TypedHost {
                 buf.truncate(n);
                 Ok(buf)
             }
-            _ => Err(StreamError::Closed),
+            Ok(_) => Err(StreamError::Closed), // the end of the file
+            Err(e) => Err(self.fail_input(stream, &e)),
         }
     }
     // end optional
@@ -990,21 +1061,25 @@ impl TypedHost {
 
     /// How many bytes `splice` may read for `stream`: `len`, for a connection at most its
     /// `check-write` permit. With `wait` the queue is emptied first (waiting for the peer).
-    fn splice_budget(&self, stream: u32, len: u64, wait: bool) -> Result<u64, StreamError> {
+    fn splice_budget(&mut self, stream: u32, len: u64, wait: bool) -> Result<u64, StreamError> {
         let Some(slot) = tcp_slot(stream) else { return Ok(len) };
         let conn = self.tcp_out.get(slot).ok_or(StreamError::Closed)?;
         if wait {
             conn.flush_waiting();
         }
-        Ok(len.min(conn.permit().ok_or(StreamError::Closed)?))
+        match conn.permit() {
+            Some(permit) => Ok(len.min(permit)),
+            None => Err(self.tcp_out_error(slot)),
+        }
     }
 
     /// Traps if a non-blocking write of `len` bytes to a connection is more than `check-write`
-    /// permits now (its send queue's room, up to 4096); `closed` for a connection that is gone.
+    /// permits now (its send queue's room, up to 4096); for a connection that failed or is gone it
+    /// answers like `check-write` (`last-operation-failed` once, then `closed`).
     /// The other streams are not checked here.
-    fn assert_within_permit(&self, stream: u32, len: u64, op: &str) -> Result<(), StreamError> {
+    fn assert_within_permit(&mut self, stream: u32, len: u64, op: &str) -> Result<(), StreamError> {
         if let Some(slot) = tcp_slot(stream) {
-            let permit = self.tcp_permit(slot).ok_or(StreamError::Closed)?;
+            let permit = self.tcp_permit(slot).ok_or_else(|| self.tcp_out_error(slot))?;
             assert!(len <= permit, "{op}: more than check-write allows");
         }
         Ok(())
@@ -1012,7 +1087,8 @@ impl TypedHost {
 
     /// Writes all of `contents` to a stream: the one write path of `write`,
     /// `blocking-write-and-flush`, `write-zeroes`, `blocking-write-zeroes-and-flush`,
-    /// `splice` and `blocking-splice`. A failed write ends the stream. A connection's bytes go
+    /// `splice` and `blocking-splice`. A failed write is `last-operation-failed` once (the first
+    /// time the failure shows), then the stream is `closed`. A connection's bytes go
     /// through its send queue (see `TcpOut`), so their order is kept: with `wait` false
     /// (`write`, and `splice` / `blocking-splice`, which read within the permit) they are queued
     /// and sent as far as the socket takes them; with `wait` the queue is then emptied, waiting
@@ -1029,7 +1105,9 @@ impl TypedHost {
             if wait {
                 conn.flush_waiting();
             }
-            return conn.status();
+            return self.tcp_status(slot);
+        } else if self.failed_out.contains(&stream) {
+            return Err(StreamError::Closed); // a failure was reported: the stream is closed
         } else {
             match (stream, file_index(stream)) {
                 (_, Some(index)) => match self.outputs.get_mut(index) {
@@ -1040,7 +1118,11 @@ impl TypedHost {
                 (_, None) => std::io::stdout().write_all(contents),
             }
         };
-        written.map_err(|_| StreamError::Closed)
+        written.map_err(|e| match e.kind() {
+            // a dropped file output (see above) is gone, not failed
+            std::io::ErrorKind::NotFound => StreamError::Closed,
+            _ => self.fail_output(stream, &e),
+        })
     }
     // end optional
 
@@ -1056,12 +1138,15 @@ impl TypedHost {
             } else {
                 conn.flush();
             }
-            return conn.status();
+            return self.tcp_status(slot);
+        }
+        if self.failed_out.contains(&stream) {
+            return Err(StreamError::Closed); // a failure was reported: the stream is closed
         }
         if stream != 1 {
             return Ok(()); // a file and (unbuffered in `std`) stderr hold nothing
         }
-        std::io::stdout().flush().map_err(|_| StreamError::Closed)
+        std::io::stdout().flush().map_err(|e| self.fail_output(stream, &e))
     }
     // end optional
 
@@ -1827,8 +1912,17 @@ impl Host for TypedHost {
     }
     // end optional
 
+    // optional: wasi_io_error_method_error_to_debug_string
+    /// The message of the failure behind an `error` handle (an unknown one is empty).
+    fn wasi_io_error_method_error_to_debug_string(&mut self, self_: Error) -> String {
+        self.errors.get(self_.0 as usize).cloned().unwrap_or_default()
+    }
+    // end optional
+
     // optional: wasi_io_error_resource_drop_error
-    fn wasi_io_error_resource_drop_error(&mut self, _handle: Error) {}
+    fn wasi_io_error_resource_drop_error(&mut self, handle: Error) {
+        self.errors.remove(handle.0 as usize);
+    }
     // end optional
 
     // optional: wasi_io_poll_resource_drop_pollable
@@ -1837,6 +1931,7 @@ impl Host for TypedHost {
 
     // optional: wasi_io_streams_resource_drop_input_stream
     fn wasi_io_streams_resource_drop_input_stream(&mut self, handle: InputStream) {
+        self.failed_in.remove(&handle.0);
         if let Some(slot) = tcp_slot(handle.0) {
             self.tcp_in.remove(slot);
         } else if let Some(index) = file_index(handle.0) {
@@ -1924,6 +2019,7 @@ impl Host for TypedHost {
 
     // optional: wasi_io_streams_resource_drop_output_stream
     fn wasi_io_streams_resource_drop_output_stream(&mut self, handle: OutputStream) {
+        self.failed_out.remove(&handle.0);
         if let Some(slot) = tcp_slot(handle.0) {
             // what the guest wrote still reaches the peer (see `TcpOut`)
             if let Some(conn) = self.tcp_out.get(slot) {
@@ -1950,7 +2046,7 @@ impl Host for TypedHost {
         self_: OutputStream,
     ) -> Result<u64, StreamError> {
         match tcp_slot(self_.0) {
-            Some(slot) => self.tcp_permit(slot).ok_or(StreamError::Closed),
+            Some(slot) => self.tcp_permit(slot).ok_or_else(|| self.tcp_out_error(slot)),
             None => Ok(4096),
         }
     }
@@ -2038,7 +2134,8 @@ impl Host for TypedHost {
     /// `write` (a zero `len` is ok while both are open). It does not wait for `src`: `src` at
     /// its end is `closed`, nothing available yet is `ok(0)`. For a connection it reads at
     /// most what `check-write` permits, so with the send queue full (permit 0) it returns
-    /// `ok(0)` without touching `src`. A failed write ends the output stream. Known
+    /// `ok(0)` without touching `src`. A failed write is `last-operation-failed` once, then the
+    /// output stream is `closed`. Known
     /// limitation: the bytes already read from `src` are lost then.
     fn wasi_io_streams_method_output_stream_splice(
         &mut self,

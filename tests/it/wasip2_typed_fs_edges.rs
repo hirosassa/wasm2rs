@@ -11,7 +11,9 @@ use crate::wasip2_typed_host::{assert_succeeded, component_from_wit, run_program
 const IO: &str = r#"
 package wasi:io@0.2.0;
 interface error {
-  resource error;
+  resource error {
+    to-debug-string: func() -> string;
+  }
 }
 interface poll {
   resource pollable;
@@ -72,7 +74,8 @@ interface preopens {
 
 const CORE: &str = r#"
 (module
-  (import "wasi:io/error@0.2.0" "[resource-drop]error" (func (param i32)))
+  (import "wasi:io/error@0.2.0" "[resource-drop]error" (func $drop_error (param i32)))
+  (import "wasi:io/error@0.2.0" "[method]error.to-debug-string" (func $debug (param i32 i32)))
   (import "wasi:io/poll@0.2.0" "[resource-drop]pollable" (func (param i32)))
   (import "wasi:io/streams@0.2.0" "[method]input-stream.read" (func $read (param i32 i64 i32)))
   (import "wasi:io/streams@0.2.0" "[method]input-stream.blocking-read" (func $bread (param i32 i64 i32)))
@@ -91,6 +94,9 @@ const CORE: &str = r#"
   (memory (export "memory") 1)
   (global $brk (mut i32) (i32.const 1024))
   (global $last (mut i32) (i32.const 0))
+  (global $debug_ptr (mut i32) (i32.const 0))
+  (global $debug_len (mut i32) (i32.const 0))
+  (global $failed (mut i32) (i32.const -1))
   (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (local $p i32)
     (local.set $p (i32.and (i32.add (global.get $brk) (i32.sub (local.get 2) (i32.const 1)))
                            (i32.sub (i32.const 0) (local.get 2))))
@@ -124,10 +130,32 @@ const CORE: &str = r#"
       (then (i32.const -1))
       (else (i32.load (i32.const 244)))))
 
-  ;; read / blocking-read: -1 at the end (`closed`), else the length | the first byte << 32
+  ;; read / blocking-read: -1 at the end (`closed`), -3 for `last-operation-failed` (its error
+  ;; handle is dropped at once), else the length | the first byte << 32
+  ;; (the stream-error is at `$at + $off`: 4 after a list, 8 after a u64)
+  (func $failure (param $at i32) (param $off i32) (result i64)
+    (local.set $at (i32.add (local.get $at) (local.get $off)))
+    (if (result i64) (i32.load8_u (local.get $at))
+      (then (i64.const -1))
+      (else
+        ;; keep the error's debug string for `debug_len` / `debug_byte`
+        (call $debug (i32.load (i32.add (local.get $at) (i32.const 4))) (i32.const 600))
+        (global.set $debug_ptr (i32.load (i32.const 600)))
+        (global.set $debug_len (i32.load (i32.const 604)))
+        (global.set $failed (i32.load (i32.add (local.get $at) (i32.const 4))))
+        (call $drop_error (i32.load (i32.add (local.get $at) (i32.const 4))))
+        (i64.const -3))))
+  (func (export "last_failed") (result i32) (global.get $failed))
+  ;; the length of the debug string of an error handle (0 for one the host forgot)
+  (func (export "debug_len_of") (param $e i32) (result i32)
+    (call $debug (local.get $e) (i32.const 600))
+    (i32.load (i32.const 604)))
+  (func (export "debug_len") (result i32) (global.get $debug_len))
+  (func (export "debug_byte") (param $i i32) (result i32)
+    (i32.load8_u (i32.add (global.get $debug_ptr) (local.get $i))))
   (func $got (result i64)
     (if (result i64) (i32.load8_u (i32.const 260))
-      (then (i64.const -1))
+      (then (call $failure (i32.const 260) (i32.const 4)))
       (else
         (i64.or
           (i64.extend_i32_u (i32.load (i32.const 268)))
@@ -143,10 +171,10 @@ const CORE: &str = r#"
   ;; skip / blocking-skip: the count, or -1 at the end
   (func (export "fs_skip") (param $s i32) (param $len i64) (result i64)
     (call $skip (local.get $s) (local.get $len) (i32.const 280))
-    (if (result i64) (i32.load8_u (i32.const 280)) (then (i64.const -1)) (else (i64.load (i32.const 288)))))
+    (if (result i64) (i32.load8_u (i32.const 280)) (then (call $failure (i32.const 280) (i32.const 8))) (else (i64.load (i32.const 288)))))
   (func (export "fs_bskip") (param $s i32) (param $len i64) (result i64)
     (call $bskip (local.get $s) (local.get $len) (i32.const 280))
-    (if (result i64) (i32.load8_u (i32.const 280)) (then (i64.const -1)) (else (i64.load (i32.const 288)))))
+    (if (result i64) (i32.load8_u (i32.const 280)) (then (call $failure (i32.const 280) (i32.const 8))) (else (i64.load (i32.const 288)))))
 
   ;; the low half of the hash of a descriptor / of a path under the preopen; 0 on error
   (func (export "fs_hash") (param $h i32) (result i64)
@@ -197,6 +225,46 @@ fn run(root: &Path, body: &str) -> std::process::Output {
         ),
         body,
     )
+}
+
+#[test]
+fn a_failing_file_read_is_last_operation_failed_once_then_closed() {
+    let root = fresh_root("edges_read_error");
+    std::fs::write(root.join("a.txt"), "0123456789").unwrap();
+    // a file opened for writing only cannot be read: the host's read fails (not the end)
+    let out = run_program(
+        &component_from_wit(&[CLOCKS, IO, FILESYSTEM], WORLD, "w"),
+        CORE,
+        &format!(
+            "TypedHost::new(Vec::new()).with_writable_preopen(std::path::PathBuf::from({:?}))",
+            root.to_str().unwrap()
+        ),
+        &format!(
+            "assert_eq!(inst.fs_open({A}, 0, 2), 0);
+             let f = inst.fs_last();
+             let s = inst.fs_stream(f, 0);
+             // the first failure is `last-operation-failed` (-3), with the OS message
+             assert_eq!(inst.fs_read(s, 4), -3);
+             let len = inst.debug_len();
+             assert!(len > 0);
+             let text: String = (0..len).map(|i| inst.debug_byte(i) as u8 as char).collect();
+             assert!(text.to_lowercase().contains(\"bad file descriptor\"), \"{{text}}\");
+             // the guest dropped the error: the host forgot it
+             let error = inst.last_failed();
+             assert_eq!(inst.debug_len_of(error), 0);
+             // the stream is closed from then on, a zero-length read included
+             assert_eq!(inst.fs_read(s, 4), -1);
+             assert_eq!(inst.fs_bread(s, 4), -1);
+             assert_eq!(inst.fs_skip(s, 4), -1);
+             assert_eq!(inst.fs_bskip(s, 4), -1);
+             assert_eq!(inst.fs_read(s, 0), -1);
+             // another stream fails by itself, and gets the freed error slot back
+             let t = inst.fs_stream(f, 0);
+             assert_eq!(inst.fs_bskip(t, 4), -3);
+             assert_eq!(inst.last_failed(), error);"
+        ),
+    );
+    assert_succeeded(&out);
 }
 
 #[test]

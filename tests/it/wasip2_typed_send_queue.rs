@@ -356,7 +356,7 @@ fn a_flush_in_progress_keeps_check_write_at_zero_until_the_queue_is_empty() {
 }
 
 #[test]
-fn a_failed_peer_closes_the_stream_instead_of_trapping_or_hanging() {
+fn a_failed_peer_reports_last_operation_failed_once_then_the_stream_is_closed() {
     assert_succeeded(&run(&format!(
         "{SERVER}
          fill(&mut inst, out);
@@ -364,9 +364,30 @@ fn a_failed_peer_closes_the_stream_instead_of_trapping_or_hanging() {
          let sub_out = inst.sub_out(out);
          // closing a socket with unread data resets the connection
          drop(client);
+         // a failed stream is writable (ready) so that the guest finds out
          inst.block(sub_out);
+         // the failure shows once the host's send attempt meets the reset; the first call that
+         // sees it reports `last-operation-failed` (-1 for `check-write`, with an error handle)
+         let mut failed = false;
+         for _ in 0..2000 {{
+             if inst.check_write(out) == -1 {{
+                 failed = true;
+                 break;
+             }}
+             std::thread::sleep(std::time::Duration::from_millis(1));
+         }}
+         assert!(failed, \"the reset never showed\");
+         let error = inst.last_err();
+         assert_ne!(error, -1, \"the first report is not last-operation-failed\");
+         // after the report every operation is `closed` (case 1), and no new error appears
          assert_eq!(inst.check_write(out), -1);
          assert_eq!(inst.write(out, 400, 4), 101);
+         assert_eq!(inst.flush(out), 101);
+         assert_eq!(inst.blocking_write_and_flush(out, 400, 4), 101);
+         assert_eq!(inst.last_err(), error);
+         // still ready, so a guest that polls it does not hang
+         inst.block(sub_out);
+         inst.drop_error(error);
          let started = std::time::Instant::now();
          inst.drop_out(out);
          assert!(started.elapsed() < std::time::Duration::from_secs(2), \"{{:?}}\", started.elapsed());"
