@@ -1247,3 +1247,138 @@ fn a_component_without_a_core_module_keeps_every_resource_drop() {
         "{names:?}"
     );
 }
+
+#[test]
+fn a_top_level_import_that_is_not_an_instance_names_the_import_and_its_kind() {
+    let cases = [
+        ("fun", "a function", r#"(import "fun" (func))"#),
+        (
+            "val",
+            "a value",
+            r#"(import "val" (value $v u32)) (export "o" (value $v))"#,
+        ),
+        (
+            "mod",
+            "a module or component",
+            r#"(import "mod" (core module))"#,
+        ),
+        (
+            "comp",
+            "a module or component",
+            r#"(import "comp" (component))"#,
+        ),
+    ];
+    for (name, kind, import) in cases {
+        let wasm = wat::parse_str(format!("(component {import})")).unwrap();
+        let err = wit_host_trait(&wasm).unwrap_err().to_string();
+        assert!(err.contains("unsupported"), "{name}: {err}");
+        assert!(err.contains(&format!("import \"{name}\"")), "{name}: {err}");
+        assert!(err.contains(kind), "{name}: {err}");
+    }
+}
+
+/// A component whose `defines_t` declares a type `$t`, then imports `pt` as
+/// `(eq $t)` and an interface `a:b/d` with `f(p: pt)`.
+fn eq_import_of(defines_t: &str) -> Vec<u8> {
+    wat::parse_str(format!(
+        r#"(component {defines_t}
+          (import "pt" (type $e (eq $t)))
+          (import "a:b/d" (instance
+            (alias outer 1 $e (type $q))
+            (export "f" (func (param "p" $q))))))"#
+    ))
+    .unwrap()
+}
+
+#[test]
+fn an_eq_import_of_an_aliased_record_is_the_same_named_record() {
+    let wasm = eq_import_of(
+        r#"(type $r (record (field "x" u32)))
+          (import "a:b/c" (instance $i
+            (alias outer 1 $r (type $r0))
+            (export "point" (type $p (eq $r0)))))
+          (alias export $i "point" (type $t))"#,
+    );
+    let rust = host(&wasm);
+    assert!(rust.contains("pub struct Point {"), "{rust}");
+    assert!(rust.contains("fn a_b_d_f(&mut self, p: Point);"), "{rust}");
+}
+
+#[test]
+fn an_instance_exported_by_the_component_keeps_its_types() {
+    let wasm = eq_import_of(
+        r#"(type $r (record (field "x" u32)))
+          (import "a:b/c" (instance $i
+            (alias outer 1 $r (type $r0))
+            (export "point" (type $p (eq $r0)))))
+          (export $ie "ie" (instance $i))
+          (alias export $ie "point" (type $t))"#,
+    );
+    let rust = host(&wasm);
+    // The type went through an instance export and is still `point`.
+    assert!(rust.contains("fn a_b_d_f(&mut self, p: Point);"), "{rust}");
+}
+
+#[test]
+fn a_type_of_an_instantiated_instance_is_an_error_naming_the_function() {
+    // The type of an instance made by `instantiate` is not known to the host trait.
+    let wasm = eq_import_of(
+        r#"(component $c
+            (type $r (record (field "x" u32)))
+            (export "point" (type $r)))
+          (instance $s (instantiate $c))
+          (alias export $s "point" (type $t))"#,
+    );
+    let err = wit_host_trait(&wasm).unwrap_err().to_string();
+    assert!(err.contains("unsupported"), "{err}");
+    assert!(err.contains("unknown instance"), "{err}");
+    assert!(err.contains("`f`") && err.contains("a:b/d"), "{err}");
+}
+
+#[test]
+fn a_sub_resource_import_is_a_resource_named_after_the_import() {
+    let wasm = wat::parse_str(
+        r#"(component
+          (import "my-res" (type $r (sub resource)))
+          (import "a:b/c" (instance
+            (alias outer 1 $r (type $q))
+            (export "f" (func (param "x" (borrow $q)) (result (own $q)))))))"#,
+    )
+    .unwrap();
+    let rust = host(&wasm);
+    assert!(
+        rust.contains("fn a_b_c_f(&mut self, x: MyRes) -> MyRes;"),
+        "{rust}"
+    );
+}
+
+#[test]
+fn a_drop_that_is_not_tied_to_an_imported_resource_keeps_every_resource_drop() {
+    // Two imported resources `r` and `s`, a core module, and one `canon resource.drop`.
+    let names = |dropped: &str| -> Vec<String> {
+        let wasm = wat::parse_str(format!(
+            r#"(component
+              (import "a:b/res" (instance $i
+                (export "r" (type $r (sub resource)))
+                (export "s" (type $s (sub resource)))))
+              (alias export $i "r" (type $ir))
+              (component $c
+                (type $res (resource (rep i32)))
+                (export "res" (type $res)))
+              (instance $made (instantiate $c))
+              (alias export $made "res" (type $local))
+              (core func (canon resource.drop {dropped}))
+              (core module))"#
+        ))
+        .unwrap();
+        wasm2rs::wit_functions(&wasm)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.name)
+            .collect()
+    };
+    // The drop of the imported `r` is tied to it: only that drop is declared.
+    assert_eq!(names("$ir"), ["[resource-drop]r"]);
+    // The drop of a resource of an instantiated instance is tied to no import: keep both.
+    assert_eq!(names("$local"), ["[resource-drop]r", "[resource-drop]s"]);
+}
