@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `examples/wasip2_host/typed.rs`: `open-at` with `create` + `exclusive` on a symlink name returns
+  `exist` also with `symlink-follow` (it used to be `not-permitted` for a dangling link, as POSIX
+  `O_CREAT | O_EXCL` never follows a link). `shutdown` finds the connection's send queue
+  through a slot (and a unique id, so a slot reused by another connection is not mistaken for
+  it) kept in `NetState::Connected`, not by matching socket addresses; it no longer flushes (and
+  waits on) another connection's queue after the guest dropped the output stream. Tests in
+  `tests/it/wasip2_typed_fs_symlink.rs` and `tests/it/wasip2_typed_send_queue.rs`.
+
 - `examples/wasip2_host/typed.rs`: `splice` and `blocking-splice` to a TCP output stream respect
   `check-write`. They used to read `min(len, 4096)` from the source and then wait for the peer
   to read the whole send queue, so a stalled peer hung the guest and the bytes could not be

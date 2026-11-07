@@ -128,6 +128,8 @@ struct TypedHost {
     /// Output streams of connections, behind the output-stream handles `TCP_STREAM..`, each
     /// with its send queue.
     tcp_out: Slab<TcpOut>,
+    /// The `id` of the next `TcpOut`.
+    next_tcp_out_id: u64,
     /// UDP sockets behind `udp-socket` handles.
     udp_sockets: Slab<UdpSock>,
     /// Incoming datagram streams, behind `incoming-datagram-stream` handles.
@@ -165,6 +167,7 @@ impl TypedHost {
             sockets: Slab::new(),
             tcp_in: Slab::new(),
             tcp_out: Slab::new(),
+            next_tcp_out_id: 0,
             udp_sockets: Slab::new(),
             udp_in: Slab::new(),
             udp_out: Slab::new(),
@@ -722,7 +725,10 @@ enum NetState {
     Listening { listener: TcpListener, pending: std::cell::RefCell<Option<TcpStream>> },
     /// `start-connect` has connected (or failed): `finish-connect` reports it.
     ConnectStarted(Result<TcpStream, Net>),
-    Connected(TcpStream),
+    /// Connected: `out` is the slot in `tcp_out` of the send queue of the output stream
+    /// opened with the connection, and that queue's `id` (the slot is reused once the
+    /// stream is dropped, by another connection's queue).
+    Connected { stream: TcpStream, out: (usize, u64) },
     /// A connection attempt failed.
     Closed,
 }
@@ -779,6 +785,8 @@ const SEND_QUEUE_CAPACITY: usize = 64 * 1024;
 /// asks for readiness through `&TypedHost`.
 #[allow(dead_code)]
 struct TcpOut {
+    /// Unique among the host's connections (see `NetState::Connected`).
+    id: u64,
     stream: TcpStream,
     queue: std::cell::RefCell<VecDeque<u8>>,
     /// The socket failed: the stream is marked failed and the queue was dropped.
@@ -789,8 +797,9 @@ struct TcpOut {
 
 #[allow(dead_code)]
 impl TcpOut {
-    fn new(stream: TcpStream) -> Self {
+    fn new(id: u64, stream: TcpStream) -> Self {
         TcpOut {
+            id,
             stream,
             queue: std::cell::RefCell::new(VecDeque::new()),
             failed: std::cell::Cell::new(false),
@@ -867,12 +876,6 @@ impl TcpOut {
 
     fn flush_waiting(&self) {
         self.flush_until(None);
-    }
-
-    /// Whether this is the output side of the connection `other` is a handle of.
-    fn is_connection_of(&self, other: &TcpStream) -> bool {
-        self.stream.local_addr().ok() == other.local_addr().ok()
-            && self.stream.peer_addr().ok() == other.peer_addr().ok()
     }
 }
 
@@ -1151,12 +1154,16 @@ impl TypedHost {
         }
     }
 
-    /// The slots in `tcp_in` and `tcp_out` of new streams over duplicates of `stream`.
-    fn open_tcp_streams(&mut self, stream: &TcpStream) -> Result<(usize, usize), Net> {
+    /// The slots in `tcp_in` and `tcp_out` of new streams over duplicates of `stream`, and
+    /// the `Connected` state that owns `stream`.
+    fn open_tcp_streams(&mut self, stream: TcpStream) -> Result<(usize, usize, NetState), Net> {
         let dup = |s: &TcpStream| s.try_clone().map_err(|e| net_error(&e));
-        let (input, output) = (dup(stream)?, dup(stream)?);
-        let output = TcpOut::new(output);
-        Ok((TCP_STREAM + self.tcp_in.insert(input), TCP_STREAM + self.tcp_out.insert(output)))
+        let (input, output) = (dup(&stream)?, dup(&stream)?);
+        let id = self.next_tcp_out_id;
+        self.next_tcp_out_id += 1;
+        let out = self.tcp_out.insert(TcpOut::new(id, output));
+        let state = NetState::Connected { stream, out: (out, id) };
+        Ok((TCP_STREAM + self.tcp_in.insert(input), TCP_STREAM + out, state))
     }
 
     fn tcp_start_bind(&mut self, handle: u32, addr: SocketAddr) -> Result<(), Net> {
@@ -1244,9 +1251,9 @@ impl TypedHost {
                 return Err(Net::NotInProgress);
             }
         };
-        let streams = self.open_tcp_streams(&stream)?;
-        self.socket(handle).state = NetState::Connected(stream);
-        Ok(streams)
+        let (input, output, state) = self.open_tcp_streams(stream)?;
+        self.socket(handle).state = state;
+        Ok((input, output))
     }
 
     /// The new socket's slot and the stream handles (see `TCP_STREAM`).
@@ -1263,16 +1270,16 @@ impl TypedHost {
             None => listener.accept().map(|(stream, _)| stream).map_err(|e| net_error(&e))?,
         };
         stream.set_nonblocking(true).map_err(|e| net_error(&e))?;
-        let (input, output) = self.open_tcp_streams(&stream)?;
-        let slot = self.sockets.insert(NetSocket { ipv6, state: NetState::Connected(stream), options });
+        let (input, output, state) = self.open_tcp_streams(stream)?;
+        let slot = self.sockets.insert(NetSocket { ipv6, state, options });
         Ok((slot, input, output))
     }
 
     /// The local address of a bound socket, the remote one (`remote`) of a connected one.
     fn tcp_address(&mut self, handle: u32, remote: bool) -> Result<SocketAddr, Net> {
         match (&self.socket(handle).state, remote) {
-            (NetState::Connected(stream), true) => stream.peer_addr(),
-            (NetState::Connected(stream), false) => stream.local_addr(),
+            (NetState::Connected { stream, .. }, true) => stream.peer_addr(),
+            (NetState::Connected { stream, .. }, false) => stream.local_addr(),
             (
                 NetState::Bound(l)
                 | NetState::ListenStarted(l)
@@ -1285,17 +1292,17 @@ impl TypedHost {
     }
 
     fn tcp_shutdown(&mut self, handle: u32, how: Shutdown) -> Result<(), Net> {
-        let stream = match &self.socket(handle).state {
-            NetState::Connected(stream) => stream.try_clone().map_err(|e| net_error(&e))?,
+        let (stream, out) = match &self.socket(handle).state {
+            NetState::Connected { stream, out } => {
+                (stream.try_clone().map_err(|e| net_error(&e))?, *out)
+            }
             _ => return Err(Net::InvalidState),
         };
         if matches!(how, Shutdown::Write | Shutdown::Both) {
             // what the guest wrote before still reaches the peer, in order (a dead peer
-            // discards it)
-            for conn in self.tcp_out.slots.iter().flatten() {
-                if conn.is_connection_of(&stream) {
-                    conn.flush_waiting();
-                }
+            // discards it); the stream may be dropped already
+            if let Some(conn) = self.tcp_out.get(out.0).filter(|c| c.id == out.1) {
+                conn.flush_waiting();
             }
         }
         stream.shutdown(how).map_err(|e| net_error(&e))
@@ -2158,6 +2165,7 @@ impl Host for TypedHost {
     ) -> Result<Descriptor, FsErrorCode> {
         let create = open_flags.contains(OpenFlags::CREATE);
         let exclusive = open_flags.contains(OpenFlags::EXCLUSIVE);
+        let exclusive_create = create && exclusive;
         let truncate = open_flags.contains(OpenFlags::TRUNCATE);
         let writes = flags.contains(DescriptorFlags::WRITE);
         let changes = create || exclusive || truncate;
@@ -2168,11 +2176,13 @@ impl Host for TypedHost {
         if wants_directory && (changes || writes) {
             return Err(Fs::Invalid.into());
         }
-        if !path_flags.contains(PathFlags::SYMLINK_FOLLOW) && names_an_entry(&path) {
+        let follows = path_flags.contains(PathFlags::SYMLINK_FOLLOW);
+        if (exclusive_create || !follows) && names_an_entry(&path) {
             let entry = self.resolve_entry(self_.0, &path)?;
             if entry.symlink_metadata().is_ok_and(|meta| meta.is_symlink()) {
-                // `create` + `exclusive` never follows: the name exists (before `loop`)
-                return Err(if create && exclusive { Fs::Exist } else { Fs::Loop }.into());
+                // `create` + `exclusive` never follows: the name exists (before `loop`),
+                // dangling or not
+                return Err(if exclusive_create { Fs::Exist } else { Fs::Loop }.into());
             }
         }
         let full = if create {
@@ -2187,7 +2197,7 @@ impl Host for TypedHost {
         if is_dir && writes {
             return Err(Fs::IsDirectory.into());
         }
-        if create && exclusive && full.exists() {
+        if exclusive_create && full.exists() {
             return Err(Fs::Exist.into());
         }
         if create || truncate {
@@ -2765,7 +2775,7 @@ impl Host for TypedHost {
         // `std` listens with its own backlog; the size is checked, not applied. While
         // listening it is ignored (as the spec allows), not an error.
         match self.socket(self_.0).state {
-            NetState::ConnectStarted(_) | NetState::Connected(_) | NetState::Closed => {
+            NetState::ConnectStarted(_) | NetState::Connected { .. } | NetState::Closed => {
                 Err(Net::InvalidState.into())
             }
             _ => Ok(()),
