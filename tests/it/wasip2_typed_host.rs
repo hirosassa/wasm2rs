@@ -36,7 +36,8 @@ pub(crate) fn component_from_wit(deps: &[&str], wit: &str, world: &str) -> Vec<u
 }
 
 /// Builds the program for `component` and the core module `core_wat`: the glue, the typed
-/// host reduced to the methods the component declares, and a `main` that makes the
+/// host reduced to the methods the component declares (after the `type_aliases` that name its
+/// `error-code` enums), and a `main` that makes the
 /// instance (around the `host` expression) and runs `body`.
 fn build_program(component: &[u8], core_wat: &str, host: &str, body: &str) -> std::path::PathBuf {
     let glue = wit_host_glue(component).unwrap();
@@ -48,10 +49,11 @@ fn build_program(component: &[u8], core_wat: &str, host: &str, body: &str) -> st
     };
     let generated = transpile_with_options(&wat::parse_str(core_wat).unwrap(), &opts).unwrap();
     let host_source = keep_declared_methods(HOST, &glue);
+    let aliases = type_aliases(&glue);
     let main = format!("fn main() {{ let mut inst = Instance::new(Glue({host})); {body} }}");
     common::build(
         "wasip2_typed_host",
-        &format!("{generated}\n{glue}\n{host_source}\n{main}\n"),
+        &format!("{generated}\n{glue}\n{aliases}\n{host_source}\n{main}\n"),
     )
 }
 

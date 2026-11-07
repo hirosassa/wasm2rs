@@ -28,10 +28,16 @@
 // pollable is polled every millisecond; a connection's streams are `TCP_STREAM + slot`.
 // UDP, ip-name-lookup and the socket options are not implemented.
 //
+// A component that imports both filesystem and sockets gets two `error-code` enums, which the
+// generator spells `ErrorCode` and `ErrorCode2` in an order that follows the imports. The host
+// therefore names them `FsErrorCode` and `NetErrorCode`: type aliases that
+// `type_aliases` (`filter.rs`) emits from the generated trait, for the interfaces it declares.
+//
 // Like `host.rs`, each method sits between `// optional: <method>` and `// end optional`
 // and is kept only when the generated trait declares it (see `keep_declared_methods` in
 // `filter.rs`), so one source serves components that import different subsets. A
-// component that imports a method this host lacks does not build.
+// component that imports a method this host lacks does not build. The source needs the
+// `type_aliases` text before it.
 
 #[allow(unused_imports)]
 use std::io::Write;
@@ -430,7 +436,7 @@ fn file_index(stream: u32) -> Option<usize> {
 }
 
 /// The `error-code`s this host returns, without the generated type (which a component
-/// that imports no filesystem interface does not have); `From<Fs> for ErrorCode` below.
+/// that imports no filesystem interface does not have); `From<Fs> for FsErrorCode` below.
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum Fs {
@@ -536,7 +542,7 @@ fn tcp_slot(stream: u32) -> Option<usize> {
 }
 
 /// The `wasi:sockets` `error-code`s this host returns, without the generated type;
-/// `From<Net> for ErrorCode` below.
+/// `From<Net> for NetErrorCode` below.
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum Net {
@@ -819,21 +825,21 @@ impl TypedHost {
 // the methods that need it.
 
 // optional: wasi_filesystem_types_method_descriptor_open_at | wasi_filesystem_types_method_descriptor_read_via_stream | wasi_filesystem_types_method_descriptor_get_flags | wasi_filesystem_types_method_descriptor_read_directory | wasi_filesystem_types_method_descriptor_stat | wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_descriptor_readlink_at | wasi_filesystem_types_method_descriptor_metadata_hash | wasi_filesystem_types_method_descriptor_metadata_hash_at | wasi_filesystem_types_method_directory_entry_stream_read_directory_entry | wasi_filesystem_types_method_descriptor_create_directory_at | wasi_filesystem_types_method_descriptor_remove_directory_at | wasi_filesystem_types_method_descriptor_unlink_file_at | wasi_filesystem_types_method_descriptor_write_via_stream | wasi_filesystem_types_method_descriptor_append_via_stream | wasi_filesystem_types_method_descriptor_set_size | wasi_filesystem_types_method_descriptor_sync | wasi_filesystem_types_method_descriptor_sync_data | wasi_filesystem_types_method_descriptor_rename_at | wasi_filesystem_types_method_descriptor_symlink_at | wasi_filesystem_types_method_descriptor_link_at | wasi_filesystem_types_method_descriptor_set_times | wasi_filesystem_types_method_descriptor_set_times_at
-impl From<Fs> for ErrorCode {
+impl From<Fs> for FsErrorCode {
     fn from(e: Fs) -> Self {
         match e {
-            Fs::Access => ErrorCode::Access,
-            Fs::BadDescriptor => ErrorCode::BadDescriptor,
-            Fs::Exist => ErrorCode::Exist,
-            Fs::Invalid => ErrorCode::Invalid,
-            Fs::Io => ErrorCode::Io,
-            Fs::IsDirectory => ErrorCode::IsDirectory,
-            Fs::NoEntry => ErrorCode::NoEntry,
-            Fs::NotDirectory => ErrorCode::NotDirectory,
-            Fs::NotEmpty => ErrorCode::NotEmpty,
-            Fs::Unsupported => ErrorCode::Unsupported,
-            Fs::NotPermitted => ErrorCode::NotPermitted,
-            Fs::ReadOnly => ErrorCode::ReadOnly,
+            Fs::Access => FsErrorCode::Access,
+            Fs::BadDescriptor => FsErrorCode::BadDescriptor,
+            Fs::Exist => FsErrorCode::Exist,
+            Fs::Invalid => FsErrorCode::Invalid,
+            Fs::Io => FsErrorCode::Io,
+            Fs::IsDirectory => FsErrorCode::IsDirectory,
+            Fs::NoEntry => FsErrorCode::NoEntry,
+            Fs::NotDirectory => FsErrorCode::NotDirectory,
+            Fs::NotEmpty => FsErrorCode::NotEmpty,
+            Fs::Unsupported => FsErrorCode::Unsupported,
+            Fs::NotPermitted => FsErrorCode::NotPermitted,
+            Fs::ReadOnly => FsErrorCode::ReadOnly,
         }
     }
 }
@@ -932,22 +938,22 @@ fn file_times(
 // end optional
 
 // optional: wasi_sockets_tcp_create_socket_create_tcp_socket | wasi_sockets_tcp_method_tcp_socket_start_bind | wasi_sockets_tcp_method_tcp_socket_finish_bind | wasi_sockets_tcp_method_tcp_socket_start_listen | wasi_sockets_tcp_method_tcp_socket_finish_listen | wasi_sockets_tcp_method_tcp_socket_start_connect | wasi_sockets_tcp_method_tcp_socket_finish_connect | wasi_sockets_tcp_method_tcp_socket_accept | wasi_sockets_tcp_method_tcp_socket_local_address | wasi_sockets_tcp_method_tcp_socket_remote_address | wasi_sockets_tcp_method_tcp_socket_shutdown
-impl From<Net> for ErrorCode {
+impl From<Net> for NetErrorCode {
     fn from(e: Net) -> Self {
         match e {
-            Net::Unknown => ErrorCode::Unknown,
-            Net::AccessDenied => ErrorCode::AccessDenied,
-            Net::NotSupported => ErrorCode::NotSupported,
-            Net::InvalidArgument => ErrorCode::InvalidArgument,
-            Net::Timeout => ErrorCode::Timeout,
-            Net::NotInProgress => ErrorCode::NotInProgress,
-            Net::WouldBlock => ErrorCode::WouldBlock,
-            Net::InvalidState => ErrorCode::InvalidState,
-            Net::AddressNotBindable => ErrorCode::AddressNotBindable,
-            Net::AddressInUse => ErrorCode::AddressInUse,
-            Net::ConnectionRefused => ErrorCode::ConnectionRefused,
-            Net::ConnectionReset => ErrorCode::ConnectionReset,
-            Net::ConnectionAborted => ErrorCode::ConnectionAborted,
+            Net::Unknown => NetErrorCode::Unknown,
+            Net::AccessDenied => NetErrorCode::AccessDenied,
+            Net::NotSupported => NetErrorCode::NotSupported,
+            Net::InvalidArgument => NetErrorCode::InvalidArgument,
+            Net::Timeout => NetErrorCode::Timeout,
+            Net::NotInProgress => NetErrorCode::NotInProgress,
+            Net::WouldBlock => NetErrorCode::WouldBlock,
+            Net::InvalidState => NetErrorCode::InvalidState,
+            Net::AddressNotBindable => NetErrorCode::AddressNotBindable,
+            Net::AddressInUse => NetErrorCode::AddressInUse,
+            Net::ConnectionRefused => NetErrorCode::ConnectionRefused,
+            Net::ConnectionReset => NetErrorCode::ConnectionReset,
+            Net::ConnectionAborted => NetErrorCode::ConnectionAborted,
         }
     }
 }
@@ -1218,7 +1224,7 @@ impl Host for TypedHost {
         path: String,
         open_flags: OpenFlags,
         flags: DescriptorFlags,
-    ) -> Result<Descriptor, ErrorCode> {
+    ) -> Result<Descriptor, FsErrorCode> {
         let create = open_flags.contains(OpenFlags::CREATE);
         let exclusive = open_flags.contains(OpenFlags::EXCLUSIVE);
         let truncate = open_flags.contains(OpenFlags::TRUNCATE);
@@ -1273,7 +1279,7 @@ impl Host for TypedHost {
         &mut self,
         self_: Descriptor,
         offset: u64,
-    ) -> Result<InputStream, ErrorCode> {
+    ) -> Result<InputStream, FsErrorCode> {
         let file = self.open_descriptor(self_.0)?.file.as_ref().ok_or(Fs::IsDirectory)?;
         let stream = FileStream::over(file, offset, false)?;
         let slot = self.files.insert(stream);
@@ -1288,7 +1294,7 @@ impl Host for TypedHost {
         &mut self,
         self_: Descriptor,
         offset: u64,
-    ) -> Result<OutputStream, ErrorCode> {
+    ) -> Result<OutputStream, FsErrorCode> {
         Ok(OutputStream(self.open_output_stream(self_.0, offset, false)?))
     }
     // end optional
@@ -1298,7 +1304,7 @@ impl Host for TypedHost {
     fn wasi_filesystem_types_method_descriptor_append_via_stream(
         &mut self,
         self_: Descriptor,
-    ) -> Result<OutputStream, ErrorCode> {
+    ) -> Result<OutputStream, FsErrorCode> {
         Ok(OutputStream(self.open_output_stream(self_.0, 0, true)?))
     }
     // end optional
@@ -1312,7 +1318,7 @@ impl Host for TypedHost {
         old_path: String,
         new_descriptor: Descriptor,
         new_path: String,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), FsErrorCode> {
         self.require_writable()?;
         let old = self.resolve_entry(self_.0, &old_path)?;
         let new = self.resolve_entry(new_descriptor.0, &new_path)?;
@@ -1336,7 +1342,7 @@ impl Host for TypedHost {
         self_: Descriptor,
         old_path: String,
         new_path: String,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), FsErrorCode> {
         self.require_writable()?;
         if old_path.is_empty() {
             return Err(Fs::NoEntry.into());
@@ -1361,7 +1367,7 @@ impl Host for TypedHost {
         old_path: String,
         new_descriptor: Descriptor,
         new_path: String,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), FsErrorCode> {
         self.require_writable()?;
         let old = if old_path_flags.contains(PathFlags::SYMLINK_FOLLOW) {
             self.resolve(self_.0, &old_path)?
@@ -1388,7 +1394,7 @@ impl Host for TypedHost {
         self_: Descriptor,
         data_access_timestamp: NewTimestamp,
         data_modification_timestamp: NewTimestamp,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), FsErrorCode> {
         self.require_writable()?;
         let d = self.open_descriptor(self_.0)?;
         if d.file.is_some() && !d.write {
@@ -1410,7 +1416,7 @@ impl Host for TypedHost {
         path: String,
         data_access_timestamp: NewTimestamp,
         data_modification_timestamp: NewTimestamp,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), FsErrorCode> {
         self.require_writable()?;
         let times = file_times(data_access_timestamp, data_modification_timestamp)?;
         let full = if path_flags.contains(PathFlags::SYMLINK_FOLLOW) {
@@ -1434,7 +1440,7 @@ impl Host for TypedHost {
         &mut self,
         self_: Descriptor,
         size: u64,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), FsErrorCode> {
         let file = self.writable_descriptor_file(self_.0)?;
         Ok(file.set_len(size).map_err(io_error_code)?)
     }
@@ -1446,7 +1452,7 @@ impl Host for TypedHost {
     fn wasi_filesystem_types_method_descriptor_sync(
         &mut self,
         self_: Descriptor,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), FsErrorCode> {
         Ok(self.sync_descriptor(self_.0, false)?)
     }
     // end optional
@@ -1456,7 +1462,7 @@ impl Host for TypedHost {
     fn wasi_filesystem_types_method_descriptor_sync_data(
         &mut self,
         self_: Descriptor,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), FsErrorCode> {
         Ok(self.sync_descriptor(self_.0, true)?)
     }
     // end optional
@@ -1469,7 +1475,7 @@ impl Host for TypedHost {
         &mut self,
         self_: Descriptor,
         path: String,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), FsErrorCode> {
         self.require_writable()?;
         let entry = self.resolve_entry(self_.0, &path)?;
         Ok(std::fs::create_dir(entry).map_err(io_error_code)?)
@@ -1483,7 +1489,7 @@ impl Host for TypedHost {
         &mut self,
         self_: Descriptor,
         path: String,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), FsErrorCode> {
         self.require_writable()?;
         let entry = self.resolve_entry(self_.0, &path)?;
         if entry.symlink_metadata().map_err(io_error_code)?.is_dir() {
@@ -1500,7 +1506,7 @@ impl Host for TypedHost {
         &mut self,
         self_: Descriptor,
         path: String,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), FsErrorCode> {
         self.require_writable()?;
         let entry = self.resolve_entry(self_.0, &path)?;
         if !entry.symlink_metadata().map_err(io_error_code)?.is_dir() {
@@ -1516,7 +1522,7 @@ impl Host for TypedHost {
         &mut self,
         self_: Descriptor,
         path: String,
-    ) -> Result<String, ErrorCode> {
+    ) -> Result<String, FsErrorCode> {
         Ok(self.read_link_target(self_.0, &path)?)
     }
     // end optional
@@ -1526,7 +1532,7 @@ impl Host for TypedHost {
     fn wasi_filesystem_types_method_descriptor_get_flags(
         &mut self,
         self_: Descriptor,
-    ) -> Result<DescriptorFlags, ErrorCode> {
+    ) -> Result<DescriptorFlags, FsErrorCode> {
         let write = self.open_descriptor(self_.0)?.write;
         Ok(if write { DescriptorFlags::READ.union(DescriptorFlags::WRITE) } else { DescriptorFlags::READ })
     }
@@ -1536,7 +1542,7 @@ impl Host for TypedHost {
     fn wasi_filesystem_types_method_descriptor_read_directory(
         &mut self,
         self_: Descriptor,
-    ) -> Result<DirectoryEntryStream, ErrorCode> {
+    ) -> Result<DirectoryEntryStream, FsErrorCode> {
         let entries = self.list_directory(self_.0)?;
         Ok(DirectoryEntryStream(self.listings.insert(entries.into_iter()) as u32))
     }
@@ -1546,7 +1552,7 @@ impl Host for TypedHost {
     fn wasi_filesystem_types_method_descriptor_stat(
         &mut self,
         self_: Descriptor,
-    ) -> Result<DescriptorStat, ErrorCode> {
+    ) -> Result<DescriptorStat, FsErrorCode> {
         Ok(descriptor_stat(self.descriptor_metadata(self_.0)?))
     }
     // end optional
@@ -1558,7 +1564,7 @@ impl Host for TypedHost {
         self_: Descriptor,
         _path_flags: PathFlags,
         path: String,
-    ) -> Result<DescriptorStat, ErrorCode> {
+    ) -> Result<DescriptorStat, FsErrorCode> {
         let full = self.resolve(self_.0, &path)?;
         Ok(descriptor_stat(std::fs::metadata(full).map_err(io_error_code)?))
     }
@@ -1568,7 +1574,7 @@ impl Host for TypedHost {
     fn wasi_filesystem_types_method_descriptor_metadata_hash(
         &mut self,
         self_: Descriptor,
-    ) -> Result<MetadataHashValue, ErrorCode> {
+    ) -> Result<MetadataHashValue, FsErrorCode> {
         let meta = self.descriptor_metadata(self_.0)?;
         Ok(metadata_hash(&meta, &self.open_descriptor(self_.0)?.path))
     }
@@ -1580,7 +1586,7 @@ impl Host for TypedHost {
         self_: Descriptor,
         _path_flags: PathFlags,
         path: String,
-    ) -> Result<MetadataHashValue, ErrorCode> {
+    ) -> Result<MetadataHashValue, FsErrorCode> {
         let full = self.resolve(self_.0, &path)?;
         let meta = std::fs::metadata(&full).map_err(io_error_code)?;
         Ok(metadata_hash(&meta, &full))
@@ -1592,7 +1598,7 @@ impl Host for TypedHost {
     fn wasi_filesystem_types_method_directory_entry_stream_read_directory_entry(
         &mut self,
         self_: DirectoryEntryStream,
-    ) -> Result<Option<DirectoryEntry>, ErrorCode> {
+    ) -> Result<Option<DirectoryEntry>, FsErrorCode> {
         let listing = self.listings.get_mut(self_.0 as usize).ok_or(Fs::BadDescriptor)?;
         Ok(listing.next().map(|(kind, name)| DirectoryEntry { type_: descriptor_type(kind), name }))
     }
@@ -1653,7 +1659,7 @@ impl Host for TypedHost {
     fn wasi_sockets_tcp_create_socket_create_tcp_socket(
         &mut self,
         address_family: IpAddressFamily,
-    ) -> Result<TcpSocket, ErrorCode> {
+    ) -> Result<TcpSocket, NetErrorCode> {
         let ipv6 = address_family == IpAddressFamily::Ipv6;
         let slot = self.sockets.insert(NetSocket { ipv6, state: NetState::Unbound });
         Ok(TcpSocket(slot as u32))
@@ -1673,7 +1679,7 @@ impl Host for TypedHost {
         self_: TcpSocket,
         _network: Network,
         local_address: IpSocketAddress,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), NetErrorCode> {
         Ok(self.tcp_start_bind(self_.0, socket_addr(local_address))?)
     }
     // end optional
@@ -1682,7 +1688,7 @@ impl Host for TypedHost {
     fn wasi_sockets_tcp_method_tcp_socket_finish_bind(
         &mut self,
         self_: TcpSocket,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), NetErrorCode> {
         Ok(self.tcp_finish_bind(self_.0)?)
     }
     // end optional
@@ -1691,7 +1697,7 @@ impl Host for TypedHost {
     fn wasi_sockets_tcp_method_tcp_socket_start_listen(
         &mut self,
         self_: TcpSocket,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), NetErrorCode> {
         Ok(self.tcp_start_listen(self_.0)?)
     }
     // end optional
@@ -1700,7 +1706,7 @@ impl Host for TypedHost {
     fn wasi_sockets_tcp_method_tcp_socket_finish_listen(
         &mut self,
         self_: TcpSocket,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), NetErrorCode> {
         Ok(self.tcp_finish_listen(self_.0)?)
     }
     // end optional
@@ -1709,7 +1715,7 @@ impl Host for TypedHost {
     fn wasi_sockets_tcp_method_tcp_socket_local_address(
         &mut self,
         self_: TcpSocket,
-    ) -> Result<IpSocketAddress, ErrorCode> {
+    ) -> Result<IpSocketAddress, NetErrorCode> {
         Ok(ip_socket_address(self.tcp_address(self_.0, false)?))
     }
     // end optional
@@ -1721,7 +1727,7 @@ impl Host for TypedHost {
         self_: TcpSocket,
         _network: Network,
         remote_address: IpSocketAddress,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), NetErrorCode> {
         Ok(self.tcp_start_connect(self_.0, socket_addr(remote_address))?)
     }
     // end optional
@@ -1730,7 +1736,7 @@ impl Host for TypedHost {
     fn wasi_sockets_tcp_method_tcp_socket_finish_connect(
         &mut self,
         self_: TcpSocket,
-    ) -> Result<(InputStream, OutputStream), ErrorCode> {
+    ) -> Result<(InputStream, OutputStream), NetErrorCode> {
         let (input, output) = self.tcp_finish_connect(self_.0)?;
         Ok((InputStream(input as u32), OutputStream(output as u32)))
     }
@@ -1741,7 +1747,7 @@ impl Host for TypedHost {
     fn wasi_sockets_tcp_method_tcp_socket_accept(
         &mut self,
         self_: TcpSocket,
-    ) -> Result<(TcpSocket, InputStream, OutputStream), ErrorCode> {
+    ) -> Result<(TcpSocket, InputStream, OutputStream), NetErrorCode> {
         let (socket, input, output) = self.tcp_accept(self_.0)?;
         Ok((TcpSocket(socket as u32), InputStream(input as u32), OutputStream(output as u32)))
     }
@@ -1751,7 +1757,7 @@ impl Host for TypedHost {
     fn wasi_sockets_tcp_method_tcp_socket_remote_address(
         &mut self,
         self_: TcpSocket,
-    ) -> Result<IpSocketAddress, ErrorCode> {
+    ) -> Result<IpSocketAddress, NetErrorCode> {
         Ok(ip_socket_address(self.tcp_address(self_.0, true)?))
     }
     // end optional
@@ -1779,7 +1785,7 @@ impl Host for TypedHost {
         &mut self,
         self_: TcpSocket,
         shutdown_type: ShutdownType,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), NetErrorCode> {
         let how = match shutdown_type {
             ShutdownType::Receive => Shutdown::Read,
             ShutdownType::Send_ => Shutdown::Write,
