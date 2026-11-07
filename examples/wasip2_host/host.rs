@@ -198,7 +198,7 @@ impl P2Host {
         let root = self.root.as_ref().ok_or(code::NOT_PERMITTED)?;
         let base = self.descriptor(dir)?;
         let relative = Path::new(path);
-        if relative.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
+        if !stays_below(relative) {
             return Err(code::NOT_PERMITTED);
         }
         let full = base.join(relative).canonicalize().map_err(io_error_code)?;
@@ -215,7 +215,7 @@ impl P2Host {
         let root = self.root.as_ref().ok_or(code::NOT_PERMITTED)?;
         let base = self.descriptor(dir)?;
         let relative = Path::new(path);
-        if relative.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
+        if !stays_below(relative) {
             return Err(code::NOT_PERMITTED);
         }
         if path.ends_with('/') || path.ends_with("/.") {

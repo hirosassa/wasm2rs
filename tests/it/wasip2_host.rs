@@ -1442,6 +1442,8 @@ const MAKE_LINKS_IMPORTS: &str = r#"
   (data (i32.const 410) "d")
   (data (i32.const 420) "../f.txt")
   (data (i32.const 430) "nope")
+  (data (i32.const 440) "abs")
+  (data (i32.const 450) "up")
 "#;
 
 /// `fs_make_links` runs on a writable root holding `f.txt`, `g.txt`, `ln` (a symlink to
@@ -1499,6 +1501,11 @@ const MAKE_LINKS: &str = r#"
     (call $hard (local.get $dir) (i32.const 0) (i32.const 420) (i32.const 8) (i32.const 400) (i32.const 2))
     (call $err (i32.const 31))
     (call $hard (local.get $dir) (i32.const 0) (i32.const 430) (i32.const 4) (i32.const 400) (i32.const 2))
+    (call $err (i32.const 20))
+    ;; following a symlink that leads out of the preopen, or to nothing
+    (call $hard (local.get $dir) (i32.const 1) (i32.const 440) (i32.const 3) (i32.const 400) (i32.const 2))
+    (call $err (i32.const 31))
+    (call $hard (local.get $dir) (i32.const 1) (i32.const 450) (i32.const 2) (i32.const 400) (i32.const 2))
     (call $err (i32.const 20)))
   (func (export "fs_make_links_denied") (local $dir i32)
     (call $dirs (i32.const 200))
