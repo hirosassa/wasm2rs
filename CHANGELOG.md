@@ -21,7 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `create-directory-at`, `remove-directory-at`, `unlink-file-at`, `rename-at`, `symlink-at`,
   `link-at`, `set-size`, `sync`, `sync-data`, `set-times` and `set-times-at`; all with the
   semantics of `host.rs`; tests in `tests/it/wasip2_typed_fs.rs` and
-  `tests/it/wasip2_typed_fs_write.rs`). Sockets still live only in the hand-written `host.rs`.
+  `tests/it/wasip2_typed_fs_write.rs`). TCP over loopback too (`create-tcp-socket`, bind, listen, connect, accept, addresses,
+  `subscribe`, `shutdown` and the connection streams; `TypedHost::with_external_network` lifts the
+  loopback limit; tests in `tests/it/wasip2_typed_sockets.rs`). A component that imports both
+  filesystem and socket interfaces is not supported yet (their two `error-code` enums become
+  `ErrorCode` and `ErrorCode2` in the generated trait).
 - The `// optional: a | b` marker of the host sources (`filter.rs`) keeps a block if the generated
   trait declares any of the listed methods.
 - `wit_host_glue` and `--wit-host --glue`: the glue from the typed `Host` trait to the flat
