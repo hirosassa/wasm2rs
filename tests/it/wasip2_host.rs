@@ -1558,6 +1558,71 @@ fn a_read_only_preopen_refuses_symlink_at_and_link_at() {
     }
 }
 
+/// The imports and paths of the test of `link-at` into another directory descriptor.
+const LINK_ACROSS_IMPORTS: &str = r#"
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.link-at" (func $link_at (param i32 i32 i32 i32 i32 i32 i32 i32)))
+  (data (i32.const 300) "d")
+  (data (i32.const 310) "f.txt")
+  (data (i32.const 320) "in_d")
+  (data (i32.const 330) "../up")
+  (data (i32.const 340) "/abs")
+  (data (i32.const 350) "back")
+"#;
+
+/// `fs_link_across` runs on a writable root holding `f.txt` and the directory `d`. It
+/// opens `d` and links `f.txt` into it (as `in_d`), then `d/in_d` back into the root
+/// (as `back`); a new name that is absolute or has `..` is not-permitted (31).
+const LINK_ACROSS: &str = r#"
+  (func $ok
+    (if (i32.load8_u (i32.const 220)) (then unreachable)))
+  (func $denied
+    (if (i32.ne (i32.load8_u (i32.const 220)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 221)) (i32.const 31)) (then unreachable)))
+  (func (export "fs_link_across") (local $dir i32) (local $sub i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 1) (i32.const 2) (i32.const 1) (i32.const 220))
+    (call $ok)
+    (local.set $sub (i32.load (i32.const 224)))
+    ;; root/f.txt -> d/in_d
+    (call $link_at (local.get $dir) (i32.const 0) (i32.const 310) (i32.const 5)
+                   (local.get $sub) (i32.const 320) (i32.const 4) (i32.const 220))
+    (call $ok)
+    ;; d/in_d -> root/back
+    (call $link_at (local.get $sub) (i32.const 0) (i32.const 320) (i32.const 4)
+                   (local.get $dir) (i32.const 350) (i32.const 4) (i32.const 220))
+    (call $ok)
+    ;; a new name that leaves the new directory
+    (call $link_at (local.get $dir) (i32.const 0) (i32.const 310) (i32.const 5)
+                   (local.get $sub) (i32.const 330) (i32.const 5) (i32.const 220))
+    (call $denied)
+    (call $link_at (local.get $dir) (i32.const 0) (i32.const 310) (i32.const 5)
+                   (local.get $sub) (i32.const 340) (i32.const 4) (i32.const 220))
+    (call $denied))
+"#;
+
+#[cfg(unix)]
+#[test]
+fn link_at_into_another_directory_descriptor_links_there() {
+    use std::os::unix::fs::MetadataExt;
+    let root = root_with_file("link_across");
+    std::fs::create_dir(root.join("d")).unwrap();
+    let bin = compile(
+        "fs_link_across",
+        &hello_with(LINK_ACROSS_IMPORTS, LINK_ACROSS),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_link_across();",
+    );
+    run_ok(&bin);
+    let ino = |path: std::path::PathBuf| std::fs::metadata(path).unwrap().ino();
+    assert_eq!(ino(root.join("d/in_d")), ino(root.join("f.txt")));
+    assert_eq!(ino(root.join("back")), ino(root.join("f.txt")));
+    assert!(!root.join("in_d").exists());
+    assert!(!root.parent().unwrap().join("up").exists());
+}
+
 /// The imports and paths of the test where a guest moves a directory under the path of a
 /// directory descriptor it holds. Calls that return `result<_, error-code>` put the tag
 /// at `ret` and the error's tag byte at `ret + 1`.
