@@ -685,32 +685,3 @@ fn a_try_table_clause_branching_to_a_try_whose_handler_it_is_in_is_rejected() {
         "branch out of a try handler",
     );
 }
-
-#[test]
-fn a_cast_to_a_continuation_type_in_a_module_with_a_switch_is_rejected() {
-    // A `switch` gives a continuation a type that the handle's recorded type does
-    // not follow, so the cast could answer wrongly.
-    assert_unsupported(
-        r#"(module
-            (type $ht (func (result i32)))
-            (tag $t (type $ht))
-            (type $fa (func (result i32)))
-            (type $ca (cont $fa))
-            (type $fa_s (func (result i32)))
-            (type $ca_s (cont $fa_s))
-            (type $fb (func (param i32) (param (ref $ca_s)) (result i32)))
-            (type $cb (cont $fb))
-            (func $a (type $fa)
-              i32.const 11
-              ref.func $b cont.new $cb
-              switch $cb $t
-              i32.const 999)
-            (func $b (type $fb)
-              local.get 0 i32.const 2 i32.add)
-            (func (export "run") (type $fa)
-              ref.func $a cont.new $ca
-              resume $ca (on $t switch))
-            (func (export "t") (result i32) (ref.test (ref $ca) (ref.null $ca))))"#,
-        "continuation type in a module with a switch",
-    );
-}

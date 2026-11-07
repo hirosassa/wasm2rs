@@ -765,9 +765,10 @@ impl super::FuncGen<'_> {
 
     /// A test of a continuation handle against the concrete continuation type `idx`:
     /// null answers `null_matches`, any other handle matches when its declared type
-    /// (`cont_types`, kept by `cont.new`, `cont.bind` and `resume` handlers) is `idx`
-    /// or a declared subtype of it. A `switch` retypes a continuation without
-    /// updating that table, so a module with one is rejected.
+    /// (`cont_types`, kept by `cont.new`, `cont.bind`, `resume` handlers and
+    /// `switch`) is `idx` or a declared subtype of it. A `switch` gives the parked
+    /// switcher the type of the target's self-reference parameter (see the
+    /// `resume` trampoline).
     fn cont_heap_test(
         &self,
         ref_expr: &str,
@@ -777,13 +778,6 @@ impl super::FuncGen<'_> {
         let target = idx
             .filter(|i| self.ctx.types.get(*i as usize).is_some())
             .ok_or_else(|| TranspileError::Unsupported("ref cast/test: unknown type".into()))?;
-        if self.ctx.cont.uses_switch {
-            return Err(TranspileError::Unsupported(
-                "ref cast/test to a continuation type in a module with a switch: a switch \
-                 retypes a continuation"
-                    .into(),
-            ));
-        }
         let types = self.ctx.cont_types_of_subtype(target).ok_or_else(|| {
             TranspileError::Unsupported(
                 "ref cast/test to a continuation type: the type section did not validate".into(),

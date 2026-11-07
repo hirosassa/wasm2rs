@@ -18,10 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   relation, so a function of a declared subtype is callable through its supertype.
 - `ref.test`, `ref.cast` and `br_on_cast` against a concrete continuation type: the instance
   records each continuation's declared type (`cont.new`, `cont.bind`, and the type a `resume`
-  handler block gives a suspended continuation) and a test matches the target or a declared
-  subtype of it. In such a module `cont.bind` and a `resume` handler move the continuation to a
-  new handle, so a reference kept from before keeps its own type. A module with a `switch` is
-  rejected, as the table does not follow its retyping.
+  handler block gives a suspended continuation, and the self-reference type a `switch` gives
+  the parked switcher) and a test matches the target or a declared subtype of it. In such a
+  module `cont.bind`, a `resume` handler and `switch` move the continuation to a new handle, so
+  a reference kept from before keeps its own type.
 - The abstract `contref` type and `ref.null cont`: a `u32` handle like a concrete continuation
   reference.
 - `ref.null nocont` / `nullcontref`: the bottom of the continuation hierarchy lowers to the same

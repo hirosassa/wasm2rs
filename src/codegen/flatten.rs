@@ -233,6 +233,7 @@ impl Flattener {
                     Node::Switch {
                         tag,
                         target,
+                        ty,
                         payload,
                         save,
                     } => {
@@ -248,7 +249,7 @@ impl Flattener {
                             0,
                             format!(
                                 "{save}__frame.pc = {resume}u32; return StepResult::Switch {{ \
-                                 tag: {tag}u32, target: {target}, args: vec![{payload}] }};"
+                                 tag: {tag}u32, target: {target}, ty: {ty}u32, args: vec![{payload}] }};"
                             ),
                         ));
                         self.arms.push((state, std::mem::take(&mut stmts)));
@@ -288,9 +289,9 @@ impl Flattener {
                                      StepResult::Suspend {{ tag: __t, payload: __p }} => {{ \
                                      {save}__frame.pc = {call}u32; \
                                      return StepResult::Suspend {{ tag: __t, payload: __p }}; }} \
-                                     StepResult::Switch {{ tag: __t, target: __tgt, args: __a }} => \
+                                     StepResult::Switch {{ tag: __t, target: __tgt, ty: __ty, args: __a }} => \
                                      {{ {save}__frame.pc = {call}u32; \
-                                     return StepResult::Switch {{ tag: __t, target: __tgt, args: __a \
+                                     return StepResult::Switch {{ tag: __t, target: __tgt, ty: __ty, args: __a \
                                      }}; }} \
                                      StepResult::Return(__cret) => {{ __frame.ostack = __cret; \
                                      pc = {resume}; }} }}"
