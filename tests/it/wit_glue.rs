@@ -721,3 +721,41 @@ fn type_names_that_clash_with_the_generated_code_get_a_trailing_underscore() {
         "#,
     );
 }
+
+#[test]
+fn a_one_tuple_is_a_rust_one_tuple_in_one_flat_slot() {
+    // `tuple<u32>` is `(u32,)` (not the parenthesised `u32`), lifted from and lowered to a
+    // single flat slot.
+    let body = r#"(export "one" (func (param "t" (tuple u32)) (result (tuple u32))))
+        (export "two" (func (param "t" (tuple u8 bool)) (result (tuple s8))))"#;
+    let trait_text = wit_host_trait(&component(body)).unwrap();
+    assert!(
+        trait_text.contains("t: (u32,)") && trait_text.contains("-> (u32,)"),
+        "{trait_text}"
+    );
+    run(
+        "one_tuple",
+        body,
+        r#"(module
+          (import "a:b/c" "one" (func $one (param i32) (result i32)))
+          (import "a:b/c" "two" (func $two (param i32 i32) (result i32)))
+          (func (export "ro") (param i32) (result i32) (call $one (local.get 0)))
+          (func (export "rt") (param i32 i32) (result i32)
+            (call $two (local.get 0) (local.get 1))))"#,
+        r#"
+        struct H;
+        impl Host for H {
+            fn a_b_c_one(&mut self, t: (u32,)) -> (u32,) { (t.0 * 2,) }
+            fn a_b_c_two(&mut self, t: (u8, bool)) -> (i8,) {
+                (if t.1 { -(t.0 as i8) } else { t.0 as i8 },)
+            }
+        }
+        fn main() {
+            let mut inst = Instance::new(Glue(H));
+            assert_eq!(inst.ro(21), 42);
+            assert_eq!(inst.rt(5, 1), -5); // sign-extended s8 in the i32 slot
+            assert_eq!(inst.rt(5, 0), 5);
+        }
+        "#,
+    );
+}

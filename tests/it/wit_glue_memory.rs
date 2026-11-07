@@ -1006,3 +1006,161 @@ fn a_list_with_a_four_gigabyte_length_traps_fast() {
         "lifted data too large",
     );
 }
+
+#[test]
+fn the_discriminant_is_one_byte_and_the_payload_sits_at_its_own_alignment() {
+    // option<u8>: disc 1 byte, payload at 1, size 2. variant{a(u8), b(u16)}: disc 1 byte,
+    // payload at 2 (the u16's alignment), size 4. The list strides expose the sizes.
+    go(
+        "disc_small",
+        r#"(type $v (variant (case "a" u8) (case "b" u16)))
+        (export "ab" (type $ab (eq $v)))
+        (export "opts" (func (param "l" (list (option u8))) (result (list (option u8)))))
+        (export "abs" (func (param "l" (list $ab)) (result (list $ab))))"#,
+        r#"(import "a:b/c" "opts" (func $opts (param i32 i32 i32)))
+        (import "a:b/c" "abs" (func $abs (param i32 i32 i32)))"#,
+        // opts at 16: Some(5), None (garbage payload), Some(9). abs at 32: a(7), b(0x0102),
+        // with garbage in the padding bytes.
+        r#"(data (i32.const 16) "\01\05\00\77\01\09")
+        (data (i32.const 32) "\00\ee\07\ee\01\ee\02\01")
+        (func (export "run")
+          (call $opts (i32.const 16) (i32.const 3) (i32.const 64))
+          (call $abs (i32.const 32) (i32.const 2) (i32.const 80)))"#,
+        r#"
+        struct H;
+        impl Host for H {
+            fn a_b_c_opts(&mut self, l: Vec<Option<u8>>) -> Vec<Option<u8>> {
+                assert_eq!(l, vec![Some(5), None, Some(9)]);
+                vec![Some(0xAB), None, Some(0xCD)]
+            }
+            fn a_b_c_abs(&mut self, l: Vec<Ab>) -> Vec<Ab> {
+                assert_eq!(l, vec![Ab::A(7), Ab::B(0x0102)]);
+                vec![Ab::B(0x0304), Ab::A(0x55)]
+            }
+        }
+        fn main() {
+            let mut inst = Instance::new(Glue(H));
+            inst.run();
+            let m = inst.memory();
+            let (p, n) = (u32_at(m, 64) as usize, u32_at(m, 68));
+            assert_eq!(n, 3);
+            // [disc, payload] per element; the None payload is not written.
+            assert_eq!((m[p], m[p + 1]), (1, 0xAB));
+            assert_eq!(m[p + 2], 0);
+            assert_eq!((m[p + 4], m[p + 5]), (1, 0xCD));
+            let (p, n) = (u32_at(m, 80) as usize, u32_at(m, 84));
+            assert_eq!(n, 2);
+            assert_eq!((m[p], m[p + 1]), (1, 0)); // b: disc byte, payload from p + 2
+            assert_eq!((m[p + 2], m[p + 3]), (0x04, 0x03));
+            assert_eq!((m[p + 4], m[p + 6]), (0, 0x55)); // a, element stride 4
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_257_case_enum_and_variant_use_a_two_byte_discriminant() {
+    let cases: String = (0..257).map(|i| format!(r#" "c{i}""#)).collect();
+    let vcases: String = (0..256).map(|i| format!(r#" (case "c{i}")"#)).collect();
+    go(
+        "disc_257",
+        &format!(
+            r#"(type $e (enum{cases}))
+            (export "big" (type $big (eq $e)))
+            (type $v (variant{vcases} (case "last" u8)))
+            (export "wide" (type $wide (eq $v)))
+            (export "enums" (func (param "l" (list $big)) (result (list $big))))
+            (export "wides" (func (param "l" (list $wide)) (result (list $wide))))"#
+        ),
+        r#"(import "a:b/c" "enums" (func $enums (param i32 i32 i32)))
+        (import "a:b/c" "wides" (func $wides (param i32 i32 i32)))"#,
+        // enums at 16: case 256 is bytes 00 01, then case 1 is 01 00 (2-byte elements).
+        // wides at 32: last(0x42) is disc 00 01 then payload at 2; then c1 with garbage.
+        r#"(data (i32.const 16) "\00\01\01\00")
+        (data (i32.const 32) "\00\01\42\ee\01\00\ee\ee")
+        (func (export "run")
+          (call $enums (i32.const 16) (i32.const 2) (i32.const 64))
+          (call $wides (i32.const 32) (i32.const 2) (i32.const 80)))"#,
+        r#"
+        struct H;
+        impl Host for H {
+            fn a_b_c_enums(&mut self, l: Vec<Big>) -> Vec<Big> {
+                assert_eq!(l, vec![Big::C256, Big::C1]);
+                vec![Big::C256, Big::C0, Big::C255]
+            }
+            fn a_b_c_wides(&mut self, l: Vec<Wide>) -> Vec<Wide> {
+                assert_eq!(l, vec![Wide::Last(0x42), Wide::C1]);
+                vec![Wide::C255, Wide::Last(0x99)]
+            }
+        }
+        fn main() {
+            let mut inst = Instance::new(Glue(H));
+            inst.run();
+            let m = inst.memory();
+            let (p, n) = (u32_at(m, 64) as usize, u32_at(m, 68));
+            assert_eq!(n, 3);
+            assert_eq!(&m[p..p + 6], &[0x00, 0x01, 0x00, 0x00, 0xff, 0x00]);
+            let (p, n) = (u32_at(m, 80) as usize, u32_at(m, 84));
+            assert_eq!(n, 2);
+            // disc (2 bytes), payload at 2, element stride 4.
+            assert_eq!(&m[p..p + 2], &[0xff, 0x00]);
+            assert_eq!(&m[p + 4..p + 7], &[0x00, 0x01, 0x99]);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn signed_bytes_and_chars_are_stored_and_loaded_at_their_memory_widths() {
+    go(
+        "s8_char_mem",
+        r#"(type $r (record (field "c" char) (field "b" s8)))
+        (export "cb" (type $cb (eq $r)))
+        (export "sb" (func (param "l" (list s8)) (result (list s8))))
+        (export "cs" (func (param "l" (list char)) (result (list char))))
+        (export "rec" (func (result $cb)))
+        (export "tup" (func (result (tuple u32 u64))))"#,
+        r#"(import "a:b/c" "sb" (func $sb (param i32 i32 i32)))
+        (import "a:b/c" "cs" (func $cs (param i32 i32 i32)))
+        (import "a:b/c" "rec" (func $rec (param i32)))
+        (import "a:b/c" "tup" (func $tup (param i32)))"#,
+        r#"(data (i32.const 16) "\ff\7f\80")
+        (data (i32.const 32) "\e9\00\00\00\00\f6\01\00")
+        (func (export "run")
+          (call $sb (i32.const 16) (i32.const 3) (i32.const 64))
+          (call $cs (i32.const 32) (i32.const 2) (i32.const 80))
+          (call $rec (i32.const 96))
+          (call $tup (i32.const 112)))"#,
+        r#"
+        struct H;
+        impl Host for H {
+            fn a_b_c_sb(&mut self, l: Vec<i8>) -> Vec<i8> {
+                assert_eq!(l, vec![-1, 127, -128]);
+                vec![-1, 1, i8::MIN]
+            }
+            fn a_b_c_cs(&mut self, l: Vec<char>) -> Vec<char> {
+                assert_eq!(l, vec!['\u{e9}', '\u{1F600}']);
+                vec!['\u{e9}', 'a']
+            }
+            fn a_b_c_rec(&mut self) -> Cb { Cb { c: '\u{1F600}', b: -1 } }
+            fn a_b_c_tup(&mut self) -> (u32, u64) { (0x0102_0304, 0x1112_1314_1516_1718) }
+        }
+        fn main() {
+            let mut inst = Instance::new(Glue(H));
+            inst.run();
+            let m = inst.memory();
+            let (p, n) = (u32_at(m, 64) as usize, u32_at(m, 68));
+            // The byte after the list is still zero: an s8 is stored as one byte, not as the flat i32.
+            assert_eq!((&m[p..p + 4], n), (&[0xff, 0x01, 0x80, 0x00][..], 3));
+            let (p, n) = (u32_at(m, 80) as usize, u32_at(m, 84));
+            assert_eq!(n, 2);
+            assert_eq!(&m[p..p + 8], &[0xe9, 0, 0, 0, 0x61, 0, 0, 0]);
+            // record{c: char, b: s8}: c at 0, b at 4.
+            assert_eq!(&m[96..104], &[0x00, 0xf6, 0x01, 0, 0xff, 0, 0, 0]);
+            // tuple<u32, u64>: u32 at 0, u64 at 8.
+            assert_eq!(u32_at(m, 112), 0x0102_0304);
+            assert_eq!(u64_at(m, 120), 0x1112_1314_1516_1718);
+        }
+        "#,
+    );
+}
