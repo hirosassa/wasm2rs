@@ -115,9 +115,6 @@ pub(crate) struct BodyScan {
     /// Per defined function (0-based): whether its own body has a `suspend`/
     /// `switch` control transfer. Seeds the `can_suspend` fixpoint.
     pub(crate) suspends: Vec<bool>,
-    /// Whether any body has a `switch`, which hands a continuation a new type that
-    /// the `cont_types` table does not follow.
-    pub(crate) uses_switch: bool,
     /// The concrete type indices that `ref.test`/`ref.cast`/`br_on_cast` target (any
     /// kind; the driver keeps the continuation ones).
     pub(crate) cast_targets: Vec<u32>,
@@ -180,7 +177,6 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
         suspends: vec![false; funcs.len()],
         calls: vec![Vec::new(); funcs.len()],
         uses_extern_box: false,
-        uses_switch: false,
         cast_targets: Vec::new(),
         uses_call_ref: false,
         uses_array_segment_ops: false,
@@ -221,10 +217,7 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
                     scan.note_cast_target(to_ref_type.heap_type());
                 }
                 Operator::Suspend { .. } => scan.suspends[i] = true,
-                Operator::Switch { .. } => {
-                    scan.suspends[i] = true;
-                    scan.uses_switch = true;
-                }
+                Operator::Switch { .. } => scan.suspends[i] = true,
                 Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
                     scan.calls[i].push(function_index);
                 }

@@ -163,3 +163,75 @@ fn a_reference_kept_across_a_suspend_still_has_its_own_type() {
         "let mut inst = Instance::new(); assert_eq!(inst.func1(), 1);",
     );
 }
+
+// A `switch` hands the parked switcher to its target as a reified reference whose
+// type is the self-continuation type in the target's last parameter (`$cas` here),
+// not the `$ca` the switcher was created as. Funcs: `$a`=0, `$b`=1, then the exports.
+fn switch_module(b_body: &str) -> String {
+    format!(
+        r#"(module
+          (type $ft (func (result i32)))
+          (type $ca (cont $ft))
+          (type $cas (sub (cont $ft)))
+          (type $fb (func (param i32) (param (ref $cas)) (result i32)))
+          (type $cb (cont $fb))
+          (type $ht (func (result i32)))
+          (tag $t (type $ht))
+          (func $a (type $ft)
+            i32.const 11
+            ref.func $b cont.new $cb
+            switch $cb $t
+            i32.const 999)
+          (func $b (type $fb) {b_body})
+          (elem declare func $a $b)
+          (func (export "run") (type $ft)
+            ref.func $a cont.new $ca
+            resume $ca (on $t switch))
+          (func (export "old") (type $ft) (local $k (ref null $ca))
+            (local.set $k (cont.new $ca (ref.func $a)))
+            (drop (resume $ca (on $t switch) (local.get $k)))
+            (ref.test (ref $ca) (local.get $k))))"#
+    )
+}
+
+#[test]
+fn a_switch_gives_the_parked_switcher_the_self_reference_type() {
+    // `$b` sees the switcher as a `$cas` (not the `$ca` it was created as).
+    let module = switch_module(
+        "(i32.add (i32.add (local.get 0)
+            (i32.mul (ref.test (ref $cas) (local.get 1)) (i32.const 100)))
+            (i32.mul (ref.test (ref $ca) (local.get 1)) (i32.const 10)))",
+    );
+    common::compile_run(
+        "cont_cast_switch_type",
+        &module,
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 111);",
+    );
+}
+
+#[test]
+fn a_reference_kept_across_a_switch_still_has_its_own_type() {
+    let module = switch_module("local.get 0");
+    common::compile_run(
+        "cont_cast_switch_old",
+        &module,
+        "let mut inst = Instance::new(); assert_eq!(inst.func3(), 1);",
+    );
+}
+
+#[test]
+fn ref_cast_of_the_switcher_traps_on_a_mismatch_and_passes_a_match() {
+    let bad = switch_module("(drop (ref.cast (ref $ca) (local.get 1))) local.get 0");
+    common::compile_run(
+        "cont_cast_switch_trap",
+        &bad,
+        "let mut inst = Instance::new();\n \
+         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inst.func2()));\n assert!(r.is_err());",
+    );
+    let good = switch_module("(drop (ref.cast (ref $cas) (local.get 1))) local.get 0");
+    common::compile_run(
+        "cont_cast_switch_ok",
+        &good,
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 11);",
+    );
+}

@@ -29,9 +29,10 @@ pub(super) fn continuation_runtime_lines(
         "    Return(Vec<i64>),".to_string(),
         "    Suspend { tag: u32, payload: Vec<i64> },".to_string(),
         // A `switch` parks the running continuation and transfers directly to
-        // `target`, handing it `args` (the switch payload); the driving `resume`
-        // (its `(on $tag switch)` handler) follows the transfer — see `resume`.
-        "    Switch { tag: u32, target: u32, args: Vec<i64> },".to_string(),
+        // `target`, handing it `args` (the switch payload) and `ty`, the continuation
+        // type the parked switcher takes as the target's self-reference; the driving
+        // `resume` (its `(on $tag switch)` handler) follows the transfer — see `resume`.
+        "    Switch { tag: u32, target: u32, ty: u32, args: Vec<i64> },".to_string(),
         "}".to_string(),
         String::new(),
     ];

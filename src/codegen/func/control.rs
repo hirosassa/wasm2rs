@@ -573,12 +573,13 @@ impl<'a> super::FuncGen<'a> {
                     // trailing self-reference and drive the target with the switch
                     // payload as its injected args.
                     self.line(format!(
-                        "StepResult::Switch {{ tag: __t, target: __tgt, args: __sa }} if __t == \
-                         {tag}u32 => {{"
+                        "StepResult::Switch {{ tag: __t, target: __tgt, ty: __sty, args: __sa }} \
+                         if __t == {tag}u32 => {{"
                     ));
-                    self.line(format!(
-                        "let mut __next = __sa; __next.push({cur_var} as i64);"
-                    ));
+                    // The switcher becomes the target's self-reference, of the type
+                    // that parameter declares (`__sty`).
+                    self.emit_cont_retype("let __self", &cur_var, "__sty");
+                    self.line("let mut __next = __sa; __next.push(__self as i64);");
                     self.line(format!("{cur_var} = __tgt; {args_var} = __next;"));
                     self.line("continue 'drive;");
                     self.line("}");
@@ -602,10 +603,24 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    /// Give the continuation behind `src` the type `ty` and bind it to `dst`: a fresh
+    /// handle when casts can observe types (an old reference keeps its own type),
+    /// else the same handle retyped in place.
+    fn emit_cont_retype(&mut self, dst: &str, src: &str, ty: &str) {
+        if self.ctx.cont.casts {
+            self.line(format!("{dst} = self.cont_retype({src}, {ty});"));
+        } else {
+            self.line(format!("{dst} = {src};"));
+            self.line(format!("self.cont_types[{src} as usize] = {ty};"));
+        }
+    }
+
     /// Emit one `(on $tag $label)` resume handler arm: on a matching suspend,
     /// decode the tag payload into the target block's leading result variables,
     /// hand it the reused (one-shot) continuation handle in the trailing variable,
-    /// and branch there. Shared by the plain and switch-driver forms of `resume`.
+    /// and branch there. Only reached from the plain (non-trampoline) form of
+    /// `resume`: a switch handler and a label handler cannot be mixed, so
+    /// `handle_var` is always the stepped handle.
     fn emit_resume_on_label(
         &mut self,
         tag: u32,
@@ -646,15 +661,7 @@ impl<'a> super::FuncGen<'a> {
         let cont_var = vars.last().ok_or(TranspileError::StackUnderflow)?;
         // The handler block gives the suspended continuation its own type.
         match self.label_cont_type(label_depth) {
-            Some(ty) if self.ctx.cont.casts => {
-                self.line(format!(
-                    "{cont_var} = self.cont_retype({handle_var}, {ty}u32);"
-                ));
-            }
-            Some(ty) => {
-                self.line(format!("{cont_var} = {handle_var};"));
-                self.line(format!("self.cont_types[{handle_var} as usize] = {ty}u32;"));
-            }
+            Some(ty) => self.emit_cont_retype(cont_var, handle_var, &format!("{ty}u32")),
             None => self.line(format!("{cont_var} = {handle_var};")),
         }
         let keyword = if is_loop { "continue" } else { "break" };
