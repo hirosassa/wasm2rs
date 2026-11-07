@@ -3,9 +3,9 @@ use std::mem;
 use wasmparser::{BlockType, HeapType, ValType};
 
 use super::super::{
-    BrArm, BranchEscape, CatchArm, CatchKind, CompositeKind, EXC_TYPE, Frame, FrameKind, Node,
-    RegionNode, Rt, TableCatch, TryRegionNode, TryState, Val, condition_code, decode_exc_value,
-    default_value, encode_exc_value, index_u32, reachable_after, rust_type,
+    BrArm, BranchEscape, CatchArm, CatchKind, EXC_TYPE, Frame, FrameKind, Node, RegionNode, Rt,
+    TableCatch, TryRegionNode, TryState, Val, condition_code, decode_exc_value, default_value,
+    encode_exc_value, index_u32, reachable_after, rust_type,
 };
 use super::{CatchPhase, TryBarrier};
 use crate::TranspileError;
@@ -669,11 +669,7 @@ impl<'a> super::FuncGen<'a> {
             return None;
         };
         let idx = idx.as_module_index()?;
-        matches!(
-            self.ctx.type_kinds.get(idx as usize),
-            Some(CompositeKind::Cont(_))
-        )
-        .then_some(idx)
+        self.is_cont_type(Some(idx)).then_some(idx)
     }
 
     pub(super) fn branch_table(

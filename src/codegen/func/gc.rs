@@ -753,7 +753,8 @@ impl super::FuncGen<'_> {
         ))
     }
 
-    fn is_cont_type(&self, idx: Option<u32>) -> bool {
+    /// Whether the type index names a continuation type.
+    pub(super) fn is_cont_type(&self, idx: Option<u32>) -> bool {
         idx.is_some_and(|i| {
             matches!(
                 self.ctx.type_kinds.get(i as usize),

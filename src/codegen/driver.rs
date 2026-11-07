@@ -411,9 +411,9 @@ pub(crate) fn build_ctx<'a>(
     // independent full scans.
     let scan = scan_bodies(funcs)?;
     let uses_extern_box = scan.uses_extern_box;
+    let uses_switch = scan.uses_switch;
     // Continuations carry per-instance state (the `conts` handle table), so any
     // module that creates one is stateful even without other mutable state.
-    let uses_switch = scan.uses_switch;
     let cont_bodies = scan.cont_bodies;
     let n_imports = imports.len();
     let can_suspend = can_suspend_functions(n_imports, &scan.suspends, &scan.calls)?;
