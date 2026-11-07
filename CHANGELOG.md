@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `examples/wasip2_host/typed.rs`: the TCP socket options (`is-listening`, `set-listen-backlog-size`,
+  keep-alive enabled/idle-time/interval/count, `hop-limit`, `receive-buffer-size`,
+  `send-buffer-size`) are recorded per socket with default values, validated (zero is
+  `invalid-argument`; the backlog size is `invalid-state` once a connection is started or made),
+  read back and inherited by accepted sockets, but not applied to the OS socket. A real `std::net` TCP program now builds.
+
 ### Fixed
 
 - `wit_host_trait` / `wit_host_glue` / `wit_functions` (and `--wit-host`, `--glue`) declare
