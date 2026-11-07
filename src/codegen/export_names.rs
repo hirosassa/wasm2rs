@@ -66,6 +66,18 @@ pub(super) fn sanitize(name: &str) -> String {
     out
 }
 
+/// `name` as a snake_case identifier that is also not a Rust keyword (a keyword gets a
+/// trailing `_`), for a name that is not matched against the generated code's own
+/// members, e.g. a parameter or a record field of a typed host trait.
+pub(crate) fn plain_ident(name: &str) -> String {
+    let ident = sanitize(name);
+    if KEYWORDS.contains(&ident.as_str()) {
+        format!("{ident}_")
+    } else {
+        ident
+    }
+}
+
 /// Whether `name` starts with a prefix the generated code reserves.
 fn has_reserved_prefix(name: &str) -> bool {
     ["wasi_", "cont_", "call_ref_t"]

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `wit_host_trait` and `--wit-host <component.wasm> [output]`: read the types of a WebAssembly
+  component's imports (type section, instance types, aliases, imports; `wasmparser` only) and
+  generate a typed `pub trait Host` with one method per function of every imported interface,
+  named like the `named_imports` method of the core import that lowers it. Integers, floats,
+  `bool`, `char`, `string`, `list`, `option`, `result`, `tuple` and `record` map to std types
+  (a record is one struct, emitted once); resources, `variant`, `enum`, `flags`, `future`,
+  `stream` and `error-context` are an `Unsupported` error naming the type. `wit_functions`
+  returns the decoded `WitFunc`/`WitType` list. No lowering glue yet.
 - `ref.test`, `ref.cast` and `br_on_cast` against a concrete function type: a non-null funcref
   matches when its function's declared type is the target or a declared subtype of it
   (`sub` chains, final vs. open types and equivalent types across rec groups included; the

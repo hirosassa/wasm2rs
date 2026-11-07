@@ -3,7 +3,9 @@
 //! <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
 //! `wasm2rs --dump <input.wasm>` to summarize a module, or
 //! `wasm2rs --extract-core <component.wasm> <dir>` to write a component's core
-//! modules to `<dir>/module{n}.wasm`.
+//! modules to `<dir>/module{n}.wasm`, or
+//! `wasm2rs --wit-host <component.wasm> [output]` to write a typed `Host` trait for
+//! the interfaces the component imports.
 //!
 //! Reads a WebAssembly binary and writes the transpiled Rust source. With no
 //! `funcs_per_file`/`max_bytes_per_file`, the whole module is one file, written
@@ -36,7 +38,7 @@ use wasm2rs::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host <component.wasm> [output]";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -75,12 +77,23 @@ fn extract_core_modules(wasm: &[u8], dir: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Write `text` to the `output` file, or to stdout when there is none.
+fn write_output(output: Option<String>, text: &str) -> Result<(), String> {
+    match output {
+        Some(path) => std::fs::write(&path, text).map_err(|e| format!("cannot write {path}: {e}")),
+        None => std::io::stdout()
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("cannot write to stdout: {e}")),
+    }
+}
+
 fn run() -> Result<(), String> {
     // Flags may appear anywhere; the remaining positional arguments keep their
     // order. `--unsafe-memory` opts into unchecked linear-memory access.
     let mut unsafe_memory = false;
     let mut dump = false;
     let mut extract_core = false;
+    let mut wit_host = false;
     let mut named_exports = false;
     let mut named_imports = false;
     let mut import_memory = false;
@@ -115,6 +128,7 @@ fn run() -> Result<(), String> {
             "--unsafe-memory" => unsafe_memory = true,
             "--dump" => dump = true,
             "--extract-core" => extract_core = true,
+            "--wit-host" => wit_host = true,
             "--named-exports" => named_exports = true,
             "--named-imports" => named_imports = true,
             "--import-memory" => import_memory = true,
@@ -128,8 +142,9 @@ fn run() -> Result<(), String> {
     let funcs_per_file = parse_usize_arg(args.next(), "funcs_per_file")?;
     let max_bytes_per_file = parse_usize_arg(args.next(), "max_bytes_per_file")?;
 
-    // `--dump` and `--extract-core` generate no code, so they refuse extra arguments and
-    // the flags that only change generated code instead of silently ignoring them.
+    // `--dump`, `--extract-core` and `--wit-host` generate no code, so they refuse extra
+    // arguments and the flags that only change generated code instead of silently
+    // ignoring them.
     let refuse_extras = |mode: &str, takes: &str, extra_args: bool| {
         if extra_args {
             return Err(format!("{mode} takes only {takes}"));
@@ -156,6 +171,20 @@ fn run() -> Result<(), String> {
     };
 
     let wasm = std::fs::read(&input).map_err(|e| format!("cannot read {input}: {e}"))?;
+    if wit_host {
+        for (given, flag) in [(dump, "--dump"), (extract_core, "--extract-core")] {
+            if given {
+                return Err(format!("--wit-host cannot be combined with {flag}"));
+            }
+        }
+        refuse_extras(
+            "--wit-host",
+            "the input file and an optional output file",
+            funcs_per_file > 0 || max_bytes_per_file > 0,
+        )?;
+        let rust = wasm2rs::wit_host_trait(&wasm).map_err(|e| e.to_string())?;
+        return write_output(output, &rust);
+    }
     if extract_core {
         if dump {
             return Err("--extract-core cannot be combined with --dump".to_string());
@@ -196,17 +225,7 @@ fn run() -> Result<(), String> {
     }
 
     let rust = transpile_with_options(&wasm, &topts).map_err(|e| e.to_string())?;
-    match output {
-        Some(path) => {
-            std::fs::write(&path, rust).map_err(|e| format!("cannot write {path}: {e}"))?;
-        }
-        None => {
-            std::io::stdout()
-                .write_all(rust.as_bytes())
-                .map_err(|e| format!("cannot write to stdout: {e}"))?;
-        }
-    }
-    Ok(())
+    write_output(output, &rust)
 }
 
 /// Derive a valid Cargo package name from the output directory's final
