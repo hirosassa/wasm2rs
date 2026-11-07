@@ -241,7 +241,11 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
    *Typed host trait generation started: `wit_host_trait` / `--wit-host` read the component's
    import types and generate a `Host` trait with the same method names (plain-data types and resources, as `Copy` handle newtypes with a
    per-resource drop method, variants as Rust enums, enums, and flags as `Copy` integer newtypes with a constant per flag; futures, streams and error-context are rejected by name; a real `wasm32-wasip2` hello world now yields a trait). The glue between it and the core `Imports`
-   follows.*
+   is started: `wit_host_glue` / `--wit-host --glue` generate `Glue<H: Host>` implementing `Imports` for the functions that need no
+   linear memory (scalars, enum, flags, handles, flat variant/option/result/record/tuple; at most 16 flat parameters and one flat result), with a canonical ABI model (layout, flattening, `join`). Strings, lists and
+   return pointers are refused by function name and come next. Checked against a real `wasm32-wasip2` hello world: all 21 core import names
+   (`wasi:io/poll@0.2.0` `[resource-drop]pollable`, ...) equal the `Host`/`Imports` method names, because the core module's
+   version (`@0.2.0`) differs from the component import's (`@0.2.12`) and `named_imports` drops the version suffix.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
    generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at` and `readlink-at` are done too; `symlink-at` and `link-at` are done too; so are TCP sockets over loopback (UDP and `ip-name-lookup` are not). This is what makes a wasip2 hello-world run natively.

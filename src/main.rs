@@ -4,8 +4,9 @@
 //! `wasm2rs --dump <input.wasm>` to summarize a module, or
 //! `wasm2rs --extract-core <component.wasm> <dir>` to write a component's core
 //! modules to `<dir>/module{n}.wasm`, or
-//! `wasm2rs --wit-host <component.wasm> [output]` to write a typed `Host` trait for
-//! the interfaces the component imports.
+//! `wasm2rs --wit-host [--glue] <component.wasm> [output]` to write a typed `Host` trait for
+//! the interfaces the component imports (with `--glue`, also the `Glue` that lowers it to
+//! the flat `Imports` trait).
 //!
 //! Reads a WebAssembly binary and writes the transpiled Rust source. With no
 //! `funcs_per_file`/`max_bytes_per_file`, the whole module is one file, written
@@ -38,7 +39,7 @@ use wasm2rs::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host <component.wasm> [output]";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue] <component.wasm> [output]";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -94,6 +95,7 @@ fn run() -> Result<(), String> {
     let mut dump = false;
     let mut extract_core = false;
     let mut wit_host = false;
+    let mut glue = false;
     let mut named_exports = false;
     let mut named_imports = false;
     let mut import_memory = false;
@@ -129,6 +131,7 @@ fn run() -> Result<(), String> {
             "--dump" => dump = true,
             "--extract-core" => extract_core = true,
             "--wit-host" => wit_host = true,
+            "--glue" => glue = true,
             "--named-exports" => named_exports = true,
             "--named-imports" => named_imports = true,
             "--import-memory" => import_memory = true,
@@ -170,6 +173,9 @@ fn run() -> Result<(), String> {
         }
     };
 
+    if glue && !wit_host {
+        return Err("--glue only applies to --wit-host".to_string());
+    }
     let wasm = std::fs::read(&input).map_err(|e| format!("cannot read {input}: {e}"))?;
     if wit_host {
         for (given, flag) in [(dump, "--dump"), (extract_core, "--extract-core")] {
@@ -182,7 +188,12 @@ fn run() -> Result<(), String> {
             "the input file and an optional output file",
             funcs_per_file > 0 || max_bytes_per_file > 0,
         )?;
-        let rust = wasm2rs::wit_host_trait(&wasm).map_err(|e| e.to_string())?;
+        let rust = if glue {
+            wasm2rs::wit_host_glue(&wasm)
+        } else {
+            wasm2rs::wit_host_trait(&wasm)
+        }
+        .map_err(|e| e.to_string())?;
         return write_output(output, &rust);
     }
     if extract_core {

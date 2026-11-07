@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `wit_host_glue` and `--wit-host --glue`: the glue from the typed `Host` trait to the flat
+  reentrant `Imports` trait of the core module (`pub struct Glue<H: Host>(pub H)` with
+  `impl<H: Host> Imports for Glue<H>`; each method has the name of the `Host` method it
+  forwards to, lifts the flat core parameters, calls the host and lowers the result). New
+  canonical ABI model (size, alignment, flattened types with `join`, `MAX_FLAT_PARAMS` 16 /
+  `MAX_FLAT_RESULTS` 1). Covers functions made only of integers, floats, `bool`, `char`,
+  `enum`, `flags`, resource handles (with `[resource-drop]`) and flat `variant`/`option`/
+  `result`/`record`/`tuple`; lifting is lenient like the canonical ABI (non-zero `bool` is true, narrow integers keep their low bits, undeclared flag bits are ignored); an invalid `char` or discriminant panics. A function that needs linear memory
+  (`string`, `list`, more than 16 flat parameters, a result of more than one flat value) is an
+  `Unsupported` error naming it; memory-backed types follow.
 - `wit_host_trait` and `--wit-host <component.wasm> [output]`: read the types of a WebAssembly
   component's imports (type section, instance types, aliases, imports; `wasmparser` only) and
   generate a typed `pub trait Host` with one method per function of every imported interface,
