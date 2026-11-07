@@ -13,10 +13,13 @@ mod codegen;
 mod dump;
 mod extract;
 mod wit;
+mod wit_abi;
 
 pub use dump::{ModuleSummary, dump};
 pub use extract::extract_core_modules;
-pub use wit::{WitFunc, WitRecord, WitResource, WitType, wit_functions, wit_host_trait};
+pub use wit::{
+    WitFunc, WitRecord, WitResource, WitType, wit_functions, wit_host_glue, wit_host_trait,
+};
 
 use wasmparser::{
     CompositeInnerType, DataKind, ElementItems, ElementKind, ExternalKind, FuncType, Parser,

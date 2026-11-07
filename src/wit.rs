@@ -28,6 +28,8 @@ use wasmparser::{
 use crate::TranspileError;
 use crate::codegen::{assign_import_names, plain_ident};
 
+mod glue;
+
 /// A WIT value type that a host function can take or return.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(missing_docs, reason = "the variants are the WIT type names")]
@@ -783,7 +785,7 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
 /// How many type nodes rendering one trait may visit. A component can share a type
 /// between many others, so a small component can expand to Rust text of exponential size;
 /// past this the trait is refused instead.
-const NODE_BUDGET: usize = 200_000;
+pub(crate) const NODE_BUDGET: usize = 200_000;
 
 /// A named compound type the trait declares once.
 enum Decl {
@@ -840,8 +842,19 @@ fn type_name(name: &str) -> String {
     }
     // The std names the generated code uses, and the prelude items a `struct Some(..)` or
     // `trait Default` would shadow in a module that also holds the user's `impl Host`.
-    const RESERVED: [&str; 18] = [
+    const RESERVED: [&str; 28] = [
         "Host",
+        // Top-level names of the transpiled code and the glue it is placed beside.
+        "Glue",
+        "Instance",
+        "Imports",
+        "GcRef",
+        "ContObj",
+        "StepResult",
+        "ContFrame",
+        "ExternFuncs",
+        "Wasm2RsException",
+        "Wasm2RsDelegate",
         "String",
         "Vec",
         "Option",
@@ -1087,12 +1100,17 @@ fn flag_idents<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
 
 /// A flags type as `pub struct Name(pub u8|u16|u32)` (the canonical ABI's size: flag `i`
 /// is bit `i`) with one associated constant per flag, `contains` and `union`.
-fn write_flags(out: &mut String, name: &str, flags: &WitFlags) {
-    let int = match flags.flags.len() {
+/// The Rust integer holding a flags type: the canonical ABI's size.
+fn flags_int(flags: &WitFlags) -> &'static str {
+    match flags.flags.len() {
         0..=8 => "u8",
         9..=16 => "u16",
         _ => "u32",
-    };
+    }
+}
+
+fn write_flags(out: &mut String, name: &str, flags: &WitFlags) {
+    let int = flags_int(flags);
     let _ = writeln!(
         out,
         "\n#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\npub struct {name}(pub {int});\n\nimpl {name} {{"
@@ -1142,8 +1160,14 @@ fn write_flags(out: &mut String, name: &str, flags: &WitFlags) {
 /// ([`TranspileError::Unsupported`], naming the type, the function and the interface).
 pub fn wit_host_trait(component: &[u8]) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
+    Ok(render_host(&funcs)?.0)
+}
+
+/// The text of [`wit_host_trait`], with what the glue needs to name things the same way: the
+/// registered types and the method name of every function (parallel to `funcs`).
+fn render_host(funcs: &[WitFunc]) -> Result<(String, Records, Vec<String>), TranspileError> {
     let mut records = Records::default();
-    for f in &funcs {
+    for f in funcs {
         for (_, ty) in &f.params {
             records.add_in(ty)?;
         }
@@ -1226,5 +1250,37 @@ pub fn wit_host_trait(component: &[u8]) -> Result<String, TranspileError> {
         let _ = writeln!(out, "{sig};");
     }
     out.push_str("}\n");
+    Ok((out, records, names))
+}
+
+/// [`wit_host_trait`] plus the glue that lowers it to the flat reentrant `Imports` trait of
+/// the component's core module: the same `Host` trait and types, then a
+/// `pub struct Glue<H: Host>(pub H);` with `impl<H: Host> Imports for Glue<H>`.
+///
+/// Transpile the core module with
+/// [`named_imports`](crate::TranspileOptions::named_imports) and
+/// [`reentrant_imports`](crate::TranspileOptions::reentrant_imports), put the generated
+/// text in the same module as the transpiled code, implement `Host` and build the guest as
+/// `Instance::new(Glue(host))`. Each `Imports` method has the name of the `Host` method it
+/// forwards to (both come from the same naming), lifts the flat core parameters into the
+/// typed ones, calls the host and lowers the typed result to the flat core result.
+///
+/// Covered: functions whose parameters and result are made only of integers, floats,
+/// `bool`, `char`, `enum`, `flags`, resource handles (so `[resource-drop]` too) and
+/// `variant`/`option`/`result`/`record`/`tuple` of those, when the parameters flatten to at
+/// most 16 core values and the result to at most one. Lifting follows the canonical ABI: a
+/// `bool` is any non-zero value, a narrow integer keeps its low bits, flag bits beyond the
+/// declared ones are ignored; an invalid `char` or an unknown discriminant panics.
+///
+/// # Errors
+///
+/// Everything [`wit_host_trait`] reports, and [`TranspileError::Unsupported`] naming the
+/// function when it needs linear memory (a `string` or `list` anywhere in its parameters or
+/// result, more than 16 flat parameters, or a result of more than one flat value): not
+/// supported yet, so no glue is returned at all rather than a partial one.
+pub fn wit_host_glue(component: &[u8]) -> Result<String, TranspileError> {
+    let funcs = wit_functions(component)?;
+    let (mut out, records, names) = render_host(&funcs)?;
+    glue::write(&mut out, &funcs, &names, &records)?;
     Ok(out)
 }
