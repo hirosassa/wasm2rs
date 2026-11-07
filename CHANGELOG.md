@@ -7,8 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-08
+
+### Migrating from 0.2.0
+
+- `TranspileOptions` gained the public fields `named_exports`, `named_imports`, `import_memory` and
+  `reentrant_imports` (all `false` by default, so the default output is unchanged). A struct literal
+  that lists every field no longer compiles: add `..Default::default()`.
+- A Component Model binary is rejected with `TranspileError::Unsupported` instead of generating
+  its inner modules. Use `--extract-core` / `extract_core_modules` first.
+- `memory.grow` now fails (returns -1) past the declared maximum of a memory.
+- `--dump` rejects code-generation flags and extra arguments instead of ignoring them; `--glue` is
+  only valid with `--wit-host`.
+- `examples/wasip2_run.rs` takes a `wasm32-wasip2` component (see Changed); the hand-written
+  `P2Host` is removed (see Removed).
+- Several code-generation semantics were corrected towards the specification (segment init/drop,
+  negative `i64` offsets, data/element application order, imported and shared memory/table
+  combinations); see Fixed.
+- No public API was removed. The new `wasm2rs-macros` crate provides `include_wasm!`.
+
 ### Added
 
+- `CONTRIBUTING.md` (build, test and release procedure, changelog rule).
+- `fuzz-diff/`, a differential fuzzer that compares generated code with wasmtime, with feature
+  profiles (simd, tail-call, extended-const, exceptions); see `docs/differential-fuzzing.md`.
 - `examples/wasip2_host/typed.rs`: a TCP output stream has a host-side send queue (64 KiB). `write`
   appends to it and moves what the non-blocking socket takes, never waiting; `check-write` drains
   the queue first and returns `min(4096, room)` (0 when full), and a `write` or `write-zeroes` over
@@ -146,7 +168,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   globals get none. A mutable one also gets a setter `pub fn set_<name>(&mut self, v: T)`, e.g.
   `inst.set_stack_pointer(1024)` (an imported global is written through the host's `set_global{k}`).
   Names share one namespace with the function wrappers; a setter yields to an existing name.
-- The WASI preview2 host example can let a program write files: `P2Host::with_writable_preopen`
+- The WASI preview2 host example can let a program write files (first through `P2Host::with_writable_preopen`, since removed; the typed host provides the same):
   (`$WASIP2_PREOPEN_WRITABLE=1` in `wasip2_run`) supports `open-at` with `create`,
   `exclusive` and `truncate`, `write-via-stream` and `append-via-stream`; the preopen is
   read-only by default. It also supports `create-directory-at`, `unlink-file-at`,
@@ -549,7 +571,8 @@ bounds checks, and trap behaviour).
   faster code on modules trusted to stay in bounds (an out-of-bounds access
   becomes undefined behaviour instead of a wasm trap).
 
-[Unreleased]: https://github.com/hirosassa/wasm2rs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/hirosassa/wasm2rs/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/hirosassa/wasm2rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hirosassa/wasm2rs/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/hirosassa/wasm2rs/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hirosassa/wasm2rs/releases/tag/v0.1.0
