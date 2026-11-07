@@ -233,6 +233,38 @@ fn file_reads_and_skips_share_one_position_and_end_as_closed() {
 }
 
 #[test]
+fn a_zero_length_file_request_is_ok_before_the_end_consumes_nothing_and_is_closed_at_it() {
+    let root = fresh_root("edges_zero_len");
+    std::fs::write(root.join("a.txt"), "abc").unwrap();
+    let body = format!(
+        "assert_eq!(inst.fs_open({A}, 0, 1), 0);
+         let f = inst.fs_last();
+         let s = inst.fs_stream(f, 0);
+         // before the end: ok and empty, and nothing is consumed
+         assert_eq!(inst.fs_read(s, 0), 0);
+         assert_eq!(inst.fs_bread(s, 0), 0);
+         assert_eq!(inst.fs_skip(s, 0), 0);
+         assert_eq!(inst.fs_bskip(s, 0), 0);
+         assert_eq!(inst.fs_read(s, 3), 3 | 97 << 32);
+         // at the end: closed
+         assert_eq!(inst.fs_read(s, 0), -1);
+         assert_eq!(inst.fs_bread(s, 0), -1);
+         assert_eq!(inst.fs_skip(s, 0), -1);
+         assert_eq!(inst.fs_bskip(s, 0), -1);
+         // a stream starting at the end (or past it) is closed for a zero length too
+         let t = inst.fs_stream(f, 3);
+         assert_eq!(inst.fs_read(t, 0), -1);
+         let u = inst.fs_stream(f, 9);
+         assert_eq!(inst.fs_bskip(u, 0), -1);
+         // an offset stream before the end is open
+         let v = inst.fs_stream(f, 1);
+         assert_eq!(inst.fs_read(v, 0), 0);
+         assert_eq!(inst.fs_read(v, 1), 1 | 98 << 32);"
+    );
+    assert_succeeded(&run(&root, &body));
+}
+
+#[test]
 fn blocking_read_and_both_skips_move_at_most_4096_bytes_of_a_file_at_once() {
     let root = fresh_root("edges_chunk");
     let mut big = vec![b'x'; 10_000];

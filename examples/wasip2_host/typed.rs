@@ -774,11 +774,12 @@ impl TypedHost {
     fn read_stream(&mut self, stream: u32, len: u64) -> Result<Vec<u8>, StreamError> {
         let mut buf = vec![0u8; len.min(4096) as usize];
         if stream == 0 {
-            if buf.is_empty() {
-                return Ok(buf);
-            }
             self.start_stdin();
             let mut shared = self.stdin.0.lock().unwrap();
+            if buf.is_empty() {
+                // a zero length succeeds only while the input is open: probe, consume nothing
+                return if shared.bytes.is_empty() && shared.eof { Err(StreamError::Closed) } else { Ok(buf) };
+            }
             let n = std::io::Read::read(&mut shared.bytes, &mut buf).unwrap_or(0); // a `VecDeque` never fails
             if n == 0 && shared.eof {
                 return Err(StreamError::Closed);
@@ -789,8 +790,17 @@ impl TypedHost {
         if let Some(slot) = tcp_slot(stream) {
             // never blocks: an empty list means "nothing yet"
             let stream = self.tcp_in.get_mut(slot).expect("read from an unknown or dropped stream");
+            if buf.is_empty() {
+                // a zero length succeeds only while the connection is open: peek, consume nothing
+                return match stream.peek(&mut [0u8; 1]) {
+                    Ok(0) => Err(StreamError::Closed),
+                    Ok(_) => Ok(buf),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(buf),
+                    Err(_) => Err(StreamError::Closed),
+                };
+            }
             return match std::io::Read::read(stream, &mut buf) {
-                Ok(0) if !buf.is_empty() => Err(StreamError::Closed),
+                Ok(0) => Err(StreamError::Closed),
                 Ok(n) => {
                     buf.truncate(n);
                     Ok(buf)
@@ -804,7 +814,9 @@ impl TypedHost {
         };
         let file = self.files.get_mut(index).expect("read from an unknown or dropped stream");
         if buf.is_empty() {
-            return Ok(buf);
+            // a zero length succeeds only before the end of the file: look, consume nothing
+            let at_end = file.file.metadata().map_or(true, |meta| file.pos >= meta.len());
+            return if at_end { Err(StreamError::Closed) } else { Ok(buf) };
         }
         match file.read(&mut buf) {
             Ok(n) if n > 0 => {
@@ -2243,7 +2255,7 @@ impl Host for TypedHost {
 
     // optional: wasi_io_streams_method_input_stream_blocking_read
     /// Like `read`, but waits while stdin or a connection has nothing yet, so the list is
-    /// never empty for a `len` over 0; `closed` at the end.
+    /// never empty for a `len` over 0; `closed` at the end (for a `len` of 0 too).
     fn wasi_io_streams_method_input_stream_blocking_read(
         &mut self,
         self_: InputStream,
@@ -2255,7 +2267,7 @@ impl Host for TypedHost {
 
     // optional: wasi_io_streams_method_input_stream_skip
     /// Reads and discards at most 4096 bytes, returning how many (0 while a connection or
-    /// stdin has nothing yet); `closed` at the end.
+    /// stdin has nothing yet); `closed` at the end (for a `len` of 0 too).
     fn wasi_io_streams_method_input_stream_skip(
         &mut self,
         self_: InputStream,
