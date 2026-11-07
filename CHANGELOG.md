@@ -7,25 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `examples/wasip2_host/typed.rs`: `splice` and `blocking-splice` to a TCP output stream respect
+  `check-write`. They used to read `min(len, 4096)` from the source and then wait for the peer
+  to read the whole send queue, so a stalled peer hung the guest and the bytes could not be
+  taken back. Now a connection takes at most the permit: with a full queue (permit 0) `splice`
+  returns `ok(0)` and leaves the source untouched; `blocking-splice` first waits for the queue
+  to empty (the peer to read), then moves up to the permit. The bytes are queued like `write`'s
+  and neither call waits for the peer afterwards. stdout, stderr and files are unchanged.
+  Tests in `tests/it/wasip2_typed_splice_permit.rs`.
+
 ### Added
 
-- `examples/wasip2_host/typed.rs`: a TCP output stream has a host-side send queue (64 KiB).
-  `write` appends to it and moves what the non-blocking socket takes, never waiting;
-  `check-write` drains the queue first and returns `min(4096, room)` (0 when full), and a
-  `write` or `write-zeroes` over that traps; the output-stream `subscribe` is ready while the queue
-  has room (or the connection failed). `blocking-write-and-flush`, `blocking-write-zeroes-and-flush`,
-  `splice`, `blocking-splice` and `blocking-flush` empty the queue first (waiting for the peer, so
-  the bytes stay in order); `flush` only drains as far as the socket takes. Dropping the output
-  stream or `shutdown` of the send side flushes the queue first (waiting for a peer that is
-  alive but not reading; a dead peer discards it); `exit` and dropping the host (`wasip2_run` does so before it exits) do the same for every connection, waiting up to 5 seconds in all. After a `flush` that left bytes queued, `check-write` is 0 and the pollable not ready until they are sent. stdout, stderr and files still permit 4096.
-  Tests in `tests/it/wasip2_typed_send_queue.rs`.
+- `examples/wasip2_host/typed.rs`: a TCP output stream has a host-side send queue (64 KiB). `write`
+  appends to it and moves what the non-blocking socket takes, never waiting; `check-write` drains
+  the queue first and returns `min(4096, room)` (0 when full), and a `write` or `write-zeroes` over
+  that traps; the output-stream `subscribe` is ready while the queue has room (or the connection
+  failed). `blocking-write-and-flush`, `blocking-write-zeroes-and-flush`, and `blocking-flush` empty
+  the queue first (waiting for the peer, so the bytes stay in order); `splice` and `blocking-splice`
+  stay within the permit (see Fixed); `flush` only drains as far as the socket takes. Dropping the
+  output stream or `shutdown` of the send side flushes the queue first (waiting for a peer that is
+  alive but not reading; a dead peer discards it); `exit` and dropping the host (`wasip2_run` does
+  so before it exits) do the same for every connection, waiting up to 5 seconds in all. After a
+  `flush` that left bytes queued, `check-write` is 0 and the pollable not ready until they are sent.
+  stdout, stderr and files still permit 4096. Tests in `tests/it/wasip2_typed_send_queue.rs`.
 - `examples/wasip2_host/typed.rs`: `output-stream.splice` and `blocking-splice`, the last
   `wasi:io/streams` methods: they move at most `min(len, 4096)` bytes from an input stream
   (a file, a connection or stdin) to the output stream and return the count. `splice` does not
   wait for the source (`ok(0)` while an open source has nothing yet, `closed` at its end; a
   zero `len` is ok while both streams are open); `blocking-splice` waits for at least one
-  byte. A dropped output is `closed` before anything is read. The write itself waits for room,
-  so a splice to a connection waits for the peer to read, like `write`. Known limitation:
+  byte. A dropped output is `closed` before anything is read. Known limitation:
   the bytes already read from the source are lost if the write then fails. Tests in
   `tests/it/wasip2_typed_splice.rs`.
 - `examples/wasip2_host/typed.rs`: the TCP socket options (`is-listening`, `set-listen-backlog-size`,

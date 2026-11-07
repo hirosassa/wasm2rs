@@ -132,6 +132,7 @@ mod wasip2_typed_random;
 mod wasip2_typed_send_queue;
 mod wasip2_typed_sockets;
 mod wasip2_typed_splice;
+mod wasip2_typed_splice_permit;
 mod wasip2_typed_stdin;
 mod wasip2_typed_streams;
 mod wasip2_typed_tcp_options;

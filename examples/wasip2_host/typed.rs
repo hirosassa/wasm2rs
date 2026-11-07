@@ -985,6 +985,17 @@ impl TypedHost {
         }
     }
 
+    /// How many bytes `splice` may read for `stream`: `len`, for a connection at most its
+    /// `check-write` permit. With `wait` the queue is emptied first (waiting for the peer).
+    fn splice_budget(&self, stream: u32, len: u64, wait: bool) -> Result<u64, StreamError> {
+        let Some(slot) = tcp_slot(stream) else { return Ok(len) };
+        let conn = self.tcp_out.get(slot).ok_or(StreamError::Closed)?;
+        if wait {
+            conn.flush_waiting();
+        }
+        Ok(len.min(conn.permit().ok_or(StreamError::Closed)?))
+    }
+
     /// Traps if a non-blocking write of `len` bytes to a connection is more than `check-write`
     /// permits now (its send queue's room, up to 4096); `closed` for a connection that is gone.
     /// The other streams are not checked here.
@@ -1000,8 +1011,9 @@ impl TypedHost {
     /// `blocking-write-and-flush`, `write-zeroes`, `blocking-write-zeroes-and-flush`,
     /// `splice` and `blocking-splice`. A failed write ends the stream. A connection's bytes go
     /// through its send queue (see `TcpOut`), so their order is kept: with `wait` false
-    /// (`write`) they are queued and sent as far as the socket takes them; with `wait` the
-    /// queue is then emptied, waiting for the peer to read.
+    /// (`write`, and `splice` / `blocking-splice`, which read within the permit) they are queued
+    /// and sent as far as the socket takes them; with `wait` the queue is then emptied, waiting
+    /// for the peer to read.
     fn write_stream(
         &mut self,
         stream: u32,
@@ -2017,9 +2029,10 @@ impl Host for TypedHost {
     /// Moves at most `min(len, 4096)` bytes from `src` to this stream and returns how many:
     /// a dropped output is `closed` first (before anything is read), then `read`, then
     /// `write` (a zero `len` is ok while both are open). It does not wait for `src`: `src` at
-    /// its end is `closed`, nothing available yet is `ok(0)`. The write waits for the peer to
-    /// read (see `write_stream`). A failed write ends the
-    /// output stream. Known limitation: the bytes already read from `src` are lost then.
+    /// its end is `closed`, nothing available yet is `ok(0)`. For a connection it reads at
+    /// most what `check-write` permits, so with the send queue full (permit 0) it returns
+    /// `ok(0)` without touching `src`. A failed write ends the output stream. Known
+    /// limitation: the bytes already read from `src` are lost then.
     fn wasi_io_streams_method_output_stream_splice(
         &mut self,
         self_: OutputStream,
@@ -2029,9 +2042,13 @@ impl Host for TypedHost {
         if !self.output_is_open(self_.0) {
             return Err(StreamError::Closed);
         }
-        let data = self.read_stream(src.0, len)?;
+        let budget = self.splice_budget(self_.0, len, false)?;
+        if budget == 0 && len > 0 {
+            return Ok(0);
+        }
+        let data = self.read_stream(src.0, budget)?;
         if !data.is_empty() {
-            self.write_stream(self_.0, &data, true)?;
+            self.write_stream(self_.0, &data, false)?;
         }
         Ok(data.len() as u64)
     }
@@ -2039,7 +2056,8 @@ impl Host for TypedHost {
 
     // optional: wasi_io_streams_method_output_stream_blocking_splice
     /// Like `splice`, but waits while an open `src` (stdin or a connection) has nothing yet,
-    /// so at least one byte is moved for a `len` over 0. The write waits like `splice`'s.
+    /// so at least one byte is moved for a `len` over 0. For a connection it first waits for its
+    /// send queue to empty (the peer to read), then reads at most what `check-write` permits.
     fn wasi_io_streams_method_output_stream_blocking_splice(
         &mut self,
         self_: OutputStream,
@@ -2049,9 +2067,10 @@ impl Host for TypedHost {
         if !self.output_is_open(self_.0) {
             return Err(StreamError::Closed);
         }
-        let data = self.read_stream_waiting(src.0, len)?;
+        let budget = self.splice_budget(self_.0, len, true)?;
+        let data = self.read_stream_waiting(src.0, budget)?;
         if !data.is_empty() {
-            self.write_stream(self_.0, &data, true)?;
+            self.write_stream(self_.0, &data, false)?;
         }
         Ok(data.len() as u64)
     }

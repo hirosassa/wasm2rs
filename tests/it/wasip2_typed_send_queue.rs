@@ -11,7 +11,7 @@ use crate::wasip2_typed_sockets::{CORE, HELPERS, IO, SOCKETS, WORLD};
 /// (`ping`, six zero bytes, `pong!`); `fill`, which writes those 15 bytes while `check-write`
 /// permits, then `ping` once more if it permits that, and returns how many chunks were written
 /// and whether the final `ping` was; and `top_off`, which writes single bytes up to 0.
-const QUEUE_HELPERS: &str = r#"
+pub(crate) const QUEUE_HELPERS: &str = r#"
 #[allow(dead_code)]
 fn watchdog() {
     std::thread::spawn(|| {
