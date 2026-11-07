@@ -37,13 +37,8 @@ pub(crate) fn component_from_wit(deps: &[&str], wit: &str, world: &str) -> Vec<u
 
 /// Builds the program for `component` and the core module `core_wat`: the glue, the typed
 /// host reduced to the methods the component declares, and a `main` that makes the
-/// instance (from the host's `env`) and runs `body`.
-pub(crate) fn build_program(
-    component: &[u8],
-    core_wat: &str,
-    env: &str,
-    body: &str,
-) -> std::path::PathBuf {
+/// instance (around the `host` expression) and runs `body`.
+fn build_program(component: &[u8], core_wat: &str, host: &str, body: &str) -> std::path::PathBuf {
     let glue = wit_host_glue(component).unwrap();
     let opts = TranspileOptions {
         named_imports: true,
@@ -52,18 +47,16 @@ pub(crate) fn build_program(
         ..TranspileOptions::default()
     };
     let generated = transpile_with_options(&wat::parse_str(core_wat).unwrap(), &opts).unwrap();
-    let host = keep_declared_methods(HOST, &glue);
-    let main = format!(
-        "fn main() {{ let mut inst = Instance::new(Glue(TypedHost::new({env}))); {body} }}"
-    );
+    let host_source = keep_declared_methods(HOST, &glue);
+    let main = format!("fn main() {{ let mut inst = Instance::new(Glue({host})); {body} }}");
     common::build(
         "wasip2_typed_host",
-        &format!("{generated}\n{glue}\n{host}\n{main}\n"),
+        &format!("{generated}\n{glue}\n{host_source}\n{main}\n"),
     )
 }
 
-pub(crate) fn run_program(component: &[u8], core_wat: &str, env: &str, body: &str) -> Output {
-    Command::new(build_program(component, core_wat, env, body))
+pub(crate) fn run_program(component: &[u8], core_wat: &str, host: &str, body: &str) -> Output {
+    Command::new(build_program(component, core_wat, host, body))
         .output()
         .unwrap()
 }
@@ -195,7 +188,8 @@ const CORE: &str = r#"
 "#;
 
 fn run(env: &str, body: &str) -> Output {
-    run_program(&wat::parse_str(COMPONENT).unwrap(), CORE, env, body)
+    let host = format!("TypedHost::new({env})");
+    run_program(&wat::parse_str(COMPONENT).unwrap(), CORE, &host, body)
 }
 
 pub(crate) fn assert_succeeded(out: &Output) {

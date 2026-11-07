@@ -257,20 +257,18 @@ fn run(root: Option<&Path>, body: &str) -> std::process::Output {
             root.to_str().unwrap()
         )
     });
-    let body = format!(
-        "let _ = &inst; inst = Instance::new(Glue(TypedHost::new(Vec::new()){preopen})); {body}"
-    );
     run_program(
         &component_from_wit(&[CLOCKS, IO, FILESYSTEM], WORLD, "w"),
         CORE,
-        "Vec::new()",
-        &body,
+        &format!("TypedHost::new(Vec::new()){preopen}"),
+        body,
     )
 }
 
 /// An empty directory of its own, with the path of a file next to it.
 fn fresh_root(name: &str) -> std::path::PathBuf {
-    let parent = std::env::temp_dir().join(format!("wasm2rs_typed_fs_{name}"));
+    let parent =
+        std::env::temp_dir().join(format!("wasm2rs_typed_fs_{}_{name}", std::process::id()));
     std::fs::remove_dir_all(&parent).ok();
     let root = parent.join("root");
     std::fs::create_dir_all(&root).unwrap();

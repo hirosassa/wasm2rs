@@ -50,7 +50,7 @@ fn run(body: &str) -> std::process::Output {
     run_program(
         &component_from_wit(&[RANDOM], WORLD, "w"),
         CORE,
-        "Vec::new()",
+        "TypedHost::new(Vec::new())",
         body,
     )
 }

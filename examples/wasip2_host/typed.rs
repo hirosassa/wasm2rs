@@ -94,33 +94,34 @@ impl TypedHost {
     /// it can be moved since it was opened, so the path is resolved again and must still be
     /// under the preopen: `not-permitted` if not.
     fn directory(&self, descriptor: u32) -> Result<PathBuf, Fs> {
-        let root = self.root.as_ref().ok_or(Fs::NotPermitted)?;
         let OpenDescriptor { path, file } = self.open_descriptor(descriptor)?;
         if file.is_some() {
             return Err(Fs::NotDirectory);
         }
-        let real = path.canonicalize().map_err(io_error_code)?;
+        self.confined(path.canonicalize().map_err(io_error_code)?)
+    }
+
+    /// `real` if it lies under the preopen, `not-permitted` otherwise.
+    fn confined(&self, real: PathBuf) -> Result<PathBuf, Fs> {
+        let root = self.root.as_ref().ok_or(Fs::NotPermitted)?;
         if real.starts_with(root) { Ok(real) } else { Err(Fs::NotPermitted) }
     }
 
     /// The path `path` names under the directory behind descriptor `dir`: `not-permitted`
     /// outside the preopen.
     fn resolve(&self, dir: u32, path: &str) -> Result<PathBuf, Fs> {
-        let root = self.root.as_ref().ok_or(Fs::NotPermitted)?;
         let base = self.directory(dir)?;
         let relative = Path::new(path);
         if !stays_below(relative) {
             return Err(Fs::NotPermitted);
         }
-        let full = base.join(relative).canonicalize().map_err(io_error_code)?;
-        if full.starts_with(root) { Ok(full) } else { Err(Fs::NotPermitted) }
+        self.confined(base.join(relative).canonicalize().map_err(io_error_code)?)
     }
 
     /// The entry `path` names under the directory behind `dir`, without following it if it
     /// is a symlink: its parent directory must resolve under the preopen. A name ending in
     /// `/` or `/.` names a directory, which `file_name` would silently drop: `invalid`.
     fn resolve_entry(&self, dir: u32, path: &str) -> Result<PathBuf, Fs> {
-        let root = self.root.as_ref().ok_or(Fs::NotPermitted)?;
         let base = self.directory(dir)?;
         let relative = Path::new(path);
         if !stays_below(relative) {
@@ -132,7 +133,7 @@ impl TypedHost {
         let name = relative.file_name().ok_or(Fs::Invalid)?;
         let parent = relative.parent().unwrap_or(Path::new(""));
         let parent = base.join(parent).canonicalize().map_err(io_error_code)?;
-        if parent.starts_with(root) { Ok(parent.join(name)) } else { Err(Fs::NotPermitted) }
+        Ok(self.confined(parent)?.join(name))
     }
 
     /// The target of the symlink at `path`, if it is relative and stays under the preopen.
@@ -645,10 +646,11 @@ impl Host for TypedHost {
             return Err(Fs::ReadOnly.into());
         }
         let full = self.resolve(self_.0, &path)?;
-        if open_flags.contains(OpenFlags::DIRECTORY) && !full.is_dir() {
+        let is_dir = full.is_dir();
+        if open_flags.contains(OpenFlags::DIRECTORY) && !is_dir {
             return Err(Fs::NotDirectory.into());
         }
-        let file = if full.is_dir() {
+        let file = if is_dir {
             None
         } else {
             Some(std::fs::File::open(&full).map_err(io_error_code)?)
