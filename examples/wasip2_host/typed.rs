@@ -7,16 +7,20 @@
 // streams and pollables, plus stdin (always at its end), stderr and the terminal
 // queries (not a terminal), which a std program asks for at startup. Handles: 0 = stdin,
 // 1 = stdout, 2 = stderr; a pollable is an index into `pollables`: ready at once, or
-// at the deadline a clock subscription gave it. It also serves `wasi:random` and, read-only,
-// `wasi:filesystem` (`with_preopen`): `preopens.get-directories`, `descriptor.open-at`,
-// `read-via-stream`, `stat`, `stat-at`, `get-flags`, `read-directory`, `readlink-at`,
-// `metadata-hash` (and `-at`), `directory-entry-stream.read-directory-entry` and file
-// `input-stream.read` (`blocking-read` and `skip` are not implemented), with the semantics
-// of `host.rs`: one preopened directory shown as "/", descriptors and streams in slabs
-// (the preopen is descriptor 0 and never freed; a file's input stream is
-// `FIRST_FILE_STREAM + slot`, clear of the stdio handles), paths resolved under the
-// preopen (absolute paths, `..` and symlinks that lead out are `not-permitted`), writes
-// refused with `read-only`.
+// at the deadline a clock subscription gave it. It also serves `wasi:random` and
+// `wasi:filesystem`: read-only with `with_preopen`, writable with `with_writable_preopen`.
+// Reading: `preopens.get-directories`, `descriptor.open-at`, `read-via-stream`, `stat`,
+// `stat-at`, `get-flags`, `read-directory`, `readlink-at`, `metadata-hash` (and `-at`),
+// `directory-entry-stream.read-directory-entry` and file `input-stream.read`
+// (`blocking-read` and `skip` are not implemented). Writing (`read-only` on a read-only
+// preopen): `open-at` with create/exclusive/truncate and `write`, `write-via-stream`,
+// `append-via-stream`, file `output-stream` `write`/`check-write`/`blocking-flush`,
+// `create-directory-at`, `remove-directory-at`, `unlink-file-at`, `rename-at`, `symlink-at`,
+// `link-at`, `set-size`, `sync`, `sync-data`, `set-times` and `set-times-at`. The semantics
+// are those of `host.rs`: one preopened directory shown as "/", descriptors and streams in
+// slabs (the preopen is descriptor 0 and never freed; a file's input or output stream is
+// `FIRST_FILE_STREAM + slot` in its own slab, clear of the stdio handles), paths resolved
+// under the preopen (absolute paths, `..` and symlinks that lead out are `not-permitted`).
 //
 // Like `host.rs`, each method sits between `// optional: <method>` and `// end optional`
 // and is kept only when the generated trait declares it (see `keep_declared_methods` in
@@ -53,10 +57,15 @@ struct TypedHost {
     pollables: Vec<Option<Instant>>,
     /// The canonicalized preopened directory (`with_preopen`), shown to the guest as "/".
     root: Option<PathBuf>,
+    /// Whether the guest may write under `root`; set by `with_writable_preopen`.
+    writable: bool,
     /// Open descriptors; slot 0 is the preopen.
     descriptors: Slab<OpenDescriptor>,
     /// Streams behind the input-stream handles `FIRST_FILE_STREAM..`.
     files: Slab<FileStream>,
+    /// Streams behind the output-stream handles `FIRST_FILE_STREAM + slot` (1 and 2 are
+    /// stdout and stderr).
+    outputs: Slab<FileStream>,
     /// Directory listings behind `directory-entry-stream` handles: the entries (type, name)
     /// still to be read.
     listings: Slab<std::vec::IntoIter<(std::fs::FileType, String)>>,
@@ -70,18 +79,84 @@ impl TypedHost {
             rng: os_seed(),
             pollables: Vec::new(),
             root: None,
+            writable: false,
             descriptors: Slab::new(),
             files: Slab::new(),
+            outputs: Slab::new(),
             listings: Slab::new(),
         }
     }
 
-    /// Gives the guest the directory `root` (as its "/"), read-only.
+    /// Gives the guest the directory `root` (as its "/"), read-only; see
+    /// `with_writable_preopen`.
     fn with_preopen(mut self, root: PathBuf) -> Self {
         let root = root.canonicalize().expect("preopen: directory does not exist");
-        self.descriptors.insert(OpenDescriptor { path: root.clone(), file: None }); // slot 0
+        self.descriptors.insert(OpenDescriptor { path: root.clone(), write: false, file: None }); // slot 0
         self.root = Some(root);
         self
+    }
+
+    /// Like `with_preopen`, but the guest may create, write, append to and truncate
+    /// files under `root`.
+    fn with_writable_preopen(mut self, root: PathBuf) -> Self {
+        self.writable = true;
+        self.with_preopen(root)
+    }
+
+    /// Like `resolve`, for a file that `open-at` may create: if `path` does not exist, it
+    /// is named in its parent directory (see `resolve_entry`). A symlink that leads nowhere
+    /// (or out of the preopen) is `not-permitted`, not a place to create a file.
+    fn resolve_to_create(&self, dir: u32, path: &str) -> Result<PathBuf, Fs> {
+        match self.resolve(dir, path) {
+            Err(Fs::NoEntry) => {}
+            found => return found,
+        }
+        let full = self.resolve_entry(dir, path)?;
+        if full.symlink_metadata().is_ok() { Err(Fs::NotPermitted) } else { Ok(full) }
+    }
+
+    /// The open file behind a descriptor opened for `write`: `read-only` unless the preopen
+    /// is writable, `is-directory` for a directory, `bad-descriptor` if it was not opened
+    /// for `write`.
+    fn writable_descriptor_file(&self, descriptor: u32) -> Result<&std::fs::File, Fs> {
+        self.require_writable()?;
+        let d = self.open_descriptor(descriptor)?;
+        let file = d.file.as_ref().ok_or(Fs::IsDirectory)?;
+        if d.write { Ok(file) } else { Err(Fs::BadDescriptor) }
+    }
+
+    /// A new output stream over `writable_descriptor_file`, from `pos` (`append`: always
+    /// at its end): the handle.
+    fn open_output_stream(&mut self, descriptor: u32, pos: u64, append: bool) -> Result<u32, Fs> {
+        let stream = FileStream::over(self.writable_descriptor_file(descriptor)?, pos, append)?;
+        Ok(FIRST_FILE_STREAM + self.outputs.insert(stream) as u32)
+    }
+
+    /// Runs `op` on the open file behind a descriptor, or on a directory's (opened from its
+    /// path, resolved again).
+    fn with_descriptor_file<T>(
+        &self,
+        descriptor: u32,
+        op: impl FnOnce(&std::fs::File) -> std::io::Result<T>,
+    ) -> Result<T, Fs> {
+        let done = match &self.open_descriptor(descriptor)?.file {
+            Some(file) => op(file),
+            None => op(&std::fs::File::open(self.directory(descriptor)?).map_err(io_error_code)?),
+        };
+        done.map_err(io_error_code)
+    }
+
+    /// Flushes the file or directory behind a descriptor to disk (`data_only`: without its
+    /// metadata).
+    fn sync_descriptor(&self, descriptor: u32, data_only: bool) -> Result<(), Fs> {
+        self.with_descriptor_file(descriptor, |file| {
+            if data_only { file.sync_data() } else { file.sync_all() }
+        })
+    }
+
+    /// `Ok` if the preopen is writable, else `read-only`.
+    fn require_writable(&self) -> Result<(), Fs> {
+        if self.writable { Ok(()) } else { Err(Fs::ReadOnly) }
     }
 
     /// The descriptor behind a handle, or `bad-descriptor`.
@@ -94,7 +169,7 @@ impl TypedHost {
     /// it can be moved since it was opened, so the path is resolved again and must still be
     /// under the preopen: `not-permitted` if not.
     fn directory(&self, descriptor: u32) -> Result<PathBuf, Fs> {
-        let OpenDescriptor { path, file } = self.open_descriptor(descriptor)?;
+        let OpenDescriptor { path, file, .. } = self.open_descriptor(descriptor)?;
         if file.is_some() {
             return Err(Fs::NotDirectory);
         }
@@ -210,21 +285,27 @@ impl TypedHost {
 #[allow(dead_code)]
 struct OpenDescriptor {
     path: PathBuf,
+    /// Whether a file was opened for `write`.
+    write: bool,
     file: Option<std::fs::File>,
 }
 
 /// A stream over a duplicate of a descriptor's `File`. Duplicates share one file offset,
-/// so each stream keeps its own position and seeks to it before every read.
+/// so each stream keeps its own position and seeks to it before every read or write (the
+/// host runs one guest call at a time, so nothing interleaves).
 #[allow(dead_code)]
 struct FileStream {
     file: std::fs::File,
     pos: u64,
+    /// Every write goes to the end of the file.
+    append: bool,
 }
 
 #[allow(dead_code)]
 impl FileStream {
-    fn over(file: &std::fs::File, pos: u64) -> Result<Self, Fs> {
-        Ok(FileStream { file: file.try_clone().map_err(io_error_code)?, pos })
+    /// A stream over a duplicate of `file`, from `pos`.
+    fn over(file: &std::fs::File, pos: u64, append: bool) -> Result<Self, Fs> {
+        Ok(FileStream { file: file.try_clone().map_err(io_error_code)?, pos, append })
     }
 
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -233,6 +314,15 @@ impl FileStream {
         let n = self.file.read(buf)?;
         self.pos += n as u64;
         Ok(n)
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        let at = if self.append { SeekFrom::End(0) } else { SeekFrom::Start(self.pos) };
+        self.pos = self.file.seek(at)?;
+        self.file.write_all(bytes)?;
+        self.pos += bytes.len() as u64;
+        Ok(())
     }
 }
 
@@ -280,11 +370,12 @@ impl<T> Slab<T> {
     }
 }
 
-/// The handle of the first file's input stream (0 to 2 are stdin, stdout, stderr).
+/// The handle of the first file's stream, input or output (0 to 2 are stdin, stdout, stderr).
 #[allow(dead_code)]
 const FIRST_FILE_STREAM: u32 = 3;
 
-/// The slot in `files` of an input-stream handle (`None` for stdin, stdout, stderr).
+/// The slot in `files` (input streams) or `outputs` (output streams) of a stream handle
+/// (`None` for stdin, stdout, stderr).
 #[allow(dead_code)]
 fn file_index(stream: u32) -> Option<usize> {
     stream.checked_sub(FIRST_FILE_STREAM).map(|i| i as usize)
@@ -307,6 +398,18 @@ enum Fs {
     Unsupported,
     NotPermitted,
     ReadOnly,
+}
+
+/// A symlink at `link` holding `target`; hosts without symlinks answer `unsupported`.
+#[allow(dead_code)]
+fn make_symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(target, link);
+    #[cfg(not(unix))]
+    {
+        let _ = (target, link);
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
 }
 
 #[allow(dead_code)]
@@ -334,7 +437,7 @@ fn stays_below(path: &Path) -> bool {
 // The next blocks use generated types, so each is kept only if the component imports one of
 // the methods that need it.
 
-// optional: wasi_filesystem_types_method_descriptor_open_at | wasi_filesystem_types_method_descriptor_read_via_stream | wasi_filesystem_types_method_descriptor_get_flags | wasi_filesystem_types_method_descriptor_read_directory | wasi_filesystem_types_method_descriptor_stat | wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_descriptor_readlink_at | wasi_filesystem_types_method_descriptor_metadata_hash | wasi_filesystem_types_method_descriptor_metadata_hash_at | wasi_filesystem_types_method_directory_entry_stream_read_directory_entry
+// optional: wasi_filesystem_types_method_descriptor_open_at | wasi_filesystem_types_method_descriptor_read_via_stream | wasi_filesystem_types_method_descriptor_get_flags | wasi_filesystem_types_method_descriptor_read_directory | wasi_filesystem_types_method_descriptor_stat | wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_descriptor_readlink_at | wasi_filesystem_types_method_descriptor_metadata_hash | wasi_filesystem_types_method_descriptor_metadata_hash_at | wasi_filesystem_types_method_directory_entry_stream_read_directory_entry | wasi_filesystem_types_method_descriptor_create_directory_at | wasi_filesystem_types_method_descriptor_remove_directory_at | wasi_filesystem_types_method_descriptor_unlink_file_at | wasi_filesystem_types_method_descriptor_write_via_stream | wasi_filesystem_types_method_descriptor_append_via_stream | wasi_filesystem_types_method_descriptor_set_size | wasi_filesystem_types_method_descriptor_sync | wasi_filesystem_types_method_descriptor_sync_data | wasi_filesystem_types_method_descriptor_rename_at | wasi_filesystem_types_method_descriptor_symlink_at | wasi_filesystem_types_method_descriptor_link_at | wasi_filesystem_types_method_descriptor_set_times | wasi_filesystem_types_method_descriptor_set_times_at
 impl From<Fs> for ErrorCode {
     fn from(e: Fs) -> Self {
         match e {
@@ -416,6 +519,34 @@ fn metadata_hash(meta: &std::fs::Metadata, path: &Path) -> MetadataHashValue {
         hasher.finish()
     };
     MetadataHashValue { lower: hash(0), upper: hash(1) }
+}
+// end optional
+
+// optional: wasi_filesystem_types_method_descriptor_set_times | wasi_filesystem_types_method_descriptor_set_times_at
+/// The times of a `set-times` call. Nanoseconds of a second or more, or a time too far
+/// ahead, are `invalid`.
+fn file_times(
+    access: NewTimestamp,
+    modification: NewTimestamp,
+) -> Result<std::fs::FileTimes, Fs> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let time = |t: NewTimestamp| match t {
+        NewTimestamp::NoChange => Ok(None),
+        NewTimestamp::Now => Ok(Some(SystemTime::now())),
+        NewTimestamp::Timestamp(Datetime { seconds, nanoseconds }) if nanoseconds < 1_000_000_000 => {
+            let since = Duration::new(seconds, nanoseconds);
+            UNIX_EPOCH.checked_add(since).map(Some).ok_or(Fs::Invalid)
+        }
+        NewTimestamp::Timestamp(_) => Err(Fs::Invalid),
+    };
+    let mut times = std::fs::FileTimes::new();
+    if let Some(t) = time(access)? {
+        times = times.set_accessed(t);
+    }
+    if let Some(t) = time(modification)? {
+        times = times.set_modified(t);
+    }
+    Ok(times)
 }
 // end optional
 
@@ -520,7 +651,11 @@ impl Host for TypedHost {
     // end optional
 
     // optional: wasi_io_streams_resource_drop_output_stream
-    fn wasi_io_streams_resource_drop_output_stream(&mut self, _handle: OutputStream) {}
+    fn wasi_io_streams_resource_drop_output_stream(&mut self, handle: OutputStream) {
+        if let Some(index) = file_index(handle.0) {
+            self.outputs.remove(index);
+        }
+    }
     // end optional
 
     // optional: wasi_io_poll_method_pollable_block
@@ -546,10 +681,15 @@ impl Host for TypedHost {
         self_: OutputStream,
         contents: Vec<u8>,
     ) -> Result<(), StreamError> {
-        let written = match self_.0 {
-            2 => std::io::stderr().write_all(&contents),
-            _ => std::io::stdout().write_all(&contents),
+        let written = match (self_.0, file_index(self_.0)) {
+            (_, Some(index)) => match self.outputs.get_mut(index) {
+                Some(file) => file.write_all(&contents),
+                None => Err(std::io::ErrorKind::NotFound.into()),
+            },
+            (2, None) => std::io::stderr().write_all(&contents),
+            (_, None) => std::io::stdout().write_all(&contents),
         };
+        // a failed write ends the stream
         written.map_err(|_| StreamError::Closed)
     }
     // end optional
@@ -626,8 +766,10 @@ impl Host for TypedHost {
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_open_at
-    /// Path flags are ignored (links are always followed, within the preopen). The preopen
-    /// is read-only: creating, truncating or writing is `read-only`.
+    /// Path flags are ignored (links are always followed, within the preopen). Creating,
+    /// truncating and writing are `read-only` unless the preopen is writable; then `create`,
+    /// `exclusive` and `truncate` act at once, and the descriptor remembers whether it was
+    /// opened for `write`.
     fn wasi_filesystem_types_method_descriptor_open_at(
         &mut self,
         self_: Descriptor,
@@ -636,26 +778,50 @@ impl Host for TypedHost {
         open_flags: OpenFlags,
         flags: DescriptorFlags,
     ) -> Result<Descriptor, ErrorCode> {
-        let changes = open_flags.contains(OpenFlags::CREATE)
-            || open_flags.contains(OpenFlags::EXCLUSIVE)
-            || open_flags.contains(OpenFlags::TRUNCATE);
-        if changes
-            || flags.contains(DescriptorFlags::WRITE)
-            || flags.contains(DescriptorFlags::MUTATE_DIRECTORY)
-        {
+        let create = open_flags.contains(OpenFlags::CREATE);
+        let exclusive = open_flags.contains(OpenFlags::EXCLUSIVE);
+        let truncate = open_flags.contains(OpenFlags::TRUNCATE);
+        let writes = flags.contains(DescriptorFlags::WRITE);
+        let changes = create || exclusive || truncate;
+        if !self.writable && (changes || writes || flags.contains(DescriptorFlags::MUTATE_DIRECTORY)) {
             return Err(Fs::ReadOnly.into());
         }
-        let full = self.resolve(self_.0, &path)?;
+        let wants_directory = open_flags.contains(OpenFlags::DIRECTORY);
+        if wants_directory && (changes || writes) {
+            return Err(Fs::Invalid.into());
+        }
+        let full = if create {
+            self.resolve_to_create(self_.0, &path)?
+        } else {
+            self.resolve(self_.0, &path)?
+        };
         let is_dir = full.is_dir();
-        if open_flags.contains(OpenFlags::DIRECTORY) && !is_dir {
+        if wants_directory && !is_dir {
             return Err(Fs::NotDirectory.into());
+        }
+        if is_dir && writes {
+            return Err(Fs::IsDirectory.into());
+        }
+        if create && exclusive && full.exists() {
+            return Err(Fs::Exist.into());
+        }
+        if create || truncate {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(create)
+                .truncate(truncate)
+                .open(&full)
+                .map_err(io_error_code)?;
         }
         let file = if is_dir {
             None
         } else {
-            Some(std::fs::File::open(&full).map_err(io_error_code)?)
+            // a file that only writes need not be readable (and one with no flags reads)
+            let reads = flags.contains(DescriptorFlags::READ) || !writes;
+            let opened = std::fs::OpenOptions::new().read(reads).write(writes).open(&full);
+            Some(opened.map_err(io_error_code)?)
         };
-        let slot = self.descriptors.insert(OpenDescriptor { path: full, file });
+        let slot = self.descriptors.insert(OpenDescriptor { path: full, write: writes, file });
         Ok(Descriptor(slot as u32))
     }
     // end optional
@@ -668,9 +834,238 @@ impl Host for TypedHost {
         offset: u64,
     ) -> Result<InputStream, ErrorCode> {
         let file = self.open_descriptor(self_.0)?.file.as_ref().ok_or(Fs::IsDirectory)?;
-        let stream = FileStream::over(file, offset)?;
+        let stream = FileStream::over(file, offset, false)?;
         let slot = self.files.insert(stream);
         Ok(InputStream(FIRST_FILE_STREAM + slot as u32))
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_write_via_stream
+    /// A new stream writing into the file from `offset`: `read-only` unless the preopen is
+    /// writable; the descriptor must have been opened for `write`.
+    fn wasi_filesystem_types_method_descriptor_write_via_stream(
+        &mut self,
+        self_: Descriptor,
+        offset: u64,
+    ) -> Result<OutputStream, ErrorCode> {
+        Ok(OutputStream(self.open_output_stream(self_.0, offset, false)?))
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_append_via_stream
+    /// Like `write-via-stream`, but every write goes to the end of the file.
+    fn wasi_filesystem_types_method_descriptor_append_via_stream(
+        &mut self,
+        self_: Descriptor,
+    ) -> Result<OutputStream, ErrorCode> {
+        Ok(OutputStream(self.open_output_stream(self_.0, 0, true)?))
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_rename_at
+    /// Both names are checked like any other entry; an existing target file is replaced. A
+    /// symlink cannot be renamed (`not-permitted`).
+    fn wasi_filesystem_types_method_descriptor_rename_at(
+        &mut self,
+        self_: Descriptor,
+        old_path: String,
+        new_descriptor: Descriptor,
+        new_path: String,
+    ) -> Result<(), ErrorCode> {
+        self.require_writable()?;
+        let old = self.resolve_entry(self_.0, &old_path)?;
+        let new = self.resolve_entry(new_descriptor.0, &new_path)?;
+        // Not a symlink: moving one over the path of an open descriptor would lead it out of
+        // the preopen. (A directory that holds a symlink can still be moved there;
+        // `directory` resolves the path again on every use.)
+        if old.symlink_metadata().map_err(io_error_code)?.file_type().is_symlink() {
+            return Err(Fs::NotPermitted.into());
+        }
+        Ok(std::fs::rename(old, new).map_err(io_error_code)?)
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_symlink_at
+    /// A symlink named `new-path` (under this directory) holding `old-path`. The target must
+    /// be relative and have no `..` (`not-permitted`; empty is `no-entry`), so every link
+    /// made can be read back with `readlink-at`, and a taken name is `exist`. Needs a
+    /// writable preopen.
+    fn wasi_filesystem_types_method_descriptor_symlink_at(
+        &mut self,
+        self_: Descriptor,
+        old_path: String,
+        new_path: String,
+    ) -> Result<(), ErrorCode> {
+        self.require_writable()?;
+        if old_path.is_empty() {
+            return Err(Fs::NoEntry.into());
+        }
+        if !stays_below(Path::new(&old_path)) {
+            return Err(Fs::NotPermitted.into());
+        }
+        let link = self.resolve_entry(self_.0, &new_path)?;
+        Ok(make_symlink(&old_path, &link).map_err(io_error_code)?)
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_link_at
+    /// A hard link. With `symlink-follow` a symlink `old-path` is followed; without it a
+    /// symlink is `unsupported` (hosts differ on what to link) and a directory is
+    /// `not-permitted`. Both names are checked like any other entry; a taken new name is
+    /// `exist`. Needs a writable preopen.
+    fn wasi_filesystem_types_method_descriptor_link_at(
+        &mut self,
+        self_: Descriptor,
+        old_path_flags: PathFlags,
+        old_path: String,
+        new_descriptor: Descriptor,
+        new_path: String,
+    ) -> Result<(), ErrorCode> {
+        self.require_writable()?;
+        let old = if old_path_flags.contains(PathFlags::SYMLINK_FOLLOW) {
+            self.resolve(self_.0, &old_path)?
+        } else {
+            let entry = self.resolve_entry(self_.0, &old_path)?;
+            if entry.symlink_metadata().map_err(io_error_code)?.is_symlink() {
+                return Err(Fs::Unsupported.into());
+            }
+            entry
+        };
+        if old.metadata().map_err(io_error_code)?.is_dir() {
+            return Err(Fs::NotPermitted.into());
+        }
+        let new = self.resolve_entry(new_descriptor.0, &new_path)?;
+        Ok(std::fs::hard_link(old, new).map_err(io_error_code)?)
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_set_times
+    /// Needs a writable preopen; a file must have been opened for `write` (a directory needs
+    /// nothing more).
+    fn wasi_filesystem_types_method_descriptor_set_times(
+        &mut self,
+        self_: Descriptor,
+        data_access_timestamp: NewTimestamp,
+        data_modification_timestamp: NewTimestamp,
+    ) -> Result<(), ErrorCode> {
+        self.require_writable()?;
+        let d = self.open_descriptor(self_.0)?;
+        if d.file.is_some() && !d.write {
+            return Err(Fs::BadDescriptor.into());
+        }
+        let times = file_times(data_access_timestamp, data_modification_timestamp)?;
+        Ok(self.with_descriptor_file(self_.0, |file| file.set_times(times))?)
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_set_times_at
+    /// `set-times` for the entry a path names. With `symlink-follow` a symlink is followed
+    /// to its target; without it the entry itself is set, but `std` cannot set the times of
+    /// a symlink, so that is `unsupported`. Needs a writable preopen.
+    fn wasi_filesystem_types_method_descriptor_set_times_at(
+        &mut self,
+        self_: Descriptor,
+        path_flags: PathFlags,
+        path: String,
+        data_access_timestamp: NewTimestamp,
+        data_modification_timestamp: NewTimestamp,
+    ) -> Result<(), ErrorCode> {
+        self.require_writable()?;
+        let times = file_times(data_access_timestamp, data_modification_timestamp)?;
+        let full = if path_flags.contains(PathFlags::SYMLINK_FOLLOW) {
+            self.resolve(self_.0, &path)?
+        } else {
+            let entry = self.resolve_entry(self_.0, &path)?;
+            if entry.symlink_metadata().map_err(io_error_code)?.is_symlink() {
+                return Err(Fs::Unsupported.into());
+            }
+            entry
+        };
+        let file = std::fs::File::open(full).map_err(io_error_code)?;
+        Ok(file.set_times(times).map_err(io_error_code)?)
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_set_size
+    /// Truncates or zero-extends the file. Like writing, it needs a writable preopen and a
+    /// descriptor opened for `write`.
+    fn wasi_filesystem_types_method_descriptor_set_size(
+        &mut self,
+        self_: Descriptor,
+        size: u64,
+    ) -> Result<(), ErrorCode> {
+        let file = self.writable_descriptor_file(self_.0)?;
+        Ok(file.set_len(size).map_err(io_error_code)?)
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_sync
+    /// Flushes the file or directory to disk. It changes nothing, so a read-only preopen
+    /// allows it.
+    fn wasi_filesystem_types_method_descriptor_sync(
+        &mut self,
+        self_: Descriptor,
+    ) -> Result<(), ErrorCode> {
+        Ok(self.sync_descriptor(self_.0, false)?)
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_sync_data
+    /// Like `sync`, without the metadata.
+    fn wasi_filesystem_types_method_descriptor_sync_data(
+        &mut self,
+        self_: Descriptor,
+    ) -> Result<(), ErrorCode> {
+        Ok(self.sync_descriptor(self_.0, true)?)
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_create_directory_at
+    /// `exist` if it is there. This and the three below (and the other methods that change
+    /// the preopen) are `read-only` unless it is writable, and never follow a symlink to
+    /// its target.
+    fn wasi_filesystem_types_method_descriptor_create_directory_at(
+        &mut self,
+        self_: Descriptor,
+        path: String,
+    ) -> Result<(), ErrorCode> {
+        self.require_writable()?;
+        let entry = self.resolve_entry(self_.0, &path)?;
+        Ok(std::fs::create_dir(entry).map_err(io_error_code)?)
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_unlink_file_at
+    /// Removes a file or a symlink (the link, not its target); a directory is
+    /// `is-directory`.
+    fn wasi_filesystem_types_method_descriptor_unlink_file_at(
+        &mut self,
+        self_: Descriptor,
+        path: String,
+    ) -> Result<(), ErrorCode> {
+        self.require_writable()?;
+        let entry = self.resolve_entry(self_.0, &path)?;
+        if entry.symlink_metadata().map_err(io_error_code)?.is_dir() {
+            return Err(Fs::IsDirectory.into());
+        }
+        Ok(std::fs::remove_file(entry).map_err(io_error_code)?)
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_remove_directory_at
+    /// An empty directory only (`not-empty`); anything else, a symlink to a directory
+    /// included, is `not-directory`.
+    fn wasi_filesystem_types_method_descriptor_remove_directory_at(
+        &mut self,
+        self_: Descriptor,
+        path: String,
+    ) -> Result<(), ErrorCode> {
+        self.require_writable()?;
+        let entry = self.resolve_entry(self_.0, &path)?;
+        if !entry.symlink_metadata().map_err(io_error_code)?.is_dir() {
+            return Err(Fs::NotDirectory.into());
+        }
+        Ok(std::fs::remove_dir(entry).map_err(io_error_code)?)
     }
     // end optional
 
@@ -686,13 +1081,13 @@ impl Host for TypedHost {
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_get_flags
-    /// Every descriptor is `read` (writing is refused at `open-at`).
+    /// Every descriptor is `read`, plus `write` if it was opened for writing.
     fn wasi_filesystem_types_method_descriptor_get_flags(
         &mut self,
         self_: Descriptor,
     ) -> Result<DescriptorFlags, ErrorCode> {
-        self.open_descriptor(self_.0)?;
-        Ok(DescriptorFlags::READ)
+        let write = self.open_descriptor(self_.0)?.write;
+        Ok(if write { DescriptorFlags::READ.union(DescriptorFlags::WRITE) } else { DescriptorFlags::READ })
     }
     // end optional
 

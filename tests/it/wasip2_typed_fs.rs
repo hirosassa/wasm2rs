@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::wasip2_typed_host::{assert_succeeded, component_from_wit, run_program};
 
-const CLOCKS: &str = r#"
+pub(crate) const CLOCKS: &str = r#"
 package wasi:clocks@0.2.0;
 interface wall-clock {
   record datetime { seconds: u64, nanoseconds: u32 }
@@ -83,7 +83,7 @@ interface preopens {
 }
 "#;
 
-const WORLD: &str = r#"
+pub(crate) const WORLD: &str = r#"
 package test:t;
 world w {
   import wasi:filesystem/preopens@0.2.0;
@@ -266,7 +266,7 @@ fn run(root: Option<&Path>, body: &str) -> std::process::Output {
 }
 
 /// An empty directory of its own, with the path of a file next to it.
-fn fresh_root(name: &str) -> std::path::PathBuf {
+pub(crate) fn fresh_root(name: &str) -> std::path::PathBuf {
     let parent =
         std::env::temp_dir().join(format!("wasm2rs_typed_fs_{}_{name}", std::process::id()));
     std::fs::remove_dir_all(&parent).ok();
