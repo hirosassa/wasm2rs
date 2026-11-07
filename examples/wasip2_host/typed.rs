@@ -3,11 +3,16 @@
 // code: strings, lists, results and resources arrive as Rust values, and the generated
 // `Glue` lowers them to the module's flat `Imports`. It is source text appended to the
 // generated code (the `Host` trait and its types come from the component), covering
-// the interfaces a `println!` program uses: stdout, the environment, exit, output
-// streams and pollables, plus stdin (always at its end), stderr and the terminal
+// the interfaces a `println!` program uses: stdout, the environment, the arguments
+// (`with_arguments`), exit, output streams and pollables, stderr and the terminal
 // queries (not a terminal), which a std program asks for at startup. Handles: 0 = stdin,
-// 1 = stdout, 2 = stderr; a pollable is an index into `pollables`: ready at once, or
-// at the deadline a clock subscription gave it. It also serves `wasi:random` and
+// 1 = stdout, 2 = stderr; a pollable is an index into `pollables`: ready at once, at
+// the deadline a clock subscription gave it, or when stdin has data or is at its end.
+// The clocks: monotonic `now` (nanoseconds since the host was created), `subscribe-duration`,
+// `subscribe-instant` (an instant on that same clock) and wall-clock `now`. Stdin is the real
+// one, as in `host.rs`: a thread reads it into a buffer, so `read` never blocks (an empty
+// list means "nothing yet", `closed` the end of input) and `poll` and `block` wait on the
+// buffer's condition variable with a timeout at the earliest deadline. It also serves `wasi:random` and
 // `wasi:filesystem`: read-only with `with_preopen`, writable with `with_writable_preopen`.
 // Reading: `preopens.get-directories`, `descriptor.open-at`, `read-via-stream`, `stat`,
 // `stat-at`, `get-flags`, `read-directory`, `readlink-at`, `metadata-hash` (and `-at`),
@@ -40,6 +45,8 @@
 // `type_aliases` text before it.
 
 #[allow(unused_imports)]
+use std::collections::VecDeque;
+#[allow(unused_imports)]
 use std::io::Write;
 #[allow(unused_imports)]
 use std::net::{
@@ -47,6 +54,8 @@ use std::net::{
 };
 #[allow(unused_imports)]
 use std::path::{Component, Path, PathBuf};
+#[allow(unused_imports)]
+use std::sync::{Arc, Condvar, Mutex};
 #[allow(unused_imports)]
 use std::time::{Duration, Instant};
 
@@ -56,15 +65,19 @@ fn os_seed() -> u64 {
     std::collections::hash_map::RandomState::new().hash_one(0u8)
 }
 
-/// Blocks until `deadline`.
-#[allow(dead_code)]
-fn sleep_until(deadline: Instant) {
-    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-}
-
 #[allow(dead_code)]
 struct TypedHost {
+    /// The program's arguments; set by `with_arguments`, read only by the optional
+    /// `get-arguments` block.
+    args: Vec<String>,
     env: Vec<(String, String)>,
+    /// The monotonic clock's zero: when the host was created; read only by the optional
+    /// clock blocks.
+    start: Instant,
+    /// Filled by the stdin thread, which `start_stdin` spawns on first use.
+    stdin: SharedStdin,
+    /// Whether the stdin thread was started.
+    stdin_started: bool,
     /// The generator state (splitmix64, seeded from the OS-seeded `std` hasher): fine for
     /// `HashMap` seeds and examples, not for keys or tokens.
     rng: u64,
@@ -99,7 +112,11 @@ struct TypedHost {
 impl TypedHost {
     fn new(env: Vec<(String, String)>) -> Self {
         TypedHost {
+            args: Vec::new(),
             env,
+            start: Instant::now(),
+            stdin: SharedStdin::default(),
+            stdin_started: false,
             rng: os_seed(),
             pollables: Vec::new(),
             root: None,
@@ -113,6 +130,12 @@ impl TypedHost {
             tcp_in: Slab::new(),
             tcp_out: Slab::new(),
         }
+    }
+
+    /// Gives the guest these command-line arguments (none by default).
+    fn with_arguments(mut self, args: Vec<String>) -> Self {
+        self.args = args;
+        self
     }
 
     /// Gives the guest the directory `root` (as its "/"), read-only; see
@@ -311,13 +334,41 @@ impl TypedHost {
         self.pollables.get(pollable.0 as usize).copied().unwrap_or(Wait::Ready)
     }
 
+    /// Starts the thread that reads the real stdin into the buffer (once).
+    fn start_stdin(&mut self) {
+        use std::io::Read;
+        if self.stdin_started {
+            return;
+        }
+        self.stdin_started = true;
+        let shared = Arc::clone(&self.stdin);
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            loop {
+                // a read error counts as the end of input
+                let n = std::io::stdin().read(&mut chunk).unwrap_or(0);
+                let (buf, changed) = &*shared;
+                let mut buf = buf.lock().unwrap();
+                buf.bytes.extend(&chunk[..n]);
+                buf.eof = n == 0;
+                changed.notify_all();
+                if n == 0 {
+                    return;
+                }
+            }
+        });
+    }
+
     /// The positions in `pollables` of the ones that are ready, waiting until at least one
-    /// is: for the earliest deadline, looking at sockets again every millisecond.
+    /// is: on the stdin buffer's condition variable, with a timeout at the earliest deadline
+    /// (and every millisecond while a socket is among them, which nothing wakes it for).
     fn wait_ready(&self, pollables: &[Pollable]) -> Vec<u32> {
+        let (buf, changed) = &*self.stdin;
+        let mut buf = buf.lock().unwrap();
         loop {
             let now = Instant::now();
             let ready: Vec<u32> = (0..pollables.len() as u32)
-                .filter(|&i| self.wait_of(pollables[i as usize]).is_ready(now, self))
+                .filter(|&i| self.wait_of(pollables[i as usize]).is_ready(now, &buf, self))
                 .collect();
             if !ready.is_empty() {
                 return ready;
@@ -328,7 +379,10 @@ impl TypedHost {
                 let soon = now + Duration::from_millis(1);
                 earliest = Some(earliest.map_or(soon, |d| d.min(soon)));
             }
-            sleep_until(earliest.unwrap_or(now));
+            buf = match earliest {
+                Some(d) => changed.wait_timeout(buf, d.saturating_duration_since(now)).unwrap().0,
+                None => changed.wait(buf).unwrap(),
+            };
         }
     }
     // end optional
@@ -491,6 +545,17 @@ fn stays_below(path: &Path) -> bool {
 // Sockets: the types and helpers below use `std` only; the generated types come in the
 // optional blocks that follow.
 
+/// The bytes the stdin thread has read and not yet handed to the guest.
+#[allow(dead_code)]
+#[derive(Default)]
+struct StdinBuf {
+    bytes: VecDeque<u8>,
+    eof: bool,
+}
+
+#[allow(dead_code)]
+type SharedStdin = Arc<(Mutex<StdinBuf>, Condvar)>;
+
 /// What a pollable waits for.
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
@@ -499,6 +564,8 @@ enum Wait {
     Ready,
     /// Ready at the instant.
     Deadline(Instant),
+    /// Ready when stdin has data or is at its end.
+    Stdin,
     /// Ready when the listening socket in the slot has a connection to accept (or is not
     /// listening).
     TcpAccept(usize),
@@ -508,10 +575,11 @@ enum Wait {
 
 #[allow(dead_code)]
 impl Wait {
-    fn is_ready(self, now: Instant, host: &TypedHost) -> bool {
+    fn is_ready(self, now: Instant, stdin: &StdinBuf, host: &TypedHost) -> bool {
         match self {
             Wait::Ready => true,
             Wait::Deadline(d) => d <= now,
+            Wait::Stdin => !stdin.bytes.is_empty() || stdin.eof,
             Wait::TcpAccept(slot) => host.accept_ready(slot),
             Wait::TcpReadable(slot) => host.readable(slot),
         }
@@ -1002,6 +1070,12 @@ impl Host for TypedHost {
     }
     // end optional
 
+    // optional: wasi_cli_environment_get_arguments
+    fn wasi_cli_environment_get_arguments(&mut self) -> Vec<String> {
+        self.args.clone()
+    }
+    // end optional
+
     // optional: wasi_cli_environment_get_environment
     fn wasi_cli_environment_get_environment(&mut self) -> Vec<(String, String)> {
         self.env.clone()
@@ -1078,9 +1152,33 @@ impl Host for TypedHost {
     }
     // end optional
 
+    // optional: wasi_clocks_monotonic_clock_subscribe_instant
+    /// An instant is nanoseconds since the host was created (see `monotonic-clock.now`); one
+    /// that has passed is ready at once.
+    fn wasi_clocks_monotonic_clock_subscribe_instant(&mut self, when: u64) -> Pollable {
+        self.subscribe(Some(self.start + Duration::from_nanos(when)))
+    }
+    // end optional
+
+    // optional: wasi_clocks_monotonic_clock_now
+    /// Nanoseconds since the host was created.
+    fn wasi_clocks_monotonic_clock_now(&mut self) -> u64 {
+        u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+    // end optional
+
+    // optional: wasi_clocks_wall_clock_now
+    fn wasi_clocks_wall_clock_now(&mut self) -> Datetime {
+        let since = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the system clock is before the Unix epoch");
+        Datetime { seconds: since.as_secs(), nanoseconds: since.subsec_nanos() }
+    }
+    // end optional
+
     // optional: wasi_io_poll_poll
-    /// The indices of the ready pollables, waiting for the earliest deadline if none
-    /// is ready yet. An empty list traps, as the interface specifies.
+    /// The indices of the ready pollables, waiting for the earliest deadline, for data
+    /// on stdin or for a socket if none is ready yet. An empty list traps, as the interface specifies.
     fn wasi_io_poll_poll(&mut self, in_: Vec<Pollable>) -> Vec<u32> {
         assert!(!in_.is_empty(), "wasi:io/poll.poll: empty list");
         self.wait_ready(&in_)
@@ -1605,15 +1703,28 @@ impl Host for TypedHost {
     // end optional
 
     // optional: wasi_io_streams_method_input_stream_read
-    /// Reads at most 4096 bytes of a file or connection stream at once (a connection's
-    /// stream gives an empty list while nothing has arrived); `closed` at its end (and for
-    /// stdin, which is always at its end). An unknown or dropped stream traps.
+    /// Reads at most 4096 bytes of a file, connection or stdin stream at once (a
+    /// connection's stream or stdin gives an empty list while nothing has arrived);
+    /// `closed` at its end. An unknown or dropped stream traps.
     fn wasi_io_streams_method_input_stream_read(
         &mut self,
         self_: InputStream,
         len: u64,
     ) -> Result<Vec<u8>, StreamError> {
         let mut buf = vec![0u8; len.min(4096) as usize];
+        if self_.0 == 0 {
+            if buf.is_empty() {
+                return Ok(buf);
+            }
+            self.start_stdin();
+            let mut shared = self.stdin.0.lock().unwrap();
+            let n = std::io::Read::read(&mut shared.bytes, &mut buf).unwrap_or(0); // a `VecDeque` never fails
+            if n == 0 && shared.eof {
+                return Err(StreamError::Closed);
+            }
+            buf.truncate(n);
+            return Ok(buf);
+        }
         if let Some(slot) = tcp_slot(self_.0) {
             // never blocks: an empty list means "nothing yet"
             let stream = self.tcp_in.get_mut(slot).expect("read from an unknown or dropped stream");
@@ -1770,13 +1881,17 @@ impl Host for TypedHost {
     // end optional
 
     // optional: wasi_io_streams_method_input_stream_subscribe
-    /// Ready when a connection's stream has data or is at its end; any other input stream
-    /// (stdin is always at its end, a file is read at once) is always ready.
+    /// Ready when stdin has data or is at its end, or a connection's stream has data or is
+    /// at its end; a file is always ready.
     fn wasi_io_streams_method_input_stream_subscribe(&mut self, self_: InputStream) -> Pollable {
-        match tcp_slot(self_.0) {
-            Some(slot) => self.subscribe_wait(Wait::TcpReadable(slot)),
-            None => self.subscribe(None),
+        if let Some(slot) = tcp_slot(self_.0) {
+            return self.subscribe_wait(Wait::TcpReadable(slot));
         }
+        if self_.0 != 0 {
+            return self.subscribe(None);
+        }
+        self.start_stdin();
+        self.subscribe_wait(Wait::Stdin)
     }
     // end optional
 

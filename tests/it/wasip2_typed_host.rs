@@ -39,7 +39,12 @@ pub(crate) fn component_from_wit(deps: &[&str], wit: &str, world: &str) -> Vec<u
 /// host reduced to the methods the component declares (after the `type_aliases` that name its
 /// `error-code` enums), and a `main` that makes the
 /// instance (around the `host` expression) and runs `body`.
-fn build_program(component: &[u8], core_wat: &str, host: &str, body: &str) -> std::path::PathBuf {
+pub(crate) fn build_program(
+    component: &[u8],
+    core_wat: &str,
+    host: &str,
+    body: &str,
+) -> std::path::PathBuf {
     let glue = wit_host_glue(component).unwrap();
     let opts = TranspileOptions {
         named_imports: true,
