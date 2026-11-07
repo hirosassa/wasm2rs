@@ -23,9 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   semantics of `host.rs`; tests in `tests/it/wasip2_typed_fs.rs` and
   `tests/it/wasip2_typed_fs_write.rs`). TCP over loopback too (`create-tcp-socket`, bind, listen, connect, accept, addresses,
   `subscribe`, `shutdown` and the connection streams; `TypedHost::with_external_network` lifts the
-  loopback limit; tests in `tests/it/wasip2_typed_sockets.rs`). A component that imports both
-  filesystem and socket interfaces is not supported yet (their two `error-code` enums become
-  `ErrorCode` and `ErrorCode2` in the generated trait).
+  loopback limit; tests in `tests/it/wasip2_typed_sockets.rs`). A component may import both
+  filesystem and socket interfaces: the second of their two `error-code` enums gets a numeric suffix
+  (`ErrorCode2`) in the generated trait, depending on import order, so the host names them through `FsErrorCode` / `NetErrorCode` aliases that
+  `type_aliases` (`filter.rs`) emits (test in `tests/it/wasip2_typed_both.rs`).
 - The `// optional: a | b` marker of the host sources (`filter.rs`) keeps a block if the generated
   trait declares any of the listed methods.
 - `wit_host_glue` and `--wit-host --glue`: the glue from the typed `Host` trait to the flat
