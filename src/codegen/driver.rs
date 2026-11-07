@@ -29,6 +29,14 @@ pub(crate) struct ContInfo {
     /// `ContFrame` field so the local survives suspends. Step functions have no
     /// parameters (rejected), so these are exactly the declared locals.
     pub(crate) step_locals: HashMap<u32, Vec<ValType>>,
+    /// Whether the module has a `switch`: a switch retypes a continuation without
+    /// updating `cont_types`, so a cast to a concrete continuation type is rejected.
+    pub(crate) uses_switch: bool,
+    /// Whether the module tests or casts to a concrete continuation type. Then a
+    /// `cont.bind` or a `resume` handler moves the continuation to a new handle, so a
+    /// reference kept from before still has its own type; otherwise the handle is
+    /// reused, which spares the handle table a slot per suspend.
+    pub(crate) casts: bool,
 }
 
 /// The per-tag payload/result types for one module, grouped so `ctx.tags.params`
@@ -167,6 +175,23 @@ impl ModuleCtx<'_> {
         self.funcs_by_sig
             .get(&(params.to_vec(), results.to_vec()))
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// The indices of the continuation types that are `target` or a declared subtype
+    /// of it, ascending: the types of the continuations a test against the
+    /// continuation type `target` accepts. `None` when the type relation is
+    /// unavailable.
+    pub(crate) fn cont_types_of_subtype(&self, target: u32) -> Option<Vec<u32>> {
+        let rel = self.type_rel?;
+        Some(
+            self.type_kinds
+                .iter()
+                .enumerate()
+                .filter(|(_, kind)| matches!(kind, CompositeKind::Cont(_)))
+                .filter_map(|(t, _)| u32::try_from(t).ok())
+                .filter(|&t| rel.is_subtype(t, target))
+                .collect(),
+        )
     }
 
     /// The full indices of every live function whose declared type is `target` or a
@@ -391,6 +416,11 @@ pub(crate) fn build_ctx<'a>(
     // independent full scans.
     let scan = scan_bodies(funcs)?;
     let uses_extern_box = scan.uses_extern_box;
+    let uses_switch = scan.uses_switch;
+    let casts = scan
+        .cast_targets
+        .iter()
+        .any(|&t| matches!(type_kinds.get(t as usize), Some(CompositeKind::Cont(_))));
     // Continuations carry per-instance state (the `conts` handle table), so any
     // module that creates one is stateful even without other mutable state.
     let cont_bodies = scan.cont_bodies;
@@ -495,6 +525,8 @@ pub(crate) fn build_ctx<'a>(
             step_set,
             checkpoint_callee,
             step_locals,
+            uses_switch,
+            casts,
         },
         unsafe_memory: parts.unsafe_memory,
         reentrant_imports: parts.reentrant_imports,
