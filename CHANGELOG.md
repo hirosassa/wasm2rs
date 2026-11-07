@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `examples/wasip2_host/typed.rs`: `read-via-stream` on a descriptor opened for writing only
+  returns `bad-descriptor` (as wasmtime does) instead of a stream whose reads fail; a descriptor
+  with `read`, or with no flags at all, still reads. `get-flags` reports what the descriptor was
+  opened for (a write-only one no longer reports `read`). Tests in
+  `tests/it/wasip2_typed_fs_edges.rs` and `tests/it/wasip2_typed_fs_write.rs`.
+
 - `examples/wasip2_host/typed.rs`: `open-at` with `create` + `exclusive` on a symlink name returns
   `exist` also with `symlink-follow` (it used to be `not-permitted` for a dangling link, as POSIX
   `O_CREAT | O_EXCL` never follows a link). `shutdown` finds the connection's send queue

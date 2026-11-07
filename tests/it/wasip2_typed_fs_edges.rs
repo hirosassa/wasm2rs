@@ -123,6 +123,13 @@ const CORE: &str = r#"
       (else (global.set $last (i32.load (i32.const 204))) (i32.const 0))))
   (func (export "fs_last") (result i32) (global.get $last))
 
+  ;; read-via-stream: 0 if it succeeds (its stream is dropped), else 100 + the error code
+  (func (export "fs_stream_code") (param $h i32) (param $offset i64) (result i32)
+    (call $rvs (local.get $h) (local.get $offset) (i32.const 240))
+    (if (result i32) (i32.load8_u (i32.const 240))
+      (then (call $code (i32.const 244)))
+      (else (call $drop_stream (i32.load (i32.const 244))) (i32.const 0))))
+
   ;; read-via-stream: the stream handle, or -1
   (func (export "fs_stream") (param $h i32) (param $offset i64) (result i32)
     (call $rvs (local.get $h) (local.get $offset) (i32.const 240))
@@ -231,7 +238,8 @@ fn run(root: &Path, body: &str) -> std::process::Output {
 fn a_failing_file_read_is_last_operation_failed_once_then_closed() {
     let root = fresh_root("edges_read_error");
     std::fs::write(root.join("a.txt"), "0123456789").unwrap();
-    // a file opened for writing only cannot be read: the host's read fails (not the end)
+    // a read at an offset no file has (past `i64::MAX`) fails in the host's seek with
+    // EINVAL on every platform: a failure, not the end
     let out = run_program(
         &component_from_wit(&[CLOCKS, IO, FILESYSTEM], WORLD, "w"),
         CORE,
@@ -240,15 +248,16 @@ fn a_failing_file_read_is_last_operation_failed_once_then_closed() {
             root.to_str().unwrap()
         ),
         &format!(
-            "assert_eq!(inst.fs_open({A}, 0, 2), 0);
+            "const BAD_OFFSET: i64 = i64::MIN;
+             assert_eq!(inst.fs_open({A}, 0, 1), 0);
              let f = inst.fs_last();
-             let s = inst.fs_stream(f, 0);
+             let s = inst.fs_stream(f, BAD_OFFSET);
              // the first failure is `last-operation-failed` (-3), with the OS message
              assert_eq!(inst.fs_read(s, 4), -3);
              let len = inst.debug_len();
              assert!(len > 0);
              let text: String = (0..len).map(|i| inst.debug_byte(i) as u8 as char).collect();
-             assert!(text.to_lowercase().contains(\"bad file descriptor\"), \"{{text}}\");
+             assert!(text.to_lowercase().contains(\"invalid argument\"), \"{{text}}\");
              // the guest dropped the error: the host forgot it
              let error = inst.last_failed();
              assert_eq!(inst.debug_len_of(error), 0);
@@ -259,9 +268,41 @@ fn a_failing_file_read_is_last_operation_failed_once_then_closed() {
              assert_eq!(inst.fs_bskip(s, 4), -1);
              assert_eq!(inst.fs_read(s, 0), -1);
              // another stream fails by itself, and gets the freed error slot back
-             let t = inst.fs_stream(f, 0);
+             let t = inst.fs_stream(f, BAD_OFFSET);
              assert_eq!(inst.fs_bskip(t, 4), -3);
              assert_eq!(inst.last_failed(), error);"
+        ),
+    );
+    assert_succeeded(&out);
+}
+
+#[test]
+fn read_via_stream_needs_a_descriptor_opened_for_reading() {
+    let root = fresh_root("edges_read_flags");
+    std::fs::write(root.join("a.txt"), "0123456789").unwrap();
+    std::fs::create_dir(root.join("d")).unwrap();
+    let out = run_program(
+        &component_from_wit(&[CLOCKS, IO, FILESYSTEM], WORLD, "w"),
+        CORE,
+        &format!(
+            "TypedHost::new(Vec::new()).with_writable_preopen(std::path::PathBuf::from({:?}))",
+            root.to_str().unwrap()
+        ),
+        &format!(
+            "// write only: bad-descriptor (3), as in wasmtime
+             assert_eq!(inst.fs_open({A}, 0, 2), 0);
+             let w = inst.fs_last();
+             assert_eq!(inst.fs_stream_code(w, 0), 103);
+             // read only, read + write and no flags at all (which reads) succeed
+             for flags in [1, 3, 0] {{
+                 assert_eq!(inst.fs_open({A}, 0, flags), 0);
+                 let h = inst.fs_last();
+                 assert_eq!(inst.fs_stream_code(h, 0), 0);
+             }}
+             // a directory is still is-directory (14)
+             assert_eq!(inst.fs_open({D}, 2, 0), 0);
+             let d = inst.fs_last();
+             assert_eq!(inst.fs_stream_code(d, 0), 114);"
         ),
     );
     assert_succeeded(&out);
