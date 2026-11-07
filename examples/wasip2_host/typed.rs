@@ -386,10 +386,15 @@ impl TypedHost {
         std::thread::spawn(move || {
             let mut chunk = [0u8; 4096];
             loop {
-                // a read error counts as the end of input
-                let n = std::io::stdin().read(&mut chunk).unwrap_or(0);
+                let (n, error) = match std::io::stdin().read(&mut chunk) {
+                    Ok(n) => (n, None),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    // the failure ends the input: `read_stream` reports it after the bytes
+                    Err(e) => (0, Some(e.to_string())),
+                };
                 let (buf, changed) = &*shared;
                 let mut buf = buf.lock().unwrap();
+                buf.error = error;
                 buf.bytes.extend(&chunk[..n]);
                 buf.eof = n == 0;
                 changed.notify_all();
@@ -614,6 +619,8 @@ fn stays_below(path: &Path) -> bool {
 struct StdinBuf {
     bytes: VecDeque<u8>,
     eof: bool,
+    /// Why the input ended, when a read failed instead of reaching the end; taken when reported.
+    error: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -964,14 +971,17 @@ impl TypedHost {
         let mut buf = vec![0u8; len.min(4096) as usize];
         if stream == 0 {
             self.start_stdin();
-            let mut shared = self.stdin.0.lock().unwrap();
-            if buf.is_empty() {
-                // a zero length succeeds only while the input is open: probe, consume nothing
-                return if shared.bytes.is_empty() && shared.eof { Err(StreamError::Closed) } else { Ok(buf) };
-            }
+            let stdin = Arc::clone(&self.stdin);
+            let mut shared = stdin.0.lock().unwrap();
+            // a zero length consumes nothing: ok while the input is open, like a read with data left
             let n = std::io::Read::read(&mut shared.bytes, &mut buf).unwrap_or(0); // a `VecDeque` never fails
-            if n == 0 && shared.eof {
-                return Err(StreamError::Closed);
+            if n == 0 && shared.bytes.is_empty() && shared.eof {
+                // the end of the input: `closed`, unless a read failed: that is reported once,
+                // after the bytes before it, and the input is `closed` from then on
+                return Err(match shared.error.take() {
+                    Some(why) => self.last_operation_failed(why),
+                    None => StreamError::Closed,
+                });
             }
             buf.truncate(n);
             return Ok(buf);
