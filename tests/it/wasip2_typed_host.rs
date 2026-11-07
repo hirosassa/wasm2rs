@@ -4,7 +4,9 @@
 //! the same lowered functions, is transpiled with `named_imports` + `reentrant_imports` +
 //! `named_exports`, and runs with the generated glue and the typed host.
 
-use std::process::{Command, Output};
+use std::io::Read;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::common;
 use wasm2rs::{TranspileOptions, transpile_with_options, wit_host_glue};
@@ -62,10 +64,61 @@ pub(crate) fn build_program(
     )
 }
 
+/// How long a generated program may run before the test fails instead of hanging.
+const RUN_LIMIT: Duration = Duration::from_secs(60);
+
 pub(crate) fn run_program(component: &[u8], core_wat: &str, host: &str, body: &str) -> Output {
-    Command::new(build_program(component, core_wat, host, body))
-        .output()
-        .unwrap()
+    run_program_within(component, core_wat, host, body, RUN_LIMIT)
+}
+
+/// Like [`run_program`], but kills the program and panics if it runs longer than `limit`
+/// (a guest blocked forever must fail the test, not hang CI).
+#[allow(clippy::panic, reason = "a test helper: a timeout must fail the test")]
+pub(crate) fn run_program_within(
+    component: &[u8],
+    core_wat: &str,
+    host: &str,
+    body: &str,
+    limit: Duration,
+) -> Output {
+    let mut child = Command::new(build_program(component, core_wat, host, body))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as _));
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() >= limit {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let stderr = stderr.join().unwrap();
+            panic!(
+                "the generated program timed out after {limit:?}; stderr: {}",
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    Output {
+        status,
+        stdout: stdout.join().unwrap(),
+        stderr: stderr.join().unwrap(),
+    }
 }
 
 /// The imports of a `println!("hello")` program, as the WIT of wasi 0.2 declares them
@@ -235,4 +288,16 @@ fn poll_waits_for_a_clock_deadline() {
         "let start = std::time::Instant::now(); assert_eq!(inst.wait(), 1); \
          assert!(start.elapsed() >= std::time::Duration::from_millis(40));",
     ));
+}
+
+#[test]
+#[should_panic(expected = "timed out")]
+fn a_guest_that_blocks_forever_fails_the_run_instead_of_hanging() {
+    run_program_within(
+        &wat::parse_str(COMPONENT).unwrap(),
+        CORE,
+        "TypedHost::new(Vec::new())",
+        "let _ = &mut inst; loop { std::thread::park(); }",
+        std::time::Duration::from_secs(3),
+    );
 }
