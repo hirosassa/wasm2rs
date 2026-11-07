@@ -37,17 +37,22 @@ fn error_type_of(generated: &str, prefix: &str) -> Option<String> {
 }
 
 /// `type FsErrorCode = ...;` and `type NetErrorCode = ...;` for the interfaces the generated
-/// code declares. The `error-code` enums of `wasi:filesystem` and `wasi:sockets` get a
-/// numeric suffix when one component imports both, so the typed host (`typed.rs`) names them
-/// through these aliases instead of the generated spelling.
+/// code declares (`NetErrorCode` from tcp, udp or ip-name-lookup, whichever it imports). The
+/// `error-code` enums of `wasi:filesystem` and `wasi:sockets` get a numeric suffix when one
+/// component imports both, so the typed host (`typed.rs`) names them through these aliases
+/// instead of the generated spelling.
 #[allow(dead_code, reason = "only the typed host callers use it")]
 fn type_aliases(generated: &str) -> String {
     let mut out = String::new();
-    for (alias, prefix) in [
-        ("FsErrorCode", "wasi_filesystem_types_method_descriptor_"),
-        ("NetErrorCode", "wasi_sockets_tcp_"),
+    // the first prefix the generated code has a fallible method for names the enum
+    for (alias, prefixes) in [
+        ("FsErrorCode", &["wasi_filesystem_types_method_descriptor_"][..]),
+        (
+            "NetErrorCode",
+            &["wasi_sockets_tcp_", "wasi_sockets_udp_", "wasi_sockets_ip_name_lookup_"][..],
+        ),
     ] {
-        if let Some(name) = error_type_of(generated, prefix) {
+        if let Some(name) = prefixes.iter().find_map(|prefix| error_type_of(generated, prefix)) {
             out.push_str(&format!("type {alias} = {name};\n"));
         }
     }

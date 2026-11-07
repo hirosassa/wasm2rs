@@ -32,7 +32,19 @@
 // 127.0.0.0/8 and ::1 is `access-denied` unless `with_external_network` was called, `finish-bind`
 // binds and listens, `start-connect` connects at once, `read` never blocks (`blocking-read` and `blocking-skip` wait) and a socket's
 // pollable is polled every millisecond; a connection's streams are `TCP_STREAM + slot`.
-// UDP, ip-name-lookup and the socket options are not implemented.
+// UDP (`udp`, `udp-create-socket`) works the same way over loopback: `finish-bind` binds a
+// non-blocking `std` socket (an address outside loopback is `access-denied`), `stream` (callable on a
+// bound socket; a later call replaces the default remote, and the streams of earlier calls then trap) gives the datagram streams as `udp_in` and `udp_out` slots, and
+// `receive` and `send` never block (an empty list, or fewer datagrams sent, means "not now").
+// A stream made with `Some(remote)` drops datagrams from other senders and sends to `remote` (a
+// datagram's own address must then be absent or the same); an unconnected one needs an address in
+// each datagram (`invalid-argument` otherwise). A datagram stream's pollable is polled every
+// millisecond, an outgoing stream and a socket are always ready, and sending more than `check-send`
+// permits (1024) traps. Name lookup (`ip-name-lookup`): `localhost` (both loopback addresses) and
+// numeric IPv4 and IPv6 addresses resolve locally; any other name needs `with_external_network`
+// (then `std`'s resolver runs at `resolve-addresses`) and is `permanent-resolver-failure` without it;
+// a name that is not a host name is `invalid-argument`. The socket options (hop limit,
+// buffer sizes, `ipv6-only`) answer `not-supported`; the TCP ones are not implemented.
 //
 // A component that imports both filesystem and sockets gets two `error-code` enums, which the
 // generator spells `ErrorCode` and `ErrorCode2` in an order that follows the imports. The host
@@ -51,10 +63,13 @@ use std::collections::VecDeque;
 use std::io::Write;
 #[allow(unused_imports)]
 use std::net::{
-    Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6, TcpListener, TcpStream,
+    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6, TcpListener,
+    TcpStream, ToSocketAddrs, UdpSocket as StdUdpSocket,
 };
 #[allow(unused_imports)]
 use std::path::{Component, Path, PathBuf};
+#[allow(unused_imports)]
+use std::sync::atomic::{AtomicU64, Ordering};
 #[allow(unused_imports)]
 use std::sync::{Arc, Condvar, Mutex};
 #[allow(unused_imports)]
@@ -107,6 +122,14 @@ struct TypedHost {
     tcp_in: Slab<TcpStream>,
     /// Output streams of connections, behind the output-stream handles `TCP_STREAM..`.
     tcp_out: Slab<TcpStream>,
+    /// UDP sockets behind `udp-socket` handles.
+    udp_sockets: Slab<UdpSock>,
+    /// Incoming datagram streams, behind `incoming-datagram-stream` handles.
+    udp_in: Slab<UdpEnd>,
+    /// Outgoing datagram streams, behind `outgoing-datagram-stream` handles.
+    udp_out: Slab<UdpEnd>,
+    /// The addresses still to be read from `resolve-address-stream` handles.
+    resolutions: Slab<VecDeque<IpAddr>>,
 }
 
 #[allow(dead_code)]
@@ -130,6 +153,10 @@ impl TypedHost {
             sockets: Slab::new(),
             tcp_in: Slab::new(),
             tcp_out: Slab::new(),
+            udp_sockets: Slab::new(),
+            udp_in: Slab::new(),
+            udp_out: Slab::new(),
+            resolutions: Slab::new(),
         }
     }
 
@@ -577,6 +604,8 @@ enum Wait {
     TcpAccept(usize),
     /// Ready when the stream in `tcp_in` at the slot has data, is at its end or failed.
     TcpReadable(usize),
+    /// Ready when the stream in `udp_in` at the slot has a datagram it would return (or failed).
+    UdpReadable(usize),
 }
 
 #[allow(dead_code)]
@@ -588,12 +617,13 @@ impl Wait {
             Wait::Stdin => !stdin.bytes.is_empty() || stdin.eof,
             Wait::TcpAccept(slot) => host.accept_ready(slot),
             Wait::TcpReadable(slot) => host.readable(slot),
+            Wait::UdpReadable(slot) => host.udp_readable(slot),
         }
     }
 
     /// Whether readiness can only be found by asking the socket again.
     fn polls_socket(self) -> bool {
-        matches!(self, Wait::TcpAccept(_) | Wait::TcpReadable(_))
+        matches!(self, Wait::TcpAccept(_) | Wait::TcpReadable(_) | Wait::UdpReadable(_))
     }
 
     fn deadline(self) -> Option<Instant> {
@@ -633,6 +663,9 @@ enum Net {
     ConnectionRefused,
     ConnectionReset,
     ConnectionAborted,
+    DatagramTooLarge,
+    PermanentResolverFailure,
+    NameUnresolvable,
 }
 
 #[allow(dead_code)]
@@ -842,6 +875,20 @@ impl TypedHost {
     /// `Ok` if the guest may use `addr` on a socket of the family `ipv6`: it must be of
     /// that family, a unicast address that is not an IPv4-mapped IPv6 one, and loopback
     /// unless the host allows the network.
+    /// `check_address` for the address of a peer to connect or send to: also not port 0 nor an
+    /// unspecified address (`0.0.0.0`, `::`), which is `invalid-argument` whether or not the
+    /// network is allowed (so those checks come before the loopback one, after the family one).
+    fn check_peer(&self, ipv6: bool, addr: &SocketAddr) -> Result<(), Net> {
+        let mapped = matches!(addr, SocketAddr::V6(a) if a.ip().to_ipv4_mapped().is_some());
+        if addr.is_ipv6() != ipv6 || mapped || addr.ip().is_multicast() {
+            return Err(Net::InvalidArgument);
+        }
+        if addr.port() == 0 || addr.ip().is_unspecified() {
+            return Err(Net::InvalidArgument);
+        }
+        self.check_address(ipv6, addr)
+    }
+
     fn check_address(&self, ipv6: bool, addr: &SocketAddr) -> Result<(), Net> {
         let mapped = matches!(addr, SocketAddr::V6(a) if a.ip().to_ipv4_mapped().is_some());
         if addr.is_ipv6() != ipv6 || mapped || addr.ip().is_multicast() {
@@ -927,10 +974,7 @@ impl TypedHost {
             NetState::BindStarted(_) | NetState::Bound(_) => return Err(Net::NotSupported),
             _ => return Err(Net::InvalidState),
         }
-        self.check_address(ipv6, &addr)?;
-        if addr.port() == 0 || addr.ip().is_unspecified() {
-            return Err(Net::InvalidArgument);
-        }
+        self.check_peer(ipv6, &addr)?;
         let connected = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
             .and_then(|stream| stream.set_nonblocking(true).map(|()| stream))
             .map_err(|e| net_error(&e));
@@ -1126,7 +1170,281 @@ fn file_times(
 }
 // end optional
 
-// optional: wasi_sockets_tcp_create_socket_create_tcp_socket | wasi_sockets_tcp_method_tcp_socket_start_bind | wasi_sockets_tcp_method_tcp_socket_finish_bind | wasi_sockets_tcp_method_tcp_socket_start_listen | wasi_sockets_tcp_method_tcp_socket_finish_listen | wasi_sockets_tcp_method_tcp_socket_start_connect | wasi_sockets_tcp_method_tcp_socket_finish_connect | wasi_sockets_tcp_method_tcp_socket_accept | wasi_sockets_tcp_method_tcp_socket_local_address | wasi_sockets_tcp_method_tcp_socket_remote_address | wasi_sockets_tcp_method_tcp_socket_shutdown
+/// Where a UDP socket is in its life: unbound, `start-bind` called, or bound (a non-blocking
+/// `std` socket, shared with the streams made from it; `remote` is the default peer of the
+/// last `stream` call).
+#[allow(dead_code)]
+enum UdpState {
+    Unbound,
+    BindStarted(SocketAddr),
+    Bound { socket: Arc<StdUdpSocket>, remote: Option<SocketAddr> },
+}
+
+#[allow(dead_code)]
+struct UdpSock {
+    ipv6: bool,
+    state: UdpState,
+    /// How many times `stream` was called; only the streams of the last call work (see `UdpEnd`).
+    generation: Arc<AtomicU64>,
+}
+
+/// One datagram stream over a bound socket: the peer it was made for (`stream(Some(..))`).
+#[allow(dead_code)]
+struct UdpEnd {
+    ipv6: bool,
+    socket: Arc<StdUdpSocket>,
+    remote: Option<SocketAddr>,
+    /// The socket's `generation` counter, and its value when this stream was made: a stream is
+    /// stale once `stream` was called again.
+    current: Arc<AtomicU64>,
+    generation: u64,
+}
+
+#[allow(dead_code)]
+impl UdpEnd {
+    fn is_stale(&self) -> bool {
+        self.current.load(Ordering::SeqCst) != self.generation
+    }
+
+    /// Traps (the spec lets a replaced stream trap) if `stream` was called again since.
+    fn require_current(&self) {
+        assert!(!self.is_stale(), "stale datagram stream: `stream` was called again");
+    }
+}
+
+/// Whether two addresses name the same endpoint: the IP and the port. (`SocketAddr`'s `==`
+/// also compares an IPv6 address's flow info and scope id, which a sender's address may lack.)
+#[allow(dead_code)]
+fn same_endpoint(a: SocketAddr, b: SocketAddr) -> bool {
+    a.ip() == b.ip() && a.port() == b.port()
+}
+
+/// Whether a datagram from `from` is for a stream made for `remote` (any sender if none).
+#[allow(dead_code)]
+fn from_peer(remote: Option<SocketAddr>, from: SocketAddr) -> bool {
+    remote.is_none_or(|peer| same_endpoint(peer, from))
+}
+
+/// The most datagrams one `send` takes (what `check-send` permits).
+#[allow(dead_code)]
+const UDP_SEND_BATCH: u64 = 1024;
+
+/// The most bytes in a UDP datagram over IPv4 and over IPv6.
+#[allow(dead_code)]
+const UDP_MAX_PAYLOAD: usize = 65507;
+#[allow(dead_code)]
+const UDP_MAX_PAYLOAD_V6: usize = 65527;
+
+/// Whether `name` (without a trailing dot) is a syntactically valid host name: dot-separated
+/// labels of 1 to 63 letters, digits, `-` and `_` that do not start or end with `-`. A name of
+/// only digits and dots is not (an address that failed to parse is not a name).
+#[allow(dead_code)]
+fn is_host_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && !name.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && name.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+}
+
+#[allow(dead_code)]
+impl TypedHost {
+    /// The UDP socket behind a handle.
+    fn udp_socket(&mut self, handle: u32) -> &mut UdpSock {
+        self.udp_sockets.get_mut(handle as usize).expect("unknown or dropped udp-socket")
+    }
+
+    fn udp_start_bind(&mut self, handle: u32, addr: SocketAddr) -> Result<(), Net> {
+        let socket = self.udp_socket(handle);
+        if !matches!(socket.state, UdpState::Unbound) {
+            return Err(Net::InvalidState);
+        }
+        let ipv6 = socket.ipv6;
+        self.check_address(ipv6, &addr)?;
+        self.udp_socket(handle).state = UdpState::BindStarted(addr);
+        Ok(())
+    }
+
+    fn udp_finish_bind(&mut self, handle: u32) -> Result<(), Net> {
+        let socket = self.udp_socket(handle);
+        match std::mem::replace(&mut socket.state, UdpState::Unbound) {
+            UdpState::BindStarted(addr) => {
+                // a failed bind leaves the socket unbound, to try again
+                let bound = StdUdpSocket::bind(addr).map_err(|e| net_error(&e))?;
+                bound.set_nonblocking(true).map_err(|e| net_error(&e))?;
+                socket.state = UdpState::Bound { socket: Arc::new(bound), remote: None };
+                Ok(())
+            }
+            other => {
+                socket.state = other;
+                Err(Net::NotInProgress)
+            }
+        }
+    }
+
+    /// The local address, or (`remote`) the default peer of a bound socket.
+    fn udp_address(&mut self, handle: u32, remote: bool) -> Result<SocketAddr, Net> {
+        match &self.udp_socket(handle).state {
+            UdpState::Bound { socket, .. } if !remote => {
+                socket.local_addr().map_err(|e| net_error(&e))
+            }
+            UdpState::Bound { remote: Some(peer), .. } => Ok(*peer),
+            _ => Err(Net::InvalidState),
+        }
+    }
+
+    /// Makes the two streams of a bound socket (`remote`: the peer to talk to) and returns their
+    /// slots in `udp_in` and `udp_out`.
+    fn udp_stream(
+        &mut self,
+        handle: u32,
+        remote: Option<SocketAddr>,
+    ) -> Result<(usize, usize), Net> {
+        let ipv6 = self.udp_socket(handle).ipv6;
+        if let Some(peer) = &remote {
+            self.check_peer(ipv6, peer)?;
+        }
+        let sock = self.udp_socket(handle);
+        let UdpState::Bound { socket, remote: default_peer } = &mut sock.state else {
+            return Err(Net::InvalidState);
+        };
+        *default_peer = remote;
+        let socket = Arc::clone(socket);
+        // the streams of earlier calls are stale from now on
+        let current = Arc::clone(&sock.generation);
+        let generation = current.fetch_add(1, Ordering::SeqCst) + 1;
+        let end = || UdpEnd {
+            ipv6,
+            socket: Arc::clone(&socket),
+            remote,
+            current: Arc::clone(&current),
+            generation,
+        };
+        let (input, output) = (end(), end());
+        Ok((self.udp_in.insert(input), self.udp_out.insert(output)))
+    }
+
+    /// Whether the incoming stream at `slot` has a datagram `receive` would return, or failed.
+    /// A datagram from another sender than a connected stream's peer is dropped here. A stale
+    /// stream is always ready (so a waiting guest wakes up and traps) and takes nothing.
+    fn udp_readable(&self, slot: usize) -> bool {
+        let Some(end) = self.udp_in.get(slot) else { return true };
+        if end.is_stale() {
+            return true;
+        }
+        let mut byte = [0u8; 1];
+        loop {
+            match end.socket.peek_from(&mut byte) {
+                Ok((_, from)) if from_peer(end.remote, from) => return true,
+                Ok(_) => {
+                    // not for this stream: take it off the queue
+                    let _ = end.socket.recv_from(&mut byte);
+                }
+                Err(e) => return e.kind() != std::io::ErrorKind::WouldBlock,
+            }
+        }
+    }
+
+    /// At most `max` queued datagrams for the incoming stream at `slot`, with their sources; an
+    /// error shows only if there is nothing to return.
+    fn udp_receive(&mut self, slot: u32, max: u64) -> Result<Vec<(Vec<u8>, SocketAddr)>, Net> {
+        let end = self.udp_in.get(slot as usize).expect("unknown or dropped incoming-datagram-stream");
+        end.require_current();
+        let mut got = Vec::new();
+        let mut buf = vec![0u8; 65536];
+        while (got.len() as u64) < max {
+            match end.socket.recv_from(&mut buf) {
+                Ok((n, from)) if from_peer(end.remote, from) => {
+                    got.push((buf[..n].to_vec(), from))
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) if got.is_empty() => return Err(net_error(&e)),
+                Err(_) => break,
+            }
+        }
+        Ok(got)
+    }
+
+    /// Traps if the outgoing stream at `slot` is stale (`check-send`).
+    fn udp_check_send(&self, slot: u32) {
+        let end = self.udp_out.get(slot as usize).expect("unknown or dropped outgoing-datagram-stream");
+        end.require_current();
+    }
+
+    /// Sends the datagrams (data, address) over the outgoing stream at `slot` in order, stopping
+    /// at the first the socket will not take now: the count sent. As the spec requires, once a
+    /// datagram was sent no error is returned: a later datagram that fails the address or size
+    /// rules ends the batch like a full buffer; if the first one fails, that is the error.
+    fn udp_send(
+        &mut self,
+        slot: u32,
+        datagrams: Vec<(Vec<u8>, Option<SocketAddr>)>,
+    ) -> Result<u64, Net> {
+        assert!(
+            datagrams.len() as u64 <= UDP_SEND_BATCH,
+            "send: more datagrams than check-send permits"
+        );
+        let end = self.udp_out.get(slot as usize).expect("unknown or dropped outgoing-datagram-stream");
+        end.require_current();
+        let max = if end.ipv6 { UDP_MAX_PAYLOAD_V6 } else { UDP_MAX_PAYLOAD };
+        let mut sent = 0u64;
+        for (data, address) in datagrams {
+            let destination = || -> Result<SocketAddr, Net> {
+                let to = match (end.remote, address) {
+                    (Some(peer), None) => peer,
+                    (Some(peer), Some(a)) if same_endpoint(peer, a) => peer,
+                    (Some(_), Some(_)) | (None, None) => return Err(Net::InvalidArgument),
+                    (None, Some(a)) => a,
+                };
+                self.check_peer(end.ipv6, &to)?;
+                if data.len() > max { Err(Net::DatagramTooLarge) } else { Ok(to) }
+            };
+            let to = match destination() {
+                Ok(to) => to,
+                Err(_) if sent > 0 => break,
+                Err(e) => return Err(e),
+            };
+            match end.socket.send_to(&data, to) {
+                Ok(_) => sent += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) if sent == 0 => return Err(net_error(&e)),
+                Err(_) => break,
+            }
+        }
+        Ok(sent)
+    }
+
+    /// The addresses of `name` for `resolve-addresses`: see the header.
+    fn resolve_name(&self, name: &str) -> Result<VecDeque<IpAddr>, Net> {
+        if let Ok(ip) = name.parse::<IpAddr>() {
+            return Ok(VecDeque::from([ip]));
+        }
+        let host = name.strip_suffix('.').unwrap_or(name);
+        if !is_host_name(host) {
+            return Err(Net::InvalidArgument);
+        }
+        if host.eq_ignore_ascii_case("localhost") {
+            return Ok(VecDeque::from([Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()]));
+        }
+        if !self.external_network {
+            return Err(Net::PermanentResolverFailure);
+        }
+        let mut found = VecDeque::new();
+        for addr in (host, 0).to_socket_addrs().map_err(|_| Net::NameUnresolvable)? {
+            if !found.contains(&addr.ip()) {
+                found.push_back(addr.ip());
+            }
+        }
+        if found.is_empty() { Err(Net::NameUnresolvable) } else { Ok(found) }
+    }
+}
+
+// optional: wasi_sockets_tcp_create_socket_create_tcp_socket | wasi_sockets_tcp_method_tcp_socket_start_bind | wasi_sockets_tcp_method_tcp_socket_finish_bind | wasi_sockets_tcp_method_tcp_socket_start_listen | wasi_sockets_tcp_method_tcp_socket_finish_listen | wasi_sockets_tcp_method_tcp_socket_start_connect | wasi_sockets_tcp_method_tcp_socket_finish_connect | wasi_sockets_tcp_method_tcp_socket_accept | wasi_sockets_tcp_method_tcp_socket_local_address | wasi_sockets_tcp_method_tcp_socket_remote_address | wasi_sockets_tcp_method_tcp_socket_shutdown | wasi_sockets_udp_method_udp_socket_start_bind | wasi_sockets_udp_method_udp_socket_finish_bind | wasi_sockets_udp_method_udp_socket_stream | wasi_sockets_udp_method_udp_socket_local_address | wasi_sockets_udp_method_udp_socket_remote_address | wasi_sockets_udp_method_incoming_datagram_stream_receive | wasi_sockets_udp_method_outgoing_datagram_stream_send | wasi_sockets_ip_name_lookup_resolve_addresses
 impl From<Net> for NetErrorCode {
     fn from(e: Net) -> Self {
         match e {
@@ -1143,12 +1461,15 @@ impl From<Net> for NetErrorCode {
             Net::ConnectionRefused => NetErrorCode::ConnectionRefused,
             Net::ConnectionReset => NetErrorCode::ConnectionReset,
             Net::ConnectionAborted => NetErrorCode::ConnectionAborted,
+            Net::DatagramTooLarge => NetErrorCode::DatagramTooLarge,
+            Net::PermanentResolverFailure => NetErrorCode::PermanentResolverFailure,
+            Net::NameUnresolvable => NetErrorCode::NameUnresolvable,
         }
     }
 }
 // end optional
 
-// optional: wasi_sockets_tcp_method_tcp_socket_start_bind | wasi_sockets_tcp_method_tcp_socket_start_connect
+// optional: wasi_sockets_tcp_method_tcp_socket_start_bind | wasi_sockets_tcp_method_tcp_socket_start_connect | wasi_sockets_udp_method_udp_socket_start_bind | wasi_sockets_udp_method_udp_socket_stream | wasi_sockets_udp_method_outgoing_datagram_stream_send
 fn socket_addr(addr: IpSocketAddress) -> SocketAddr {
     match addr {
         IpSocketAddress::Ipv4(a) => {
@@ -1164,7 +1485,7 @@ fn socket_addr(addr: IpSocketAddress) -> SocketAddr {
 }
 // end optional
 
-// optional: wasi_sockets_tcp_method_tcp_socket_local_address | wasi_sockets_tcp_method_tcp_socket_remote_address
+// optional: wasi_sockets_tcp_method_tcp_socket_local_address | wasi_sockets_tcp_method_tcp_socket_remote_address | wasi_sockets_udp_method_udp_socket_local_address | wasi_sockets_udp_method_udp_socket_remote_address | wasi_sockets_udp_method_incoming_datagram_stream_receive
 fn ip_socket_address(addr: SocketAddr) -> IpSocketAddress {
     match addr {
         SocketAddr::V4(a) => {
@@ -1179,6 +1500,21 @@ fn ip_socket_address(addr: SocketAddr) -> IpSocketAddress {
                 address: (a0, a1, a2, a3, a4, a5, a6, a7),
                 scope_id: a.scope_id(),
             })
+        }
+    }
+}
+// end optional
+
+// optional: wasi_sockets_ip_name_lookup_method_resolve_address_stream_resolve_next_address
+fn ip_address(addr: IpAddr) -> IpAddress {
+    match addr {
+        IpAddr::V4(a) => {
+            let [a0, a1, a2, a3] = a.octets();
+            IpAddress::Ipv4((a0, a1, a2, a3))
+        }
+        IpAddr::V6(a) => {
+            let [a0, a1, a2, a3, a4, a5, a6, a7] = a.segments();
+            IpAddress::Ipv6((a0, a1, a2, a3, a4, a5, a6, a7))
         }
     }
 }
@@ -2054,6 +2390,284 @@ impl Host for TypedHost {
             ShutdownType::Both => Shutdown::Both,
         };
         Ok(self.tcp_shutdown(self_.0, how)?)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_create_socket_create_udp_socket
+    fn wasi_sockets_udp_create_socket_create_udp_socket(
+        &mut self,
+        address_family: IpAddressFamily,
+    ) -> Result<UdpSocket, NetErrorCode> {
+        let ipv6 = address_family == IpAddressFamily::Ipv6;
+        let slot = self.udp_sockets.insert(UdpSock { ipv6, state: UdpState::Unbound, generation: Arc::new(AtomicU64::new(0)) });
+        Ok(UdpSocket(slot as u32))
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_resource_drop_udp_socket
+    fn wasi_sockets_udp_resource_drop_udp_socket(&mut self, handle: UdpSocket) {
+        self.udp_sockets.remove(handle.0 as usize);
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_resource_drop_incoming_datagram_stream
+    fn wasi_sockets_udp_resource_drop_incoming_datagram_stream(
+        &mut self,
+        handle: IncomingDatagramStream,
+    ) {
+        self.udp_in.remove(handle.0 as usize);
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_resource_drop_outgoing_datagram_stream
+    fn wasi_sockets_udp_resource_drop_outgoing_datagram_stream(
+        &mut self,
+        handle: OutgoingDatagramStream,
+    ) {
+        self.udp_out.remove(handle.0 as usize);
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_start_bind
+    /// `access-denied` outside loopback unless `with_external_network` was called.
+    fn wasi_sockets_udp_method_udp_socket_start_bind(
+        &mut self,
+        self_: UdpSocket,
+        _network: Network,
+        local_address: IpSocketAddress,
+    ) -> Result<(), NetErrorCode> {
+        Ok(self.udp_start_bind(self_.0, socket_addr(local_address))?)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_finish_bind
+    fn wasi_sockets_udp_method_udp_socket_finish_bind(
+        &mut self,
+        self_: UdpSocket,
+    ) -> Result<(), NetErrorCode> {
+        Ok(self.udp_finish_bind(self_.0)?)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_stream
+    /// `invalid-state` unless the socket is bound; `Some(remote)` connects the streams to it.
+    fn wasi_sockets_udp_method_udp_socket_stream(
+        &mut self,
+        self_: UdpSocket,
+        remote_address: Option<IpSocketAddress>,
+    ) -> Result<(IncomingDatagramStream, OutgoingDatagramStream), NetErrorCode> {
+        let (input, output) = self.udp_stream(self_.0, remote_address.map(socket_addr))?;
+        Ok((IncomingDatagramStream(input as u32), OutgoingDatagramStream(output as u32)))
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_local_address
+    fn wasi_sockets_udp_method_udp_socket_local_address(
+        &mut self,
+        self_: UdpSocket,
+    ) -> Result<IpSocketAddress, NetErrorCode> {
+        Ok(ip_socket_address(self.udp_address(self_.0, false)?))
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_remote_address
+    /// `invalid-state` unless `stream` was called with a remote address.
+    fn wasi_sockets_udp_method_udp_socket_remote_address(
+        &mut self,
+        self_: UdpSocket,
+    ) -> Result<IpSocketAddress, NetErrorCode> {
+        Ok(ip_socket_address(self.udp_address(self_.0, true)?))
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_address_family
+    fn wasi_sockets_udp_method_udp_socket_address_family(&mut self, self_: UdpSocket) -> IpAddressFamily {
+        if self.udp_socket(self_.0).ipv6 { IpAddressFamily::Ipv6 } else { IpAddressFamily::Ipv4 }
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_ipv6_only
+    fn wasi_sockets_udp_method_udp_socket_ipv6_only(
+        &mut self,
+        _self_: UdpSocket,
+    ) -> Result<bool, NetErrorCode> {
+        Err(NetErrorCode::NotSupported)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_set_ipv6_only
+    fn wasi_sockets_udp_method_udp_socket_set_ipv6_only(
+        &mut self,
+        _self_: UdpSocket,
+        _value: bool,
+    ) -> Result<(), NetErrorCode> {
+        Err(NetErrorCode::NotSupported)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_unicast_hop_limit
+    fn wasi_sockets_udp_method_udp_socket_unicast_hop_limit(
+        &mut self,
+        _self_: UdpSocket,
+    ) -> Result<u8, NetErrorCode> {
+        Err(NetErrorCode::NotSupported)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_set_unicast_hop_limit
+    fn wasi_sockets_udp_method_udp_socket_set_unicast_hop_limit(
+        &mut self,
+        _self_: UdpSocket,
+        _value: u8,
+    ) -> Result<(), NetErrorCode> {
+        Err(NetErrorCode::NotSupported)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_receive_buffer_size
+    fn wasi_sockets_udp_method_udp_socket_receive_buffer_size(
+        &mut self,
+        _self_: UdpSocket,
+    ) -> Result<u64, NetErrorCode> {
+        Err(NetErrorCode::NotSupported)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_set_receive_buffer_size
+    fn wasi_sockets_udp_method_udp_socket_set_receive_buffer_size(
+        &mut self,
+        _self_: UdpSocket,
+        _value: u64,
+    ) -> Result<(), NetErrorCode> {
+        Err(NetErrorCode::NotSupported)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_send_buffer_size
+    fn wasi_sockets_udp_method_udp_socket_send_buffer_size(
+        &mut self,
+        _self_: UdpSocket,
+    ) -> Result<u64, NetErrorCode> {
+        Err(NetErrorCode::NotSupported)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_set_send_buffer_size
+    fn wasi_sockets_udp_method_udp_socket_set_send_buffer_size(
+        &mut self,
+        _self_: UdpSocket,
+        _value: u64,
+    ) -> Result<(), NetErrorCode> {
+        Err(NetErrorCode::NotSupported)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_udp_socket_subscribe
+    /// Always ready: binding completes in `finish-bind`.
+    fn wasi_sockets_udp_method_udp_socket_subscribe(&mut self, _self_: UdpSocket) -> Pollable {
+        self.subscribe(None)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_incoming_datagram_stream_receive
+    /// An empty list if nothing is queued (or `max_results` is 0).
+    fn wasi_sockets_udp_method_incoming_datagram_stream_receive(
+        &mut self,
+        self_: IncomingDatagramStream,
+        max_results: u64,
+    ) -> Result<Vec<IncomingDatagram>, NetErrorCode> {
+        let got = self.udp_receive(self_.0, max_results)?;
+        Ok(got
+            .into_iter()
+            .map(|(data, from)| IncomingDatagram { data, remote_address: ip_socket_address(from) })
+            .collect())
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_incoming_datagram_stream_subscribe
+    /// Ready when `receive` would return a datagram.
+    fn wasi_sockets_udp_method_incoming_datagram_stream_subscribe(
+        &mut self,
+        self_: IncomingDatagramStream,
+    ) -> Pollable {
+        self.subscribe_wait(Wait::UdpReadable(self_.0 as usize))
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_outgoing_datagram_stream_check_send
+    fn wasi_sockets_udp_method_outgoing_datagram_stream_check_send(
+        &mut self,
+        self_: OutgoingDatagramStream,
+    ) -> Result<u64, NetErrorCode> {
+        self.udp_check_send(self_.0);
+        Ok(UDP_SEND_BATCH)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_outgoing_datagram_stream_send
+    /// Returns how many datagrams were sent (see `udp_send`).
+    fn wasi_sockets_udp_method_outgoing_datagram_stream_send(
+        &mut self,
+        self_: OutgoingDatagramStream,
+        datagrams: Vec<OutgoingDatagram>,
+    ) -> Result<u64, NetErrorCode> {
+        let datagrams = datagrams
+            .into_iter()
+            .map(|d| (d.data, d.remote_address.map(socket_addr)))
+            .collect();
+        Ok(self.udp_send(self_.0, datagrams)?)
+    }
+    // end optional
+
+    // optional: wasi_sockets_udp_method_outgoing_datagram_stream_subscribe
+    /// Always ready: `send` never waits.
+    fn wasi_sockets_udp_method_outgoing_datagram_stream_subscribe(
+        &mut self,
+        _self_: OutgoingDatagramStream,
+    ) -> Pollable {
+        self.subscribe(None)
+    }
+    // end optional
+
+    // optional: wasi_sockets_ip_name_lookup_resolve_addresses
+    /// Resolves at once (see `resolve_name`); the stream holds the result.
+    fn wasi_sockets_ip_name_lookup_resolve_addresses(
+        &mut self,
+        _network: Network,
+        name: String,
+    ) -> Result<ResolveAddressStream, NetErrorCode> {
+        let found = self.resolve_name(&name)?;
+        Ok(ResolveAddressStream(self.resolutions.insert(found) as u32))
+    }
+    // end optional
+
+    // optional: wasi_sockets_ip_name_lookup_method_resolve_address_stream_resolve_next_address
+    /// The next address, `None` once they are all read; never `would-block`.
+    fn wasi_sockets_ip_name_lookup_method_resolve_address_stream_resolve_next_address(
+        &mut self,
+        self_: ResolveAddressStream,
+    ) -> Result<Option<IpAddress>, NetErrorCode> {
+        let stream = self.resolutions.get_mut(self_.0 as usize).expect("unknown or dropped resolve-address-stream");
+        Ok(stream.pop_front().map(ip_address))
+    }
+    // end optional
+
+    // optional: wasi_sockets_ip_name_lookup_method_resolve_address_stream_subscribe
+    /// Always ready: the addresses are known when `resolve-addresses` returns.
+    fn wasi_sockets_ip_name_lookup_method_resolve_address_stream_subscribe(
+        &mut self,
+        _self_: ResolveAddressStream,
+    ) -> Pollable {
+        self.subscribe(None)
+    }
+    // end optional
+
+    // optional: wasi_sockets_ip_name_lookup_resource_drop_resolve_address_stream
+    fn wasi_sockets_ip_name_lookup_resource_drop_resolve_address_stream(
+        &mut self,
+        handle: ResolveAddressStream,
+    ) {
+        self.resolutions.remove(handle.0 as usize);
     }
     // end optional
 }

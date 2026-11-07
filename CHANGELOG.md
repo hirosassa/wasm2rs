@@ -48,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem and socket interfaces: the second of their two `error-code` enums gets a numeric suffix
   (`ErrorCode2`) in the generated trait, depending on import order, so the host names them through `FsErrorCode` / `NetErrorCode` aliases that
   `type_aliases` (`filter.rs`) emits (test in `tests/it/wasip2_typed_both.rs`).
+- `examples/wasip2_host/typed.rs`: UDP over loopback (`udp-create-socket`, `udp-socket`
+  bind, `stream`, addresses, `subscribe`; `incoming-datagram-stream.receive` and
+  `outgoing-datagram-stream.check-send`/`send`, which never block; a stream made with a remote
+  address drops other senders' datagrams) and `ip-name-lookup` (`localhost` and numeric
+  addresses resolve locally; other names only with `with_external_network`, else
+  `permanent-resolver-failure`). The UDP socket options answer `not-supported`. `type_aliases`
+  (`filter.rs`) now finds `NetErrorCode` from udp or ip-name-lookup too. Tests in
+  `tests/it/wasip2_typed_udp.rs` and `tests/it/wasip2_typed_name_lookup.rs`.
 - `examples/wasip2_host/typed.rs`: the remaining `wasi:io/streams` methods except `splice` and
   `blocking-splice`: `input-stream.blocking-read`, `skip` and `blocking-skip` (the blocking ones
   wait on stdin or a connection like the stream's `subscribe` pollable; a file never waits; at
