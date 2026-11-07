@@ -10,13 +10,18 @@ use crate::common;
 use wasm2rs::{TranspileOptions, transpile_with_options, wit_host_glue, wit_host_trait};
 
 /// A component importing `a:b/c`, whose instance type declares `body` (types and exports).
-fn component(body: &str) -> Vec<u8> {
+pub(crate) fn component(body: &str) -> Vec<u8> {
     wat::parse_str(format!(r#"(component (import "a:b/c" (instance {body})))"#)).unwrap()
 }
 
 /// Builds the program from the transpiled `core_wat` (its imports must be `a:b/c`
 /// functions), the glue for `body`, then `rest` (the `impl Host` and `fn main`), and runs it.
-fn build_and_run(name: &str, body: &str, core_wat: &str, rest: &str) -> std::process::Output {
+pub(crate) fn build_and_run(
+    name: &str,
+    body: &str,
+    core_wat: &str,
+    rest: &str,
+) -> std::process::Output {
     let glue = wit_host_glue(&component(body)).unwrap();
     let core = wat::parse_str(core_wat).unwrap();
     let opts = TranspileOptions {
@@ -32,7 +37,7 @@ fn build_and_run(name: &str, body: &str, core_wat: &str, rest: &str) -> std::pro
 }
 
 /// Asserts the program exits 0.
-fn run(name: &str, body: &str, core_wat: &str, rest: &str) {
+pub(crate) fn run(name: &str, body: &str, core_wat: &str, rest: &str) {
     let out = build_and_run(name, body, core_wat, rest);
     assert!(
         out.status.success(),
@@ -42,15 +47,11 @@ fn run(name: &str, body: &str, core_wat: &str, rest: &str) {
 }
 
 /// Like [`run`], but the program must panic with `needle` on stderr.
-fn run_panics(name: &str, body: &str, core_wat: &str, rest: &str, needle: &str) {
+pub(crate) fn run_panics(name: &str, body: &str, core_wat: &str, rest: &str, needle: &str) {
     let out = build_and_run(name, body, core_wat, rest);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{name} did not panic");
     assert!(stderr.contains(needle), "{name}: {stderr}");
-}
-
-fn glue_error(body: &str) -> String {
-    wit_host_glue(&component(body)).unwrap_err().to_string()
 }
 
 #[test]
@@ -67,7 +68,7 @@ fn glue_methods_are_named_like_the_host_methods() {
     for name in ["a_b_c_get_it", "a_b_c_other_one"] {
         assert!(host.contains(&format!("fn {name}(&mut self")), "{host}");
         assert!(
-            glue.contains(&format!("    fn {name}(&mut self, _g: &mut Instance<Self>")),
+            glue.contains(&format!("    fn {name}(&mut self, g: &mut Instance<Self>")),
             "{glue}"
         );
     }
@@ -594,7 +595,7 @@ fn a_payload_free_variant_and_a_unit_result_are_lowered() {
 }
 
 #[test]
-fn sixteen_flat_params_are_supported_and_seventeen_are_not() {
+fn sixteen_flat_params_are_passed_flat() {
     let params = |n: usize| {
         (0..n)
             .map(|i| format!(r#"(param "p{i}" u32)"#))
@@ -639,46 +640,6 @@ fn sixteen_flat_params_are_supported_and_seventeen_are_not() {
             }}"
         ),
     );
-
-    let err = glue_error(&format!(
-        r#"(export "wider" (func {} (result u32)))"#,
-        params(17)
-    ));
-    assert!(err.contains("`wider`") && err.contains("a:b/c"), "{err}");
-    assert!(
-        err.contains("more than 16") && err.contains("(not yet)"),
-        "{err}"
-    );
-}
-
-#[test]
-fn a_function_needing_memory_is_unsupported_and_names_the_function() {
-    let string_param = glue_error(r#"(export "say" (func (param "s" string)))"#);
-    assert!(
-        string_param.contains("glue for `say` of `a:b/c`") && string_param.contains("string"),
-        "{string_param}"
-    );
-    assert!(string_param.contains("(not yet)"), "{string_param}");
-
-    let list_result = glue_error(r#"(export "all" (func (result (list u8))))"#);
-    assert!(
-        list_result.contains("`all`") && list_result.contains("list"),
-        "{list_result}"
-    );
-
-    let nested = glue_error(r#"(export "deep" (func (param "o" (option (tuple u8 string)))))"#);
-    assert!(nested.contains("`deep`"), "{nested}");
-
-    // Two flat values would be returned through a pointer.
-    let retptr = glue_error(
-        r#"(type $r (record (field "a" u32) (field "b" u32)))
-        (export "pair" (type $pr (eq $r)))
-        (export "two" (func (result $pr)))"#,
-    );
-    assert!(
-        retptr.contains("`two`") && retptr.contains("returned through memory"),
-        "{retptr}"
-    );
 }
 
 #[test]
@@ -708,19 +669,20 @@ fn the_cli_glue_flag_prints_the_glue_and_needs_wit_host() {
     assert!(!alone.status.success());
     assert!(String::from_utf8_lossy(&alone.stderr).contains("--glue"));
 
-    let unsupported = dir.join("s.wasm");
+    let string_param = dir.join("s.wasm");
     std::fs::write(
-        &unsupported,
+        &string_param,
         component(r#"(export "say" (func (param "s" string)))"#),
     )
     .unwrap();
-    let refused = Command::new(env!("CARGO_BIN_EXE_wasm2rs"))
+    // A string parameter is covered too (the memory-backed glue).
+    let with_string = Command::new(env!("CARGO_BIN_EXE_wasm2rs"))
         .args(["--wit-host", "--glue"])
-        .arg(&unsupported)
+        .arg(&string_param)
         .output()
         .unwrap();
-    assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("`say`"));
+    assert!(with_string.status.success());
+    assert!(String::from_utf8_lossy(&with_string.stdout).contains("glue_abi::string("));
 }
 
 #[test]

@@ -13,13 +13,23 @@
 //! of the case looks only at the low 32 bits or all 64, so the spec's coercions from the
 //! joined slot type need no code of their own.
 //!
-//! Only functions that need no linear memory are covered; see [`check`].
+//! Memory-backed types are covered too. A `string` or `list` is a `(ptr, len)` pair into the
+//! guest's linear memory, read through `g.memory()`; parameters that flatten to more than 16
+//! core values arrive as one pointer to a record of them; a result of more than one core value
+//! is written through a trailing return pointer. Lowering a `string` or `list` calls the
+//! guest's `cabi_realloc(0, 0, align, size)` (the core module must export it, so transpile
+//! with `named_exports`). Everything the guest hands over is checked like the canonical ABI
+//! says: an out-of-range or unaligned pointer, invalid UTF-8, a bad discriminant or `char` is a
+//! trap, which here is a panic.
 
 use std::fmt::Write as _;
 
 use super::{Records, WitFunc, WitType, case_idents, flags_int, unique_idents, unsupported};
 use crate::TranspileError;
-use crate::wit_abi::{Budget, CoreSignature, Flat, core_signature, flatten, needs_memory};
+use crate::wit_abi::{
+    Budget, Flat, core_signature, field_offsets, flatten, needs_memory, record_layout, size_align,
+    variant_layout,
+};
 
 /// Helpers the glue calls to validate what the guest passes (a trap is a panic: an
 /// `Imports` method has no other way out).
@@ -72,55 +82,120 @@ mod glue_abi {
         let bits = v as u32;
         if count >= 32 { bits } else { bits & ((1 << count) - 1) }
     }
+
+    /// What one call may still lift (copy out of guest memory): the guest's memory length at
+    /// the start of the call. Every lifted string or list spends its byte length and its
+    /// element count, so descriptors that alias the same bytes, or a huge list of zero-sized
+    /// elements, cannot make the host copy or loop more than memory could hold.
+    pub struct Budget(std::cell::Cell<u64>);
+
+    impl Budget {
+        pub fn new(mem_len: usize) -> Self {
+            Budget(std::cell::Cell::new(mem_len as u64))
+        }
+
+        pub fn spend(&self, n: u64) {
+            match self.0.get().checked_sub(n) {
+                Some(left) => self.0.set(left),
+                None => trap("lifted data too large"),
+            }
+        }
+    }
+
+    /// The `len` bytes of guest memory at `at`.
+    pub fn slice(m: &[u8], at: u64, len: u64) -> &[u8] {
+        let range = at
+            .checked_add(len)
+            .and_then(|end| Some((usize::try_from(at).ok()?, usize::try_from(end).ok()?)))
+            .and_then(|(a, e)| m.get(a..e));
+        range.unwrap_or_else(|| trap("pointer out of bounds"))
+    }
+
+    /// The little-endian unsigned integer of `n` bytes at `at`.
+    pub fn ld(m: &[u8], at: u64, n: usize) -> u64 {
+        let mut bytes = [0u8; 8];
+        bytes[..n].copy_from_slice(slice(m, at, n as u64));
+        u64::from_le_bytes(bytes)
+    }
+
+    /// A pointer is a multiple of `align` and `size` bytes from it are in memory.
+    pub fn check(mem_len: usize, at: u64, size: u64, align: u64) {
+        if at % align.max(1) != 0 {
+            trap("unaligned pointer");
+        }
+        match at.checked_add(size) {
+            Some(end) if end <= mem_len as u64 => {}
+            _ => trap("pointer out of bounds"),
+        }
+    }
+
+    /// Checks a list of `len` elements of `size` bytes and spends its elements and bytes.
+    pub fn check_list(m: &[u8], lb: &Budget, ptr: u32, len: u32, size: u64, align: u64) {
+        let bytes = u64::from(len) * size;
+        lb.spend(bytes.saturating_add(u64::from(len)));
+        check(m.len(), u64::from(ptr), bytes, align);
+    }
+
+    /// The bytes of a `string` or `list<u8>`: the length is both its bytes and its elements.
+    pub fn bytes(m: &[u8], lb: &Budget, ptr: u32, len: u32) -> Vec<u8> {
+        lb.spend(u64::from(len));
+        slice(m, u64::from(ptr), u64::from(len)).to_vec()
+    }
+
+    pub fn string(m: &[u8], lb: &Budget, ptr: u32, len: u32) -> String {
+        String::from_utf8(bytes(m, lb, ptr, len)).unwrap_or_else(|_| trap("invalid UTF-8 in a string"))
+    }
 }
 "#;
 
-/// The error for a function the glue does not cover.
-fn not_yet(f: &WitFunc, reason: &str) -> TranspileError {
-    unsupported(format!(
-        "glue for `{}` of `{}`: {reason} (not yet)",
-        f.name, f.interface
-    ))
-}
+/// Writes into guest memory; present only when a result is returned through memory.
+const MEM_HELPERS: &str = r#"
+mod glue_mem {
+    #![allow(dead_code, unused_imports)]
+    use super::*;
 
-/// Checks that glue can be generated for `f`: only functions made of scalars, enums, flags,
-/// resource handles and flat variants, options, results, records and tuples with at most
-/// [`MAX_FLAT_PARAMS`](crate::wit_abi::MAX_FLAT_PARAMS) flat parameters and a result that
-/// flattens to at most one core value. A `string` or `list` (a pointer into linear memory),
-/// too many flat parameters (a pointer to them) or a larger flat result (a return pointer)
-/// need memory and are refused.
-fn check(f: &WitFunc, budget: &mut Budget) -> Result<CoreSignature, TranspileError> {
-    for (name, ty) in &f.params {
-        if needs_memory(ty, budget)? {
-            return Err(not_yet(
-                f,
-                &format!("parameter `{name}` holds a string or list, which needs linear memory"),
-            ));
+    pub fn st<H: Host>(g: &mut Instance<Glue<H>>, at: u64, bytes: &[u8]) {
+        let m = g.memory();
+        let len = m.len() as u64;
+        match at.checked_add(bytes.len() as u64) {
+            Some(end) if end <= len => m[at as usize..end as usize].copy_from_slice(bytes),
+            _ => glue_abi::trap("pointer out of bounds"),
         }
     }
-    if let Some(ty) = &f.result
-        && needs_memory(ty, budget)?
-    {
-        return Err(not_yet(
-            f,
-            "the result holds a string or list, which needs linear memory",
-        ));
-    }
-    let sig = core_signature(f, budget)?;
-    if sig.params_in_memory {
-        return Err(not_yet(
-            f,
-            "the parameters flatten to more than 16 core values and are passed through memory",
-        ));
-    }
-    if sig.result_in_memory {
-        return Err(not_yet(
-            f,
-            "the result flattens to more than 1 core value and is returned through memory",
-        ));
-    }
-    Ok(sig)
 }
+"#;
+
+/// Allocating in the guest; present only when a `string` or `list` is returned.
+const ALLOC_HELPERS: &str = r#"
+mod glue_alloc {
+    #![allow(dead_code, unused_imports)]
+    use super::*;
+
+    /// `count * size` bytes from the guest's `cabi_realloc`, aligned to `align`.
+    pub fn alloc<H: Host>(g: &mut Instance<Glue<H>>, align: u64, count: u64, size: u64) -> u64 {
+        let bytes = match count.checked_mul(size) {
+            Some(b) if b <= u64::from(u32::MAX) => b,
+            _ => glue_abi::trap("list too large"),
+        };
+        let ptr = u64::from(g.cabi_realloc(0, 0, align as i32, bytes as i32) as u32);
+        glue_abi::check(g.memory().len(), ptr, bytes, align);
+        ptr
+    }
+
+    /// Copies `data` into a fresh guest allocation and writes its `(ptr, len)` at `at`.
+    pub fn put_bytes<H: Host>(g: &mut Instance<Glue<H>>, at: u64, data: &[u8]) {
+        let ptr = alloc(g, 1, data.len() as u64, 1);
+        glue_mem::st(g, ptr, data);
+        put_ptr_len(g, at, ptr, data.len() as u64);
+    }
+
+    /// Writes the `(ptr, len)` of a string or list at `at`.
+    pub fn put_ptr_len<H: Host>(g: &mut Instance<Glue<H>>, at: u64, ptr: u64, len: u64) {
+        glue_mem::st(g, at, &(ptr as u32).to_le_bytes());
+        glue_mem::st(g, at + 4, &(len as u32).to_le_bytes());
+    }
+}
+"#;
 
 fn core_rust(flat: Flat) -> &'static str {
     match flat {
@@ -189,14 +264,69 @@ impl Case {
     }
 }
 
+/// Where a value is lifted from: the flat core parameters (`s[n..]`) or memory at an address
+/// (a Rust `u64` expression).
+enum Src {
+    Flat(usize),
+    Mem(String),
+}
+
+impl Src {
+    /// The source `off` further on: `off` more flat slots, or `off` more bytes.
+    fn advance(&self, off: u64) -> Src {
+        match self {
+            Src::Flat(b) => Src::Flat(b.saturating_add(usize::try_from(off).unwrap_or(usize::MAX))),
+            Src::Mem(at) => Src::Mem(offset_expr(at, off)),
+        }
+    }
+}
+
+/// The bytes a scalar (or flags, or a discriminant) takes in memory.
+fn mem_width(ty: &WitType) -> usize {
+    match ty {
+        WitType::U8 | WitType::S8 | WitType::Bool => 1,
+        WitType::U16 | WitType::S16 => 2,
+        WitType::U64 | WitType::S64 | WitType::F64 => 8,
+        WitType::Flags(f) => match f.flags.len() {
+            0 => 0,
+            1..=8 => 1,
+            9..=16 => 2,
+            _ => 4,
+        },
+        _ => 4,
+    }
+}
+
 struct Gen<'a> {
     records: &'a Records,
     budget: Budget,
+    /// A counter for the variable names of nested lists, records and the like.
+    fresh: usize,
+    /// Some result is written through a pointer.
+    writes_memory: bool,
+    /// Some result is a `string` or `list`, allocated through `cabi_realloc`.
+    allocates: bool,
 }
 
 impl Gen<'_> {
     fn flat_len(&mut self, ty: &WitType) -> Result<usize, TranspileError> {
         Ok(flatten(ty, &mut self.budget)?.len())
+    }
+
+    fn fresh(&mut self) -> usize {
+        self.fresh = self.fresh.saturating_add(1);
+        self.fresh
+    }
+
+    /// The `(size, align)` of `ty` in memory.
+    fn layout(&mut self, ty: &WitType) -> Result<(u64, u64), TranspileError> {
+        size_align(ty, &mut self.budget)
+    }
+
+    /// The discriminant size and payload offset of a variant-like type. Every caller has
+    /// matched `cases` first, so the `(1, 1)` fallback for any other type is never used.
+    fn variant_layout(&mut self, ty: &WitType) -> Result<(u64, u64), TranspileError> {
+        Ok(variant_layout(ty, &mut self.budget)?.unwrap_or((1, 1)))
     }
 
     /// The cases of an option, result, variant or enum; `None` for any other type.
@@ -230,13 +360,40 @@ impl Gen<'_> {
         }))
     }
 
-    /// A Rust expression lifting the value of `ty` held in slots `s[base..]`.
-    fn lift(&mut self, ty: &WitType, base: usize) -> Result<String, TranspileError> {
-        self.budget.spend()?;
-        let s = format!("s[{base}]");
-        if let Some(cases) = self.cases(ty)? {
-            return self.lift_cases(&cases, base);
+    /// The sources of consecutive fields of `tys` laid out from `src`.
+    fn field_srcs(&mut self, tys: &[&WitType], src: &Src) -> Result<Vec<Src>, TranspileError> {
+        match src {
+            Src::Flat(base) => {
+                let mut offset = *base;
+                let mut out = Vec::new();
+                for t in tys {
+                    out.push(Src::Flat(offset));
+                    offset = offset.saturating_add(self.flat_len(t)?);
+                }
+                Ok(out)
+            }
+            Src::Mem(at) => Ok(field_offsets(tys, &mut self.budget)?
+                .into_iter()
+                .map(|off| Src::Mem(offset_expr(at, off)))
+                .collect()),
         }
+    }
+
+    /// The `u64` bit pattern of a `width`-byte value at `src`.
+    fn raw(src: &Src, width: usize) -> String {
+        match src {
+            Src::Flat(base) => format!("s[{base}]"),
+            Src::Mem(at) => format!("glue_abi::ld(m, {at}, {width})"),
+        }
+    }
+
+    /// A Rust expression lifting the value of `ty` at `src`.
+    fn lift(&mut self, ty: &WitType, src: &Src) -> Result<String, TranspileError> {
+        self.budget.spend()?;
+        if let Some(cases) = self.cases(ty)? {
+            return self.lift_cases(ty, &cases, src);
+        }
+        let s = Self::raw(src, mem_width(ty));
         Ok(match ty {
             WitType::U8 => format!("glue_abi::u8_({s})"),
             WitType::U16 => format!("glue_abi::u16_({s})"),
@@ -264,11 +421,11 @@ impl Gen<'_> {
                 }
             }
             WitType::Tuple(ts) => {
-                let mut offset = base;
+                let tys: Vec<&WitType> = ts.iter().map(AsRef::as_ref).collect();
+                let srcs = self.field_srcs(&tys, src)?;
                 let mut parts = Vec::new();
-                for t in ts {
-                    parts.push(self.lift(t, offset)?);
-                    offset = offset.saturating_add(self.flat_len(t)?);
+                for (t, src) in tys.iter().zip(&srcs) {
+                    parts.push(self.lift(t, src)?);
                 }
                 match parts.as_slice() {
                     [one] => format!("({one},)"),
@@ -278,40 +435,87 @@ impl Gen<'_> {
             WitType::Record(r) => {
                 let name = self.records.rust(ty)?;
                 let idents = unique_idents(r.fields.iter().map(|(n, _)| n.as_str()));
-                let mut offset = base;
+                let tys: Vec<&WitType> = r.fields.iter().map(|(_, t)| t.as_ref()).collect();
+                let srcs = self.field_srcs(&tys, src)?;
                 let mut fields = String::new();
-                for (ident, (_, t)) in idents.iter().zip(&r.fields) {
-                    let _ = write!(fields, "{ident}: {}, ", self.lift(t, offset)?);
-                    offset = offset.saturating_add(self.flat_len(t)?);
+                for ((ident, t), src) in idents.iter().zip(&tys).zip(&srcs) {
+                    let _ = write!(fields, "{ident}: {}, ", self.lift(t, src)?);
                 }
                 format!("{name} {{ {fields}}}")
             }
-            // `String` and `List` never get here: `check` refuses them.
-            _ => {
+            WitType::String => {
+                let (ptr, len) = Self::ptr_len(src);
+                format!("glue_abi::string(m, &lb, {ptr}, {len})")
+            }
+            WitType::List(t) => {
+                let (ptr, len) = Self::ptr_len(src);
+                if matches!(**t, WitType::U8) {
+                    return Ok(format!("glue_abi::bytes(m, &lb, {ptr}, {len})"));
+                }
+                let (size, align) = self.layout(t)?;
+                let id = self.fresh();
+                let elem = self.lift(
+                    t,
+                    &Src::Mem(format!("(u64::from(p{id}) + u64::from(i{id}) * {size})")),
+                )?;
+                format!(
+                    "{{ let p{id} = {ptr}; let n{id} = {len}; \
+                     glue_abi::check_list(m, &lb, p{id}, n{id}, {size}, {align}); \
+                     (0..n{id}).map(|i{id}| {elem}).collect::<Vec<_>>() }}"
+                )
+            }
+            // Variant-like types were lifted above.
+            WitType::Option(_)
+            | WitType::Result { .. }
+            | WitType::Variant(_)
+            | WitType::Enum(_) => {
                 return Err(unsupported(
-                    "glue: a string or list reached the flat lift".to_string(),
+                    "glue: a variant-like type reached the scalar lift".to_string(),
                 ));
             }
         })
     }
 
-    fn lift_cases(&mut self, cases: &[Case], base: usize) -> Result<String, TranspileError> {
+    /// The `(ptr, len)` `u32` expressions of the string or list at `src`.
+    fn ptr_len(src: &Src) -> (String, String) {
+        let word = |src: &Src| format!("{} as u32", Self::raw(src, 4));
+        let len_at = match src {
+            Src::Flat(_) => 1,
+            Src::Mem(_) => 4,
+        };
+        (word(src), word(&src.advance(len_at)))
+    }
+
+    fn lift_cases(
+        &mut self,
+        ty: &WitType,
+        cases: &[Case],
+        src: &Src,
+    ) -> Result<String, TranspileError> {
+        let (disc_size, payload_off) = match src {
+            Src::Flat(_) => (4, 1),
+            Src::Mem(_) => self.variant_layout(ty)?,
+        };
+        let disc = Self::raw(src, usize::try_from(disc_size).unwrap_or(4));
+        let payload_src = src.advance(payload_off);
         let mut arms = String::new();
         for (i, case) in cases.iter().enumerate() {
             let payload = match &case.payload {
-                Some(t) => Some(self.lift(t, base.saturating_add(1))?),
+                Some(t) => Some(self.lift(t, &payload_src)?),
                 None => None,
             };
             let _ = write!(arms, "{i} => {}, ", case.build(payload));
         }
         Ok(format!(
-            "match glue_abi::disc(s[{base}], {}) {{ {arms}_ => glue_abi::trap(\"invalid discriminant\") }}",
+            "match glue_abi::disc({disc}, {}) {{ {arms}_ => glue_abi::trap(\"invalid discriminant\") }}",
             cases.len()
         ))
     }
 
     /// Statements storing the flat form of the Rust expression `value` of type `ty` into
     /// `out[base..]` (which starts zeroed, so the slots a variant case leaves unused stay 0).
+    /// Only for types without a `string` or `list`: a result that holds one is returned
+    /// through memory.
     fn lower(&mut self, ty: &WitType, value: &str, base: usize) -> Result<String, TranspileError> {
         self.budget.spend()?;
         if matches!(ty, WitType::Enum(_)) {
@@ -375,12 +579,126 @@ impl Gen<'_> {
                 }
                 format!("{{ let v = {value}; {body}}}")
             }
-            _ => {
+            // `check` never lets these reach the flat lower.
+            WitType::String | WitType::List(_) => {
                 return Err(unsupported(
                     "glue: a string or list reached the flat lower".to_string(),
                 ));
             }
+            _ => String::new(),
         })
+    }
+
+    /// Statements storing the Rust expression `value` of type `ty` into guest memory at the
+    /// address expression `at` (`glue_mem::st`), allocating in the guest for a `string` or
+    /// `list`. Padding is left as it is.
+    fn store(&mut self, ty: &WitType, value: &str, at: &str) -> Result<String, TranspileError> {
+        self.budget.spend()?;
+        self.writes_memory = true;
+        let put = |bytes: String| format!("glue_mem::st(g, {at}, &{bytes});");
+        if let Some(cases) = self.cases(ty)? {
+            let (disc_size, payload_off) = self.variant_layout(ty)?;
+            let payload_at = offset_expr(at, payload_off);
+            let disc = |i: String| put(format!("({i}).to_le_bytes()[..{disc_size}]"));
+            if matches!(ty, WitType::Enum(_)) {
+                return Ok(disc(format!("({value}) as u32")));
+            }
+            let mut arms = String::new();
+            for (i, case) in cases.iter().enumerate() {
+                let body = match &case.payload {
+                    Some(t) => self.store(t, "x", &payload_at)?,
+                    None => String::new(),
+                };
+                let d = disc(format!("{i}u32"));
+                let _ = write!(arms, "{} => {{ {d} {body} }} ", case.pattern());
+            }
+            return Ok(format!("match {value} {{ {arms}}}"));
+        }
+        Ok(match ty {
+            WitType::U8 => put(format!("[{value}]")),
+            WitType::S8 => put(format!("[({value}) as u8]")),
+            WitType::Bool => put(format!("[u8::from({value})]")),
+            WitType::U16
+            | WitType::U32
+            | WitType::U64
+            | WitType::S16
+            | WitType::S32
+            | WitType::S64
+            | WitType::F32
+            | WitType::F64 => put(format!("({value}).to_le_bytes()")),
+            WitType::Char => put(format!("u32::from({value}).to_le_bytes()")),
+            WitType::Own(_) | WitType::Borrow(_) => put(format!("({value}).0.to_le_bytes()")),
+            WitType::Flags(f) => {
+                if f.flags.is_empty() {
+                    String::new()
+                } else {
+                    put(format!("({value}).0.to_le_bytes()"))
+                }
+            }
+            WitType::Tuple(ts) => {
+                let tys: Vec<&WitType> = ts.iter().map(AsRef::as_ref).collect();
+                let names: Vec<String> = (0..tys.len()).map(|i| i.to_string()).collect();
+                self.store_fields(&tys, &names, value, at)?
+            }
+            WitType::Record(r) => {
+                let tys: Vec<&WitType> = r.fields.iter().map(|(_, t)| t.as_ref()).collect();
+                let names = unique_idents(r.fields.iter().map(|(n, _)| n.as_str()));
+                self.store_fields(&tys, &names, value, at)?
+            }
+            WitType::String => {
+                self.allocates = true;
+                format!("glue_alloc::put_bytes(g, {at}, ({value}).as_bytes());")
+            }
+            WitType::List(t) => {
+                self.allocates = true;
+                if matches!(**t, WitType::U8) {
+                    return Ok(format!("glue_alloc::put_bytes(g, {at}, &({value}));"));
+                }
+                let (size, align) = self.layout(t)?;
+                let id = self.fresh();
+                let elem_at = format!("(p{id} + (i{id} as u64) * {size})");
+                let elem = self.store(t, &format!("x{id}"), &elem_at)?;
+                format!(
+                    "{{ let v{id} = {value}; let n{id} = v{id}.len() as u64; \
+                     let p{id} = glue_alloc::alloc(g, {align}, n{id}, {size}); \
+                     for (i{id}, x{id}) in v{id}.into_iter().enumerate() {{ {elem} }} \
+                     glue_alloc::put_ptr_len(g, {at}, p{id}, n{id}); }}"
+                )
+            }
+            _ => String::new(),
+        })
+    }
+}
+
+impl Gen<'_> {
+    /// Stores the fields `value.<names[i]>` of a tuple or record, each at its offset from `at`.
+    fn store_fields(
+        &mut self,
+        tys: &[&WitType],
+        names: &[String],
+        value: &str,
+        at: &str,
+    ) -> Result<String, TranspileError> {
+        let offsets = field_offsets(tys, &mut self.budget)?;
+        let id = self.fresh();
+        let mut body = String::new();
+        for ((t, name), off) in tys.iter().zip(names).zip(offsets) {
+            let _ = write!(
+                body,
+                "{} ",
+                self.store(t, &format!("v{id}.{name}"), &offset_expr(at, off))?
+            );
+        }
+        Ok(format!("{{ let v{id} = {value}; {body}}}"))
+    }
+}
+
+/// The address expression `at + offset`.
+fn offset_expr(at: &str, offset: u64) -> String {
+    if offset == 0 {
+        at.to_string()
+    } else {
+        format!("({at} + {offset})")
     }
 }
 
@@ -389,33 +707,33 @@ impl Gen<'_> {
 ///
 /// # Errors
 ///
-/// A function [`check`] refuses, naming it and the reason.
+/// A type that expands past the node budget.
 pub(super) fn write(
     out: &mut String,
     funcs: &[WitFunc],
     names: &[String],
     records: &Records,
 ) -> Result<(), TranspileError> {
-    let mut budget = Budget::new();
-    let mut sigs = Vec::new();
-    for f in funcs {
-        sigs.push(check(f, &mut budget)?);
-    }
+    let mut sig_budget = Budget::new();
     let mut gen_ = Gen {
         records,
         budget: Budget::new(),
+        fresh: 0,
+        writes_memory: false,
+        allocates: false,
     };
     out.push_str(HELPERS);
     out.push_str(
         "\n/// Lowers a typed `Host` to the flat `Imports` of the core module (transpiled with\n\
-         /// `named_imports` and `reentrant_imports`): `Instance<Glue<H>>`.\n\
+         /// `named_imports`, `reentrant_imports` and `named_exports`): `Instance<Glue<H>>`.\n\
          pub struct Glue<H: Host>(pub H);\n\n\
-         #[allow(unused_variables)]\n\
+         #[allow(unused_variables, unused_parens)]\n\
          impl<H: Host> Imports for Glue<H> {\n",
     );
-    for ((f, name), sig) in funcs.iter().zip(names).zip(&sigs) {
+    for (f, name) in funcs.iter().zip(names) {
+        let sig = core_signature(f, &mut sig_budget)?;
         let _ = writeln!(out, "    /// {:?} {:?}", f.interface, f.name);
-        let mut head = format!("    fn {name}(&mut self, _g: &mut Instance<Self>");
+        let mut head = format!("    fn {name}(&mut self, g: &mut Instance<Self>");
         for (i, flat) in sig.params.iter().enumerate() {
             let _ = write!(head, ", p{i}: {}", core_rust(*flat));
         }
@@ -424,23 +742,62 @@ pub(super) fn write(
             let _ = write!(head, " -> {}", core_rust(*flat));
         }
         let _ = writeln!(out, "{head} {{");
-        if !sig.params.is_empty() {
-            let slots: Vec<String> = sig
-                .params
-                .iter()
-                .enumerate()
-                .map(|(i, flat)| to_slot(*flat, &format!("p{i}")))
-                .collect();
-            let _ = writeln!(out, "        let s = [{}];", slots.join(", "));
-        }
-        let mut args = Vec::new();
-        let mut offset = 0usize;
+
+        // The parameters: flat in `s`, or one pointer to a record of them.
+        let mut reads_memory = sig.params_in_memory;
         for (_, ty) in &f.params {
-            args.push(gen_.lift(ty, offset)?);
-            offset = offset.saturating_add(gen_.flat_len(ty)?);
+            reads_memory |= needs_memory(ty, &mut sig_budget)?;
         }
+        let mut prologue = String::new();
+        let tys: Vec<&WitType> = f.params.iter().map(|(_, t)| t).collect();
+        let srcs = if sig.params_in_memory {
+            let mut fields = Vec::new();
+            for t in &tys {
+                fields.push(gen_.layout(t)?);
+            }
+            let (size, align) = record_layout(&fields);
+            let _ = writeln!(prologue, "        let at = u64::from(p0 as u32);");
+            let _ = writeln!(
+                prologue,
+                "        glue_abi::check(m.len(), at, {size}, {align});"
+            );
+            gen_.field_srcs(&tys, &Src::Mem("at".to_string()))?
+        } else {
+            if !sig.params.is_empty() {
+                let slots: Vec<String> = sig
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, flat)| to_slot(*flat, &format!("p{i}")))
+                    .collect();
+                let _ = writeln!(out, "        let s = [{}];", slots.join(", "));
+            }
+            gen_.field_srcs(&tys, &Src::Flat(0))?
+        };
+        if reads_memory {
+            let _ = writeln!(out, "        let m: &[u8] = g.memory();");
+            let _ = writeln!(out, "        let lb = glue_abi::Budget::new(m.len());");
+        }
+        out.push_str(&prologue);
+        let mut args = Vec::new();
+        for (i, (ty, src)) in tys.iter().zip(&srcs).enumerate() {
+            let _ = writeln!(out, "        let a{i} = {};", gen_.lift(ty, src)?);
+            args.push(format!("a{i}"));
+        }
+
         let call = format!("self.0.{name}({})", args.join(", "));
         match (&f.result, sig.results.first()) {
+            (Some(ty), _) if sig.result_in_memory => {
+                let (size, align) = gen_.layout(ty)?;
+                let retptr = format!("p{}", sig.params.len().saturating_sub(1));
+                let _ = writeln!(out, "        let r = {call};");
+                let _ = writeln!(out, "        let at = u64::from({retptr} as u32);");
+                let _ = writeln!(
+                    out,
+                    "        glue_abi::check(g.memory().len(), at, {size}, {align});"
+                );
+                let _ = writeln!(out, "        {}", gen_.store(ty, "r", "at")?);
+            }
             (Some(ty), Some(flat)) => {
                 let _ = writeln!(out, "        let r = {call};");
                 let _ = writeln!(out, "        let mut out = [0u64; 1];");
@@ -458,5 +815,11 @@ pub(super) fn write(
         out.push_str("    }\n");
     }
     out.push_str("}\n");
+    if gen_.writes_memory {
+        out.push_str(MEM_HELPERS);
+    }
+    if gen_.allocates {
+        out.push_str(ALLOC_HELPERS);
+    }
     Ok(())
 }
