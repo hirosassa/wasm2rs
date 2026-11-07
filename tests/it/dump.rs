@@ -322,3 +322,34 @@ fn reports_continuations() {
     );
     assert!(text.contains("continuations"), "{text}");
 }
+
+#[test]
+fn compact_import_groups_are_listed_item_by_item_with_their_own_signatures() {
+    // Encoding 1 (`item name type`) gives each item its own type; encoding 2
+    // (`item name` ... then one shared type) shares one. Both expand to one line
+    // per imported function, classified like single imports.
+    let text = summary(
+        r#"(module
+            (import "env"
+              (item "one" (func (param i32)))
+              (item "two" (func (result i64))))
+            (import "wasi_snapshot_preview1"
+              (item "fd_write")
+              (item "fd_read")
+              (func (param i32 i32 i32 i32) (result i32))))"#,
+    );
+    assert!(
+        text.contains("functions: 4 (4 imported, 0 defined)"),
+        "{text}"
+    );
+    assert!(text.contains("env.one (i32) -> () [host trait]"), "{text}");
+    assert!(text.contains("env.two () -> (i64) [host trait]"), "{text}");
+    for name in ["fd_write", "fd_read"] {
+        assert!(
+            text.contains(&format!(
+                "wasi_snapshot_preview1.{name} (i32, i32, i32, i32) -> (i32) [native WASI]"
+            )),
+            "{text}"
+        );
+    }
+}

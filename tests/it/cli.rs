@@ -378,3 +378,84 @@ fn named_imports_flag_names_the_trait_methods_single_and_split() {
     assert!(all.contains("fn env_log(&mut self, a0: i32);"), "{all}");
     assert!(all.contains("self.imports.env_log("), "{all}");
 }
+
+/// Run the CLI with `args`, assert it fails, and return its stderr.
+fn failing_stderr(args: &[&std::path::Path]) -> String {
+    let run = Command::new(wasm2rs_bin())
+        .args(args)
+        .output()
+        .expect("run wasm2rs");
+    assert!(!run.status.success(), "expected a nonzero exit");
+    String::from_utf8_lossy(&run.stderr).into_owned()
+}
+
+/// A component with one core module, written next to a fresh scratch directory.
+fn write_component(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let wasm = wat::parse_str(r#"(component (core module (func (export "a"))))"#).expect("wat");
+    let dir = std::env::temp_dir().join(format!("wasm2rs_cli_{name}_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let input = dir.join("c.wasm");
+    std::fs::write(&input, wasm).expect("write component");
+    (dir, input)
+}
+
+#[test]
+fn extract_core_reports_a_directory_it_cannot_create() {
+    // The parent of the requested directory is a regular file, so the directory
+    // cannot exist on any platform (and regardless of the user's privileges).
+    let (dir, input) = write_component("extract_mkdir");
+    let blocker = dir.join("blocker");
+    std::fs::write(&blocker, b"not a directory").expect("write blocker");
+    let out = blocker.join("modules");
+
+    let stderr = failing_stderr(&["--extract-core".as_ref(), &input, &out]);
+    assert!(
+        stderr.starts_with(&format!("wasm2rs: cannot create {}: ", out.display())),
+        "{stderr}"
+    );
+    assert!(blocker.is_file(), "the blocking file must be untouched");
+}
+
+#[test]
+fn extract_core_reports_a_module_file_it_cannot_write() {
+    // `module0.wasm` already exists as a directory, so writing the file fails.
+    let (dir, input) = write_component("extract_write");
+    let out = dir.join("out");
+    std::fs::create_dir_all(out.join("module0.wasm")).expect("create blocking dir");
+
+    let stderr = failing_stderr(&["--extract-core".as_ref(), &input, &out]);
+    assert!(
+        stderr.starts_with(&format!(
+            "wasm2rs: cannot write {}: ",
+            out.join("module0.wasm").display()
+        )),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn an_output_file_in_a_missing_directory_is_reported() {
+    let (dir, input) = write_sample_wasm("output_missing_dir");
+    let output = dir.join("no-such-dir").join("out.rs");
+
+    let stderr = failing_stderr(&[&input, &output]);
+    assert!(
+        stderr.starts_with(&format!("wasm2rs: cannot write {}: ", output.display())),
+        "{stderr}"
+    );
+    assert!(!output.exists());
+}
+
+#[test]
+fn a_split_output_directory_that_cannot_be_created_is_reported() {
+    let (dir, input) = write_sample_wasm("split_mkdir");
+    let blocker = dir.join("split_blocker");
+    std::fs::write(&blocker, b"not a directory").expect("write blocker");
+    let out = blocker.join("crate");
+
+    let stderr = failing_stderr(&[&input, &out, "1".as_ref()]);
+    assert!(
+        stderr.starts_with(&format!("wasm2rs: cannot create {}: ", out.display())),
+        "{stderr}"
+    );
+}

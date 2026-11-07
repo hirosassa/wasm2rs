@@ -1382,3 +1382,43 @@ fn a_drop_that_is_not_tied_to_an_imported_resource_keeps_every_resource_drop() {
     // The drop of a resource of an instantiated instance is tied to no import: keep both.
     assert_eq!(names("$local"), ["[resource-drop]r", "[resource-drop]s"]);
 }
+
+#[test]
+fn an_async_function_is_unsupported_and_names_the_function() {
+    let wasm = component("", "a:b/c", r#"(export "f" (func async (param "a" u8)))"#);
+    let err = wit_host_trait(&wasm).unwrap_err().to_string();
+    assert!(
+        err.contains("async function in function `f` of `a:b/c`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_async_function_among_synchronous_ones_fails_the_whole_interface() {
+    // Unlike an unused *type*, a function the trait must declare cannot be skipped.
+    let wasm = component(
+        "",
+        "a:b/c",
+        r#"(export "ok" (func (result u8)))
+           (export "slow" (func async))"#,
+    );
+    let err = wit_host_trait(&wasm).unwrap_err().to_string();
+    assert!(err.contains("async function in function `slow`"), "{err}");
+}
+
+#[test]
+fn an_alias_of_a_type_exported_by_an_instantiated_component_is_not_an_error_when_unused() {
+    // `$i` is the result of an `instantiate`, not an imported instance, so its
+    // exports are unknown to the trait generator; aliasing one must not break
+    // an unrelated import.
+    let wasm = component(
+        r#"(component $inner
+             (type $r (record (field "n" u8)))
+             (export "r" (type $r)))
+           (instance $i (instantiate $inner))
+           (alias export $i "r" (type $t))"#,
+        "a:b/c",
+        r#"(export "f" (func (result u8)))"#,
+    );
+    assert!(host(&wasm).contains("fn a_b_c_f(&mut self) -> u8;"));
+}
