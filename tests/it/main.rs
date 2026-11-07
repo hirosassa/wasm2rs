@@ -130,6 +130,7 @@ mod wasip2_typed_host;
 mod wasip2_typed_name_lookup;
 mod wasip2_typed_random;
 mod wasip2_typed_sockets;
+mod wasip2_typed_splice;
 mod wasip2_typed_stdin;
 mod wasip2_typed_streams;
 mod wasip2_typed_tcp_options;

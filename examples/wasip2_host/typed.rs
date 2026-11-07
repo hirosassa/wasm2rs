@@ -352,21 +352,7 @@ impl TypedHost {
             .collect()
     }
 
-    // optional: wasi_io_poll_resource_drop_pollable | wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_blocking_skip
-    fn subscribe(&mut self, deadline: Option<Instant>) -> Pollable {
-        self.subscribe_wait(deadline.map_or(Wait::Ready, Wait::Deadline))
-    }
-
-    fn subscribe_wait(&mut self, wait: Wait) -> Pollable {
-        self.pollables.push(wait);
-        Pollable((self.pollables.len() - 1) as u32)
-    }
-
-    /// What a pollable waits for; an unknown one is ready.
-    fn wait_of(&self, pollable: Pollable) -> Wait {
-        self.pollables.get(pollable.0 as usize).copied().unwrap_or(Wait::Ready)
-    }
-
+    // optional: wasi_io_streams_method_input_stream_read | wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_skip | wasi_io_streams_method_input_stream_blocking_skip | wasi_io_streams_method_output_stream_splice | wasi_io_streams_method_output_stream_blocking_splice | wasi_io_streams_method_input_stream_subscribe
     /// Starts the thread that reads the real stdin into the buffer (once).
     fn start_stdin(&mut self) {
         use std::io::Read;
@@ -390,6 +376,22 @@ impl TypedHost {
                 }
             }
         });
+    }
+    // end optional
+
+    // optional: wasi_io_poll_resource_drop_pollable | wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_blocking_skip | wasi_io_streams_method_output_stream_blocking_splice
+    fn subscribe(&mut self, deadline: Option<Instant>) -> Pollable {
+        self.subscribe_wait(deadline.map_or(Wait::Ready, Wait::Deadline))
+    }
+
+    fn subscribe_wait(&mut self, wait: Wait) -> Pollable {
+        self.pollables.push(wait);
+        Pollable((self.pollables.len() - 1) as u32)
+    }
+
+    /// What a pollable waits for; an unknown one is ready.
+    fn wait_of(&self, pollable: Pollable) -> Wait {
+        self.pollables.get(pollable.0 as usize).copied().unwrap_or(Wait::Ready)
     }
 
     /// The positions in `pollables` of the ones that are ready, waiting until at least one
@@ -769,9 +771,9 @@ fn write_all_waiting(stream: &mut TcpStream, mut bytes: &[u8]) -> std::io::Resul
 
 #[allow(dead_code)]
 impl TypedHost {
-    // optional: wasi_io_streams_method_input_stream_read | wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_skip | wasi_io_streams_method_input_stream_blocking_skip
+    // optional: wasi_io_streams_method_input_stream_read | wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_skip | wasi_io_streams_method_input_stream_blocking_skip | wasi_io_streams_method_output_stream_splice | wasi_io_streams_method_output_stream_blocking_splice
     /// Reads at most 4096 bytes of a stream without waiting: the one read path of `read`,
-    /// `blocking-read`, `skip` and `blocking-skip`.
+    /// `blocking-read`, `skip`, `blocking-skip`, `splice` and `blocking-splice`.
     fn read_stream(&mut self, stream: u32, len: u64) -> Result<Vec<u8>, StreamError> {
         let mut buf = vec![0u8; len.min(4096) as usize];
         if stream == 0 {
@@ -829,7 +831,7 @@ impl TypedHost {
     }
     // end optional
 
-    // optional: wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_blocking_skip
+    // optional: wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_blocking_skip | wasi_io_streams_method_output_stream_blocking_splice
     /// `read_stream`, but waits (as the stream's `subscribe` would) while an open stream has
     /// nothing yet: stdin and connections; a file never waits. A zero length waits, too, until
     /// the stream is readable (data or its end), then answers like `read_stream(.., 0)`: ok
@@ -853,10 +855,23 @@ impl TypedHost {
     }
     // end optional
 
-    // optional: wasi_io_streams_method_output_stream_write | wasi_io_streams_method_output_stream_blocking_write_and_flush | wasi_io_streams_method_output_stream_write_zeroes | wasi_io_streams_method_output_stream_blocking_write_zeroes_and_flush
+    // optional: wasi_io_streams_method_output_stream_write | wasi_io_streams_method_output_stream_blocking_write_and_flush | wasi_io_streams_method_output_stream_write_zeroes | wasi_io_streams_method_output_stream_blocking_write_zeroes_and_flush | wasi_io_streams_method_output_stream_splice | wasi_io_streams_method_output_stream_blocking_splice
+    /// Whether an output stream can still be written (not dropped or unknown): `splice`
+    /// asks before it reads, so a dead output does not consume the source's bytes.
+    fn output_is_open(&self, stream: u32) -> bool {
+        if let Some(slot) = tcp_slot(stream) {
+            self.tcp_out.get(slot).is_some()
+        } else if let Some(index) = file_index(stream) {
+            self.outputs.get(index).is_some()
+        } else {
+            true // stdout and stderr
+        }
+    }
+
     /// Writes all of `contents` to a stream: the one write path of `write`,
-    /// `blocking-write-and-flush`, `write-zeroes` and `blocking-write-zeroes-and-flush`.
-    /// A failed write ends the stream.
+    /// `blocking-write-and-flush`, `write-zeroes`, `blocking-write-zeroes-and-flush`,
+    /// `splice` and `blocking-splice`. A failed write ends the stream. A connection is written
+    /// with `write_all_waiting`: this waits for the peer to read, it never returns early.
     fn write_stream(&mut self, stream: u32, contents: &[u8]) -> Result<(), StreamError> {
         let written = if let Some(slot) = tcp_slot(stream) {
             match self.tcp_out.get_mut(slot) {
@@ -1799,6 +1814,50 @@ impl Host for TypedHost {
         assert!(len <= 4096, "blocking-write-zeroes-and-flush: more than check-write allows");
         self.write_stream(self_.0, &vec![0u8; len as usize])?;
         self.flush_stream(self_.0)
+    }
+    // end optional
+
+    // optional: wasi_io_streams_method_output_stream_splice
+    /// Moves at most `min(len, 4096)` bytes from `src` to this stream and returns how many:
+    /// a dropped output is `closed` first (before anything is read), then `read`, then
+    /// `write` (a zero `len` is ok while both are open). It does not wait for `src`: `src` at
+    /// its end is `closed`, nothing available yet is `ok(0)`. The write does wait for room:
+    /// a connection is written like `write` (the peer must read). A failed write ends the
+    /// output stream. Known limitation: the bytes already read from `src` are lost then.
+    fn wasi_io_streams_method_output_stream_splice(
+        &mut self,
+        self_: OutputStream,
+        src: InputStream,
+        len: u64,
+    ) -> Result<u64, StreamError> {
+        if !self.output_is_open(self_.0) {
+            return Err(StreamError::Closed);
+        }
+        let data = self.read_stream(src.0, len)?;
+        if !data.is_empty() {
+            self.write_stream(self_.0, &data)?;
+        }
+        Ok(data.len() as u64)
+    }
+    // end optional
+
+    // optional: wasi_io_streams_method_output_stream_blocking_splice
+    /// Like `splice`, but waits while an open `src` (stdin or a connection) has nothing yet,
+    /// so at least one byte is moved for a `len` over 0. The write waits like `splice`'s.
+    fn wasi_io_streams_method_output_stream_blocking_splice(
+        &mut self,
+        self_: OutputStream,
+        src: InputStream,
+        len: u64,
+    ) -> Result<u64, StreamError> {
+        if !self.output_is_open(self_.0) {
+            return Err(StreamError::Closed);
+        }
+        let data = self.read_stream_waiting(src.0, len)?;
+        if !data.is_empty() {
+            self.write_stream(self_.0, &data)?;
+        }
+        Ok(data.len() as u64)
     }
     // end optional
 
