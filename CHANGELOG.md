@@ -10,10 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `examples/wasip2_host/typed.rs`: a WASI preview2 host written against the generated typed `Host`
-  trait (no canonical-ABI code): stdout/stderr, stdin, the environment, exit, output streams,
-  pollables, `poll`, monotonic-clock timers and the terminal queries, enough for a real
+  trait (no canonical-ABI code): stdout/stderr, the environment, exit, output streams,
+  pollables, `poll`, and the terminal queries, enough for a real
   `wasm32-wasip2` `println!` program (checked by hand with one, and by tests that declare the
-  imports in a component). It also serves `wasi:random` and `wasi:filesystem`
+  imports in a component). It also serves the arguments (`TypedHost::with_arguments`), the
+  clocks (monotonic `now`, `subscribe-duration` and `subscribe-instant`, wall-clock `now`) and the
+  real process stdin (a reader thread fills a buffer, `read` never blocks and ends with `closed`,
+  the stdin pollable wakes on data and at the end of the input; as in `host.rs`; tests in
+  `tests/it/wasip2_typed_cli.rs`, `tests/it/wasip2_typed_clocks.rs` and
+  `tests/it/wasip2_typed_stdin.rs`). It also serves `wasi:random` and `wasi:filesystem`
   (`TypedHost::with_preopen`, read-only: `get-directories`, `open-at`, `read-via-stream`, `stat`,
   `stat-at`, `get-flags`, `read-directory`, `readlink-at`, `metadata-hash`, file
   `input-stream.read`; `TypedHost::with_writable_preopen` adds `open-at` with create/exclusive/
