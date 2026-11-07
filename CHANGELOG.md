@@ -13,8 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trait (no canonical-ABI code): stdout/stderr, stdin, the environment, exit, output streams,
   pollables, `poll`, monotonic-clock timers and the terminal queries, enough for a real
   `wasm32-wasip2` `println!` program (checked by hand with one, and by tests that declare the
-  imports in a component). The filesystem, sockets and random interfaces still live in the
-  hand-written `host.rs`.
+  imports in a component). It also serves `wasi:random` and read-only `wasi:filesystem`
+  (`TypedHost::with_preopen`: `get-directories`, `open-at`, `read-via-stream`, `stat`, `stat-at`,
+  `get-flags`, `read-directory`, `readlink-at`, `metadata-hash`, file `input-stream.read`, with the
+  semantics of `host.rs`; tests in `tests/it/wasip2_typed_fs.rs`). Writing files and sockets still
+  live only in the hand-written `host.rs`.
+- The `// optional: a | b` marker of the host sources (`filter.rs`) keeps a block if the generated
+  trait declares any of the listed methods.
 - `wit_host_glue` and `--wit-host --glue`: the glue from the typed `Host` trait to the flat
   reentrant `Imports` trait of the core module (`pub struct Glue<H: Host>(pub H)` with
   `impl<H: Host> Imports for Glue<H>`; each method has the name of the `Host` method it
