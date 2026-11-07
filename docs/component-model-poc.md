@@ -85,12 +85,12 @@ import that takes or returns a pointer (`write`, `check-write`, `get-environment
 becomes host-owned, like an imported memory, so the host's methods read and write guest
 memory directly.
 
-With it, `examples/wasip2_host/host.rs` implements the lowered imports of a
+With it, a hand-written host (`examples/wasip2_host/host.rs`, since retired in favor of the typed host) implemented the lowered imports of a
 `println!` program (stdout/stderr writes with the canonical-ABI `result` layouts, a
 fixed write budget, an empty environment and argument list, `exit`, no-op resource
 drops) and `examples/wasip2_run.rs` built and ran a core module with it (that is how
 the programs below ran). The example now takes the component itself and runs it through
-the typed host (`typed.rs`, with the generated glue) instead of `host.rs`; this is a
+the typed host (`typed.rs`, with the generated glue); this is a
 breaking change of its input (it no longer accepts an extracted core module):
 
 ```
@@ -104,7 +104,7 @@ build with rustc's E0046 errors and a hint, and the example exits with 2.
 
 Two programs ran: `println!("hello")` (21 imports) and one using `eprintln!`,
 `print!`, `flush` and `std::env::args` (22; the extra one is `get-arguments`). A small
-WAT with the same imports is covered by `tests/it/wasip2_host.rs`.
+WAT with the same imports was covered by the retired `tests/it/wasip2_host.rs`; the typed host's tests are in `tests/it/wasip2_typed_*.rs`.
 
 ## Result 4: the host calls back into the guest
 
@@ -115,7 +115,7 @@ host: the guest keeps its own memory, and the host builds the lists and strings 
 returns in it, the way the canonical ABI expects (`cabi_realloc(0, 0, align, size)`,
 then `(ptr, len)` at the return pointer).
 
-`examples/wasip2_host/host.rs` now implements, besides the hello-world imports:
+The hand-written host (`host.rs`, since retired) implemented, besides the hello-world imports:
 
 - `get-arguments` (`list<string>`, 8-byte elements) and `get-environment`
   (`list<tuple<string, string>>`, 16-byte elements), non-empty;
@@ -125,9 +125,9 @@ then `(ptr, len)` at the return pointer).
 The runner passes its trailing arguments and its environment to the program
 (`wasip2_run -- program.component.wasm one "two words"`; the work dir is
 `$WASIP2_WORK_DIR`, default a temporary directory). The `std::env::args` program above prints 3 arguments (its own
-name and the two given). `tests/it/wasip2_host.rs` checks the exact layouts from a
+name and the two given). The retired `tests/it/wasip2_host.rs` checked the exact layouts from a
 WAT module with a bump-allocator `cabi_realloc`; no real program calls `poll` from
-`println!`, so `poll` is covered by that test only.
+`println!`, so `poll` was covered by that test only.
 
 ## Result 5: stdin and clocks
 
@@ -149,7 +149,7 @@ the host.
   program that also waited on a deadline.)
 - The monotonic clock counts from the host's creation; `wall-clock.now` writes
   `datetime { seconds: u64, nanoseconds: u32 }`.
-- `tests/it/wasip2_host.rs` covers all of it from WAT (piped stdin, deadline
+- The retired `tests/it/wasip2_host.rs` covered all of it from WAT (piped stdin, deadline
   waits, a ready pollable returning at once next to a ten-second deadline, an idle
   stdin read, and `poll` waking for stdin data and end of input).
 
@@ -215,7 +215,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   opened for `write`; nanoseconds of a second or more are `invalid`) are done. On a read-only
   preopen `set-size` and `set-times` are `read-only`, while `sync` succeeds since it
   changes nothing. `set-times-at` and `readlink-at` are done too (a symlink's own times cannot be set: `unsupported`; a link target that is absolute or has `..` is `not-permitted`); `symlink-at` (a target that is absolute or has `..` is `not-permitted`) and `link-at` are done too.
-- Sockets: TCP over loopback is done (`tcp-create-socket`, `start-bind`/`finish-bind`, `start-listen`/`finish-listen`, `start-connect`/`finish-connect`, `accept`, `local-address`, `remote-address`, `subscribe`, `shutdown`, `instance-network`); the streams are the ordinary `input-stream`/`output-stream` handles. An address outside 127.0.0.0/8 and `::1` is `access-denied` unless the host calls `P2Host::with_external_network`. `std` binds and listens in one call, so `finish-bind` does both, a bound socket cannot connect (`not-supported`), and `start-connect` connects at once. UDP, `ip-name-lookup` and the socket options (keep-alive, buffer sizes, hop limit, backlog) are not implemented.
+- Sockets: TCP over loopback is done (`tcp-create-socket`, `start-bind`/`finish-bind`, `start-listen`/`finish-listen`, `start-connect`/`finish-connect`, `accept`, `local-address`, `remote-address`, `subscribe`, `shutdown`, `instance-network`); the streams are the ordinary `input-stream`/`output-stream` handles. An address outside 127.0.0.0/8 and `::1` is `access-denied` unless the host calls `TypedHost::with_external_network`. `std` binds and listens in one call, so `finish-bind` does both, a bound socket cannot connect (`not-supported`), and `start-connect` connects at once. UDP, `ip-name-lookup` and the socket options (keep-alive, buffer sizes, hop limit, backlog) are not implemented.
 - Paths must stay under the preopen: an absolute path or any `..` is `not-permitted`
   (stricter than WASI, which allows `..` that stays inside), and so is a symlink that
   leads out (the resolved path is checked against the preopen). Path flags are
@@ -247,12 +247,12 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
    *Typed host trait generation started: `wit_host_trait` / `--wit-host` read the component's
    import types and generate a `Host` trait with the same method names (plain-data types and resources, as `Copy` handle newtypes with a
    per-resource drop method, variants as Rust enums, enums, and flags as `Copy` integer newtypes with a constant per flag; futures, streams and error-context are rejected by name; a real `wasm32-wasip2` hello world now yields a trait). The glue between it and the core `Imports`
-   is done for every type the trait supports: `wit_host_glue` / `--wit-host --glue` generate `Glue<H: Host>` implementing `Imports`, with a canonical ABI model (layout, flattening, `join`), lift/lower from flat values or memory (strings as UTF-8, lists, options, results, records, variants, flags, handles, nested), parameters spilled to one pointer past 16 flat values, results through a return pointer, allocation through the guest's `cabi_realloc` and bounds, alignment, UTF-8 and discriminant checks that panic like traps, plus a per-call lift budget (traps: invalid UTF-8, bad pointers, lifted data larger than the guest's memory) so that many `(ptr, len)` descriptors aliasing the same bytes cannot make the host copy quadratically more than the guest holds. `examples/wasip2_host` predates it and still hand-writes the same ABI against the flat `Imports` (it is faster to extend for the WASI subset it covers); the glue is the generated equivalent, so a host only implements the typed `Host`. A manual check: a `wasm32-wasip2` hello world's `--wit-host --glue` text plus a std-based `impl Host` (stdout `write`, `check-write`, `get-stdout`, `poll`, ...) appended to the transpiled main core module (`--extract-core`, `module0`, transpiled with `named_imports`, `named_exports` and `reentrant_imports`; its imports are already the lowered functions, so the shim and fixup modules are not needed) prints `hello`. Checked against a real `wasm32-wasip2` hello world: all 21 core import names
+   is done for every type the trait supports: `wit_host_glue` / `--wit-host --glue` generate `Glue<H: Host>` implementing `Imports`, with a canonical ABI model (layout, flattening, `join`), lift/lower from flat values or memory (strings as UTF-8, lists, options, results, records, variants, flags, handles, nested), parameters spilled to one pointer past 16 flat values, results through a return pointer, allocation through the guest's `cabi_realloc` and bounds, alignment, UTF-8 and discriminant checks that panic like traps, plus a per-call lift budget (traps: invalid UTF-8, bad pointers, lifted data larger than the guest's memory) so that many `(ptr, len)` descriptors aliasing the same bytes cannot make the host copy quadratically more than the guest holds. `examples/wasip2_host` used to hand-write the same ABI against the flat `Imports`; that host was retired in favor of `typed.rs`, so a host only implements the typed `Host`. A manual check: a `wasm32-wasip2` hello world's `--wit-host --glue` text plus a std-based `impl Host` (stdout `write`, `check-write`, `get-stdout`, `poll`, ...) appended to the transpiled main core module (`--extract-core`, `module0`, transpiled with `named_imports`, `named_exports` and `reentrant_imports`; its imports are already the lowered functions, so the shim and fixup modules are not needed) prints `hello`. Checked against a real `wasm32-wasip2` hello world: all 21 core import names
    (`wasi:io/poll@0.2.0` `[resource-drop]pollable`, ...) equal the `Host`/`Imports` method names, because the core module's
    version (`@0.2.0`) differs from the component import's (`@0.2.12`) and `named_imports` drops the version suffix.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
-   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at` and `readlink-at` are done too; `symlink-at` and `link-at` are done too; so are TCP sockets over loopback (UDP and `ip-name-lookup` are not). This is what makes a wasip2 hello-world run natively. `examples/wasip2_host/typed.rs` redoes the `println!` subset (stdio, environment, exit, streams, pollables, `poll`, terminal queries) against the generated typed `Host` and glue, without canonical-ABI code; it also covers the arguments (`with_arguments`), the clocks (monotonic `now`, `subscribe-duration`, `subscribe-instant`, wall-clock `now`) and the real process stdin (reader thread, non-blocking `read`, pollable that wakes on data and at the end of input; `tests/it/wasip2_typed_cli.rs`, `tests/it/wasip2_typed_clocks.rs`, `tests/it/wasip2_typed_stdin.rs`), and `wasi:random` and files (`with_preopen`, read-only: `get-directories`, `open-at`, `read-via-stream`, `stat`, `stat-at`, `get-flags`, `read-directory`, `readlink-at`, `metadata-hash`, file `input-stream.read`; `with_writable_preopen` adds writing, appending, creating, truncating, removing, renaming, linking and `set-times`; same semantics as `host.rs`; `tests/it/wasip2_typed_fs.rs`, `tests/it/wasip2_typed_fs_write.rs`); TCP sockets over loopback are covered too (`tests/it/wasip2_typed_sockets.rs`), also together with files in one component (`tests/it/wasip2_typed_both.rs`; the host source is preceded by `type_aliases(&glue)` from `filter.rs`). UDP and `ip-name-lookup` are not covered.
+   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at` and `readlink-at` are done too; `symlink-at` and `link-at` are done too; so are TCP sockets over loopback (UDP and `ip-name-lookup` are not). This is what makes a wasip2 hello-world run natively. `examples/wasip2_host/typed.rs` redoes the `println!` subset (stdio, environment, exit, streams, pollables, `poll`, terminal queries) against the generated typed `Host` and glue, without canonical-ABI code; it also covers the arguments (`with_arguments`), the clocks (monotonic `now`, `subscribe-duration`, `subscribe-instant`, wall-clock `now`) and the real process stdin (reader thread, non-blocking `read`, pollable that wakes on data and at the end of input; `tests/it/wasip2_typed_cli.rs`, `tests/it/wasip2_typed_clocks.rs`, `tests/it/wasip2_typed_stdin.rs`), and `wasi:random` and files (`with_preopen`, read-only: `get-directories`, `open-at`, `read-via-stream`, `stat`, `stat-at`, `get-flags`, `read-directory`, `readlink-at`, `metadata-hash`, file `input-stream.read`; `with_writable_preopen` adds writing, appending, creating, truncating, removing, renaming, linking and `set-times`; `tests/it/wasip2_typed_fs.rs`, `tests/it/wasip2_typed_fs_write.rs`); TCP sockets over loopback are covered too (`tests/it/wasip2_typed_sockets.rs`), also together with files in one component (`tests/it/wasip2_typed_both.rs`; the host source is preceded by `type_aliases(&glue)` from `filter.rs`). UDP and `ip-name-lookup` are not covered.
 4. **Full component support** (very large): parse the component, resolve instances
    and `canon lift/lower` per the spec, and generate glue for arbitrary WIT worlds.
    Months of work; only worth it if general components are a goal.

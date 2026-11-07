@@ -69,6 +69,7 @@ interface types {
     sync-data: func() -> result<_, error-code>;
     rename-at: func(old-path: string, new-descriptor: borrow<descriptor>, new-path: string) -> result<_, error-code>;
     symlink-at: func(old-path: string, new-path: string) -> result<_, error-code>;
+    readlink-at: func(path: string) -> result<string, error-code>;
     link-at: func(old-path-flags: path-flags, old-path: string, new-descriptor: borrow<descriptor>, new-path: string) -> result<_, error-code>;
     set-times: func(data-access-timestamp: new-timestamp, data-modification-timestamp: new-timestamp) -> result<_, error-code>;
     set-times-at: func(path-flags: path-flags, path: string, data-access-timestamp: new-timestamp, data-modification-timestamp: new-timestamp) -> result<_, error-code>;
@@ -103,6 +104,7 @@ const CORE: &str = r#"
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.sync-data" (func $sync_data (param i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.rename-at" (func $rename (param i32 i32 i32 i32 i32 i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.symlink-at" (func $symlink (param i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.readlink-at" (func $readlink (param i32 i32 i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.link-at" (func $link (param i32 i32 i32 i32 i32 i32 i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-times" (func $set_times (param i32 i32 i64 i32 i32 i64 i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.set-times-at" (func $set_times_at (param i32 i32 i32 i32 i32 i64 i32 i32 i64 i32 i32)))
@@ -132,6 +134,8 @@ const CORE: &str = r#"
   (data (i32.const 544) "hello")
   (data (i32.const 560) "world")
   (data (i32.const 576) "nothere/x")
+  (data (i32.const 640) "in_d")
+  (data (i32.const 656) "back")
 
   (func $root (result i32)
     (call $dirs (i32.const 100))
@@ -215,6 +219,17 @@ const CORE: &str = r#"
   (func (export "fs_link") (param $f i32) (param $p i32) (param $n i32) (param $nd i32) (param $p2 i32) (param $n2 i32) (result i32)
     (call $link (call $root) (local.get $f) (local.get $p) (local.get $n) (local.get $nd) (local.get $p2) (local.get $n2) (i32.const 900))
     (call $status (i32.const 900)))
+  ;; link-at from descriptor `h` (no path flags) to (p2, n2) under descriptor `nd`
+  (func (export "fs_link_from") (param $h i32) (param $p i32) (param $n i32) (param $nd i32) (param $p2 i32) (param $n2 i32) (result i32)
+    (call $link (local.get $h) (i32.const 0) (local.get $p) (local.get $n) (local.get $nd) (local.get $p2) (local.get $n2) (i32.const 900))
+    (call $status (i32.const 900)))
+  ;; readlink-at: the target's length << 8 | its first byte, or 100 + the error code
+  (func (export "fs_readlink") (param $p i32) (param $n i32) (result i32)
+    (call $readlink (call $root) (local.get $p) (local.get $n) (i32.const 740))
+    (if (result i32) (i32.load8_u (i32.const 740))
+      (then (i32.add (i32.const 100) (i32.load8_u (i32.const 744))))
+      (else (i32.or (i32.shl (i32.load (i32.const 748)) (i32.const 8))
+                    (i32.load8_u (i32.load (i32.const 744)))))))
   ;; the times are new-timestamps: a tag (no-change 0, now 1, timestamp 2), seconds, nanoseconds
   (func (export "fs_set_times") (param $h i32)
       (param $at i32) (param $as i64) (param $an i32) (param $mt i32) (param $ms i64) (param $mn i32) (result i32)
@@ -243,6 +258,8 @@ const DX: &str = "432, 7";
 const PARENT_S: &str = "480, 8";
 const ABS: &str = "496, 4";
 const NOPARENT: &str = "576, 9";
+const IN_D: &str = "640, 4";
+const BACK: &str = "656, 4";
 
 /// Runs `body` with `inst` on a host whose preopen is `root`, writable or not.
 fn run(root: &Path, writable: bool, body: &str) -> std::process::Output {
@@ -590,6 +607,52 @@ fn link_at_follows_a_symlink_only_when_asked() {
     assert_succeeded(&run(&root, true, &body));
     assert!(root.join("g.txt").symlink_metadata().unwrap().is_file());
     assert_eq!(std::fs::read_to_string(root.join("g.txt")).unwrap(), "one");
+}
+
+#[cfg(unix)]
+#[test]
+fn readlink_at_shows_the_relative_target_of_a_symlink_the_guest_made() {
+    let root = fresh_root("readlink");
+    std::fs::write(root.join("f.txt"), "one").unwrap();
+    let body = format!(
+        "assert_eq!(inst.fs_symlink({F}, {LN}), 0);
+         // `f.txt`: 5 bytes, 'f' 102; a file is no symlink (invalid 12), nothing there is no-entry 20
+         assert_eq!(inst.fs_readlink({LN}), 5 << 8 | 102);
+         assert_eq!(inst.fs_readlink({F}), 100 + 12);
+         assert_eq!(inst.fs_readlink({G}), 100 + 20);
+         // a path that leaves the preopen is not permitted
+         assert_eq!(inst.fs_readlink({PARENT_S}), 100 + 31);"
+    );
+    assert_succeeded(&run(&root, true, &body));
+    assert_eq!(
+        std::fs::read_link(root.join("ln")).unwrap(),
+        Path::new("f.txt")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn link_at_between_two_directory_descriptors_links_inside_the_new_one() {
+    use std::os::unix::fs::MetadataExt;
+    let root = fresh_root("link_across");
+    std::fs::write(root.join("f.txt"), "one").unwrap();
+    std::fs::create_dir(root.join("d")).unwrap();
+    let body = format!(
+        "assert_eq!(inst.fs_open({D}, 2, 1), 0);
+         let d = inst.fs_last();
+         // root/f.txt -> d/in_d, then d/in_d -> root/back (the old path is under `d`)
+         assert_eq!(inst.fs_link(0, {F}, d, {IN_D}), 0);
+         assert_eq!(inst.fs_link_from(d, {IN_D}, 0, {BACK}), 0);
+         // a new name that leaves the new directory is refused: not-permitted 31
+         assert_eq!(inst.fs_link(0, {F}, d, {PARENT_S}), 100 + 31);
+         assert_eq!(inst.fs_link(0, {F}, d, {ABS}), 100 + 31);"
+    );
+    assert_succeeded(&run(&root, true, &body));
+    let ino = |name: &str| std::fs::metadata(root.join(name)).unwrap().ino();
+    assert_eq!(ino("d/in_d"), ino("f.txt"));
+    assert_eq!(ino("back"), ino("f.txt"));
+    assert!(!root.join("in_d").exists());
+    assert!(!root.join("s.txt").exists());
 }
 
 /// The access and modification times of `path` in whole seconds since the epoch.

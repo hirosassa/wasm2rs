@@ -10,7 +10,7 @@
 // the deadline a clock subscription gave it, or when stdin has data or is at its end.
 // The clocks: monotonic `now` (nanoseconds since the host was created), `subscribe-duration`,
 // `subscribe-instant` (an instant on that same clock) and wall-clock `now`. Stdin is the real
-// one, as in `host.rs`: a thread reads it into a buffer, so `read` never blocks (an empty
+// one: a thread reads it into a buffer, so `read` never blocks (an empty
 // list means "nothing yet", `closed` the end of input) and `poll` and `block` wait on the
 // buffer's condition variable with a timeout at the earliest deadline. It also serves `wasi:random` and
 // `wasi:filesystem`: read-only with `with_preopen`, writable with `with_writable_preopen`.
@@ -21,13 +21,13 @@
 // preopen): `open-at` with create/exclusive/truncate and `write`, `write-via-stream`,
 // `append-via-stream`, file `output-stream` `write`/`check-write`/`blocking-flush`,
 // `create-directory-at`, `remove-directory-at`, `unlink-file-at`, `rename-at`, `symlink-at`,
-// `link-at`, `set-size`, `sync`, `sync-data`, `set-times` and `set-times-at`. The semantics
-// are those of `host.rs`: one preopened directory shown as "/", descriptors and streams in
+// `link-at`, `set-size`, `sync`, `sync-data`, `set-times` and `set-times-at`. The semantics:
+// one preopened directory shown as "/", descriptors and streams in
 // slabs (the preopen is descriptor 0 and never freed; a file's input or output stream is
 // `FIRST_FILE_STREAM + slot` in its own slab, clear of the stdio handles), paths resolved
 // under the preopen (absolute paths, `..` and symlinks that lead out are `not-permitted`).
 // It also serves TCP over loopback (`wasi:sockets` network, instance-network, tcp,
-// tcp-create-socket) with the semantics of `host.rs` (see its header): an address outside
+// tcp-create-socket) with these semantics: an address outside
 // 127.0.0.0/8 and ::1 is `access-denied` unless `with_external_network` was called, `finish-bind`
 // binds and listens, `start-connect` connects at once, reads never block and a socket's
 // pollable is polled every millisecond; a connection's streams are `TCP_STREAM + slot`.
@@ -38,7 +38,7 @@
 // therefore names them `FsErrorCode` and `NetErrorCode`: type aliases that
 // `type_aliases` (`filter.rs`) emits from the generated trait, for the interfaces it declares.
 //
-// Like `host.rs`, each method sits between `// optional: <method>` and `// end optional`
+// Each method sits between `// optional: <method>` and `// end optional`
 // and is kept only when the generated trait declares it (see `keep_declared_methods` in
 // `filter.rs`), so one source serves components that import different subsets. A
 // component that imports a method this host lacks does not build. The source needs the
