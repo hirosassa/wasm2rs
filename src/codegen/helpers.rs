@@ -159,14 +159,15 @@ pub(super) const HELPER_ORDER: [Helper; 50] = [
 pub(super) fn helper_lines(
     helper: Helper,
     mem: u32,
+    max_pages: Option<u64>,
     unsafe_memory: bool,
     memory64: bool,
 ) -> Vec<String> {
-    let base = base_helper_lines(helper);
+    let base = base_helper_lines(helper, max_pages);
     // A 64-bit memory widens the memory-0 template first, so the unchecked and
     // per-memory rewrites below apply to it unchanged.
     let base = if memory64 {
-        widen_helper_lines(helper, base)
+        widen_helper_lines(helper, max_pages, base)
     } else {
         base
     };
@@ -253,31 +254,43 @@ pub(super) fn index_expr64(code: &str) -> String {
 /// address becomes `i64` and the static offset `u64`; `memory.grow`/`fill`/`copy`
 /// take `i64` operands. The effective address is clamped like [`index_expr64`], so
 /// an address whose sum with the offset overflows `u64` still traps.
-fn widen_helper_lines(helper: Helper, base: Vec<String>) -> Vec<String> {
+fn widen_helper_lines(helper: Helper, max_pages: Option<u64>, base: Vec<String>) -> Vec<String> {
     let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     match helper {
-        Helper::Grow => vec![
-            "fn memory_grow(&mut self, delta: i64) -> i64 {".to_string(),
-            format!("    let old_pages = (self.mem().len() / {WASM_PAGE_SIZE}) as u64;"),
-            "    let Some(new_pages) = old_pages.checked_add(delta as u64) else {".to_string(),
-            "        return -1;".to_string(),
-            "    };".to_string(),
-            format!("    let Some(new_len) = new_pages.checked_mul({WASM_PAGE_SIZE}) else {{"),
-            "        return -1;".to_string(),
-            "    };".to_string(),
-            "    let Ok(new_len) = usize::try_from(new_len) else {".to_string(),
-            "        return -1;".to_string(),
-            "    };".to_string(),
-            // A failed allocation reports -1 (as the spec allows) instead of
-            // aborting the process.
-            "    let extra = new_len - self.mem().len();".to_string(),
-            "    if self.mem_mut().try_reserve_exact(extra).is_err() {".to_string(),
-            "        return -1;".to_string(),
-            "    }".to_string(),
-            "    self.mem_mut().resize(new_len, 0);".to_string(),
-            "    old_pages as i64".to_string(),
-            "}".to_string(),
-        ],
+        Helper::Grow => {
+            let mut lines = vec![
+                "fn memory_grow(&mut self, delta: i64) -> i64 {".to_string(),
+                format!("    let old_pages = (self.mem().len() / {WASM_PAGE_SIZE}) as u64;"),
+                "    let Some(new_pages) = old_pages.checked_add(delta as u64) else {".to_string(),
+                "        return -1;".to_string(),
+                "    };".to_string(),
+            ];
+            // The declared maximum, when any, bounds growth before the (possibly
+            // huge) allocation is attempted.
+            if let Some(max) = max_pages {
+                lines.push(format!("    if new_pages > {max} {{"));
+                lines.push("        return -1;".to_string());
+                lines.push("    }".to_string());
+            }
+            lines.extend([
+                format!("    let Some(new_len) = new_pages.checked_mul({WASM_PAGE_SIZE}) else {{"),
+                "        return -1;".to_string(),
+                "    };".to_string(),
+                "    let Ok(new_len) = usize::try_from(new_len) else {".to_string(),
+                "        return -1;".to_string(),
+                "    };".to_string(),
+                // A failed allocation reports -1 (as the spec allows) instead of
+                // aborting the process.
+                "    let extra = new_len - self.mem().len();".to_string(),
+                "    if self.mem_mut().try_reserve_exact(extra).is_err() {".to_string(),
+                "        return -1;".to_string(),
+                "    }".to_string(),
+                "    self.mem_mut().resize(new_len, 0);".to_string(),
+                "    old_pages as i64".to_string(),
+                "}".to_string(),
+            ]);
+            lines
+        }
         Helper::MemoryFill => owned(&[
             "fn memory_fill(&mut self, dest: i64, val: i32, len: i64) {",
             "    let d = (dest as u64).min(isize::MAX as u64) as usize;",
@@ -374,7 +387,11 @@ fn specialise_helper_lines(helper: Helper, mem: u32, base: Vec<String>) -> Vec<S
 /// length instead of resizing; `table_*` helpers touch no memory, so they are
 /// emitted verbatim.
 pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
-    let base = base_helper_lines(helper);
+    // A shared memory the module defines is bounded by its reservation
+    // (`SharedMemory::with_max`, enforced in `SharedMemory::grow`); an imported
+    // shared memory relies on the reservation the host made. Either way the
+    // template's per-memory bound is not used here.
+    let base = base_helper_lines(helper, None);
     if matches!(helper, Helper::TableCopy | Helper::TableFill) {
         return base;
     }
@@ -403,7 +420,7 @@ pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
 }
 
 /// The memory-0 template lines of one memory helper method.
-fn base_helper_lines(helper: Helper) -> Vec<String> {
+fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
     let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     match helper {
         Helper::LoadI32 => owned(&[
@@ -771,14 +788,17 @@ fn base_helper_lines(helper: Helper) -> Vec<String> {
             "    self.mem_mut()[a..a + 8].copy_from_slice(&value.to_le_bytes()[o..o + 8]);",
             "}",
         ]),
-        // `delta` is an unsigned page count. Growth past the wasm32 limit of
-        // 65536 pages (4 GiB) fails, returning -1 as the wasm spec requires;
-        // the declared maximum is not tracked, so only that hard cap applies.
+        // `delta` is an unsigned page count. Growth past the memory's own bound,
+        // `min(declared maximum, wasm32 limit of 65536 pages = 4 GiB)`, fails
+        // before anything is resized, returning -1 as the wasm spec requires.
         Helper::Grow => vec![
             "fn memory_grow(&mut self, delta: i32) -> i32 {".to_string(),
             format!("    let old_pages = (self.mem().len() / {WASM_PAGE_SIZE}) as u64;"),
             "    let new_pages = old_pages + (delta as u32 as u64);".to_string(),
-            format!("    if new_pages > {WASM_MAX_PAGES} {{"),
+            format!(
+                "    if new_pages > {} {{",
+                max_pages.map_or(WASM_MAX_PAGES, |m| m.min(WASM_MAX_PAGES))
+            ),
             "        return -1;".to_string(),
             "    }".to_string(),
             format!("    self.mem_mut().resize((new_pages as usize) * {WASM_PAGE_SIZE}, 0);"),

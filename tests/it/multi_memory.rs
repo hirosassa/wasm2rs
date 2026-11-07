@@ -133,3 +133,51 @@ fn memory_size_and_grow_select_their_memory() {
          assert_eq!(inst.func0(), 1);",
     );
 }
+
+#[test]
+fn declared_maxima_limit_each_memory_independently() {
+    // Memory 0 is `(1 2)` and memory 1 is `(2 3)`: each grow is checked against
+    // its own maximum, and a failed grow of one leaves both sizes untouched.
+    compile_run(
+        "multimem_declared_maxima",
+        r#"(module
+            (memory 1 2)
+            (memory 2 3)
+            (func (param i32) (result i32) local.get 0 memory.grow)
+            (func (param i32) (result i32) local.get 0 memory.grow 1)
+            (func (result i32) memory.size)
+            (func (result i32) memory.size 1))"#,
+        "let mut inst = Instance::new(); \
+         assert_eq!(inst.func0(2), -1); \
+         assert_eq!(inst.func0(1), 1); \
+         assert_eq!(inst.func2(), 2); \
+         assert_eq!(inst.func0(1), -1); \
+         assert_eq!(inst.func2(), 2); \
+         assert_eq!(inst.func3(), 2); \
+         assert_eq!(inst.func1(2), -1); \
+         assert_eq!(inst.func3(), 2); \
+         assert_eq!(inst.func1(1), 2); \
+         assert_eq!(inst.func3(), 3); \
+         assert_eq!(inst.func1(1), -1); \
+         assert_eq!(inst.func3(), 3); \
+         assert_eq!(inst.func2(), 2);",
+    );
+}
+
+#[test]
+fn a_memory_without_maximum_is_not_limited_by_its_sibling() {
+    // Memory 0 has no maximum, memory 1 is `(1 1)`: memory 0 keeps growing while
+    // memory 1 cannot.
+    compile_run(
+        "multimem_one_unbounded",
+        r#"(module
+            (memory 1)
+            (memory 1 1)
+            (func (param i32) (result i32) local.get 0 memory.grow)
+            (func (param i32) (result i32) local.get 0 memory.grow 1))"#,
+        "let mut inst = Instance::new(); \
+         assert_eq!(inst.func0(5), 1); \
+         assert_eq!(inst.func1(1), -1); \
+         assert_eq!(inst.func1(0), 1);",
+    );
+}

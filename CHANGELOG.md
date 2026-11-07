@@ -291,6 +291,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `memory.grow` now enforces the memory's declared maximum, not only the wasm32 limit of 65536
+  pages: `(memory 1 2)` could grow to three pages; the grow now returns -1 and leaves the size
+  unchanged. Each memory uses its own bound (multi-memory, `--import-memory`, an imported memory,
+  and memory64); `unsafe_memory` output is unaffected. A shared memory the module defines already
+  honoured its maximum through its reservation (an imported shared memory relies on the host's
+  reservation). A memory without a declared maximum generates the same code
+  as before. Not covered: a maximum the host sets on the `Vec<u8>` it lends, validation of an
+  import's limits at instantiation, and allocation failure on a 32-bit memory. Follows up the
+  closed PR #7 by Nicolas0315, which reported the bug. Tests in `tests/it/state.rs`,
+  `imported_memory.rs`, `multi_memory.rs`, `atomics_threads.rs`, `memory64.rs`, `unsafe_memory.rs`.
+
 - `examples/wasip2_host/typed.rs`: `read-via-stream` on a descriptor opened for writing only
   returns `bad-descriptor` (as wasmtime does) instead of a stream whose reads fail; a descriptor
   with `read`, or with no flags at all, still reads. `get-flags` reports what the descriptor was

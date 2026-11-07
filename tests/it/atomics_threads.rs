@@ -100,6 +100,62 @@ fn notify_with_no_waiters_returns_zero() {
 }
 
 #[test]
+fn shared_memory_grow_respects_declared_maximum_across_instances() {
+    // A shared `(memory 1 2)`: a sibling instance sees the same size. Growing to
+    // exactly the maximum succeeds, growing past it fails from either instance and
+    // leaves the size unchanged.
+    compile_run_raw(
+        "atomics_threads_grow_declared_max",
+        r#"(module
+            (memory 1 2 shared)
+            (func (param i32) (result i32) local.get 0 memory.grow)
+            (func (result i32) memory.size))"#,
+        r#"fn main() {
+            let mut first = Instance::new();
+            let mut sibling = Instance::with_memory(first.shared_memory());
+            assert_eq!(first.func0(2), -1);
+            assert_eq!(first.func1(), 1);
+            assert_eq!(first.func0(1), 1);
+            assert_eq!(sibling.func1(), 2);
+            assert_eq!(sibling.func0(1), -1);
+            assert_eq!(first.func0(0), 2);
+            assert_eq!(first.func1(), 2);
+        }"#,
+    );
+}
+
+#[test]
+fn shared_memory_concurrent_grows_never_pass_the_declared_maximum() {
+    // Four threads race to grow a shared `(memory 1 5)` by one page, ten times
+    // each: exactly four succeed (returning distinct old sizes) and the final size
+    // is the maximum.
+    compile_run_raw(
+        "atomics_threads_grow_race_max",
+        r#"(module
+            (memory 1 5 shared)
+            (func (export "grow") (result i32) i32.const 1 memory.grow)
+            (func (export "size") (result i32) memory.size))"#,
+        r#"fn main() {
+            let mut first = Instance::new();
+            let handle = first.shared_memory();
+            let threads: Vec<_> = (0..4)
+                .map(|_| {
+                    let h = handle.clone();
+                    std::thread::spawn(move || {
+                        let mut inst = Instance::with_memory(h);
+                        (0..10).map(|_| inst.func0()).filter(|r| *r >= 0).collect::<Vec<i32>>()
+                    })
+                })
+                .collect();
+            let mut won: Vec<i32> = threads.into_iter().flat_map(|t| t.join().unwrap()).collect();
+            won.sort();
+            assert_eq!(won, vec![1, 2, 3, 4]);
+            assert_eq!(first.func1(), 5);
+        }"#,
+    );
+}
+
+#[test]
 fn wait_blocks_until_notified() {
     // A real handshake: a waiter thread parks on `wait32(addr=0, expected=0)`
     // while the cell is 0; the main thread later stores 1 and notifies, waking

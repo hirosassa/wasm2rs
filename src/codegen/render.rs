@@ -200,9 +200,9 @@ pub(super) fn render_module_head(
     inner.extend(wasi_method_lines(parts.imports, &layout, ctx.memory_shared));
     inner.extend(helper_method_lines(
         used,
+        parts.memories,
         ctx.memory_shared,
         ctx.unsafe_memory,
-        &ctx.memory64,
     ));
     inner.extend(dispatch_method_block(
         ctx,
@@ -1147,9 +1147,9 @@ fn spawn_thread_lines(
 /// the variants that lock `self.memory.bytes()` instead of borrowing.
 fn helper_method_lines(
     used: &HashSet<(Helper, u32)>,
+    memories: &[super::MemInfo],
     memory_shared: bool,
     unsafe_memory: bool,
-    memory64: &[bool],
 ) -> Vec<String> {
     let mut inner: Vec<String> = Vec::new();
     let mut mem_indices: Vec<u32> = used.iter().map(|(_, mem)| *mem).collect();
@@ -1165,8 +1165,13 @@ fn helper_method_lines(
                     // `unsafe_memory` does not apply to a shared memory.
                     inner.extend(shared_helper_lines(helper));
                 } else {
-                    let is64 = memory64.get(mem as usize).copied().unwrap_or(false);
-                    inner.extend(helper_lines(helper, mem, unsafe_memory, is64));
+                    // `memories` is the same index-ordered sequence `ctx.memory64`
+                    // is derived from; each memory's `memory.grow` is bounded by
+                    // its own maximum.
+                    let info = memories.get(mem as usize);
+                    let is64 = info.is_some_and(|m| m.memory64);
+                    let max_pages = info.and_then(|m| m.max_pages);
+                    inner.extend(helper_lines(helper, mem, max_pages, unsafe_memory, is64));
                 }
             }
         }

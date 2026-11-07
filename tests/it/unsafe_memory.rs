@@ -128,6 +128,26 @@ fn unsafe_memory_load_store_roundtrip() {
 }
 
 #[test]
+fn unsafe_memory_grow_still_respects_the_declared_maximum() {
+    // `memory.grow` is not an unchecked access: under both lowerings a grow past
+    // the declared maximum returns -1 and preserves the size.
+    run_safe_and_unsafe(
+        "grow_max",
+        r#"
+        (module
+          (memory 1 2)
+          (func (param i32) (result i32) (memory.grow (local.get 0)))
+          (func (result i32) (memory.size)))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         assert_eq!(inst.func0(2), -1);\n    \
+         assert_eq!(inst.func0(1), 1);\n    \
+         assert_eq!(inst.func0(1), -1);\n    \
+         assert_eq!(inst.func1(), 2);",
+    );
+}
+
+#[test]
 fn unsafe_memory_bulk_copy_and_fill() {
     // memory.fill then memory.copy over in-bounds ranges behave normally.
     // $fill=func0, $copy=func1, $load=func2.
