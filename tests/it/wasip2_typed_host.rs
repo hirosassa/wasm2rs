@@ -11,6 +11,63 @@ use wasm2rs::{TranspileOptions, transpile_with_options, wit_host_glue};
 
 const HOST: &str = include_str!("../../examples/wasip2_host/typed.rs");
 
+include!("../../examples/wasip2_host/filter.rs");
+
+/// A component importing what the WIT `world` of `wit` imports, after the packages in
+/// `deps` (each a complete WIT file, pushed in order). The world's imports are encoded
+/// with `wit-component` as a component around a generated dummy core module.
+pub(crate) fn component_from_wit(deps: &[&str], wit: &str, world: &str) -> Vec<u8> {
+    use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
+    use wit_parser::{ManglingAndAbi, Resolve};
+    let mut resolve = Resolve::default();
+    for dep in deps {
+        resolve.push_str("dep.wit", dep).unwrap();
+    }
+    let package = resolve.push_str("test.wit", wit).unwrap();
+    let world = resolve.select_world(&[package], Some(world)).unwrap();
+    let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
+    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
+    ComponentEncoder::default()
+        .module(&module)
+        .unwrap()
+        .validate(true)
+        .encode()
+        .unwrap()
+}
+
+/// Builds the program for `component` and the core module `core_wat`: the glue, the typed
+/// host reduced to the methods the component declares, and a `main` that makes the
+/// instance (from the host's `env`) and runs `body`.
+pub(crate) fn build_program(
+    component: &[u8],
+    core_wat: &str,
+    env: &str,
+    body: &str,
+) -> std::path::PathBuf {
+    let glue = wit_host_glue(component).unwrap();
+    let opts = TranspileOptions {
+        named_imports: true,
+        reentrant_imports: true,
+        named_exports: true,
+        ..TranspileOptions::default()
+    };
+    let generated = transpile_with_options(&wat::parse_str(core_wat).unwrap(), &opts).unwrap();
+    let host = keep_declared_methods(HOST, &glue);
+    let main = format!(
+        "fn main() {{ let mut inst = Instance::new(Glue(TypedHost::new({env}))); {body} }}"
+    );
+    common::build(
+        "wasip2_typed_host",
+        &format!("{generated}\n{glue}\n{host}\n{main}\n"),
+    )
+}
+
+pub(crate) fn run_program(component: &[u8], core_wat: &str, env: &str, body: &str) -> Output {
+    Command::new(build_program(component, core_wat, env, body))
+        .output()
+        .unwrap()
+}
+
 /// The imports of a `println!("hello")` program, as the WIT of wasi 0.2 declares them
 /// (the subset this host implements).
 const COMPONENT: &str = r#"
@@ -137,28 +194,11 @@ const CORE: &str = r#"
   (func (export "bye") (call $exit (i32.const 1))))
 "#;
 
-/// Builds the program whose `main` makes the instance (from the host's `env`) and runs `body`.
-fn program(env: &str, body: &str) -> std::path::PathBuf {
-    let glue = wit_host_glue(&wat::parse_str(COMPONENT).unwrap()).unwrap();
-    let opts = TranspileOptions {
-        named_imports: true,
-        reentrant_imports: true,
-        named_exports: true,
-        ..TranspileOptions::default()
-    };
-    let generated = transpile_with_options(&wat::parse_str(CORE).unwrap(), &opts).unwrap();
-    let main = format!(
-        "fn main() {{ let mut inst = Instance::new(Glue(TypedHost::new({env}))); {body} }}"
-    );
-    let source = format!("{generated}\n{glue}\n{HOST}\n{main}\n");
-    common::build("wasip2_typed_host", &source)
-}
-
 fn run(env: &str, body: &str) -> Output {
-    Command::new(program(env, body)).output().unwrap()
+    run_program(&wat::parse_str(COMPONENT).unwrap(), CORE, env, body)
 }
 
-fn assert_succeeded(out: &Output) {
+pub(crate) fn assert_succeeded(out: &Output) {
     assert!(
         out.status.success(),
         "{}",
