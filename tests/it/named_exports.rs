@@ -218,3 +218,68 @@ fn a_global_named_like_a_split_dispatch_part_stays_clear_of_it() {
         "{generated}"
     );
 }
+
+#[test]
+fn mutable_numeric_globals_get_a_setter_the_wasm_side_observes() {
+    run_named(
+        "named_global_setter",
+        r#"(module
+            (global $a (export "a") (mut i32) (i32.const 1))
+            (global $b (export "b") (mut i64) (i64.const 2))
+            (global $c (export "c") (mut f32) (f32.const 3.0))
+            (global $d (export "d") (mut f64) (f64.const 4.0))
+            (func (export "read_a") (result i32) (global.get $a))
+            (func (export "read_b") (result i64) (global.get $b))
+            (func (export "read_c") (result f32) (global.get $c))
+            (func (export "read_d") (result f64) (global.get $d))
+            (func (export "bump_a") (global.set $a (i32.add (global.get $a) (i32.const 1)))))"#,
+        "let mut inst = Instance::new();\n \
+         inst.set_a(10); inst.set_b(20); inst.set_c(30.5); inst.set_d(40.25);\n \
+         assert_eq!(inst.read_a(), 10);\n \
+         assert_eq!(inst.read_b(), 20);\n \
+         assert_eq!(inst.read_c(), 30.5);\n \
+         assert_eq!(inst.read_d(), 40.25);\n \
+         inst.bump_a();\n \
+         assert_eq!(inst.a(), 11);",
+    );
+}
+
+#[test]
+fn immutable_and_non_numeric_globals_get_no_setter() {
+    let wasm = wat::parse_str(
+        r#"(module
+            (global (export "k") i32 (i32.const 1))
+            (global (export "fn_ref") (mut funcref) (ref.null func))
+            (global (export "wide") (mut v128) (v128.const i64x2 1 2)))"#,
+    )
+    .unwrap();
+    let generated = transpile_with_options(&wasm, &named()).unwrap();
+    assert!(!generated.contains("fn set_"), "{generated}");
+}
+
+#[test]
+fn a_setter_name_yields_to_an_export_with_that_name() {
+    run_named(
+        "named_global_setter_clash",
+        r#"(module
+            (global (export "x") (mut i32) (i32.const 5))
+            (func (export "set_x") (result i32) i32.const 9))"#,
+        "let mut inst = Instance::new();\n \
+         assert_eq!(inst.set_x(), 9);\n \
+         inst.set_x_0(6);\n \
+         assert_eq!(inst.x(), 6);",
+    );
+}
+
+#[test]
+fn an_exported_mutable_imported_global_sets_through_the_host() {
+    let wasm = wat::parse_str(
+        r#"(module (import "env" "g" (global $g (mut i32))) (export "g" (global $g)))"#,
+    )
+    .unwrap();
+    let generated = transpile_with_options(&wasm, &named()).unwrap();
+    assert!(
+        generated.contains("pub fn set_g(&mut self, v: i32) { self.imports.set_global0(v) }"),
+        "{generated}"
+    );
+}

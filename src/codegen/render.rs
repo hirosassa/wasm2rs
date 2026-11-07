@@ -5,9 +5,9 @@ use super::render_cont::{continuation_method_lines, continuation_runtime_lines};
 use super::runtime::render_rt_helpers;
 use super::wasi::share_fd_table;
 use super::{
-    ALLOW, DataSegment, ElemSegment, ExportInfo, Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx,
-    ModuleParts, SegOffset, TableFill, WASM_PAGE_SIZE, WasiFn, data_static_line, indent, index_u32,
-    rust_type, rust_types,
+    ALLOW, DataSegment, ElemSegment, ExportInfo, GlobalExportInfo, Helper, ImportInfo,
+    ImportedGlobalInfo, ModuleCtx, ModuleParts, SegOffset, TableFill, WASM_PAGE_SIZE, WasiFn,
+    data_static_line, indent, index_u32, rust_type, rust_types,
 };
 use crate::TranspileError;
 use wasmparser::ValType;
@@ -1259,8 +1259,14 @@ fn named_export_lines(
         .iter()
         .filter(|e| e.name != WASI_THREAD_START)
         .collect();
-    // Global getters share the namespace with the function wrappers, so the names
-    // are assigned together (functions first).
+    // Global getters and setters share the namespace with the function wrappers, so
+    // the names are assigned together (functions, then getters, then setters; an
+    // earlier name wins a clash, so a setter never displaces an export).
+    let settable = settable_globals(parts, ctx);
+    let setter_raw: Vec<String> = settable
+        .iter()
+        .map(|(e, _)| format!("set_{}", e.name))
+        .collect();
     let idents = super::export_names::assign(
         exports
             .iter()
@@ -1270,10 +1276,22 @@ fn named_export_lines(
                     .global_exports
                     .iter()
                     .map(|g| (g.name.as_str(), g.global_index)),
+            )
+            .chain(
+                settable
+                    .iter()
+                    .zip(&setter_raw)
+                    .map(|((e, _), raw)| (raw.as_str(), e.global_index)),
             ),
     );
+    let getters_end = exports.len() + parts.global_exports.len();
     let mut lines = Vec::new();
-    lines.extend(global_getter_lines(parts, ctx, &idents[exports.len()..]));
+    lines.extend(global_getter_lines(
+        parts,
+        ctx,
+        &idents[exports.len()..getters_end],
+    ));
+    lines.extend(global_setter_lines(&settable, &idents[getters_end..]));
     for (export, ident) in exports.iter().zip(idents) {
         let Some(defined) = usize::try_from(export.func_index)
             .ok()
@@ -1311,6 +1329,42 @@ fn named_export_lines(
     Ok(lines)
 }
 
+/// An exported numeric global resolved against the module's globals.
+struct NumericGlobal {
+    index: usize,
+    rust_ty: &'static str,
+    imported: bool,
+    mutable: bool,
+}
+
+/// The numeric (`i32`/`i64`/`f32`/`f64`) global with the given index, or `None`
+/// for a reference-typed or `v128` one.
+fn numeric_global(ctx: &ModuleCtx<'_>, index: usize) -> Option<NumericGlobal> {
+    let (ty, mutable, imported) = match index.checked_sub(ctx.imported_globals.len()) {
+        None => {
+            let &(ty, mutable) = ctx.imported_globals.get(index)?;
+            (ty, mutable, true)
+        }
+        Some(defined) => {
+            let &(ty, mutable) = ctx.globals.get(defined)?;
+            (ty, mutable, false)
+        }
+    };
+    let rust_ty = match ty {
+        ValType::I32 => "i32",
+        ValType::I64 => "i64",
+        ValType::F32 => "f32",
+        ValType::F64 => "f64",
+        _ => return None,
+    };
+    Some(NumericGlobal {
+        index,
+        rust_ty,
+        imported,
+        mutable,
+    })
+}
+
 /// A `pub fn <name>(&self) -> T` getter for every exported numeric global (a
 /// reference-typed or `v128` one is skipped), reading the current value: the field
 /// of a defined global, the host's `get_global{k}` for an imported one. `idents`
@@ -1326,25 +1380,58 @@ fn global_getter_lines(
         return lines;
     }
     for (export, ident) in parts.global_exports.iter().zip(idents) {
-        let index = export.global_index as usize;
-        let (ty, imported) = match index.checked_sub(ctx.imported_globals.len()) {
-            None => (ctx.imported_globals.get(index).map(|g| g.0), true),
-            Some(defined) => (ctx.globals.get(defined).map(|g| g.0), false),
+        let Some(g) = numeric_global(ctx, export.global_index as usize) else {
+            continue;
         };
-        let rust_ty = match ty {
-            Some(ValType::I32) => "i32",
-            Some(ValType::I64) => "i64",
-            Some(ValType::F32) => "f32",
-            Some(ValType::F64) => "f64",
-            _ => continue,
-        };
-        let read = if imported {
+        let (index, rust_ty) = (g.index, g.rust_ty);
+        let read = if g.imported {
             format!("self.imports.get_global{index}()")
         } else {
             format!("self.g{index}")
         };
         lines.push(String::new());
         lines.push(format!("pub fn {ident}(&self) -> {rust_ty} {{ {read} }}"));
+    }
+    lines
+}
+
+/// The exported mutable numeric globals that get a setter, each with its export
+/// (whose name the setter's is derived from) and its resolved global. A stateless
+/// module has no globals, so none.
+fn settable_globals<'a>(
+    parts: &'a ModuleParts<'_>,
+    ctx: &ModuleCtx<'_>,
+) -> Vec<(&'a GlobalExportInfo, NumericGlobal)> {
+    if !ctx.is_method {
+        return Vec::new();
+    }
+    parts
+        .global_exports
+        .iter()
+        .filter_map(|e| numeric_global(ctx, e.global_index as usize).map(|g| (e, g)))
+        .filter(|(_, g)| g.mutable)
+        .collect()
+}
+
+/// A `pub fn <name>(&mut self, v: T)` setter for every exported mutable numeric
+/// global, writing the field of a defined global or the host's `set_global{k}` for
+/// an imported one. `idents` are the setter names, in `settable` order.
+fn global_setter_lines(
+    settable: &[(&GlobalExportInfo, NumericGlobal)],
+    idents: &[String],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for ((_, g), ident) in settable.iter().zip(idents) {
+        let (index, rust_ty) = (g.index, g.rust_ty);
+        let write = if g.imported {
+            format!("self.imports.set_global{index}(v)")
+        } else {
+            format!("self.g{index} = v")
+        };
+        lines.push(String::new());
+        lines.push(format!(
+            "pub fn {ident}(&mut self, v: {rust_ty}) {{ {write} }}"
+        ));
     }
     lines
 }
