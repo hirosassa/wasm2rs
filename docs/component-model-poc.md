@@ -88,13 +88,19 @@ memory directly.
 With it, `examples/wasip2_host/host.rs` implements the lowered imports of a
 `println!` program (stdout/stderr writes with the canonical-ABI `result` layouts, a
 fixed write budget, an empty environment and argument list, `exit`, no-op resource
-drops) and `examples/wasip2_run.rs` builds and runs a core module with it:
+drops) and `examples/wasip2_run.rs` built and ran a core module with it (that is how
+the programs below ran). The example now takes the component itself and runs it through
+the typed host (`typed.rs`, with the generated glue) instead of `host.rs`; this is a
+breaking change of its input (it no longer accepts an extracted core module):
 
 ```
 rustc --target wasm32-wasip2 -C opt-level=3 hello.rs -o hello.component.wasm
-wasm2rs --extract-core hello.component.wasm dir       # the program is the largest module
-cargo run --release --example wasip2_run -- dir/module0.wasm
+cargo run --release --example wasip2_run -- hello.component.wasm
 ```
+
+The example extracts the component's core modules itself and runs the largest (the
+program); a component that imports a function `typed.rs` does not implement fails to
+build with rustc's E0046 errors and a hint, and the example exits with 2.
 
 Two programs ran: `println!("hello")` (21 imports) and one using `eprintln!`,
 `print!`, `flush` and `std::env::args` (22; the extra one is `get-arguments`). A small
@@ -117,7 +123,7 @@ then `(ptr, len)` at the return pointer).
   was always ready; Result 5 adds deadlines).
 
 The runner passes its trailing arguments and its environment to the program
-(`wasip2_run -- module0.wasm one "two words"`; the work dir is
+(`wasip2_run -- program.component.wasm one "two words"`; the work dir is
 `$WASIP2_WORK_DIR`, default a temporary directory). The `std::env::args` program above prints 3 arguments (its own
 name and the two given). `tests/it/wasip2_host.rs` checks the exact layouts from a
 WAT module with a bump-allocator `cabi_realloc`; no real program calls `poll` from
@@ -170,12 +176,12 @@ keys or tokens: do not treat `get-random-bytes` here as cryptographically secure
 that touches `std::fs` imports the whole `wasi:filesystem` surface (13 imports) even if
 it only reads, so the host implements all of it: opening and reading files, metadata
 and directory listings work, and writing answers an `error-code`. Run it with `WASIP2_PREOPEN=<dir> cargo run --release --example
-wasip2_run -- module0.wasm`: `<dir>` is the guest's `/` (without it the guest has no
+wasip2_run -- program.component.wasm`: `<dir>` is the guest's `/` (without it the guest has no
 preopens), and both `hello.txt` and `/hello.txt` open the same file.
 
 - The preopen is read-only by default: creating, truncating and writing (`open-at`
   flags, `write-via-stream`, `append-via-stream`) return `read-only`.
-- **Writing is opt-in**: `P2Host::with_writable_preopen(dir)` (`$WASIP2_PREOPEN_WRITABLE=1`
+- **Writing is opt-in**: `TypedHost::with_writable_preopen(dir)` (`$WASIP2_PREOPEN_WRITABLE=1`
   next to `$WASIP2_PREOPEN` in `wasip2_run`). Then `open-at` honours `create`,
   `exclusive` (`exist` if the file is there) and `truncate`, and a descriptor opened
   with `write` gives `write-via-stream(offset)` and `append-via-stream`, whose output

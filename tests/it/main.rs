@@ -117,6 +117,7 @@ mod wasi_sdk_e2e;
 mod wasi_shared_memory;
 mod wasi_threads;
 mod wasip2_host;
+mod wasip2_run_example;
 mod wasip2_typed_both;
 mod wasip2_typed_cli;
 mod wasip2_typed_clocks;
