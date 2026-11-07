@@ -30,11 +30,11 @@
 // descriptor resolves its path again on each use. Anything that would write is refused
 // with `read-only`; with a writable preopen, files can be created, written, appended to,
 // truncated, removed and renamed, and directories created and removed (symlinks are
-// never followed for the last name). `readlink-at` shows a relative target only.
+// never followed for the last name). `readlink-at` shows a relative target only, and `symlink-at` makes no other.
 // `stat`, `get-flags`, `metadata-hash` and directory listings work on the same paths.
 // `resource-drop` frees a handle's slot, which the next resource of its kind reuses; a guest
 // must not use a handle after dropping it (see docs/component-model-poc.md).
-// Not implemented: `symlink-at`, `link-at` and sockets.
+// Not implemented: sockets.
 
 use std::collections::VecDeque;
 use std::path::{Component, Path, PathBuf};
@@ -362,7 +362,7 @@ impl P2Host {
             return Err(code::INVALID);
         }
         let target = std::fs::read_link(entry).map_err(io_error_code)?;
-        if target.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
+        if !stays_below(&target) {
             return Err(code::NOT_PERMITTED);
         }
         target.into_os_string().into_string().map_err(|_| code::IO)
@@ -585,6 +585,13 @@ mod code {
     pub const READ_ONLY: u8 = 33;
 }
 
+/// Whether `path` is relative and has no `..`, so it stays under the directory it is
+/// joined to.
+#[allow(dead_code)]
+fn stays_below(path: &Path) -> bool {
+    path.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
 /// The times of a `set-times` call: each is a `new-timestamp` flattened to
 /// `(tag, seconds, nanoseconds)` (`no-change` 0, `now` 1, `timestamp` 2). A tag that is
 /// none of these, nanoseconds of a second or more, or a time too far ahead is `invalid`.
@@ -613,6 +620,18 @@ fn file_times(
     Ok(times)
 }
 
+/// A symlink at `link` holding `target`; hosts without symlinks answer `unsupported`.
+#[allow(dead_code)]
+fn make_symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(target, link);
+    #[cfg(not(unix))]
+    {
+        let _ = (target, link);
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
 #[allow(dead_code)]
 fn io_error_code(e: std::io::Error) -> u8 {
     use std::io::ErrorKind::*;
@@ -623,6 +642,7 @@ fn io_error_code(e: std::io::Error) -> u8 {
         DirectoryNotEmpty => code::NOT_EMPTY,
         NotADirectory => code::NOT_DIRECTORY,
         IsADirectory => code::IS_DIRECTORY,
+        Unsupported => code::UNSUPPORTED,
         _ => code::IO,
     }
 }
@@ -1268,6 +1288,74 @@ impl Imports for P2Host {
                 return Err(code::NOT_PERMITTED);
             }
             std::fs::rename(old, new).map_err(io_error_code)
+        });
+        put_status(g, ret, done);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_symlink_at
+    /// `symlink-at(old-path, new-path)`: a symlink named `new-path` (under this
+    /// directory) holding `old-path`. The target must be relative and have no `..`
+    /// (`not-permitted`; empty is `no-entry`), so every link made can be read back with
+    /// `readlink-at`, and a taken name is `exist`. Needs a writable preopen.
+    fn wasi_filesystem_types_method_descriptor_symlink_at(
+        &mut self,
+        g: &mut Guest,
+        dir: i32,
+        old_ptr: i32,
+        old_len: i32,
+        new_ptr: i32,
+        new_len: i32,
+        ret: i32,
+    ) {
+        let done = self.require_writable().and_then(|()| {
+            let target = get_str(g, old_ptr, old_len).ok_or(code::IO)?;
+            if target.is_empty() {
+                return Err(code::NO_ENTRY);
+            }
+            if !stays_below(Path::new(&target)) {
+                return Err(code::NOT_PERMITTED);
+            }
+            let link = self.entry_at(g, dir, new_ptr, new_len)?;
+            make_symlink(&target, &link).map_err(io_error_code)
+        });
+        put_status(g, ret, done);
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_link_at
+    /// `link-at(old-path-flags, old-path, new-descriptor, new-path)`: a hard link. With
+    /// `symlink-follow` (bit 0) a symlink `old-path` is followed; without it a symlink
+    /// is `unsupported` (hosts differ on what to link) and a directory is
+    /// `not-permitted`. Both names are checked like any other entry; a taken new name
+    /// is `exist`. Needs a writable preopen.
+    fn wasi_filesystem_types_method_descriptor_link_at(
+        &mut self,
+        g: &mut Guest,
+        dir: i32,
+        old_flags: i32,
+        old_ptr: i32,
+        old_len: i32,
+        new_dir: i32,
+        new_ptr: i32,
+        new_len: i32,
+        ret: i32,
+    ) {
+        let done = self.require_writable().and_then(|()| {
+            let old = if old_flags & 1 != 0 {
+                self.resolve_at(g, dir, old_ptr, old_len)?
+            } else {
+                let entry = self.entry_at(g, dir, old_ptr, old_len)?;
+                if entry.symlink_metadata().map_err(io_error_code)?.is_symlink() {
+                    return Err(code::UNSUPPORTED);
+                }
+                entry
+            };
+            if old.metadata().map_err(io_error_code)?.is_dir() {
+                return Err(code::NOT_PERMITTED);
+            }
+            let new = self.entry_at(g, new_dir, new_ptr, new_len)?;
+            std::fs::hard_link(old, new).map_err(io_error_code)
         });
         put_status(g, ret, done);
     }

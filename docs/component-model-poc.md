@@ -208,7 +208,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   `sync`, `sync-data` and `set-times` (`no-change`, `now` or a `timestamp`, on a directory or a file
   opened for `write`; nanoseconds of a second or more are `invalid`) are done. On a read-only
   preopen `set-size` and `set-times` are `read-only`, while `sync` succeeds since it
-  changes nothing. `set-times-at` and `readlink-at` are done too (a symlink's own times cannot be set: `unsupported`; a link target that is absolute or has `..` is `not-permitted`); `symlink-at`, `link-at` and sockets are not.
+  changes nothing. `set-times-at` and `readlink-at` are done too (a symlink's own times cannot be set: `unsupported`; a link target that is absolute or has `..` is `not-permitted`); `symlink-at` (a target that is absolute or has `..` is `not-permitted`) and `link-at` are done too; only sockets are not.
 - Paths must stay under the preopen: an absolute path or any `..` is `not-permitted`
   (stricter than WASI, which allows `..` that stays inside), and so is a symlink that
   leads out (the resolved path is checked against the preopen). Path flags are
@@ -239,7 +239,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
    everything below. *Done: `named_imports` / `--named-imports`.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
-   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at` and `readlink-at` are done too; `symlink-at`, `link-at` and sockets are not. This is what makes a wasip2 hello-world run natively.
+   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at` and `readlink-at` are done too; `symlink-at` and `link-at` are done too; only sockets are not. This is what makes a wasip2 hello-world run natively.
 4. **Full component support** (very large): parse the component, resolve instances
    and `canon lift/lower` per the spec, and generate glue for arbitrary WIT worlds.
    Months of work; only worth it if general components are a goal.
