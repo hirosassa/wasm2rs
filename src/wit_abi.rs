@@ -51,10 +51,6 @@ fn join(a: Flat, b: Flat) -> Flat {
 }
 
 /// The size in bytes (and alignment) of the discriminant of a variant with `cases` cases.
-#[allow(
-    dead_code,
-    reason = "the memory layout is used by the glue for strings and lists (next step)"
-)]
 fn discriminant(cases: usize) -> u64 {
     match cases {
         0..=0x100 => 1,
@@ -75,10 +71,6 @@ fn cases_of(ty: &WitType) -> Option<Vec<Option<&WitType>>> {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "the memory layout is used by the glue for strings and lists (next step)"
-)]
 fn align_to(ptr: u64, align: u64) -> u64 {
     // `align` is a power of two, at least 1.
     let align = align.max(1);
@@ -86,10 +78,6 @@ fn align_to(ptr: u64, align: u64) -> u64 {
 }
 
 /// The size and alignment in bytes of `ty` in linear memory.
-#[allow(
-    dead_code,
-    reason = "the memory layout is used by the glue for strings and lists (next step)"
-)]
 pub(crate) fn size_align(ty: &WitType, budget: &mut Budget) -> Result<(u64, u64), TranspileError> {
     budget.spend()?;
     Ok(match ty {
@@ -141,13 +129,43 @@ pub(crate) fn size_align(ty: &WitType, budget: &mut Budget) -> Result<(u64, u64)
     })
 }
 
+/// The offset of each field of a record (or tuple) of `types` in memory: every field at its
+/// alignment, one after the other.
+pub(crate) fn field_offsets(
+    types: &[&WitType],
+    budget: &mut Budget,
+) -> Result<Vec<u64>, TranspileError> {
+    let mut offsets = Vec::new();
+    let mut at = 0u64;
+    for t in types {
+        let (size, align) = size_align(t, budget)?;
+        at = align_to(at, align);
+        offsets.push(at);
+        at = at.saturating_add(size);
+    }
+    Ok(offsets)
+}
+
+/// For a variant-like type (option, result, variant, enum): the size of its discriminant and
+/// the offset of its payload (`align_to(disc, max case alignment)`); `None` for other types.
+pub(crate) fn variant_layout(
+    ty: &WitType,
+    budget: &mut Budget,
+) -> Result<Option<(u64, u64)>, TranspileError> {
+    let Some(cases) = cases_of(ty) else {
+        return Ok(None);
+    };
+    let disc = discriminant(cases.len());
+    let mut max_align = 1u64;
+    for t in cases.into_iter().flatten() {
+        max_align = max_align.max(size_align(t, budget)?.1);
+    }
+    Ok(Some((disc, align_to(disc, max_align))))
+}
+
 /// A record's layout from its fields' `(size, align)`: each field at its alignment, the
 /// whole aligned to the largest field alignment.
-#[allow(
-    dead_code,
-    reason = "the memory layout is used by the glue for strings and lists (next step)"
-)]
-fn record_layout(fields: &[(u64, u64)]) -> (u64, u64) {
+pub(crate) fn record_layout(fields: &[(u64, u64)]) -> (u64, u64) {
     let align = fields.iter().map(|&(_, a)| a).max().unwrap_or(1);
     let mut size = 0u64;
     for &(s, a) in fields {

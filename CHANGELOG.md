@@ -12,13 +12,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `wit_host_glue` and `--wit-host --glue`: the glue from the typed `Host` trait to the flat
   reentrant `Imports` trait of the core module (`pub struct Glue<H: Host>(pub H)` with
   `impl<H: Host> Imports for Glue<H>`; each method has the name of the `Host` method it
-  forwards to, lifts the flat core parameters, calls the host and lowers the result). New
+  forwards to, lifts the core parameters, calls the host and lowers the result). New
   canonical ABI model (size, alignment, flattened types with `join`, `MAX_FLAT_PARAMS` 16 /
-  `MAX_FLAT_RESULTS` 1). Covers functions made only of integers, floats, `bool`, `char`,
-  `enum`, `flags`, resource handles (with `[resource-drop]`) and flat `variant`/`option`/
-  `result`/`record`/`tuple`; lifting is lenient like the canonical ABI (non-zero `bool` is true, narrow integers keep their low bits, undeclared flag bits are ignored); an invalid `char` or discriminant panics. A function that needs linear memory
-  (`string`, `list`, more than 16 flat parameters, a result of more than one flat value) is an
-  `Unsupported` error naming it; memory-backed types follow.
+  `MAX_FLAT_RESULTS` 1). Covers every type of the typed `Host` trait: integers, floats,
+  `bool`, `char`, `string` (UTF-8), `list`, `option`, `result`, `tuple`, `record`, `variant`,
+  `enum`, `flags` and resource handles (with `[resource-drop]`), nested to any depth, lifted
+  from the flat parameters or from guest memory and lowered to the flat result or to memory.
+  Parameters of more than 16 flat values arrive as one pointer to a record, a result of more
+  than one flat value is written through a trailing return pointer, and a `string`/`list`
+  result is allocated with the guest's `cabi_realloc(0, 0, align, size)` (transpile with
+  `named_exports`). Lifting is lenient like the canonical ABI (non-zero `bool` is true, narrow
+  integers keep their low bits, undeclared flag bits are ignored); an invalid `char`,
+  discriminant or UTF-8 string, an out-of-range pointer or a misaligned pointer panics (a
+  trap), and so does a call that lifts more data (string/list bytes plus element counts) than
+  the guest's memory length (`lifted data too large`), which stops aliased descriptors from
+  amplifying host allocation. A real `wasm32-wasip2` hello world gets its glue and runs (`hello` prints).
 - `wit_host_trait` and `--wit-host <component.wasm> [output]`: read the types of a WebAssembly
   component's imports (type section, instance types, aliases, imports; `wasmparser` only) and
   generate a typed `pub trait Host` with one method per function of every imported interface,
