@@ -636,7 +636,7 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
     let mut first = true;
     // The resources whose `canon resource.drop` the component body lowers, whether it has
     // a core module at the top level, and whether some drop could not be tied to a resource
-    // (or may hide in a nested component).
+    // (or a nested component lowers some drop).
     let mut dropped: Vec<u32> = Vec::new();
     let mut has_core = false;
     let mut unmapped_drop = false;
@@ -647,6 +647,15 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
         let payload = payload?;
         if depth > 0 {
             match payload {
+                // A nested component's own `canon resource.drop`s are not mapped to
+                // resources (its index spaces are not read), so any drop may be lowered there.
+                Payload::ComponentCanonicalSection(reader) => {
+                    for func in reader {
+                        if matches!(func?, CanonicalFunction::ResourceDrop { .. }) {
+                            unmapped_drop = true;
+                        }
+                    }
+                }
                 Payload::ModuleSection { .. } | Payload::ComponentSection { .. } => {
                     depth = depth.saturating_add(1);
                 }
@@ -668,12 +677,7 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
                 has_core = true;
                 depth = 1;
             }
-            // A nested component's own `canon resource.drop`s are not read, so any drop
-            // may be lowered there.
-            Payload::ComponentSection { .. } => {
-                unmapped_drop = true;
-                depth = 1;
-            }
+            Payload::ComponentSection { .. } => depth = 1,
             Payload::ComponentCanonicalSection(reader) => {
                 for func in reader {
                     if let CanonicalFunction::ResourceDrop { resource } = func? {
@@ -797,7 +801,7 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
         // the resource, but only if the component body lowers a `canon resource.drop` for it
         // (it is in the body, not in the type): a program that never drops e.g. `network`
         // has no such import. A component without a top-level core module (just its types),
-        // with a nested component, or with a drop that cannot be tied to a resource, keeps
+        // with a nested component that lowers a drop, or with a drop that cannot be tied to a resource, keeps
         // every drop.
         for r in &inst.resources {
             if has_core && !unmapped_drop && !dropped.contains(&r.id) {
@@ -1186,7 +1190,7 @@ fn write_flags(out: &mut String, name: &str, flags: &WitFlags) {
 /// `[resource-drop]r` that the lowered `resource.drop` becomes, but only if the component
 /// lowers a `resource.drop` of `r` (a program that never drops `r` has no such core import).
 /// Every resource's drop is declared if the component has no core module at the top level
-/// (only its types), has a nested component (its drops are not read), or has a
+/// (only its types), has a nested component that lowers a `resource.drop` (it is not mapped), or has a
 /// `resource.drop` that cannot be tied to a resource.
 ///
 /// # Errors

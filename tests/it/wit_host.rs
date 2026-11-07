@@ -1190,29 +1190,49 @@ fn the_glue_builds_when_the_core_imports_the_drop() {
 }
 
 /// An outer component importing `a:b/res` (with the resource `r`) and holding a nested
-/// component with its own core module. The outer body has no `canon resource.drop`; the
-/// nested one is not read, so the drop must stay declared (the inner core may import it).
-fn composed_component() -> Vec<u8> {
-    wat::parse_str(
+/// component that lowers `resource.drop` of it (as a composed component's inner component
+/// does) when `inner_drops`. The outer body has no `canon resource.drop`; the nested one is not
+/// mapped, so the drop must stay declared.
+fn composed_component(inner_drops: bool) -> Vec<u8> {
+    let drop = if inner_drops {
+        "(core func (canon resource.drop $ir))"
+    } else {
+        ""
+    };
+    wat::parse_str(format!(
         r#"(component
           (import "a:b/res" (instance $i
             (export "r" (type $r (sub resource)))
             (export "poke" (func (param "self" (borrow $r))))))
+          (alias export $i "r" (type $or))
+          (core module $m (func))
           (component $inner
+            (import "r" (type $ir (sub resource)))
+            {drop}
             (core module (func)))
-          (instance (instantiate $inner)))"#,
-    )
+          (instance (instantiate $inner (with "r" (type $or)))))"#
+    ))
     .unwrap()
 }
 
 #[test]
 fn a_nested_component_keeps_every_resource_drop() {
-    let names: Vec<String> = wasm2rs::wit_functions(&composed_component())
+    let names: Vec<String> = wasm2rs::wit_functions(&composed_component(true))
         .unwrap()
         .into_iter()
         .map(|f| f.name)
         .collect();
     assert_eq!(names, ["poke", "[resource-drop]r"]);
+}
+
+#[test]
+fn a_nested_component_without_a_drop_does_not_declare_one() {
+    let names: Vec<String> = wasm2rs::wit_functions(&composed_component(false))
+        .unwrap()
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    assert_eq!(names, ["poke"]);
 }
 
 #[test]

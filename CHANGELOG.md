@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `wit_host_trait` / `wit_host_glue` / `wit_functions` (and `--wit-host`, `--glue`) declare
   `[resource-drop]<r>` only for resources whose `canon resource.drop` the component lowers (with no
-  top-level core module, a nested component or an unresolvable drop, every drop is kept). A `wasm32-wasip2` program using
+  top-level core module, a nested component that lowers a drop, or an unresolvable drop, every drop is kept). A `wasm32-wasip2` program using
   `std::net` never drops `network`, so its glue no longer fails with E0407 (a method that is
   not a member of `Imports`).
 - `examples/wasip2_run.rs`: a panic during the `run` call (a guest trap, or a panic inside a
