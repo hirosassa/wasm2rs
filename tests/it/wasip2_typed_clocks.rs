@@ -60,6 +60,18 @@ const CORE: &str = r#"
     (call $poll (i32.const 96) (i32.const 2) (i32.const 104))
     (i32.add (i32.mul (i32.load (i32.const 108)) (i32.const 10))
              (i32.load (i32.load (i32.const 104)))))
+  ;; polls [a timer `ns` away from now, a 30 ms timer] (or [the instant `ns`, a 30 ms timer]
+  ;; when `by_instant` is set): the number of ready pollables times ten, plus the first ready
+  ;; index
+  (func (export "poll_far_and_soon") (param $ns i64) (param $by_instant i32) (result i32)
+    (i32.store (i32.const 160)
+      (if (result i32) (local.get $by_instant)
+        (then (call $at (local.get $ns)))
+        (else (call $dur (local.get $ns)))))
+    (i32.store (i32.const 164) (call $dur (i64.const 30000000)))
+    (call $poll (i32.const 160) (i32.const 2) (i32.const 168))
+    (i32.add (i32.mul (i32.load (i32.const 172)) (i32.const 10))
+             (i32.load (i32.load (i32.const 168)))))
   ;; the datetime record: seconds (u64) at 120, nanoseconds (u32) at 128
   (func (export "wall_secs") (result i64) (call $wall (i32.const 120)) (i64.load (i32.const 120)))
   (func (export "wall_nanos") (result i32) (call $wall (i32.const 120)) (i32.load (i32.const 128))))
@@ -121,6 +133,16 @@ fn poll_waits_for_an_instant_ahead() {
          assert_eq!(inst.poll_at(at), 11); \
          assert!(start.elapsed() >= std::time::Duration::from_millis(50));",
     ));
+}
+
+#[test]
+fn a_deadline_too_far_to_represent_never_arrives_and_does_not_panic() {
+    // u64::MAX nanoseconds (about 584 years) is a deadline that never arrives: the 30 ms
+    // timer is the only one ready. `Instant` does not document its range, so a platform may
+    // overflow here (`deadline_after` guards that); the common ones do not, so this checks
+    // the far deadline stays pending rather than the overflow itself
+    assert_succeeded(&run("assert_eq!(inst.poll_far_and_soon(-1, 0), 11); \
+         assert_eq!(inst.poll_far_and_soon(-1, 1), 11);"));
 }
 
 #[test]

@@ -1059,6 +1059,20 @@ fn descriptor_stat(meta: std::fs::Metadata) -> DescriptorStat {
 }
 // end optional
 
+// optional: wasi_clocks_monotonic_clock_subscribe_duration | wasi_clocks_monotonic_clock_subscribe_instant
+/// `base` plus `when` nanoseconds. A guest can ask for more than an `Instant` holds (it
+/// depends on the platform), and adding that would panic; such a deadline is replaced by a
+/// distant one that is representable (a century, or a year if even that is not), so it is
+/// never reached in practice; only if not even a year fits is `base` itself returned.
+fn deadline_after(base: Instant, when: u64) -> Instant {
+    const YEAR: u64 = 365 * 24 * 60 * 60;
+    [Duration::from_nanos(when), Duration::from_secs(100 * YEAR), Duration::from_secs(YEAR)]
+        .into_iter()
+        .find_map(|d| base.checked_add(d))
+        .unwrap_or(base)
+}
+// end optional
+
 // optional: wasi_filesystem_types_method_descriptor_metadata_hash | wasi_filesystem_types_method_descriptor_metadata_hash_at
 /// A hash of the file's identity (device and inode; its path where there are none), so
 /// the same file gives the same value within one run and two files never do.
@@ -1255,7 +1269,7 @@ impl Host for TypedHost {
 
     // optional: wasi_clocks_monotonic_clock_subscribe_duration
     fn wasi_clocks_monotonic_clock_subscribe_duration(&mut self, when: u64) -> Pollable {
-        self.subscribe(Some(Instant::now() + Duration::from_nanos(when)))
+        self.subscribe(Some(deadline_after(Instant::now(), when)))
     }
     // end optional
 
@@ -1263,7 +1277,7 @@ impl Host for TypedHost {
     /// An instant is nanoseconds since the host was created (see `monotonic-clock.now`); one
     /// that has passed is ready at once.
     fn wasi_clocks_monotonic_clock_subscribe_instant(&mut self, when: u64) -> Pollable {
-        self.subscribe(Some(self.start + Duration::from_nanos(when)))
+        self.subscribe(Some(deadline_after(self.start, when)))
     }
     // end optional
 
