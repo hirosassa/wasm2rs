@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (example):** `examples/wasip2_run.rs` now takes a `wasm32-wasip2` component
+  (`cargo run --release --example wasip2_run -- <component.wasm> [args...]`), not an
+  extracted core module. It runs the component's largest core module through the typed host
+  `examples/wasip2_host/typed.rs` and the generated glue (`wit_host_glue`) instead of
+  `examples/wasip2_host/host.rs` (which stays in the repository). A component importing
+  something `typed.rs` does not implement fails to build with rustc's E0046 errors and a hint
+  (exit code 2). Tested end to end in `tests/it/wasip2_run_example.rs`.
+
 ### Added
 
 - `examples/wasip2_host/typed.rs`: a WASI preview2 host written against the generated typed `Host`

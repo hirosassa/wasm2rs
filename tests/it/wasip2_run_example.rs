@@ -1,0 +1,165 @@
+//! `examples/wasip2_run.rs` end to end: a real component (a core module wrapped with
+//! `wit-component`, importing and exporting what a `wasm32-wasip2` command does) goes in,
+//! the example transpiles its core module, adds the glue and the typed host, builds and
+//! runs it.
+
+use std::process::{Command, Output};
+
+use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
+use wit_parser::Resolve;
+
+const IO: &str = r#"
+package wasi:io@0.2.0;
+interface error {
+  resource error;
+}
+interface streams {
+  use error.{error};
+  resource input-stream;
+  resource output-stream {
+    write: func(contents: list<u8>) -> result<_, stream-error>;
+  }
+  variant stream-error {
+    last-operation-failed(error),
+    closed,
+  }
+}
+"#;
+
+const CLI: &str = r#"
+package wasi:cli@0.2.0;
+interface environment {
+  get-arguments: func() -> list<string>;
+}
+interface stdout {
+  use wasi:io/streams@0.2.0.{output-stream};
+  get-stdout: func() -> output-stream;
+}
+interface run {
+  run: func() -> result;
+}
+"#;
+
+const WORLD: &str = r#"
+package test:t;
+world w {
+  import wasi:cli/environment@0.2.0;
+  import wasi:cli/stdout@0.2.0;
+  export wasi:cli/run@0.2.0;
+}
+"#;
+
+/// `run` writes its second argument to stdout (nothing without one) and returns the
+/// error result when it got a third.
+const CORE: &str = r#"
+(module
+  (import "wasi:io/error@0.2.0" "[resource-drop]error" (func (param i32)))
+  (import "wasi:io/streams@0.2.0" "[resource-drop]output-stream" (func $drop_out (param i32)))
+  (import "wasi:cli/environment@0.2.0" "get-arguments" (func $args (param i32)))
+  (import "wasi:cli/stdout@0.2.0" "get-stdout" (func $stdout (result i32)))
+  (import "wasi:io/streams@0.2.0" "[method]output-stream.write" (func $write (param i32 i32 i32 i32)))
+  (memory (export "memory") 1)
+  (global $brk (mut i32) (i32.const 1024))
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (local $p i32)
+    (local.set $p (i32.and (i32.add (global.get $brk) (i32.sub (local.get 2) (i32.const 1)))
+                           (i32.sub (i32.const 0) (local.get 2))))
+    (global.set $brk (i32.add (local.get $p) (local.get 3)))
+    (local.get $p))
+  (func (export "wasi:cli/run@0.2.0#run") (result i32) (local $argc i32) (local $list i32) (local $out i32)
+    (call $args (i32.const 72))
+    (local.set $list (i32.load (i32.const 72)))
+    (local.set $argc (i32.load (i32.const 76)))
+    (if (i32.ge_u (local.get $argc) (i32.const 2))
+      (then
+        (local.set $out (call $stdout))
+        (call $write (local.get $out)
+          (i32.load offset=8 (local.get $list))
+          (i32.load offset=12 (local.get $list))
+          (i32.const 100))
+        (call $drop_out (local.get $out))))
+    (i32.gt_u (local.get $argc) (i32.const 2))))
+"#;
+
+fn component() -> Vec<u8> {
+    component_of(WORLD, CORE)
+}
+
+/// A component of `world` (in the package `world_wit`, after `IO` and the `cli` package)
+/// around the core module `core`.
+fn component_of(world_wit: &str, core: &str) -> Vec<u8> {
+    let mut resolve = Resolve::default();
+    resolve.push_str("io.wit", IO).unwrap();
+    resolve.push_str("cli.wit", CLI).unwrap();
+    let package = resolve.push_str("test.wit", world_wit).unwrap();
+    let world = resolve.select_world(&[package], Some("w")).unwrap();
+    let mut module = wat::parse_str(core).unwrap();
+    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
+    ComponentEncoder::default()
+        .module(&module)
+        .unwrap()
+        .validate(true)
+        .encode()
+        .unwrap()
+}
+
+/// Runs `cargo run --example wasip2_run -- <component> <args>` with the work dir `tag`.
+fn run_example(component: &[u8], tag: &str, args: &[&str]) -> Output {
+    let dir =
+        std::env::temp_dir().join(format!("wasm2rs-run-example-{}-{tag}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wasm = dir.join("component.wasm");
+    std::fs::write(&wasm, component).unwrap();
+    Command::new(env!("CARGO"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["run", "--quiet", "--example", "wasip2_run", "--"])
+        .arg(&wasm)
+        .args(args)
+        .env("WASIP2_WORK_DIR", dir.join("work"))
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_component_prints_its_argument_through_the_typed_host() {
+    let out = run_example(&component(), "hello", &["hello"]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "hello",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success());
+}
+
+#[test]
+fn an_error_result_from_run_is_a_nonzero_exit_code() {
+    let out = run_example(&component(), "fail", &["a", "b"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a");
+}
+
+#[test]
+fn an_import_the_typed_host_lacks_fails_with_a_hint() {
+    let world = r#"
+package test:t;
+interface unknown {
+  ping: func();
+}
+world w {
+  import unknown;
+  export wasi:cli/run@0.2.0;
+}
+"#;
+    let core = r#"
+(module
+  (import "test:t/unknown" "ping" (func $ping))
+  (memory (export "memory") 1)
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "wasi:cli/run@0.2.0#run") (result i32) (call $ping) (i32.const 0)))
+"#;
+    let out = run_example(&component_of(world, core), "unknown", &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("E0046"), "{stderr}");
+    assert!(stderr.contains("does not implement"), "{stderr}");
+}
