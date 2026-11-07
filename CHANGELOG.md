@@ -17,9 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (a record is one struct, emitted once); resources become one `Copy` newtype each
   (`pub struct Pollable(pub u32);`, shared across interfaces; `own` and `borrow` are both the
   handle) with `[method]`/`[static]`/`[constructor]` functions as methods and a
-  `<module>_resource_drop_<r>` method for the core import `[resource-drop]<r>`; `variant`, `enum`,
-  `flags`, `future`, `stream` and `error-context` are an `Unsupported` error naming the type. `wit_functions`
-  returns the decoded `WitFunc`/`WitType` list. No lowering glue yet.
+  `<module>_resource_drop_<r>` method for the core import `[resource-drop]<r>`; a `variant` is a
+  Rust `enum` with payload cases (`Case(T)`), an `enum` a fieldless `Copy` enum, and `flags` a
+  `pub struct F(pub u8|u16|u32)` (the canonical ABI width; flag `i` is bit `i`) with one associated
+  constant per flag plus `contains`/`union` (all emitted once, in the namespace shared with records
+  and resources; `WitType::Variant`/`Enum`/`Flags`). `future`, `stream` and `error-context`
+  are an `Unsupported` error naming the type. `wit_functions` returns the decoded `WitFunc`/`WitType` list. No lowering glue yet.
 - `ref.test`, `ref.cast` and `br_on_cast` against a concrete function type: a non-null funcref
   matches when its function's declared type is the target or a declared subtype of it
   (`sub` chains, final vs. open types and equivalent types across rec groups included; the

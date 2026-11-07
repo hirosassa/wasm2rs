@@ -199,24 +199,6 @@ fn an_interface_without_functions_adds_nothing() {
 #[test]
 fn unsupported_types_are_errors_naming_the_type() {
     let cases = [
-        (
-            "variant",
-            r#"(type $w (variant (case "a") (case "b" u8)))
-               (export "v" (type $v (eq $w)))
-               (export "f" (func (param "v" $v)))"#,
-        ),
-        (
-            "enum",
-            r#"(type $w (enum "a" "b"))
-               (export "v" (type $v (eq $w)))
-               (export "f" (func (param "v" $v)))"#,
-        ),
-        (
-            "flags",
-            r#"(type $w (flags "a" "b"))
-               (export "v" (type $v (eq $w)))
-               (export "f" (func (param "v" $v)))"#,
-        ),
         ("future", r#"(export "f" (func (param "v" (future u8))))"#),
         ("stream", r#"(export "f" (func (result (stream u8))))"#),
         (
@@ -224,11 +206,17 @@ fn unsupported_types_are_errors_naming_the_type() {
             r#"(export "f" (func (param "v" error-context)))"#,
         ),
         (
-            "variant",
+            "future",
             // Nested inside a supported type.
-            r#"(type $w (variant (case "a")))
+            r#"(export "f" (func (result (list (option (future u8))))))"#,
+        ),
+        (
+            "stream",
+            // An unsupported payload inside a variant.
+            r#"(type $st (stream u8))
+               (type $w (variant (case "a" $st)))
                (export "v" (type $v (eq $w)))
-               (export "f" (func (result (list (option $v)))))"#,
+               (export "f" (func (param "v" $v)))"#,
         ),
     ];
     for (what, funcs) in cases {
@@ -245,7 +233,8 @@ fn an_unused_unsupported_type_is_not_an_error() {
     let wasm = component(
         "",
         "a:b/c",
-        r#"(type $w (variant (case "a")))
+        r#"(type $st (stream u8))
+           (type $w (variant (case "a" $st)))
                (export "v" (type $v (eq $w)))
            (export "kind" (type (eq $v)))
            (export "f" (func (result u8)))"#,
@@ -382,12 +371,10 @@ fn the_cli_fails_on_a_core_module_and_unsupported_types() {
     let variant = run(&component(
         "",
         "a:b/c",
-        r#"(type $w (variant (case "a")))
-               (export "v" (type $v (eq $w)))
-           (export "f" (func (param "v" $v)))"#,
+        r#"(export "f" (func (param "v" (future u8))))"#,
     ));
     assert!(!variant.status.success());
-    assert!(String::from_utf8_lossy(&variant.stderr).contains("variant"));
+    assert!(String::from_utf8_lossy(&variant.stderr).contains("future"));
 }
 
 /// `--wit-host` generates no code from the module, so it refuses extra arguments and the
@@ -745,4 +732,371 @@ fn an_alias_of_the_first_imports_resource_stays_that_resource() {
         rust.contains("fn a_b_y_resource_drop_p(&mut self, handle: P2);"),
         "{rust}"
     );
+}
+
+// ---- variant, enum and flags ----
+
+fn variant_host(types_and_funcs: &str) -> String {
+    host(&component("", "a:b/c", types_and_funcs))
+}
+
+#[test]
+fn a_variant_becomes_a_rust_enum_with_payload_cases() {
+    let rust = variant_host(
+        r#"(type $w (variant (case "none-yet") (case "bytes" (list u8)) (case "code" u32)))
+           (export "outcome" (type $v (eq $w)))
+           (export "f" (func (param "v" $v) (result $v)))"#,
+    );
+    assert!(
+        rust.contains(
+            "#[derive(Debug, Clone, PartialEq)]\npub enum Outcome {\n    NoneYet,\n    Bytes(Vec<u8>),\n    Code(u32),\n}"
+        ),
+        "{rust}"
+    );
+    assert!(
+        rust.contains("fn a_b_c_f(&mut self, v: Outcome) -> Outcome;"),
+        "{rust}"
+    );
+}
+
+#[test]
+fn a_variant_with_compound_payloads_nests_records_options_and_handles() {
+    let rust = host(
+        &wat::parse_str(
+            r#"(component
+          (type (instance
+            (export "res" (type $res (sub resource)))
+            (type $rec (record (field "n" u8)))
+            (export "info" (type $info (eq $rec)))
+            (type $w (variant
+              (case "r" $info)
+              (case "o" (option (list string)))
+              (case "h" (own $res))
+              (case "b" (borrow $res))
+              (case "t" (tuple u8 bool))
+              (case "unit")))
+            (export "sum" (type $sum (eq $w)))
+            (type $f (func (param "s" $sum)))
+            (export "f" (func (type $f)))))
+          (import "a:b/c" (instance (type 0))))"#,
+        )
+        .unwrap(),
+    );
+    for want in [
+        "pub struct Info {",
+        "    R(Info),",
+        "    O(Option<Vec<String>>),",
+        "    H(Res),",
+        "    B(Res),",
+        "    T((u8, bool)),",
+        "    Unit,",
+        "fn a_b_c_f(&mut self, s: Sum);",
+    ] {
+        assert!(rust.contains(want), "missing {want}:\n{rust}");
+    }
+    // The record the variant contains is declared before it (deterministic order).
+    assert!(rust.find("pub struct Info").unwrap() < rust.find("pub enum Sum").unwrap());
+}
+
+#[test]
+fn an_enum_is_a_fieldless_copy_enum() {
+    let rust = variant_host(
+        r#"(type $w (enum "not-found" "denied" "io-error"))
+           (export "error-code" (type $e (eq $w)))
+           (export "f" (func (result (option $e))))"#,
+    );
+    assert!(
+        rust.contains(
+            "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum ErrorCode {\n    NotFound,\n    Denied,\n    IoError,\n}"
+        ),
+        "{rust}"
+    );
+    assert!(
+        rust.contains("fn a_b_c_f(&mut self) -> Option<ErrorCode>;"),
+        "{rust}"
+    );
+}
+
+fn flag_names(n: usize) -> String {
+    (0..n).map(|i| format!("\"f{i}\" ")).collect()
+}
+
+#[test]
+fn flags_use_the_canonical_abi_integer_width() {
+    for (count, int) in [
+        (3, "u8"),
+        (8, "u8"),
+        (9, "u16"),
+        (16, "u16"),
+        (17, "u32"),
+        (32, "u32"),
+    ] {
+        let rust = variant_host(&format!(
+            r#"(type $w (flags {}))
+               (export "perms" (type $p (eq $w)))
+               (export "f" (func (param "p" $p)))"#,
+            flag_names(count)
+        ));
+        assert!(
+            rust.contains(&format!(
+                "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\npub struct Perms(pub {int});"
+            )),
+            "{count}: {rust}"
+        );
+        assert!(
+            rust.contains(&format!(
+                "    pub const F{}: Self = Self(1 << {});",
+                count - 1,
+                count - 1
+            )),
+            "{count}: {rust}"
+        );
+    }
+}
+
+#[test]
+fn more_than_32_flags_are_unsupported() {
+    let wasm = wat::parse_str(format!(
+        r#"(component (import "a:b/c" (instance
+            (type $w (flags {}))
+            (export "perms" (type $p (eq $w)))
+            (export "f" (func (param "p" $p))))))"#,
+        flag_names(33)
+    ));
+    // Either the validator or this reader refuses; never a silently wrong trait.
+    if let Ok(wasm) = wasm {
+        let err = wit_host_trait(&wasm).unwrap_err().to_string();
+        assert!(err.contains("flags") || err.contains("32"), "{err}");
+    }
+}
+
+#[test]
+fn a_variant_used_by_two_functions_is_emitted_once() {
+    let rust = variant_host(
+        r#"(type $w (variant (case "a") (case "b" u8)))
+           (export "v" (type $v (eq $w)))
+           (export "f" (func (param "x" $v)))
+           (export "g" (func (result (list $v))))"#,
+    );
+    assert_eq!(rust.matches("pub enum V {").count(), 1, "{rust}");
+}
+
+#[test]
+fn different_types_with_one_name_get_distinct_rust_names() {
+    let wasm = wat::parse_str(
+        r#"(component
+          (import "a:b/one" (instance
+            (type $w (variant (case "a")))
+            (export "kind" (type $k (eq $w)))
+            (export "f" (func (param "k" $k)))))
+          (import "a:b/two" (instance
+            (type $w (variant (case "b" u8)))
+            (export "kind" (type $k (eq $w)))
+            (export "f" (func (param "k" $k)))))
+          (import "a:b/three" (instance
+            (type $w (enum "c"))
+            (export "kind" (type $k (eq $w)))
+            (export "f" (func (param "k" $k))))))"#,
+    )
+    .unwrap();
+    let rust = host(&wasm);
+    for want in [
+        "pub enum Kind {\n    A,\n}",
+        "pub enum Kind2 {\n    B(u8),\n}",
+        "pub enum Kind3 {\n    C,\n}",
+        "fn a_b_one_f(&mut self, k: Kind);",
+        "fn a_b_two_f(&mut self, k: Kind2);",
+        "fn a_b_three_f(&mut self, k: Kind3);",
+    ] {
+        assert!(rust.contains(want), "missing {want}:\n{rust}");
+    }
+}
+
+#[test]
+fn case_and_flag_names_are_escaped_and_deduplicated() {
+    let rust = variant_host(
+        r#"(type $w (variant (case "self") (case "a-b") (case "a1" u8) (case "type")))
+           (export "option" (type $v (eq $w)))
+           (type $x (flags "type" "a-b" "a-b2" "x1"))
+           (export "host" (type $h (eq $x)))
+           (export "f" (func (param "v" $v) (param "h" $h)))"#,
+    );
+    for want in [
+        "pub enum Option_ {",
+        "    Self_,",
+        "    AB,",
+        "    A1(u8),",
+        "    Type,",
+        "pub struct Host_(pub u8);",
+        "pub const TYPE: Self",
+        "pub const A_B: Self",
+        "pub const A_B2: Self",
+        "pub const X1: Self",
+    ] {
+        assert!(rust.contains(want), "missing {want}:\n{rust}");
+    }
+}
+
+#[test]
+fn the_decoded_form_has_variant_enum_and_flags() {
+    use wasm2rs::{WitType, wit_functions};
+    let wasm = component(
+        "",
+        "a:b/c",
+        r#"(type $w (variant (case "a") (case "b" u8)))
+           (export "v" (type $v (eq $w)))
+           (type $e (enum "x" "y"))
+           (export "e" (type $e2 (eq $e)))
+           (type $fl (flags "r" "w"))
+           (export "fl" (type $fl2 (eq $fl)))
+           (export "f" (func (param "v" $v) (param "e" $e2) (param "fl" $fl2)))"#,
+    );
+    let funcs = wit_functions(&wasm).unwrap();
+    let params = &funcs[0].params;
+    assert!(
+        matches!(&params[0].1, WitType::Variant(v) if v.name == "v" && v.cases.len() == 2 && v.cases[0].1.is_none())
+    );
+    assert!(matches!(&params[1].1, WitType::Enum(e) if e.name == "e" && e.cases == ["x", "y"]));
+    assert!(matches!(&params[2].1, WitType::Flags(f) if f.name == "fl" && f.flags == ["r", "w"]));
+}
+
+#[test]
+fn the_variant_enum_and_flags_types_compile_and_can_be_used() {
+    let rust = variant_host(
+        r#"(type $s (variant (case "closed") (case "last-operation-failed" u32) (case "text" string)))
+           (export "stream-error" (type $se (eq $s)))
+           (type $e (enum "not-found" "denied"))
+           (export "error-code" (type $ec (eq $e)))
+           (type $fl (flags "read" "write" "mutate-directory"))
+           (export "descriptor-flags" (type $df (eq $fl)))
+           (export "step" (func (param "s" $se) (param "f" $df) (result (result $ec (error $se)))))"#,
+    );
+    let program = format!(
+        r#"{rust}
+struct H;
+impl Host for H {{
+    fn a_b_c_step(&mut self, s: StreamError, f: DescriptorFlags) -> Result<ErrorCode, StreamError> {{
+        if f.contains(DescriptorFlags::WRITE) && !f.contains(DescriptorFlags::MUTATE_DIRECTORY) {{
+            return Ok(ErrorCode::Denied);
+        }}
+        match s {{
+            StreamError::Closed => Ok(ErrorCode::NotFound),
+            StreamError::LastOperationFailed(n) => Err(StreamError::LastOperationFailed(n + 1)),
+            StreamError::Text(t) => Err(StreamError::Text(t + "!")),
+        }}
+    }}
+}}
+fn main() {{
+    let mut h = H;
+    let rw = DescriptorFlags::READ.union(DescriptorFlags::WRITE);
+    assert_eq!(rw, DescriptorFlags(0b011));
+    assert_eq!(DescriptorFlags::default(), DescriptorFlags(0));
+    assert_eq!(h.a_b_c_step(StreamError::Closed, rw), Ok(ErrorCode::Denied));
+    assert_eq!(h.a_b_c_step(StreamError::Closed, DescriptorFlags::READ), Ok(ErrorCode::NotFound));
+    assert_eq!(
+        h.a_b_c_step(StreamError::LastOperationFailed(4), DescriptorFlags::READ),
+        Err(StreamError::LastOperationFailed(5))
+    );
+    assert_eq!(
+        h.a_b_c_step(StreamError::Text("x".into()), DescriptorFlags(0)),
+        Err(StreamError::Text("x!".into()))
+    );
+    let e = ErrorCode::Denied;
+    let copy = e;
+    assert_eq!(e, copy);
+}}
+"#
+    );
+    let bin = common::build("wit_host_variants", &program);
+    assert!(Command::new(bin).status().unwrap().success());
+}
+
+/// Like [`doubling_component`] with variants: each level has two cases of the previous one.
+fn doubling_variants(levels: usize, copies: usize) -> Vec<u8> {
+    // Variants must be named: level i is type 2i (the definition) and 2i+1 (its export).
+    let mut s = String::from(
+        "(component (type (instance\n (type (variant (case \"a\" u8) (case \"b\")))\n (export \"v0\" (type (eq 0)))\n",
+    );
+    for i in 1..levels {
+        let prev = 2 * (i - 1) + 1;
+        s.push_str(&format!(
+            " (type (variant (case \"a\" {prev}) (case \"b\" {prev})))\n (export \"v{i}\" (type (eq {})))\n",
+            2 * i
+        ));
+    }
+    let last = 2 * (levels - 1) + 1;
+    for _ in 0..copies {
+        s.push_str(&format!(" (type (list {last}))\n"));
+    }
+    s.push_str(&format!(
+        " (type (func (result {last})))\n (export \"f\" (func (type {})))\n",
+        2 * levels + copies
+    ));
+    s.push_str(")) (import \"a:b/c\" (instance (type 0))))\n");
+    wat::parse_str(s).unwrap()
+}
+
+#[test]
+fn a_shared_chain_of_variants_is_bounded_by_the_node_budget() {
+    let wasm = doubling_variants(17, 0);
+    let start = std::time::Instant::now();
+    let err = wit_host_trait(&wasm).unwrap_err().to_string();
+    assert!(
+        err.contains("unsupported") && err.contains("too large"),
+        "{err}"
+    );
+    assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+}
+
+#[test]
+fn a_moderately_shared_chain_of_variants_still_renders() {
+    let rust = host(&doubling_variants(3, 0));
+    assert!(rust.contains("pub enum V2 {"), "{rust}");
+}
+
+#[test]
+fn type_names_do_not_shadow_the_prelude() {
+    let rust = variant_host(
+        r#"(type $r (record (field "n" u8)))
+           (export "some" (type $some (eq $r)))
+           (type $e (enum "x"))
+           (export "none" (type $none (eq $e)))
+           (type $fl (flags "x"))
+           (export "ok" (type $ok (eq $fl)))
+           (type $v (variant (case "x")))
+           (export "err" (type $err (eq $v)))
+           (export "default" (type $default (sub resource)))
+           (export "f" (func (param "a" $some) (param "b" $none) (param "c" $ok) (param "d" $err)
+               (param "e" (own $default)) (result (option u8))))
+           (export "g" (func (result (result u8 (error u8)))))"#,
+    );
+    for want in [
+        "pub struct Some_ {",
+        "pub enum None_ {",
+        "pub struct Ok_(pub u8);",
+        "pub enum Err_ {",
+        "pub struct Default_(pub u32);",
+    ] {
+        assert!(rust.contains(want), "missing {want}:\n{rust}");
+    }
+    let program = format!(
+        r#"{rust}
+struct H;
+impl Host for H {{
+    fn a_b_c_f(&mut self, _a: Some_, _b: None_, _c: Ok_, _d: Err_, _e: Default_) -> Option<u8> {{
+        Some(Default::default())
+    }}
+    fn a_b_c_resource_drop_default(&mut self, _handle: Default_) {{}}
+    fn a_b_c_g(&mut self) -> Result<u8, u8> {{ if None::<u8>.is_none() {{ Ok(1) }} else {{ Err(2) }} }}
+}}
+fn main() {{
+    let mut h = H;
+    assert_eq!(h.a_b_c_g(), Ok(1));
+    let a = Some_ {{ n: 1 }};
+    assert_eq!(h.a_b_c_f(a, None_::X, Ok_::default(), Err_::X, Default_(0)), Some(0));
+}}
+"#
+    );
+    let bin = common::build("wit_host_prelude", &program);
+    assert!(Command::new(bin).status().unwrap().success());
 }

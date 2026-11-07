@@ -240,7 +240,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
    everything below. *Done: `named_imports` / `--named-imports`.*
    *Typed host trait generation started: `wit_host_trait` / `--wit-host` read the component's
    import types and generate a `Host` trait with the same method names (plain-data types and resources, as `Copy` handle newtypes with a
-   per-resource drop method; variants, enums, flags, futures and streams are rejected by name). The glue between it and the core `Imports`
+   per-resource drop method, variants as Rust enums, enums, and flags as `Copy` integer newtypes with a constant per flag; futures, streams and error-context are rejected by name; a real `wasm32-wasip2` hello world now yields a trait). The glue between it and the core `Imports`
    follows.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
