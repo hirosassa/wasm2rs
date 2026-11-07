@@ -26,6 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and neither call waits for the peer afterwards. stdout, stderr and files are unchanged.
   Tests in `tests/it/wasip2_typed_splice_permit.rs`.
 
+### Changed
+
+- `examples/wasip2_host/typed.rs`: a failed stream operation is `stream-error::last-operation-failed`
+  with a live `wasi:io/error` resource, as the spec says, instead of `closed` (guest-visible
+  change). It is reported once, by the first operation that finds the failure; after that the
+  stream is `closed` for every operation (a zero-length read and `subscribe` readiness included:
+  a failed stream stays ready). A connection whose socket failed (a reset, or a send queue that
+  could not be flushed), a read error on a connection or a file, and a failed write to stdout,
+  stderr or a file are `last-operation-failed`; the end of a stream and a dropped one stay
+  `closed`. Every such answer carries a fresh `error` handle that the guest drops
+  (`resource-drop`), which frees the host's slot; `[method]error.to-debug-string` (when the world
+  imports it) returns the OS message. A failed peer in the send-queue test now answers
+  `last-operation-failed` once, then `closed`. Not covered: a stdin read error (it still ends the
+  input as `closed`). Tests in `tests/it/wasip2_typed_io_error.rs`, `wasip2_typed_send_queue.rs`
+  and `wasip2_typed_fs_edges.rs`.
+
 ### Added
 
 - `examples/wasip2_host/typed.rs`: a TCP output stream has a host-side send queue (64 KiB). `write`

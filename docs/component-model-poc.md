@@ -186,7 +186,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   `exclusive` (`exist` if the file is there) and `truncate`, and a descriptor opened
   with `write` gives `write-via-stream(offset)` and `append-via-stream`, whose output
   streams share `check-write`/`write`/`blocking-flush` with stdout (file streams are
-  handles `3..`; a failed write answers `closed`). A new file is named under an
+  handles `3..`; a failed write answers `last-operation-failed` once, with an `error` handle, then `closed`; `closed` is also the end of a stream). A new file is named under an
   existing directory that must itself resolve under the preopen, and a symlink that
   leads nowhere or out (even a dangling one) is `not-permitted`, not a place to create
   a file. The path is checked when the file is opened, and a file descriptor then

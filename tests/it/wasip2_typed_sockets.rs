@@ -97,7 +97,7 @@ world w {
 
 pub(crate) const CORE: &str = r#"
 (module
-  (import "wasi:io/error@0.2.0" "[resource-drop]error" (func (param i32)))
+  (import "wasi:io/error@0.2.0" "[resource-drop]error" (func $drop_error (param i32)))
   (import "wasi:io/poll@0.2.0" "[resource-drop]pollable" (func $drop_pollable (param i32)))
   (import "wasi:io/poll@0.2.0" "[method]pollable.block" (func $block (param i32)))
   (import "wasi:io/poll@0.2.0" "poll" (func $poll (param i32 i32 i32)))
@@ -138,6 +138,7 @@ pub(crate) const CORE: &str = r#"
     (global.set $brk (i32.add (local.get $p) (local.get 3)))
     (local.get $p))
   (global $net (mut i32) (i32.const -1))
+  (global $last_err (mut i32) (i32.const -1))
   (global $c_in (mut i32) (i32.const -1))
   (global $c_out (mut i32) (i32.const -1))
   (global $s_sock (mut i32) (i32.const -1))
@@ -211,10 +212,17 @@ pub(crate) const CORE: &str = r#"
     (call $remote (local.get $s) (i32.const 200)) (call $packed))
 
   ;; result<_, error-code> or result<_, stream-error> at `at` whose error is at `at + 4`
+  ;; (a `last-operation-failed` (case 0) keeps its `own<error>` handle for `last_err`)
   (func $status4 (param $at i32) (result i32)
     (if (result i32) (i32.load8_u (local.get $at))
-      (then (i32.add (i32.const 100) (i32.load8_u (i32.add (local.get $at) (i32.const 4)))))
+      (then
+        (if (i32.eqz (i32.load8_u (i32.add (local.get $at) (i32.const 4))))
+          (then (global.set $last_err (i32.load (i32.add (local.get $at) (i32.const 8))))))
+        (i32.add (i32.const 100) (i32.load8_u (i32.add (local.get $at) (i32.const 4)))))
       (else (i32.const 0))))
+  ;; the `error` handle of the last `last-operation-failed` a status answered with
+  (func (export "last_err") (result i32) (global.get $last_err))
+  (func (export "drop_error") (param i32) (call $drop_error (local.get 0)))
 
   ;; start-connect to a.b.c.d:port (ipv4)
   (func (export "connect") (param $s i32) (param $port i32) (param $a i32) (param $b i32) (param $c i32) (param $d i32) (result i32)
@@ -253,19 +261,30 @@ pub(crate) const CORE: &str = r#"
   ;; check-write: the permitted length, or -1
   (func (export "check_write") (param $h i32) (result i64)
     (call $check_write (local.get $h) (i32.const 184))
-    (if (result i64) (i32.load8_u (i32.const 184)) (then (i64.const -1)) (else (i64.load (i32.const 192)))))
+    (if (result i64) (i32.load8_u (i32.const 184))
+      (then
+        ;; (the handle of a `last-operation-failed` is kept for `last_err`)
+        (if (i32.eqz (i32.load8_u (i32.const 192)))
+          (then (global.set $last_err (i32.load (i32.const 196)))))
+        (i64.const -1))
+      (else (i64.load (i32.const 192)))))
+  ;; the result of a read at 220: the length of the list, or -1 - the stream-error case (the
+  ;; handle of a `last-operation-failed` is kept for `last_err`)
+  (func $read_status (result i32)
+    (if (result i32) (i32.load8_u (i32.const 220))
+      (then
+        (if (i32.eqz (i32.load8_u (i32.const 224)))
+          (then (global.set $last_err (i32.load (i32.const 228)))))
+        (i32.sub (i32.const -1) (i32.load8_u (i32.const 224))))
+      (else (i32.load (i32.const 228)))))
   ;; read: the length of the list (0: nothing yet), or -1 - the stream-error case
   (func (export "read") (param $h i32) (param $len i64) (result i32)
     (call $read (local.get $h) (local.get $len) (i32.const 220))
-    (if (result i32) (i32.load8_u (i32.const 220))
-      (then (i32.sub (i32.const -1) (i32.load8_u (i32.const 224))))
-      (else (i32.load (i32.const 228)))))
+    (call $read_status))
   ;; blocking-read: like read
   (func (export "blocking_read") (param $h i32) (param $len i64) (result i32)
     (call $bread (local.get $h) (local.get $len) (i32.const 220))
-    (if (result i32) (i32.load8_u (i32.const 220))
-      (then (i32.sub (i32.const -1) (i32.load8_u (i32.const 224))))
-      (else (i32.load (i32.const 228)))))
+    (call $read_status))
   ;; skip and blocking-skip: the count, or -1 - the stream-error case
   (func (export "skip") (param $h i32) (param $len i64) (result i64)
     (call $skip (local.get $h) (local.get $len) (i32.const 240))
@@ -316,7 +335,7 @@ fn run(body: &str) -> std::process::Output {
 }
 
 /// Runs `body` with `HELPERS` in scope.
-fn run_with_main(body: &str) -> std::process::Output {
+pub(crate) fn run_with_main(body: &str) -> std::process::Output {
     run(&format!("{HELPERS}\n{body}"))
 }
 
