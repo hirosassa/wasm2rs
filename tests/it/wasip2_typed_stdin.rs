@@ -89,6 +89,7 @@ const CORE: &str = r#"
     (local.get $p))
   (global $brk (mut i32) (i32.const 1024))
   (data (i32.const 64) "hi\n")
+  (data (i32.const 72) "go\n")
   ;; waits until stdin has data or is at its end: a fresh pollable, as `std` does
   (func $wait_stdin
     (i32.store (i32.const 112) (call $sub_in (call $stdin)))
@@ -151,15 +152,23 @@ const CORE: &str = r#"
     (call $skip (call $stdin) (i64.const 16) (i32.const 200))
     (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable))
     (if (i32.ne (i32.load8_u (i32.const 208)) (i32.const 1)) (then unreachable)))
-  ;; a zero-length request on an open, idle stdin succeeds (read: empty list, skip: 0)
+  ;; "hi\n" says the program is about to block; a zero-length `blocking-read` on the idle (open)
+  ;; stdin waits until it is readable, so "go\n" appears only after the test sends data
+  (func (export "blocking_zero_read_waits_stdin")
+    (call $write (call $stdout) (i32.const 64) (i32.const 3) (i32.const 32))
+    (call $bread (call $stdin) (i64.const 0) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (call $write (call $stdout) (i32.const 72) (i32.const 3) (i32.const 32)))
+  (func (export "blocking_zero_skip_waits_stdin")
+    (call $write (call $stdout) (i32.const 64) (i32.const 3) (i32.const 32))
+    (call $bskip (call $stdin) (i64.const 0) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (call $write (call $stdout) (i32.const 72) (i32.const 3) (i32.const 32)))
+  ;; a non-blocking zero-length request on an open, idle stdin succeeds (read: empty list, skip: 0)
   (func (export "idle_zero_len_stdin")
     (call $read (call $stdin) (i64.const 0) (i32.const 200))
     (if (i32.load8_u (i32.const 200)) (then unreachable))
-    (call $bread (call $stdin) (i64.const 0) (i32.const 200))
-    (if (i32.load8_u (i32.const 200)) (then unreachable))
     (call $skip (call $stdin) (i64.const 0) (i32.const 200))
-    (if (i32.load8_u (i32.const 200)) (then unreachable))
-    (call $bskip (call $stdin) (i64.const 0) (i32.const 200))
     (if (i32.load8_u (i32.const 200)) (then unreachable)))
   ;; stdin holds "ab" and then ends: a zero-length request consumes nothing while data is
   ;; left, and at the end of the input all four calls say `closed`
@@ -305,4 +314,43 @@ fn a_zero_length_request_on_an_open_stdin_succeeds_and_at_its_end_is_closed() {
     let mut child = spawn("inst.idle_zero_len_stdin();");
     let _stdin = child.stdin.take().unwrap(); // still open
     finish_within_30_seconds(child);
+}
+
+/// Runs `body`: it writes "hi\n", then must block until the test sends "x" (only then "go\n").
+fn zero_length_blocking_waits_for_readiness(body: &str) {
+    use std::io::{Read, Write};
+    let mut child = spawn(body);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = child.stdout.take().unwrap();
+    let mut hi = [0u8; 3];
+    out.read_exact(&mut hi).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut go = [0u8; 3];
+        out.read_exact(&mut go).unwrap();
+        tx.send(go).unwrap();
+    });
+    // an idle, open stdin: the blocking call has not returned
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(400))
+            .is_err(),
+        "returned without waiting"
+    );
+    stdin.write_all(b"x").unwrap();
+    assert_eq!(
+        &rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap(),
+        b"go\n"
+    );
+    drop(stdin);
+    finish_within_30_seconds(child);
+}
+
+#[test]
+fn a_zero_length_blocking_read_waits_until_stdin_is_readable() {
+    zero_length_blocking_waits_for_readiness("inst.blocking_zero_read_waits_stdin();");
+}
+
+#[test]
+fn a_zero_length_blocking_skip_waits_until_stdin_is_readable() {
+    zero_length_blocking_waits_for_readiness("inst.blocking_zero_skip_waits_stdin();");
 }

@@ -35,6 +35,10 @@ interface types {
     unknown, block-device, character-device, directory, fifo, symbolic-link, regular-file, socket
   }
   flags path-flags { symlink-follow }
+  flags open-flags { create, directory, exclusive, truncate }
+  flags descriptor-flags {
+    read, write, file-integrity-sync, data-integrity-sync, requested-write-sync, mutate-directory
+  }
   type link-count = u64;
   record descriptor-stat {
     %type: descriptor-type,
@@ -54,6 +58,7 @@ interface types {
     invalid-seek, text-file-busy, cross-device
   }
   resource descriptor {
+    open-at: func(path-flags: path-flags, path: string, open-flags: open-flags, %flags: descriptor-flags) -> result<descriptor, error-code>;
     stat-at: func(path-flags: path-flags, path: string) -> result<descriptor-stat, error-code>;
     metadata-hash-at: func(path-flags: path-flags, path: string) -> result<metadata-hash-value, error-code>;
   }
@@ -71,6 +76,7 @@ const CORE: &str = r#"
   (import "wasi:io/streams@0.2.0" "[method]input-stream.read" (func (param i32 i64 i32)))
   (import "wasi:io/streams@0.2.0" "[resource-drop]input-stream" (func (param i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.stat-at" (func $stat_at (param i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.metadata-hash-at" (func $hash_at (param i32 i32 i32 i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[resource-drop]descriptor" (func (param i32)))
   (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
@@ -91,6 +97,8 @@ const CORE: &str = r#"
   (data (i32.const 400) "sub")
   (data (i32.const 410) "sub/")
   (data (i32.const 420) "sub/.")
+  (data (i32.const 440) "dirln/in.txt")
+  (data (i32.const 460) "dirln")
 
   (func $root (result i32)
     (call $dirs (i32.const 100))
@@ -104,6 +112,14 @@ const CORE: &str = r#"
     (if (result i32) (i32.load8_u (i32.const 600))
       (then (call $code (i32.const 608)))
       (else (i32.load8_u (i32.const 608)))))
+  ;; open-at from the preopen with path flags `f`, open flags `o` (1 create, 2 directory) and
+  ;; descriptor flags 1 (read): 0 or 100 + the error code
+  (func (export "fs_open") (param $f i32) (param $p i32) (param $n i32) (param $o i32) (result i32)
+    (call $open (call $root) (local.get $f) (local.get $p) (local.get $n)
+                (local.get $o) (i32.const 1) (i32.const 800))
+    (if (result i32) (i32.load8_u (i32.const 800))
+      (then (call $code (i32.const 804)))
+      (else (i32.const 0))))
   ;; the size of the last stat
   (func (export "fs_size") (result i64) (i64.load (i32.const 624)))
 
@@ -131,13 +147,21 @@ const SUB: &str = "400, 3";
 const SUB_SLASH: &str = "410, 4";
 const SUB_SLASH_DOT: &str = "420, 5";
 const EMPTY: &str = "0, 0";
+#[cfg(unix)]
+const VIA_DIR_LINK: &str = "440, 12";
+#[cfg(unix)]
+const DIR_LINK: &str = "460, 5";
 
 fn run(root: &Path, body: &str) -> std::process::Output {
+    run_with(root, "with_preopen", body)
+}
+
+fn run_with(root: &Path, preopen: &str, body: &str) -> std::process::Output {
     run_program(
         &component_from_wit(&[CLOCKS, IO, FILESYSTEM], WORLD, "w"),
         CORE,
         &format!(
-            "TypedHost::new(Vec::new()).with_preopen(std::path::PathBuf::from({:?}))",
+            "TypedHost::new(Vec::new()).{preopen}(std::path::PathBuf::from({:?}))",
             root.to_str().unwrap()
         ),
         body,
@@ -238,4 +262,82 @@ fn paths_naming_a_directory_itself_are_resolved_even_without_symlink_follow() {
          }}"
     );
     assert_succeeded(&run(&root, &body));
+}
+
+#[cfg(unix)]
+#[test]
+fn open_at_refuses_a_final_symlink_without_symlink_follow_as_loop_and_follows_it_with_the_flag() {
+    let root = fresh_root("nofollow_open");
+    std::fs::write(root.join("tgt.txt"), "twelve bytes").unwrap();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::os::unix::fs::symlink("tgt.txt", root.join("ln")).unwrap();
+    std::os::unix::fs::symlink("gone-for-good", root.join("dangling")).unwrap();
+    let body = format!(
+        "// no symlink-follow: a link as the last component is loop 15 (ELOOP), even dangling
+         assert_eq!(inst.fs_open(0, {LN}, 0), 100 + 15);
+         assert_eq!(inst.fs_open(0, {DANGLING}, 0), 100 + 15);
+         // with it the link is expanded; a dangling one is no-entry 20
+         assert_eq!(inst.fs_open(1, {LN}, 0), 0);
+         assert_eq!(inst.fs_open(1, {DANGLING}, 0), 100 + 20);
+         // plain files and directories open either way
+         assert_eq!(inst.fs_open(0, {TGT}, 0), 0);
+         assert_eq!(inst.fs_open(0, {SUB}, 2), 0);
+         assert_eq!(inst.fs_open(0, {NOPE}, 0), 100 + 20);"
+    );
+    assert_succeeded(&run(&root, &body));
+}
+
+#[cfg(unix)]
+#[test]
+fn open_at_nofollow_affects_only_the_last_component_and_the_preopen_still_confines() {
+    let root = fresh_root("nofollow_open_parent");
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub").join("in.txt"), "x").unwrap();
+    std::os::unix::fs::symlink("sub", root.join("dirln")).unwrap();
+    let secret = root.parent().unwrap().join("secret.txt");
+    std::os::unix::fs::symlink(&secret, root.join("out")).unwrap();
+    let body = format!(
+        "// a link in the middle of the path is followed whatever the flags
+         assert_eq!(inst.fs_open(0, {VIA_DIR_LINK}, 0), 0);
+         assert_eq!(inst.fs_open(1, {VIA_DIR_LINK}, 0), 0);
+         // a link as the last component, naming a directory: loop without the flag
+         assert_eq!(inst.fs_open(0, {DIR_LINK}, 0), 100 + 15);
+         assert_eq!(inst.fs_open(1, {DIR_LINK}, 2), 0);
+         // a link out of the preopen: loop without the flag, not-permitted 31 with it
+         assert_eq!(inst.fs_open(0, {OUT}, 0), 100 + 15);
+         assert_eq!(inst.fs_open(1, {OUT}, 0), 100 + 31);
+         // a path naming a directory itself needs no flag
+         for flags in [0, 1] {{
+             assert_eq!(inst.fs_open(flags, {DOT}, 2), 0);
+             assert_eq!(inst.fs_open(flags, {EMPTY}, 2), 0);
+             assert_eq!(inst.fs_open(flags, {SUB_SLASH}, 2), 0);
+             assert_eq!(inst.fs_open(flags, {SUB_SLASH_DOT}, 2), 0);
+         }}"
+    );
+    assert_succeeded(&run(&root, &body));
+}
+
+#[cfg(unix)]
+#[test]
+fn open_at_create_through_a_symlink_name_is_loop_without_symlink_follow() {
+    let root = fresh_root("nofollow_open_create");
+    std::fs::write(root.join("tgt.txt"), "twelve bytes").unwrap();
+    std::os::unix::fs::symlink("tgt.txt", root.join("ln")).unwrap();
+    std::os::unix::fs::symlink("gone-for-good", root.join("dangling")).unwrap();
+    let body = format!(
+        "// O_CREAT | O_NOFOLLOW on a symlink is ELOOP, existing target or dangling
+         assert_eq!(inst.fs_open(0, {LN}, 1), 100 + 15);
+         assert_eq!(inst.fs_open(0, {DANGLING}, 1), 100 + 15);
+         // with symlink-follow nothing changes: the target opens; a dangling link stays
+         // not-permitted 31 (never created through)
+         assert_eq!(inst.fs_open(1, {LN}, 1), 0);
+         assert_eq!(inst.fs_open(1, {DANGLING}, 1), 100 + 31);
+         // create + exclusive never follows a link: the name exists, exist 7 (before loop)
+         assert_eq!(inst.fs_open(0, {LN}, 5), 100 + 7);
+         assert_eq!(inst.fs_open(0, {DANGLING}, 5), 100 + 7);
+         // a new name is created either way
+         assert_eq!(inst.fs_open(0, {NOPE}, 1), 0);"
+    );
+    assert_succeeded(&run_with(&root, "with_writable_preopen", &body));
+    assert!(!root.join("gone-for-good").exists());
 }

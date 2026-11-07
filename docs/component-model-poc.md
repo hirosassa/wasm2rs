@@ -218,8 +218,10 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
 - Sockets: TCP over loopback is done (`tcp-create-socket`, `start-bind`/`finish-bind`, `start-listen`/`finish-listen`, `start-connect`/`finish-connect`, `accept`, `local-address`, `remote-address`, `subscribe`, `shutdown`, `instance-network`); the streams are the ordinary `input-stream`/`output-stream` handles. An address outside 127.0.0.0/8 and `::1` is `access-denied` unless the host calls `TypedHost::with_external_network`. `std` binds and listens in one call, so `finish-bind` does both, a bound socket cannot connect (`not-supported`), and `start-connect` connects at once. UDP and `ip-name-lookup` are done in the typed host only (below); the TCP socket options (keep-alive, buffer sizes, hop limit, backlog) are not implemented.
 - Paths must stay under the preopen: an absolute path or any `..` is `not-permitted`
   (stricter than WASI, which allows `..` that stays inside), and so is a symlink that
-  leads out (the resolved path is checked against the preopen). Path flags are
-  ignored; links are always followed.
+  leads out (the resolved path is checked against the preopen). Without
+  `symlink-follow`, `open-at` on a symlink as the last component is `loop` (also when
+  creating; `exist` with create+exclusive), and `stat-at`/`metadata-hash-at` describe the link
+  itself; links earlier in the path are still followed.
 - A file's input stream shares `input-stream.read` with stdin (handle 0).
 - Handles are reused: `resource-drop` of a pollable, descriptor, file input stream or
   directory-entry-stream frees its slot, and the next resource of that kind takes the
