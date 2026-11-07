@@ -7,9 +7,9 @@
 //! named like the [`named_imports`](crate::TranspileOptions::named_imports) method of
 //! the core import that lowers it (module = the interface, field = the function name).
 //!
-//! Only the plain-data types are supported: integers, floats, `bool`, `char`,
-//! `string`, `list`, `option`, `result`, `tuple` and `record`. A function that uses
-//! anything else (resources, `variant`, `enum`, `flags`, `future`, `stream`,
+//! Supported types: integers, floats, `bool`, `char`, `string`, `list`, `option`,
+//! `result`, `tuple`, `record` and resource handles (`own`/`borrow`). A function that uses
+//! anything else (`variant`, `enum`, `flags`, `future`, `stream`,
 //! `error-context`, ...) is an [`Unsupported`](TranspileError::Unsupported) error naming
 //! the type, never silently dropped. A type that no function uses is not checked.
 
@@ -56,6 +56,20 @@ pub enum WitType {
     },
     Tuple(Vec<Arc<WitType>>),
     Record(WitRecord),
+    /// `own<R>`: a handle the callee takes over.
+    Own(Arc<WitResource>),
+    /// `borrow<R>`: a handle lent for the call.
+    Borrow(Arc<WitResource>),
+}
+
+/// A WIT resource type. Two handles are of the same resource when their `id`s are equal,
+/// however many interfaces re-export the type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitResource {
+    /// The resource's name as the interface that defines it exports it, e.g. `pollable`.
+    pub name: String,
+    /// Identifies the resource within one component.
+    pub id: u32,
 }
 
 /// A WIT record: its name (as the interface exports it, kebab-case) and its fields.
@@ -95,7 +109,7 @@ enum Def {
     Val(Soft<Arc<WitType>>),
     Func(Arc<Soft<Sig>>),
     Instance(Arc<Instance>),
-    Resource,
+    Resource(Arc<WitResource>),
     /// A type this reader does not model (a component type).
     Other(&'static str),
 }
@@ -106,6 +120,8 @@ enum Def {
 struct Instance {
     funcs: Vec<(String, Soft<Sig>)>,
     types: Vec<(String, Def)>,
+    /// The resources this instance defines (`sub resource` exports), in order.
+    resources: Vec<Arc<WitResource>>,
 }
 
 /// The type and instance index spaces of one component or instance type.
@@ -113,6 +129,23 @@ struct Instance {
 struct Scope {
     types: Vec<Def>,
     instances: Vec<Option<Arc<Instance>>>,
+    /// Resources declared so far; only the outermost scope's count is used.
+    resources_declared: u32,
+}
+
+/// A new resource named `name`, with an id no other resource of the component has.
+fn new_resource(stack: &mut [Scope], name: &str) -> Result<Arc<WitResource>, TranspileError> {
+    let outer = stack
+        .first_mut()
+        .ok_or_else(|| unsupported("component has no type index space"))?;
+    let id = outer.resources_declared;
+    outer.resources_declared = id
+        .checked_add(1)
+        .ok_or_else(|| unsupported("too many resources"))?;
+    Ok(Arc::new(WitResource {
+        name: name.to_string(),
+        id,
+    }))
 }
 
 fn innermost(stack: &[Scope]) -> Result<&Scope, TranspileError> {
@@ -157,12 +190,19 @@ fn def_at(scope: &Scope, index: u32) -> Soft<&Def> {
         .ok_or_else(|| format!("type index {index} (out of range)"))
 }
 
+fn resource_at(scope: &Scope, index: u32) -> Soft<Arc<WitResource>> {
+    match def_at(scope, index)? {
+        Def::Resource(r) => Ok(r.clone()),
+        _ => Err("own or borrow of a type that is not a resource".into()),
+    }
+}
+
 fn val(scope: &Scope, v: ComponentValType) -> Soft<Arc<WitType>> {
     match v {
         ComponentValType::Primitive(p) => primitive(p).map(Arc::new),
         ComponentValType::Type(i) => match def_at(scope, i)? {
             Def::Val(v) => v.clone(),
-            Def::Resource => Err("resource".into()),
+            Def::Resource(_) => Err("resource (used as a value, not through own or borrow)".into()),
             Def::Other(what) => Err((*what).to_string()),
             Def::Func(_) | Def::Instance(_) => Err("a type that is not a value type".into()),
         },
@@ -202,8 +242,8 @@ fn defined(scope: &Scope, d: &ComponentDefinedType<'_>) -> Soft<WitType> {
         ComponentDefinedType::Variant(_) => return Err("variant".into()),
         ComponentDefinedType::Enum(_) => return Err("enum".into()),
         ComponentDefinedType::Flags(_) => return Err("flags".into()),
-        ComponentDefinedType::Own(_) => return Err("own (a resource handle)".into()),
-        ComponentDefinedType::Borrow(_) => return Err("borrow (a resource handle)".into()),
+        ComponentDefinedType::Own(i) => WitType::Own(resource_at(scope, *i)?),
+        ComponentDefinedType::Borrow(i) => WitType::Borrow(resource_at(scope, *i)?),
         ComponentDefinedType::Future(_) => return Err("future".into()),
         ComponentDefinedType::Stream(_) => return Err("stream".into()),
         ComponentDefinedType::Map(..) => return Err("map".into()),
@@ -226,11 +266,13 @@ fn func_sig(scope: &Scope, f: &ComponentFuncType<'_>) -> Soft<Sig> {
 
 /// The definition a type declaration makes, in the context of `stack` (innermost last).
 fn component_type(stack: &mut Vec<Scope>, ty: &ComponentType<'_>) -> Result<Def, TranspileError> {
-    let scope = innermost(stack)?;
     Ok(match ty {
-        ComponentType::Defined(d) => Def::Val(defined(scope, d).map(Arc::new)),
-        ComponentType::Func(f) => Def::Func(Arc::new(func_sig(scope, f))),
-        ComponentType::Resource { .. } => Def::Resource,
+        ComponentType::Defined(d) => Def::Val(defined(innermost(stack)?, d).map(Arc::new)),
+        ComponentType::Func(f) => Def::Func(Arc::new(func_sig(innermost(stack)?, f))),
+        ComponentType::Resource { .. } => {
+            let id = stack.first().map_or(0, |s| s.resources_declared);
+            Def::Resource(new_resource(stack, &format!("resource{id}"))?)
+        }
         ComponentType::Component(_) => Def::Other("component type"),
         ComponentType::Instance(decls) => Def::Instance(Arc::new(instance_type(stack, decls)?)),
     })
@@ -304,6 +346,107 @@ fn alias_type(
     })
 }
 
+/// The types of one import of `declared`: every resource it defines is a new resource
+/// (the declaration may be imported several times), and the types that mention it are
+/// rewritten to match. Resources that came from outside keep their identity.
+fn instantiate(
+    stack: &mut [Scope],
+    declared: &Arc<Instance>,
+) -> Result<Arc<Instance>, TranspileError> {
+    if declared.resources.is_empty() {
+        return Ok(declared.clone());
+    }
+    let mut subst = Subst::default();
+    let mut resources = Vec::new();
+    for r in &declared.resources {
+        let fresh = new_resource(stack, &r.name)?;
+        subst.resources.insert(r.id, fresh.clone());
+        resources.push(fresh);
+    }
+    let funcs = declared
+        .funcs
+        .iter()
+        .map(|(n, sig)| (n.clone(), sig.clone().map(|(ps, r)| subst.sig(ps, r))))
+        .collect();
+    let types = declared
+        .types
+        .iter()
+        .map(|(n, d)| (n.clone(), subst.def(d)))
+        .collect();
+    Ok(Arc::new(Instance {
+        funcs,
+        types,
+        resources,
+    }))
+}
+
+/// Replaces resources by id, keeping shared types shared (each `Arc` is rewritten once).
+#[derive(Default)]
+struct Subst {
+    resources: HashMap<u32, Arc<WitResource>>,
+    memo: HashMap<*const WitType, Arc<WitType>>,
+}
+
+impl Subst {
+    fn resource(&self, r: &Arc<WitResource>) -> Arc<WitResource> {
+        self.resources.get(&r.id).unwrap_or(r).clone()
+    }
+
+    fn arc(&mut self, t: &Arc<WitType>) -> Arc<WitType> {
+        if let Some(done) = self.memo.get(&Arc::as_ptr(t)) {
+            return done.clone();
+        }
+        let out = Arc::new(self.ty(t));
+        self.memo.insert(Arc::as_ptr(t), out.clone());
+        out
+    }
+
+    fn opt(&mut self, t: &Option<Arc<WitType>>) -> Option<Arc<WitType>> {
+        t.as_ref().map(|t| self.arc(t))
+    }
+
+    fn ty(&mut self, t: &WitType) -> WitType {
+        match t {
+            WitType::List(t) => WitType::List(self.arc(t)),
+            WitType::Option(t) => WitType::Option(self.arc(t)),
+            WitType::Result { ok, err } => WitType::Result {
+                ok: self.opt(ok),
+                err: self.opt(err),
+            },
+            WitType::Tuple(ts) => WitType::Tuple(ts.iter().map(|t| self.arc(t)).collect()),
+            WitType::Record(r) => WitType::Record(WitRecord {
+                name: r.name.clone(),
+                fields: r
+                    .fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), self.arc(t)))
+                    .collect(),
+            }),
+            WitType::Own(r) => WitType::Own(self.resource(r)),
+            WitType::Borrow(r) => WitType::Borrow(self.resource(r)),
+            other => other.clone(),
+        }
+    }
+
+    fn sig(&mut self, params: Vec<(String, WitType)>, result: Option<WitType>) -> Sig {
+        (
+            params.into_iter().map(|(n, t)| (n, self.ty(&t))).collect(),
+            result.map(|t| self.ty(&t)),
+        )
+    }
+
+    fn def(&mut self, d: &Def) -> Def {
+        match d {
+            Def::Val(Ok(t)) => Def::Val(Ok(self.arc(t))),
+            Def::Func(sig) => Def::Func(Arc::new(
+                sig.as_ref().clone().map(|(ps, r)| self.sig(ps, r)),
+            )),
+            Def::Resource(r) => Def::Resource(self.resource(r)),
+            other => other.clone(),
+        }
+    }
+}
+
 fn instance_type(
     stack: &mut Vec<Scope>,
     decls: &[InstanceTypeDeclaration<'_>],
@@ -333,6 +476,14 @@ fn instance_decls(
             }
             InstanceTypeDeclaration::Export { name, ty } => {
                 let name = name.full_name().into_owned();
+                if let ComponentTypeRef::Type(TypeBounds::SubResource) = ty {
+                    let r = new_resource(stack, &name)?;
+                    inst.resources.push(r.clone());
+                    let def = Def::Resource(r);
+                    innermost_mut(stack)?.types.push(def.clone());
+                    inst.types.push((name, def));
+                    continue;
+                }
                 let scope = innermost_mut(stack)?;
                 match ty {
                     ComponentTypeRef::Func(i) => {
@@ -349,7 +500,8 @@ fn instance_decls(
                                 Ok(def) => export_type(def.clone(), &name),
                                 Err(e) => Def::Val(Err(e)),
                             },
-                            TypeBounds::SubResource => Def::Resource,
+                            // Handled above.
+                            TypeBounds::SubResource => Def::Other("a resource"),
                         };
                         scope.types.push(def.clone());
                         inst.types.push((name, def));
@@ -473,23 +625,33 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
                 for import in reader {
                     let import = import?;
                     let name = import.name.full_name().into_owned();
-                    let scope = innermost_mut(&mut stack)?;
                     match import.ty {
                         ComponentTypeRef::Instance(i) => {
-                            let Ok(Def::Instance(inst)) = def_at(scope, i).cloned() else {
+                            let Ok(Def::Instance(declared)) =
+                                def_at(innermost(&stack)?, i).cloned()
+                            else {
                                 return Err(unsupported(format!(
                                     "import \"{name}\" has no instance type"
                                 )));
                             };
-                            scope.instances.push(Some(inst.clone()));
+                            // Each import makes its own resource types.
+                            let inst = instantiate(&mut stack, &declared)?;
+                            innermost_mut(&mut stack)?
+                                .instances
+                                .push(Some(inst.clone()));
                             imports.push((name, inst));
                         }
-                        ComponentTypeRef::Type(bounds) => scope.types.push(match bounds {
-                            TypeBounds::Eq(i) => def_at(scope, i)
+                        ComponentTypeRef::Type(TypeBounds::SubResource) => {
+                            let r = new_resource(&mut stack, &name)?;
+                            innermost_mut(&mut stack)?.types.push(Def::Resource(r));
+                        }
+                        ComponentTypeRef::Type(TypeBounds::Eq(i)) => {
+                            let scope = innermost_mut(&mut stack)?;
+                            let def = def_at(scope, i)
                                 .cloned()
-                                .unwrap_or_else(|e| Def::Val(Err(e))),
-                            TypeBounds::SubResource => Def::Resource,
-                        }),
+                                .unwrap_or_else(|e| Def::Val(Err(e)));
+                            scope.types.push(def);
+                        }
                         ComponentTypeRef::Func(_) => {
                             return Err(unsupported(format!(
                                 "import \"{name}\" is a function, not an interface instance"
@@ -528,6 +690,16 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
                 result,
             });
         }
+        // The core module imports `[resource-drop]<name>` from the interface that defines
+        // the resource (`canon resource.drop` is in the component body, not its type).
+        for r in &inst.resources {
+            funcs.push(WitFunc {
+                interface: interface.clone(),
+                name: format!("[resource-drop]{}", r.name),
+                params: vec![("handle".to_string(), WitType::Own(r.clone()))],
+                result: None,
+            });
+        }
     }
     Ok(funcs)
 }
@@ -537,9 +709,14 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
 /// past this the trait is refused instead.
 const NODE_BUDGET: usize = 200_000;
 
-/// The records the trait's functions use, with the Rust names they were given.
+/// The records and resources the trait's functions use, with the Rust names they were
+/// given (one namespace).
 #[derive(Default)]
 struct Records {
+    /// Resource ids and their Rust names.
+    resource_names: HashMap<u32, String>,
+    /// The resources in the order they must be emitted, with their Rust names.
+    resources: Vec<String>,
     /// Each distinct record (by name and rendered fields) and its Rust name.
     names: HashMap<String, String>,
     /// The records in the order they must be emitted, with their Rust names.
@@ -602,16 +779,30 @@ impl Records {
         if self.names.contains_key(&key) {
             return Ok(());
         }
-        let base = type_name(&record.name);
-        let mut name = base.clone();
-        let mut n = 1usize;
-        while self.list.iter().any(|(_, taken)| *taken == name) {
-            n = n.saturating_add(1);
-            name = format!("{base}{n}");
-        }
+        let name = self.fresh_name(&record.name);
         self.names.insert(key, name.clone());
         self.list.push((record.clone(), name));
         Ok(())
+    }
+
+    /// A Rust type name for `wit_name` that no record or resource has yet.
+    fn fresh_name(&self, wit_name: &str) -> String {
+        let base = type_name(wit_name);
+        let mut name = base.clone();
+        let mut n = 1usize;
+        while self.list.iter().any(|(_, taken)| *taken == name) || self.resources.contains(&name) {
+            n = n.saturating_add(1);
+            name = format!("{base}{n}");
+        }
+        name
+    }
+
+    fn add_resource(&mut self, r: &Arc<WitResource>) {
+        if !self.resource_names.contains_key(&r.id) {
+            let name = self.fresh_name(&r.name);
+            self.resource_names.insert(r.id, name.clone());
+            self.resources.push(name);
+        }
     }
 
     fn add_in(&mut self, ty: &WitType) -> Result<(), TranspileError> {
@@ -626,6 +817,10 @@ impl Records {
             }
             WitType::Tuple(ts) => ts.iter().try_for_each(|t| self.add_in(t)),
             WitType::Record(r) => self.add(r),
+            WitType::Own(r) | WitType::Borrow(r) => {
+                self.add_resource(r);
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -667,6 +862,10 @@ impl Records {
                 Some(name) => name.clone(),
                 None => type_name(&r.name),
             },
+            WitType::Own(r) | WitType::Borrow(r) => match self.resource_names.get(&r.id) {
+                Some(name) => name.clone(),
+                None => type_name(&r.name),
+            },
         })
     }
 }
@@ -696,6 +895,14 @@ fn unique_idents<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
 /// fields snake_case, emitted once however many functions use it) and the integers,
 /// floats, `bool` and `char` to their Rust types.
 ///
+/// A resource `r` becomes one `#[derive(Clone, Copy, Debug, PartialEq, Eq)] pub struct R(pub u32);`
+/// handle (however many interfaces use it); `own<r>` and `borrow<r>` are both `R`, since the
+/// host owns the handles. Its `[method]r.f`, `[static]r.f` and `[constructor]r` functions are
+/// methods named like the core imports with those field names (a method's `self` parameter
+/// is `self_`). The interface that defines the resource also gets
+/// `fn <module>_resource_drop_r(&mut self, handle: R);`, named like the core import
+/// `[resource-drop]r` that the lowered `resource.drop` becomes.
+///
 /// # Errors
 ///
 /// A parse error, a core module or other non-component input, an import that is not an
@@ -720,6 +927,12 @@ pub fn wit_host_trait(component: &[u8]) -> Result<String, TranspileError> {
     let names = assign_import_names(indexed);
 
     let mut out = String::from("// Generated by wasm2rs --wit-host.\n");
+    for name in &records.resources {
+        let _ = writeln!(
+            out,
+            "\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct {name}(pub u32);"
+        );
+    }
     for (record, name) in &records.list {
         let idents = unique_idents(record.fields.iter().map(|(n, _)| n.as_str()));
         let _ = writeln!(

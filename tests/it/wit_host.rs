@@ -217,16 +217,6 @@ fn unsupported_types_are_errors_naming_the_type() {
                (export "v" (type $v (eq $w)))
                (export "f" (func (param "v" $v)))"#,
         ),
-        (
-            "own",
-            r#"(export "res" (type $r (sub resource)))
-               (export "f" (func (param "v" (own $r))))"#,
-        ),
-        (
-            "borrow",
-            r#"(export "res" (type $r (sub resource)))
-               (export "f" (func (param "v" (borrow $r))))"#,
-        ),
         ("future", r#"(export "f" (func (param "v" (future u8))))"#),
         ("stream", r#"(export "f" (func (result (stream u8))))"#),
         (
@@ -530,4 +520,229 @@ fn an_invalid_component_is_rejected() {
     if let Ok(wasm) = wasm {
         assert!(wit_host_trait(&wasm).is_err());
     }
+}
+
+const POLL: &str = r#"(export "pollable" (type $p (sub resource)))
+    (export "[constructor]pollable" (func (param "n" u32) (result (own $p))))
+    (export "[method]pollable.block" (func (param "self" (borrow $p))))
+    (export "[method]pollable.ready" (func (param "self" (borrow $p)) (result bool)))
+    (export "[static]pollable.never" (func (result (own $p))))"#;
+
+#[test]
+fn a_resource_becomes_a_copy_newtype_with_method_static_constructor_and_drop() {
+    let wasm = component("", "wasi:io/poll@0.2.0", POLL);
+    let rust = host(&wasm);
+    for want in [
+        "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct Pollable(pub u32);",
+        "fn wasi_io_poll_constructor_pollable(&mut self, n: u32) -> Pollable;",
+        "fn wasi_io_poll_method_pollable_block(&mut self, self_: Pollable);",
+        "fn wasi_io_poll_method_pollable_ready(&mut self, self_: Pollable) -> bool;",
+        "fn wasi_io_poll_static_pollable_never(&mut self) -> Pollable;",
+        "fn wasi_io_poll_resource_drop_pollable(&mut self, handle: Pollable);",
+    ] {
+        assert!(rust.contains(want), "missing {want}:\n{rust}");
+    }
+    assert_eq!(rust.matches("pub struct Pollable").count(), 1, "{rust}");
+    assert!(
+        rust.find("pub struct Pollable") < rust.find("pub trait Host"),
+        "{rust}"
+    );
+}
+
+#[test]
+fn resource_method_names_match_the_named_imports_of_a_core_module() {
+    let core = wat::parse_str(
+        r#"(module
+          (import "wasi:io/poll@0.2.0" "[method]pollable.block" (func (param i32)))
+          (import "wasi:io/poll@0.2.0" "[resource-drop]pollable" (func (param i32)))
+          (import "wasi:io/poll@0.2.0" "[constructor]pollable" (func (param i32) (result i32)))
+          (import "wasi:io/poll@0.2.0" "[static]pollable.never" (func (result i32))))"#,
+    )
+    .unwrap();
+    let opts = TranspileOptions {
+        named_imports: true,
+        ..TranspileOptions::default()
+    };
+    let imports = transpile_with_options(&core, &opts).unwrap();
+    let rust = host(&component("", "wasi:io/poll@0.2.0", POLL));
+    for name in [
+        "wasi_io_poll_method_pollable_block",
+        "wasi_io_poll_resource_drop_pollable",
+        "wasi_io_poll_constructor_pollable",
+        "wasi_io_poll_static_pollable_never",
+    ] {
+        assert!(
+            imports.contains(&format!("fn {name}(")),
+            "{name}\n{imports}"
+        );
+        assert!(rust.contains(&format!("fn {name}(")), "{name}\n{rust}");
+    }
+}
+
+/// `streams` uses `poll`'s pollable through an outer alias of an instance export.
+fn two_interfaces() -> Vec<u8> {
+    wat::parse_str(
+        r#"(component
+          (type $poll (instance
+            (export "pollable" (type $p (sub resource)))
+            (export "[method]pollable.block" (func (param "self" (borrow $p))))))
+          (import "wasi:io/poll@0.2.0" (instance $poll_i (type $poll)))
+          (alias export $poll_i "pollable" (type $pollable))
+          (type $streams (instance
+            (alias outer 1 $pollable (type $p))
+            (export "pollable" (type $q (eq $p)))
+            (export "stream" (type $s (sub resource)))
+            (export "[method]stream.subscribe" (func (param "self" (borrow $s)) (result (own $q))))))
+          (import "wasi:io/streams@0.2.0" (instance (type $streams))))"#,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_resource_used_from_two_interfaces_is_one_newtype() {
+    let rust = host(&two_interfaces());
+    assert_eq!(rust.matches("pub struct Pollable").count(), 1, "{rust}");
+    assert!(
+        rust.contains(
+            "fn wasi_io_streams_method_stream_subscribe(&mut self, self_: Stream) -> Pollable;"
+        ),
+        "{rust}"
+    );
+    assert!(
+        rust.contains("fn wasi_io_poll_method_pollable_block(&mut self, self_: Pollable);"),
+        "{rust}"
+    );
+    // Only the defining interface drops it.
+    assert_eq!(rust.matches("resource_drop_pollable").count(), 1, "{rust}");
+    assert!(
+        rust.contains("fn wasi_io_poll_resource_drop_pollable("),
+        "{rust}"
+    );
+}
+
+#[test]
+fn two_distinct_resources_with_one_name_get_distinct_newtypes() {
+    let wasm = wat::parse_str(
+        r#"(component
+          (import "a:b/one" (instance (export "r" (type $r (sub resource)))
+            (export "f" (func (param "x" (own $r))))))
+          (import "a:b/two" (instance (export "r" (type $r (sub resource)))
+            (export "g" (func (param "x" (own $r)))))))"#,
+    )
+    .unwrap();
+    let rust = host(&wasm);
+    assert!(rust.contains("pub struct R(pub u32);"), "{rust}");
+    assert!(rust.contains("pub struct R2(pub u32);"), "{rust}");
+    assert!(rust.contains("fn a_b_one_f(&mut self, x: R);"), "{rust}");
+    assert!(rust.contains("fn a_b_two_g(&mut self, x: R2);"), "{rust}");
+}
+
+#[test]
+fn the_decoded_form_keeps_own_and_borrow_apart() {
+    use wasm2rs::WitType;
+    let funcs = wasm2rs::wit_functions(&component("", "a:b/c", POLL)).unwrap();
+    let block = funcs
+        .iter()
+        .find(|f| f.name == "[method]pollable.block")
+        .unwrap();
+    assert!(matches!(block.params[0].1, WitType::Borrow(_)));
+    let ctor = funcs
+        .iter()
+        .find(|f| f.name == "[constructor]pollable")
+        .unwrap();
+    assert!(matches!(ctor.result, Some(WitType::Own(_))));
+    let drop = funcs
+        .iter()
+        .find(|f| f.name == "[resource-drop]pollable")
+        .unwrap();
+    assert!(matches!(drop.params[0].1, WitType::Own(_)));
+}
+
+#[test]
+fn an_own_inside_a_list_is_a_list_of_handles() {
+    let wasm = component(
+        "",
+        "a:b/c",
+        r#"(export "r" (type $r (sub resource)))
+           (export "f" (func (param "x" (list (own $r)))))"#,
+    );
+    assert!(host(&wasm).contains("Vec<R>"));
+}
+
+#[test]
+fn the_resource_trait_compiles_and_can_be_implemented() {
+    let rust = host(&two_interfaces());
+    let program = format!(
+        r#"{rust}
+struct H(Vec<u32>);
+impl Host for H {{
+    fn wasi_io_poll_method_pollable_block(&mut self, self_: Pollable) {{ self.0.push(self_.0); }}
+    fn wasi_io_poll_resource_drop_pollable(&mut self, handle: Pollable) {{ self.0.push(handle.0 + 100); }}
+    fn wasi_io_streams_resource_drop_stream(&mut self, _handle: Stream) {{}}
+    fn wasi_io_streams_method_stream_subscribe(&mut self, self_: Stream) -> Pollable {{ Pollable(self_.0 + 1) }}
+}}
+fn main() {{
+    let mut h = H(Vec::new());
+    let p = h.wasi_io_streams_method_stream_subscribe(Stream(6));
+    h.wasi_io_poll_method_pollable_block(p);
+    h.wasi_io_poll_resource_drop_pollable(p);
+    assert_eq!(h.0, vec![7, 107]);
+    assert_eq!(p, p.clone());
+}}
+"#
+    );
+    let bin = common::build("wit_host_resources", &program);
+    assert!(Command::new(bin).status().unwrap().success());
+}
+
+#[test]
+fn every_import_of_one_instance_type_gets_fresh_resources() {
+    let wasm = wat::parse_str(
+        r#"(component
+          (type $i (instance
+            (export "r" (type (sub resource)))
+            (type (own 0))
+            (export "make" (func (result 1)))))
+          (import "a:b/x" (instance (type $i)))
+          (import "a:b/y" (instance (type $i))))"#,
+    )
+    .unwrap();
+    let rust = host(&wasm);
+    for want in [
+        "pub struct R(pub u32);",
+        "pub struct R2(pub u32);",
+        "fn a_b_x_make(&mut self) -> R;",
+        "fn a_b_y_make(&mut self) -> R2;",
+        "fn a_b_x_resource_drop_r(&mut self, handle: R);",
+        "fn a_b_y_resource_drop_r(&mut self, handle: R2);",
+    ] {
+        assert!(rust.contains(want), "missing {want}:\n{rust}");
+    }
+}
+
+#[test]
+fn an_alias_of_the_first_imports_resource_stays_that_resource() {
+    let wasm = wat::parse_str(
+        r#"(component
+          (type $t (instance (export "p" (type (sub resource)))))
+          (import "a:b/x" (instance $x (type $t)))
+          (import "a:b/y" (instance $y (type $t)))
+          (alias export $x "p" (type $xp))
+          (type $u (instance
+            (alias outer 1 $xp (type $q))
+            (export "q" (type $q2 (eq $q)))
+            (export "f" (func (param "a" (own $q2))))))
+          (import "a:b/z" (instance (type $u))))"#,
+    )
+    .unwrap();
+    let rust = host(&wasm);
+    assert!(rust.contains("fn a_b_z_f(&mut self, a: P);"), "{rust}");
+    assert!(
+        rust.contains("fn a_b_x_resource_drop_p(&mut self, handle: P);"),
+        "{rust}"
+    );
+    assert!(
+        rust.contains("fn a_b_y_resource_drop_p(&mut self, handle: P2);"),
+        "{rust}"
+    );
 }
