@@ -7,13 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The hand-written WASI preview2 host `examples/wasip2_host/host.rs` (`P2Host`, written against
+  the flat `Imports`) and its tests `tests/it/wasip2_host.rs` are removed in favor of the typed
+  host `examples/wasip2_host/typed.rs`, generated from WIT. Both hosts map `wasi:cli/exit` to
+  the exit codes 0 and 1 (`exit` takes only ok/err).
+
 ### Changed
 
 - **Breaking (example):** `examples/wasip2_run.rs` now takes a `wasm32-wasip2` component
   (`cargo run --release --example wasip2_run -- <component.wasm> [args...]`), not an
   extracted core module. It runs the component's largest core module through the typed host
   `examples/wasip2_host/typed.rs` and the generated glue (`wit_host_glue`) instead of
-  `examples/wasip2_host/host.rs` (which stays in the repository). A component importing
+  the hand-written `examples/wasip2_host/host.rs` (since removed). A component importing
   something `typed.rs` does not implement fails to build with rustc's E0046 errors and a hint
   (exit code 2). Tested end to end in `tests/it/wasip2_run_example.rs`.
 
@@ -26,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   imports in a component). It also serves the arguments (`TypedHost::with_arguments`), the
   clocks (monotonic `now`, `subscribe-duration` and `subscribe-instant`, wall-clock `now`) and the
   real process stdin (a reader thread fills a buffer, `read` never blocks and ends with `closed`,
-  the stdin pollable wakes on data and at the end of the input; as in `host.rs`; tests in
+  the stdin pollable wakes on data and at the end of the input; tests in
   `tests/it/wasip2_typed_cli.rs`, `tests/it/wasip2_typed_clocks.rs` and
   `tests/it/wasip2_typed_stdin.rs`). It also serves `wasi:random` and `wasi:filesystem`
   (`TypedHost::with_preopen`, read-only: `get-directories`, `open-at`, `read-via-stream`, `stat`,
@@ -34,8 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `input-stream.read`; `TypedHost::with_writable_preopen` adds `open-at` with create/exclusive/
   truncate/write, `write-via-stream`, `append-via-stream`, file `output-stream` writes,
   `create-directory-at`, `remove-directory-at`, `unlink-file-at`, `rename-at`, `symlink-at`,
-  `link-at`, `set-size`, `sync`, `sync-data`, `set-times` and `set-times-at`; all with the
-  semantics of `host.rs`; tests in `tests/it/wasip2_typed_fs.rs` and
+  `link-at`, `set-size`, `sync`, `sync-data`, `set-times` and `set-times-at`; tests in `tests/it/wasip2_typed_fs.rs` and
   `tests/it/wasip2_typed_fs_write.rs`). TCP over loopback too (`create-tcp-socket`, bind, listen, connect, accept, addresses,
   `subscribe`, `shutdown` and the connection streams; `TypedHost::with_external_network` lifts the
   loopback limit; tests in `tests/it/wasip2_typed_sockets.rs`). A component may import both
