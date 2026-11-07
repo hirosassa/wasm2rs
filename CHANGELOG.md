@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `examples/wasip2_host/typed.rs`: `output-stream.write` of more than 4096 bytes (what `check-write`
+  returns) traps, like `blocking-write-and-flush`, `write-zeroes` and
+  `blocking-write-zeroes-and-flush` (`wasi:io` 0.2: writing more than `check-write` allows is a trap).
 - `examples/wasip2_host/typed.rs`: a zero-length `read`/`blocking-read`/`skip`/`blocking-skip` on
   stdin, a connection or a file succeeds (empty) only while the stream is open and is `closed` at its
   end (as `wasi:io` 0.2 specifies); the host probes without consuming data. The blocking variants

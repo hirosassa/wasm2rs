@@ -1,5 +1,5 @@
 //! The output-stream methods of `wasi:io/streams` on stdout and stderr with the typed host:
-//! `blocking-write-and-flush`, `flush`, `write-zeroes` and `blocking-write-zeroes-and-flush`
+//! `write`, `blocking-write-and-flush`, `flush`, `write-zeroes` and `blocking-write-zeroes-and-flush`
 //! (files and connections are covered next to their interfaces). The imports are declared
 //! in WIT text.
 
@@ -19,6 +19,7 @@ interface streams {
   variant stream-error { last-operation-failed(error), closed }
   resource output-stream {
     flush: func() -> result<_, stream-error>;
+    write: func(contents: list<u8>) -> result<_, stream-error>;
     blocking-write-and-flush: func(contents: list<u8>) -> result<_, stream-error>;
     write-zeroes: func(len: u64) -> result<_, stream-error>;
     blocking-write-zeroes-and-flush: func(len: u64) -> result<_, stream-error>;
@@ -53,6 +54,7 @@ const CORE: &str = r#"
   (import "wasi:io/poll@0.2.0" "[resource-drop]pollable" (func (param i32)))
   (import "wasi:io/streams@0.2.0" "[resource-drop]output-stream" (func (param i32)))
   (import "wasi:io/streams@0.2.0" "[method]output-stream.flush" (func $flush (param i32 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]output-stream.write" (func $write (param i32 i32 i32 i32)))
   (import "wasi:io/streams@0.2.0" "[method]output-stream.blocking-write-and-flush" (func $bwf (param i32 i32 i32 i32)))
   (import "wasi:io/streams@0.2.0" "[method]output-stream.write-zeroes" (func $zeroes (param i32 i64 i32)))
   (import "wasi:io/streams@0.2.0" "[method]output-stream.blocking-write-zeroes-and-flush" (func $bzf (param i32 i64 i32)))
@@ -71,6 +73,9 @@ const CORE: &str = r#"
   (func (export "stderr_handle") (result i32) (call $stderr))
   (func (export "bwf") (param $s i32) (param $p i32) (param $n i32) (result i32)
     (call $bwf (local.get $s) (local.get $p) (local.get $n) (i32.const 200))
+    (i32.load8_u (i32.const 200)))
+  (func (export "write") (param $s i32) (param $p i32) (param $n i32) (result i32)
+    (call $write (local.get $s) (local.get $p) (local.get $n) (i32.const 200))
     (i32.load8_u (i32.const 200)))
   (func (export "flush") (param $s i32) (result i32)
     (call $flush (local.get $s) (i32.const 200))
@@ -115,14 +120,28 @@ fn blocking_write_and_flush_reaches_stderr() {
 }
 
 #[test]
-fn a_blocking_write_over_the_check_write_budget_traps_and_writes_nothing() {
+fn a_write_over_the_check_write_budget_traps_and_writes_nothing() {
     for call in [
         "inst.bzf(o, 4097)",
         "inst.zeroes(o, 4097)",
         "inst.bwf(o, 0, 4097)",
+        "inst.write(o, 0, 4097)",
     ] {
         let out = run(&format!("let o = inst.stdout_handle(); {call};"));
         assert!(!out.status.success(), "{call} did not trap");
         assert!(out.stdout.is_empty(), "{call}");
     }
+}
+
+#[test]
+fn a_write_of_exactly_the_check_write_budget_reaches_stdout() {
+    let out = run("let o = inst.stdout_handle();
+         assert_eq!(inst.write(o, 64, 5), 0);
+         assert_eq!(inst.write(o, 0, 4096), 0);
+         assert_eq!(inst.flush(o), 0);");
+    assert_succeeded(&out);
+    let mut memory = vec![0u8; 4096];
+    memory[64..69].copy_from_slice(b"hello"); // the data segment at 64
+    let expected = [b"hello".as_slice(), &memory].concat();
+    assert_eq!(out.stdout, expected);
 }
