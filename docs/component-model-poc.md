@@ -147,7 +147,7 @@ the host.
   waits, a ready pollable returning at once next to a ten-second deadline, an idle
   stdin read, and `poll` waking for stdin data and end of input).
 
-What it does not cover: sockets (random and files: Results 6 and 7); the `Imports` trait
+What it does not cover: UDP and name lookup (random, files and loopback TCP: Results 6 and 7); the `Imports` trait
 is generated per module, so the host has to match the module's import set (the example
 marks the methods only some programs need).
 
@@ -208,7 +208,8 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   `sync`, `sync-data` and `set-times` (`no-change`, `now` or a `timestamp`, on a directory or a file
   opened for `write`; nanoseconds of a second or more are `invalid`) are done. On a read-only
   preopen `set-size` and `set-times` are `read-only`, while `sync` succeeds since it
-  changes nothing. `set-times-at` and `readlink-at` are done too (a symlink's own times cannot be set: `unsupported`; a link target that is absolute or has `..` is `not-permitted`); `symlink-at` (a target that is absolute or has `..` is `not-permitted`) and `link-at` are done too; only sockets are not.
+  changes nothing. `set-times-at` and `readlink-at` are done too (a symlink's own times cannot be set: `unsupported`; a link target that is absolute or has `..` is `not-permitted`); `symlink-at` (a target that is absolute or has `..` is `not-permitted`) and `link-at` are done too.
+- Sockets: TCP over loopback is done (`tcp-create-socket`, `start-bind`/`finish-bind`, `start-listen`/`finish-listen`, `start-connect`/`finish-connect`, `accept`, `local-address`, `remote-address`, `subscribe`, `shutdown`, `instance-network`); the streams are the ordinary `input-stream`/`output-stream` handles. An address outside 127.0.0.0/8 and `::1` is `access-denied` unless the host calls `P2Host::with_external_network`. `std` binds and listens in one call, so `finish-bind` does both, a bound socket cannot connect (`not-supported`), and `start-connect` connects at once. UDP, `ip-name-lookup` and the socket options (keep-alive, buffer sizes, hop limit, backlog) are not implemented.
 - Paths must stay under the preopen: an absolute path or any `..` is `not-permitted`
   (stricter than WASI, which allows `..` that stays inside), and so is a symlink that
   leads out (the resolved path is checked against the preopen). Path flags are
@@ -239,7 +240,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
    everything below. *Done: `named_imports` / `--named-imports`.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
-   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at` and `readlink-at` are done too; `symlink-at` and `link-at` are done too; only sockets are not. This is what makes a wasip2 hello-world run natively.
+   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at` and `readlink-at` are done too; `symlink-at` and `link-at` are done too; so are TCP sockets over loopback (UDP and `ip-name-lookup` are not). This is what makes a wasip2 hello-world run natively.
 4. **Full component support** (very large): parse the component, resolve instances
    and `canon lift/lower` per the spec, and generate glue for arbitrary WIT worlds.
    Months of work; only worth it if general components are a goal.

@@ -34,9 +34,21 @@
 // `stat`, `get-flags`, `metadata-hash` and directory listings work on the same paths.
 // `resource-drop` frees a handle's slot, which the next resource of its kind reuses; a guest
 // must not use a handle after dropping it (see docs/component-model-poc.md).
-// Not implemented: sockets.
+// Sockets: TCP over loopback only (`wasi:sockets` network, instance-network, tcp,
+// tcp-create-socket). An address outside 127.0.0.0/8 and ::1 is refused with
+// `access-denied` (bind and connect) unless `with_external_network` was called. A socket is an
+// index into `sockets`; its streams are `TCP_STREAM + index` into `tcp_in` and `tcp_out`
+// (duplicates of the connection). `std` binds and listens in one call, so `finish-bind`
+// does both (a connection that arrives before `start-listen` waits in the backlog), and a
+// socket that was bound cannot connect (`not-supported`). `start-connect` connects at
+// once (`connect_timeout`), so `finish-connect` only reports the result. Reads never block
+// (an empty list means "nothing yet"), a socket's pollable is polled every millisecond, and a
+// write waits while the kernel's send buffer is full. Not implemented: UDP, ip-name-lookup
+// and the socket options (keep-alive, buffer sizes, hop limit, listen backlog).
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6, TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -52,15 +64,29 @@ enum Pollable {
     /// `input-stream.subscribe` block.
     #[allow(dead_code)]
     Stdin,
+    /// Ready when the listening socket in the slot has a connection to accept (or is not
+    /// listening). Built only by the optional `tcp-socket.subscribe` block.
+    #[allow(dead_code)]
+    TcpAccept(usize),
+    /// Ready when the stream in `tcp_in` at the slot has data, is at its end or failed.
+    #[allow(dead_code)]
+    TcpReadable(usize),
 }
 
 impl Pollable {
-    fn is_ready(self, now: Instant, stdin: &StdinBuf) -> bool {
+    fn is_ready(self, now: Instant, stdin: &StdinBuf, host: &P2Host) -> bool {
         match self {
             Pollable::Ready => true,
             Pollable::Deadline(d) => d <= now,
             Pollable::Stdin => !stdin.bytes.is_empty() || stdin.eof,
+            Pollable::TcpAccept(slot) => host.accept_ready(slot),
+            Pollable::TcpReadable(slot) => host.readable(slot),
         }
+    }
+
+    /// Whether readiness can only be found by asking the socket again.
+    fn polls_socket(self) -> bool {
+        matches!(self, Pollable::TcpAccept(_) | Pollable::TcpReadable(_))
     }
 
     fn deadline(self) -> Option<Instant> {
@@ -115,6 +141,18 @@ struct P2Host {
     /// (type, name) still to be read.
     #[allow(dead_code)]
     listings: Slab<std::vec::IntoIter<(u8, String)>>,
+    /// Whether addresses beyond loopback are allowed; set by `with_external_network`.
+    #[allow(dead_code)]
+    external_network: bool,
+    /// TCP sockets behind `tcp-socket` handles.
+    #[allow(dead_code)]
+    sockets: Slab<TcpSocket>,
+    /// Input streams of connections, behind the handles `TCP_STREAM..`.
+    #[allow(dead_code)]
+    tcp_in: Slab<TcpStream>,
+    /// Output streams of connections, behind the handles `TCP_STREAM..`.
+    #[allow(dead_code)]
+    tcp_out: Slab<TcpStream>,
 }
 
 type Guest = Instance<P2Host>;
@@ -135,7 +173,19 @@ impl P2Host {
             files: Slab::new(),
             outputs: Slab::new(),
             listings: Slab::new(),
+            external_network: false,
+            sockets: Slab::new(),
+            tcp_in: Slab::new(),
+            tcp_out: Slab::new(),
         }
+    }
+
+    /// Lets the guest bind and connect to addresses beyond loopback. Off by default: every
+    /// other address is `access-denied`.
+    #[allow(dead_code)]
+    fn with_external_network(mut self) -> Self {
+        self.external_network = true;
+        self
     }
 
     /// Gives the guest the directory `root` (as its "/"), read-only; see
@@ -447,16 +497,215 @@ impl P2Host {
         loop {
             let now = Instant::now();
             let ready: Vec<i32> = (0..handles.len() as i32)
-                .filter(|&i| self.pollable(handles[i as usize]).is_ready(now, &buf))
+                .filter(|&i| self.pollable(handles[i as usize]).is_ready(now, &buf, self))
                 .collect();
             if !ready.is_empty() {
                 return ready;
             }
-            let earliest = handles.iter().filter_map(|&h| self.pollable(h).deadline()).min();
+            let mut earliest = handles.iter().filter_map(|&h| self.pollable(h).deadline()).min();
+            if handles.iter().any(|&h| self.pollable(h).polls_socket()) {
+                // nothing wakes this thread when a socket becomes ready: look again soon
+                let soon = now + Duration::from_millis(1);
+                earliest = Some(earliest.map_or(soon, |d| d.min(soon)));
+            }
             buf = match earliest {
                 Some(d) => changed.wait_timeout(buf, d.saturating_duration_since(now)).unwrap().0,
                 None => changed.wait(buf).unwrap(),
             };
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl P2Host {
+    /// Whether `accept` on the socket in `slot` would not block (or the socket is not
+    /// listening, so `accept` answers at once). A connection found here is kept for `accept`.
+    fn accept_ready(&self, slot: usize) -> bool {
+        let Some(TcpSocket { state: TcpState::Listening { listener, pending }, .. }) =
+            self.sockets.get(slot)
+        else {
+            return true;
+        };
+        if pending.borrow().is_some() {
+            return true;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                *pending.borrow_mut() = Some(stream);
+                true
+            }
+            Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+        }
+    }
+
+    /// Whether the input stream in `tcp_in` at `slot` has data, is at its end or failed.
+    fn readable(&self, slot: usize) -> bool {
+        let Some(stream) = self.tcp_in.get(slot) else { return true };
+        match stream.peek(&mut [0u8; 1]) {
+            Ok(_) => true,
+            Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+        }
+    }
+
+    /// The socket behind a handle.
+    fn socket(&mut self, handle: i32) -> &mut TcpSocket {
+        self.sockets.get_mut(handle as u32 as usize).expect("unknown or dropped tcp-socket")
+    }
+
+    /// `Ok` if the guest may use `addr` on a socket of the family `ipv6`: it must be of
+    /// that family, a unicast address that is not an IPv4-mapped IPv6 one, and loopback
+    /// unless the host allows the network.
+    fn check_address(&self, ipv6: bool, addr: &SocketAddr) -> Result<(), u8> {
+        let mapped = matches!(addr, SocketAddr::V6(a) if a.ip().to_ipv4_mapped().is_some());
+        if addr.is_ipv6() != ipv6 || mapped || addr.ip().is_multicast() {
+            return Err(net_code::INVALID_ARGUMENT);
+        }
+        if self.external_network || addr.ip().is_loopback() {
+            Ok(())
+        } else {
+            Err(net_code::ACCESS_DENIED)
+        }
+    }
+
+    /// Input and output streams over duplicates of `stream`: their handles.
+    fn open_tcp_streams(&mut self, stream: &TcpStream) -> Result<(usize, usize), u8> {
+        let dup = |s: &TcpStream| s.try_clone().map_err(|e| net_error_code(&e));
+        let (input, output) = (dup(stream)?, dup(stream)?);
+        Ok((TCP_STREAM + self.tcp_in.insert(input), TCP_STREAM + self.tcp_out.insert(output)))
+    }
+
+    fn tcp_start_bind(&mut self, handle: i32, addr: SocketAddr) -> Result<(), u8> {
+        let socket = self.socket(handle);
+        if !matches!(socket.state, TcpState::Unbound) {
+            return Err(net_code::INVALID_STATE);
+        }
+        let ipv6 = socket.ipv6;
+        self.check_address(ipv6, &addr)?;
+        self.socket(handle).state = TcpState::BindStarted(addr);
+        Ok(())
+    }
+
+    fn tcp_finish_bind(&mut self, handle: i32) -> Result<(), u8> {
+        let socket = self.socket(handle);
+        match std::mem::replace(&mut socket.state, TcpState::Unbound) {
+            TcpState::BindStarted(addr) => {
+                // a failed bind leaves the socket unbound, to try again
+                socket.state = TcpState::Bound(TcpListener::bind(addr).map_err(|e| net_error_code(&e))?);
+                Ok(())
+            }
+            other => {
+                socket.state = other;
+                Err(net_code::NOT_IN_PROGRESS)
+            }
+        }
+    }
+
+    fn tcp_start_listen(&mut self, handle: i32) -> Result<(), u8> {
+        let socket = self.socket(handle);
+        match std::mem::replace(&mut socket.state, TcpState::Unbound) {
+            TcpState::Bound(listener) => {
+                socket.state = TcpState::ListenStarted(listener);
+                Ok(())
+            }
+            other => {
+                socket.state = other;
+                Err(net_code::INVALID_STATE)
+            }
+        }
+    }
+
+    fn tcp_finish_listen(&mut self, handle: i32) -> Result<(), u8> {
+        let socket = self.socket(handle);
+        match std::mem::replace(&mut socket.state, TcpState::Unbound) {
+            TcpState::ListenStarted(listener) => {
+                let nonblocking = listener.set_nonblocking(true);
+                socket.state = TcpState::Listening { listener, pending: RefCell::new(None) };
+                nonblocking.map_err(|e| net_error_code(&e))
+            }
+            other => {
+                socket.state = other;
+                Err(net_code::NOT_IN_PROGRESS)
+            }
+        }
+    }
+
+    /// Connects now (see the header): the result waits in the socket for `finish-connect`.
+    fn tcp_start_connect(&mut self, handle: i32, addr: SocketAddr) -> Result<(), u8> {
+        let socket = self.socket(handle);
+        let ipv6 = socket.ipv6;
+        match socket.state {
+            TcpState::Unbound => {}
+            TcpState::BindStarted(_) | TcpState::Bound(_) => return Err(net_code::NOT_SUPPORTED),
+            _ => return Err(net_code::INVALID_STATE),
+        }
+        self.check_address(ipv6, &addr)?;
+        if addr.port() == 0 || addr.ip().is_unspecified() {
+            return Err(net_code::INVALID_ARGUMENT);
+        }
+        let connected = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+            .and_then(|stream| stream.set_nonblocking(true).map(|()| stream))
+            .map_err(|e| net_error_code(&e));
+        self.socket(handle).state = TcpState::ConnectStarted(connected);
+        Ok(())
+    }
+
+    /// The handles of the connection's input and output streams.
+    fn tcp_finish_connect(&mut self, handle: i32) -> Result<(usize, usize), u8> {
+        let socket = self.socket(handle);
+        let stream = match std::mem::replace(&mut socket.state, TcpState::Closed) {
+            TcpState::ConnectStarted(Ok(stream)) => stream,
+            TcpState::ConnectStarted(Err(c)) => return Err(c),
+            other => {
+                socket.state = other;
+                return Err(net_code::NOT_IN_PROGRESS);
+            }
+        };
+        let streams = self.open_tcp_streams(&stream)?;
+        self.socket(handle).state = TcpState::Connected(stream);
+        Ok(streams)
+    }
+
+    /// The new socket and its input and output streams.
+    fn tcp_accept(&mut self, handle: i32) -> Result<(usize, usize, usize), u8> {
+        let socket = self.socket(handle);
+        let ipv6 = socket.ipv6;
+        let TcpState::Listening { listener, pending } = &socket.state else {
+            return Err(net_code::INVALID_STATE);
+        };
+        let queued = pending.borrow_mut().take();
+        let stream = match queued {
+            Some(stream) => stream,
+            None => listener.accept().map(|(stream, _)| stream).map_err(|e| net_error_code(&e))?,
+        };
+        stream.set_nonblocking(true).map_err(|e| net_error_code(&e))?;
+        let (input, output) = self.open_tcp_streams(&stream)?;
+        let slot = self.sockets.insert(TcpSocket { ipv6, state: TcpState::Connected(stream) });
+        Ok((slot, input, output))
+    }
+
+    /// The local address of a bound socket, the remote one (`remote`) of a connected one.
+    fn tcp_address(&mut self, handle: i32, remote: bool) -> std::io::Result<SocketAddr> {
+        match (&self.socket(handle).state, remote) {
+            (TcpState::Connected(stream), true) => stream.peer_addr(),
+            (TcpState::Connected(stream), false) => stream.local_addr(),
+            (
+                TcpState::Bound(l) | TcpState::ListenStarted(l) | TcpState::Listening { listener: l, .. },
+                false,
+            ) => l.local_addr(),
+            _ => Err(std::io::ErrorKind::NotConnected.into()),
+        }
+    }
+
+    fn tcp_shutdown(&mut self, handle: i32, how: i32) -> Result<(), u8> {
+        let how = match how {
+            0 => Shutdown::Read,
+            1 => Shutdown::Write,
+            2 => Shutdown::Both,
+            _ => return Err(net_code::INVALID_ARGUMENT),
+        };
+        match &self.socket(handle).state {
+            TcpState::Connected(stream) => stream.shutdown(how).map_err(|e| net_error_code(&e)),
+            _ => Err(net_code::INVALID_STATE),
         }
     }
 }
@@ -553,6 +802,133 @@ impl<T> Slab<T> {
             self.free.push(slot);
         }
     }
+}
+
+/// The first handle of the streams of TCP connections: the slot in `tcp_in` or `tcp_out`
+/// is added to it (file stream handles stay far below).
+#[allow(dead_code)]
+const TCP_STREAM: usize = 1 << 30;
+
+/// The slot in `tcp_in` or `tcp_out` of a stream handle, `None` for any other stream.
+#[allow(dead_code)]
+fn tcp_slot(stream: i32) -> Option<usize> {
+    (stream as u32 as usize).checked_sub(TCP_STREAM)
+}
+
+/// `wasi:sockets` `error-code`s.
+#[allow(dead_code)]
+mod net_code {
+    pub const UNKNOWN: u8 = 0;
+    pub const ACCESS_DENIED: u8 = 1;
+    pub const INVALID_ARGUMENT: u8 = 3;
+    pub const TIMEOUT: u8 = 5;
+    pub const NOT_IN_PROGRESS: u8 = 7;
+    pub const WOULD_BLOCK: u8 = 8;
+    pub const INVALID_STATE: u8 = 9;
+    pub const NOT_SUPPORTED: u8 = 2;
+    pub const ADDRESS_NOT_BINDABLE: u8 = 11;
+    pub const ADDRESS_IN_USE: u8 = 12;
+    pub const CONNECTION_REFUSED: u8 = 14;
+    pub const CONNECTION_RESET: u8 = 15;
+    pub const CONNECTION_ABORTED: u8 = 16;
+}
+
+#[allow(dead_code)]
+fn net_error_code(e: &std::io::Error) -> u8 {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        AddrInUse => net_code::ADDRESS_IN_USE,
+        AddrNotAvailable => net_code::ADDRESS_NOT_BINDABLE,
+        PermissionDenied => net_code::ACCESS_DENIED,
+        ConnectionRefused => net_code::CONNECTION_REFUSED,
+        ConnectionReset => net_code::CONNECTION_RESET,
+        ConnectionAborted => net_code::CONNECTION_ABORTED,
+        TimedOut => net_code::TIMEOUT,
+        WouldBlock => net_code::WOULD_BLOCK,
+        InvalidInput => net_code::INVALID_ARGUMENT,
+        NotConnected => net_code::INVALID_STATE,
+        _ => net_code::UNKNOWN,
+    }
+}
+
+/// Where a TCP socket is in its life (see the interface's state diagram). The socket
+/// is a `std` listener from `finish-bind` on, a stream once connected.
+#[allow(dead_code)]
+enum TcpState {
+    Unbound,
+    BindStarted(SocketAddr),
+    /// Bound: `std` has bound and listened, but the guest has not asked to listen yet.
+    Bound(TcpListener),
+    ListenStarted(TcpListener),
+    /// Listening (non-blocking); `pending` is a connection `subscribe` took off the
+    /// queue to find out that one had arrived, for `accept` to return.
+    Listening { listener: TcpListener, pending: RefCell<Option<TcpStream>> },
+    /// `start-connect` has connected (or failed): `finish-connect` reports it.
+    ConnectStarted(Result<TcpStream, u8>),
+    Connected(TcpStream),
+    /// A connection attempt failed.
+    Closed,
+}
+
+#[allow(dead_code)]
+struct TcpSocket {
+    ipv6: bool,
+    state: TcpState,
+}
+
+/// The address `ip-socket-address` flattens to: the variant's tag, then its fields as
+/// 11 words (ipv4: `port a b c d`; ipv6: `port flow a0..a7 scope`).
+#[allow(dead_code)]
+fn socket_address(tag: i32, w: [i32; 11]) -> SocketAddr {
+    if tag == 0 {
+        let ip = Ipv4Addr::new(w[1] as u8, w[2] as u8, w[3] as u8, w[4] as u8);
+        SocketAddr::V4(SocketAddrV4::new(ip, w[0] as u16))
+    } else {
+        let segments: [u16; 8] = std::array::from_fn(|i| w[2 + i] as u16);
+        SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(segments), w[0] as u16, w[1] as u32, w[10] as u32))
+    }
+}
+
+/// `result<ip-socket-address, error-code>` at `ret`: the variant's tag at `ret + 4`, its
+/// fields from `ret + 8` (the port, then ipv4's address or ipv6's flow info, address and scope).
+#[allow(dead_code)]
+fn put_socket_address(g: &mut Guest, ret: i32, addr: std::io::Result<SocketAddr>) {
+    let addr = match addr {
+        Ok(addr) => addr,
+        Err(e) => return fs_error(g, ret, 4, net_error_code(&e)),
+    };
+    zero_tag(g, ret);
+    put(g, ret + 8, &addr.port().to_le_bytes());
+    match addr {
+        SocketAddr::V4(a) => {
+            put(g, ret + 4, &[0]);
+            put(g, ret + 10, &a.ip().octets());
+        }
+        SocketAddr::V6(a) => {
+            put(g, ret + 4, &[1]);
+            put_u32(g, ret + 12, a.flowinfo() as i32);
+            for (i, segment) in a.ip().segments().iter().enumerate() {
+                put(g, ret + 16 + 2 * i as i32, &segment.to_le_bytes());
+            }
+            put_u32(g, ret + 32, a.scope_id() as i32);
+        }
+    }
+}
+
+/// Writes all of `bytes`, waiting (a millisecond at a time) while the send buffer is full.
+#[allow(dead_code)]
+fn write_all_waiting(stream: &mut TcpStream, mut bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::{ErrorKind, Write};
+    while !bytes.is_empty() {
+        match stream.write(bytes) {
+            Ok(0) => return Err(ErrorKind::WriteZero.into()),
+            Ok(n) => bytes = &bytes[n..],
+            Err(e) if e.kind() == ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(1)),
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// The handle of the first file's stream, input or output (0 to 2 are stdin, stdout,
@@ -821,12 +1197,16 @@ impl Imports for P2Host {
         self.pollables.remove(handle as u32 as usize);
     }
     fn wasi_io_streams_resource_drop_input_stream(&mut self, _g: &mut Guest, handle: i32) {
-        if let Some(index) = file_index(handle) {
+        if let Some(slot) = tcp_slot(handle) {
+            self.tcp_in.remove(slot);
+        } else if let Some(index) = file_index(handle) {
             self.files.remove(index);
         }
     }
     fn wasi_io_streams_resource_drop_output_stream(&mut self, _g: &mut Guest, handle: i32) {
-        if let Some(index) = file_index(handle) {
+        if let Some(slot) = tcp_slot(handle) {
+            self.tcp_out.remove(slot);
+        } else if let Some(index) = file_index(handle) {
             self.outputs.remove(index);
         }
     }
@@ -906,13 +1286,17 @@ impl Imports for P2Host {
         len: i32,
         ret: i32,
     ) {
-        let Some(index) = file_index(stream) else {
+        let range = ptr as u32 as usize..(ptr as u32 as usize + len as u32 as usize);
+        let written = if let Some(slot) = tcp_slot(stream) {
+            let bytes = &g.memory()[range];
+            self.tcp_out.get_mut(slot).map(|socket| write_all_waiting(socket, bytes))
+        } else if let Some(index) = file_index(stream) {
+            let bytes = &g.memory()[range];
+            self.outputs.get_mut(index).map(|file| file.write_all(bytes))
+        } else {
             stream_write(g, stream, ptr, len);
             return zero_tag(g, ret);
         };
-        let (ptr, len) = (ptr as u32 as usize, len as u32 as usize);
-        let bytes = &g.memory()[ptr..ptr + len];
-        let written = self.outputs.get_mut(index).map(|file| file.write_all(bytes));
         if let Some(Ok(())) = written {
             zero_tag(g, ret);
         } else {
@@ -965,6 +1349,14 @@ impl Imports for P2Host {
             let mut shared = self.stdin.0.lock().unwrap();
             let n = shared.bytes.read(&mut buf).unwrap(); // a `VecDeque` never fails
             (n > 0 || !shared.eof).then_some(n)
+        } else if let Some(slot) = tcp_slot(stream) {
+            let socket = self.tcp_in.get_mut(slot).expect("read from an unknown or dropped stream");
+            match socket.read(&mut buf) {
+                Ok(n) => Some(n).filter(|&n| n > 0),
+                // nothing yet: an empty list
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Some(0),
+                Err(_) => None,
+            }
         } else {
             let file = self.file_stream(stream).expect("read from an unknown or dropped stream");
             file.read(&mut buf).ok().filter(|&n| n > 0)
@@ -983,8 +1375,12 @@ impl Imports for P2Host {
     // end optional
 
     // optional: wasi_io_streams_method_input_stream_subscribe
-    /// Ready when stdin has data or is at its end; a file is always ready.
+    /// Ready when stdin has data or is at its end, or a connection's stream has data or is
+    /// at its end; a file is always ready.
     fn wasi_io_streams_method_input_stream_subscribe(&mut self, _g: &mut Guest, stream: i32) -> i32 {
+        if let Some(slot) = tcp_slot(stream) {
+            return self.subscribe(Pollable::TcpReadable(slot));
+        }
         if stream != 0 {
             return self.subscribe(Pollable::Ready);
         }
@@ -1624,6 +2020,169 @@ impl Imports for P2Host {
         let (a, b) = (self.next_u64(), self.next_u64());
         put(g, ret, &a.to_le_bytes());
         put(g, ret + 8, &b.to_le_bytes());
+    }
+    // end optional
+
+    // optional: wasi_sockets_instance_network_instance_network
+    /// The one network: handle 0, which no call looks at (the address policy is the host's).
+    fn wasi_sockets_instance_network_instance_network(&mut self, _g: &mut Guest) -> i32 {
+        0
+    }
+    // end optional
+
+    // optional: wasi_sockets_network_resource_drop_network
+    fn wasi_sockets_network_resource_drop_network(&mut self, _g: &mut Guest, _handle: i32) {}
+    // end optional
+
+    // optional: wasi_sockets_tcp_create_socket_create_tcp_socket
+    /// `create-tcp-socket(address-family)` -> `result<tcp-socket, error-code>`: ipv4 is 0,
+    /// ipv6 is 1.
+    fn wasi_sockets_tcp_create_socket_create_tcp_socket(&mut self, g: &mut Guest, family: i32, ret: i32) {
+        let slot = self.sockets.insert(TcpSocket { ipv6: family == 1, state: TcpState::Unbound });
+        fs_ok_handle(g, ret, slot);
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_resource_drop_tcp_socket
+    fn wasi_sockets_tcp_resource_drop_tcp_socket(&mut self, _g: &mut Guest, handle: i32) {
+        self.sockets.remove(handle as u32 as usize);
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_start_bind
+    /// `start-bind(network, local-address)` -> `result<_, error-code>`: the address is the
+    /// flattened `ip-socket-address` (see `socket_address`). `access-denied` outside loopback.
+    fn wasi_sockets_tcp_method_tcp_socket_start_bind(
+        &mut self,
+        g: &mut Guest,
+        socket: i32,
+        _network: i32,
+        tag: i32,
+        w0: i32,
+        w1: i32,
+        w2: i32,
+        w3: i32,
+        w4: i32,
+        w5: i32,
+        w6: i32,
+        w7: i32,
+        w8: i32,
+        w9: i32,
+        w10: i32,
+        ret: i32,
+    ) {
+        let addr = socket_address(tag, [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10]);
+        let done = self.tcp_start_bind(socket, addr);
+        put_status(g, ret, done);
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_finish_bind
+    fn wasi_sockets_tcp_method_tcp_socket_finish_bind(&mut self, g: &mut Guest, socket: i32, ret: i32) {
+        let done = self.tcp_finish_bind(socket);
+        put_status(g, ret, done);
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_start_listen
+    fn wasi_sockets_tcp_method_tcp_socket_start_listen(&mut self, g: &mut Guest, socket: i32, ret: i32) {
+        let done = self.tcp_start_listen(socket);
+        put_status(g, ret, done);
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_finish_listen
+    fn wasi_sockets_tcp_method_tcp_socket_finish_listen(&mut self, g: &mut Guest, socket: i32, ret: i32) {
+        let done = self.tcp_finish_listen(socket);
+        put_status(g, ret, done);
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_start_connect
+    /// `start-connect(network, remote-address)` -> `result<_, error-code>`: connects at once;
+    /// a refusal shows in `finish-connect`.
+    fn wasi_sockets_tcp_method_tcp_socket_start_connect(
+        &mut self,
+        g: &mut Guest,
+        socket: i32,
+        _network: i32,
+        tag: i32,
+        w0: i32,
+        w1: i32,
+        w2: i32,
+        w3: i32,
+        w4: i32,
+        w5: i32,
+        w6: i32,
+        w7: i32,
+        w8: i32,
+        w9: i32,
+        w10: i32,
+        ret: i32,
+    ) {
+        let addr = socket_address(tag, [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10]);
+        let done = self.tcp_start_connect(socket, addr);
+        put_status(g, ret, done);
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_finish_connect
+    /// `result<tuple<input-stream, output-stream>, error-code>` at `ret`: the handles at
+    /// `ret + 4` and `ret + 8`.
+    fn wasi_sockets_tcp_method_tcp_socket_finish_connect(&mut self, g: &mut Guest, socket: i32, ret: i32) {
+        match self.tcp_finish_connect(socket) {
+            Ok((input, output)) => {
+                zero_tag(g, ret);
+                put_u32(g, ret + 4, input as i32);
+                put_u32(g, ret + 8, output as i32);
+            }
+            Err(c) => fs_error(g, ret, 4, c),
+        }
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_accept
+    /// `result<tuple<tcp-socket, input-stream, output-stream>, error-code>` at `ret`: the
+    /// handles from `ret + 4`; `would-block` if no connection is waiting.
+    fn wasi_sockets_tcp_method_tcp_socket_accept(&mut self, g: &mut Guest, socket: i32, ret: i32) {
+        match self.tcp_accept(socket) {
+            Ok((conn, input, output)) => {
+                zero_tag(g, ret);
+                put_u32(g, ret + 4, conn as i32);
+                put_u32(g, ret + 8, input as i32);
+                put_u32(g, ret + 12, output as i32);
+            }
+            Err(c) => fs_error(g, ret, 4, c),
+        }
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_local_address
+    fn wasi_sockets_tcp_method_tcp_socket_local_address(&mut self, g: &mut Guest, socket: i32, ret: i32) {
+        let addr = self.tcp_address(socket, false);
+        put_socket_address(g, ret, addr);
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_remote_address
+    fn wasi_sockets_tcp_method_tcp_socket_remote_address(&mut self, g: &mut Guest, socket: i32, ret: i32) {
+        let addr = self.tcp_address(socket, true);
+        put_socket_address(g, ret, addr);
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_subscribe
+    /// Ready when `accept` would not block (a socket that is not listening is always ready).
+    fn wasi_sockets_tcp_method_tcp_socket_subscribe(&mut self, _g: &mut Guest, socket: i32) -> i32 {
+        self.subscribe(Pollable::TcpAccept(socket as u32 as usize))
+    }
+    // end optional
+
+    // optional: wasi_sockets_tcp_method_tcp_socket_shutdown
+    /// `shutdown(shutdown-type)`: receive 0, send 1, both 2.
+    fn wasi_sockets_tcp_method_tcp_socket_shutdown(&mut self, g: &mut Guest, socket: i32, how: i32, ret: i32) {
+        let done = self.tcp_shutdown(socket, how);
+        put_status(g, ret, done);
     }
     // end optional
 }
