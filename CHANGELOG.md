@@ -55,10 +55,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `readlink-at` returns the target of a symlink unless it is absolute or has a `..`
   (`not-permitted`, so no host path leaks). `symlink-at` makes only such links, and `link-at`
   makes hard links (a symlink is followed with `symlink-follow`, else `unsupported`; a
-  directory is `not-permitted`); only sockets are missing.
+  directory is `not-permitted`).
   A file descriptor now holds the open file, so it stays on the file it opened when
   the path is unlinked, renamed over or reused; a directory descriptor's path is checked
   again on every use.
+- The WASI preview2 host example supports TCP sockets over loopback: `create-tcp-socket`,
+  `start-bind`/`finish-bind`, `start-listen`/`finish-listen`, `start-connect`/`finish-connect`,
+  `accept`, `local-address`, `remote-address`, `subscribe` and `shutdown`, with the connection's
+  streams and pollables working like the others. An address outside 127.0.0.0/8 and `::1` is
+  `access-denied` unless the host calls `P2Host::with_external_network`. UDP, `ip-name-lookup`
+  and the socket options (keep-alive, buffer sizes, hop limit, backlog) are not implemented.
 - `wasm2rs_macros::include_wasm!` accepts `named_imports`, `import_memory` and
   `reentrant_imports` (the `TranspileOptions` of the same name), so a host such as the
   WASI preview2 example can embed a module without a build script.

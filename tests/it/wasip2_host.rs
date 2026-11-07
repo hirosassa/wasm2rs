@@ -1558,6 +1558,71 @@ fn a_read_only_preopen_refuses_symlink_at_and_link_at() {
     }
 }
 
+/// The imports and paths of the test of `link-at` into another directory descriptor.
+const LINK_ACROSS_IMPORTS: &str = r#"
+  (import "wasi:filesystem/preopens@0.2.0" "get-directories" (func $dirs (param i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.open-at" (func $open (param i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:filesystem/types@0.2.0" "[method]descriptor.link-at" (func $link_at (param i32 i32 i32 i32 i32 i32 i32 i32)))
+  (data (i32.const 300) "d")
+  (data (i32.const 310) "f.txt")
+  (data (i32.const 320) "in_d")
+  (data (i32.const 330) "../up")
+  (data (i32.const 340) "/abs")
+  (data (i32.const 350) "back")
+"#;
+
+/// `fs_link_across` runs on a writable root holding `f.txt` and the directory `d`. It
+/// opens `d` and links `f.txt` into it (as `in_d`), then `d/in_d` back into the root
+/// (as `back`); a new name that is absolute or has `..` is not-permitted (31).
+const LINK_ACROSS: &str = r#"
+  (func $ok
+    (if (i32.load8_u (i32.const 220)) (then unreachable)))
+  (func $denied
+    (if (i32.ne (i32.load8_u (i32.const 220)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 221)) (i32.const 31)) (then unreachable)))
+  (func (export "fs_link_across") (local $dir i32) (local $sub i32)
+    (call $dirs (i32.const 200))
+    (local.set $dir (i32.load (i32.load (i32.const 200))))
+    (call $open (local.get $dir) (i32.const 1) (i32.const 300) (i32.const 1) (i32.const 2) (i32.const 1) (i32.const 220))
+    (call $ok)
+    (local.set $sub (i32.load (i32.const 224)))
+    ;; root/f.txt -> d/in_d
+    (call $link_at (local.get $dir) (i32.const 0) (i32.const 310) (i32.const 5)
+                   (local.get $sub) (i32.const 320) (i32.const 4) (i32.const 220))
+    (call $ok)
+    ;; d/in_d -> root/back
+    (call $link_at (local.get $sub) (i32.const 0) (i32.const 320) (i32.const 4)
+                   (local.get $dir) (i32.const 350) (i32.const 4) (i32.const 220))
+    (call $ok)
+    ;; a new name that leaves the new directory
+    (call $link_at (local.get $dir) (i32.const 0) (i32.const 310) (i32.const 5)
+                   (local.get $sub) (i32.const 330) (i32.const 5) (i32.const 220))
+    (call $denied)
+    (call $link_at (local.get $dir) (i32.const 0) (i32.const 310) (i32.const 5)
+                   (local.get $sub) (i32.const 340) (i32.const 4) (i32.const 220))
+    (call $denied))
+"#;
+
+#[cfg(unix)]
+#[test]
+fn link_at_into_another_directory_descriptor_links_there() {
+    use std::os::unix::fs::MetadataExt;
+    let root = root_with_file("link_across");
+    std::fs::create_dir(root.join("d")).unwrap();
+    let bin = compile(
+        "fs_link_across",
+        &hello_with(LINK_ACROSS_IMPORTS, LINK_ACROSS),
+        &preopen_host_with(&root, "with_writable_preopen"),
+        "inst.fs_link_across();",
+    );
+    run_ok(&bin);
+    let ino = |path: std::path::PathBuf| std::fs::metadata(path).unwrap().ino();
+    assert_eq!(ino(root.join("d/in_d")), ino(root.join("f.txt")));
+    assert_eq!(ino(root.join("back")), ino(root.join("f.txt")));
+    assert!(!root.join("in_d").exists());
+    assert!(!root.parent().unwrap().join("up").exists());
+}
+
 /// The imports and paths of the test where a guest moves a directory under the path of a
 /// directory descriptor it holds. Calls that return `result<_, error-code>` put the tag
 /// at `ret` and the error's tag byte at `ret + 1`.
@@ -1848,4 +1913,241 @@ fn a_descriptor_stays_on_its_file_when_another_file_is_renamed_over_its_path() {
     run_ok(&bin);
     let now = std::fs::read_to_string(root.join("f.txt")).unwrap();
     assert_eq!(now, "GGGGGGGGGGGGGG");
+}
+
+/// The imports of the socket tests. A call that returns `result<_, error-code>` puts the
+/// tag at 512 and the error's tag byte at 513; one that returns a handle (or a tuple of
+/// them) puts the tag at 512, the handles from 516 and an error's tag byte at 516.
+/// `start-bind` and `start-connect` take the socket, the network, the address as a
+/// flattened `ip-socket-address` (the tag, then 11 words: `port a b c d` for ipv4,
+/// `port flow a0..a7 scope` for ipv6) and the return pointer.
+/// Address families: ipv4 0, ipv6 1. Error codes: access-denied 1, invalid-argument 3,
+/// not-in-progress 7, would-block 8, invalid-state 9, connection-refused 14.
+const SOCKET_IMPORTS: &str = r#"
+  (import "wasi:sockets/instance-network@0.2.0" "instance-network" (func $network (result i32)))
+  (import "wasi:sockets/network@0.2.0" "[resource-drop]network" (func $drop_network (param i32)))
+  (import "wasi:sockets/tcp-create-socket@0.2.0" "create-tcp-socket" (func $create (param i32 i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[resource-drop]tcp-socket" (func $drop_socket (param i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.start-bind" (func $start_bind (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.finish-bind" (func $finish_bind (param i32 i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.start-listen" (func $start_listen (param i32 i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.finish-listen" (func $finish_listen (param i32 i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.start-connect" (func $start_connect (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.finish-connect" (func $finish_connect (param i32 i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.accept" (func $accept (param i32 i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.local-address" (func $local_address (param i32 i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.remote-address" (func $remote_address (param i32 i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.subscribe" (func $socket_subscribe (param i32) (result i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.shutdown" (func $shutdown (param i32 i32 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]input-stream.read" (func $read (param i32 i64 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]input-stream.subscribe" (func $in_subscribe (param i32) (result i32)))
+  (data (i32.const 640) "ping")
+  (data (i32.const 650) "pong")
+"#;
+
+const SOCKET_HELPERS: &str = r#"
+  ;; the `result` at 512 is ok / the error `code`, whose tag byte is `off` bytes in
+  (func $ok
+    (if (i32.load8_u (i32.const 512)) (then unreachable)))
+  (func $err_at (param $off i32) (param $code i32)
+    (if (i32.ne (i32.load8_u (i32.const 512)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.add (i32.const 512) (local.get $off))) (local.get $code)) (then unreachable)))
+  (func $err (param $code i32)
+    (call $err_at (i32.const 1) (local.get $code)))
+  ;; the ipv4 address `a.b.c.d:port` (ipv6 `::` and the like are written out by the tests)
+  (func $bind4 (param $s i32) (param $a i32) (param $b i32) (param $c i32) (param $d i32) (param $port i32)
+    (i32.store (i32.const 512) (i32.const 0x09090909))
+    (call $start_bind (local.get $s) (call $network) (i32.const 0)
+      (local.get $port) (local.get $a) (local.get $b) (local.get $c) (local.get $d)
+      (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
+      (i32.const 512)))
+  (func $connect4 (param $s i32) (param $a i32) (param $b i32) (param $c i32) (param $d i32) (param $port i32)
+    (i32.store (i32.const 512) (i32.const 0x09090909))
+    (call $start_connect (local.get $s) (call $network) (i32.const 0)
+      (local.get $port) (local.get $a) (local.get $b) (local.get $c) (local.get $d)
+      (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
+      (i32.const 512)))
+  ;; a new socket of address family `$family`
+  (func $new_socket (param $family i32) (result i32)
+    (call $create (local.get $family) (i32.const 512))
+    (call $ok)
+    (i32.load (i32.const 516)))
+  ;; blocks until the pollable is ready, then drops it
+  (func $wait (param $p i32)
+    (call $block (local.get $p))
+    (call $drop_pollable (local.get $p)))
+  ;; `read` of the stream: the bytes at 640.. are expected, or the error `closed` if `$want` is 0
+  (func $read_exactly (param $stream i32) (param $want i32)
+    (call $wait (call $in_subscribe (local.get $stream)))
+    (i32.store (i32.const 600) (i32.const 0x09090909))
+    (call $read (local.get $stream) (i64.const 16) (i32.const 600))
+    (if (local.get $want)
+      (then
+        (if (i32.load8_u (i32.const 600)) (then unreachable))
+        (if (i32.ne (i32.load (i32.const 608)) (i32.const 4)) (then unreachable))
+        (if (i32.ne (i32.load (i32.load (i32.const 604))) (i32.load (local.get $want))) (then unreachable)))
+      (else
+        (if (i32.ne (i32.load8_u (i32.const 600)) (i32.const 1)) (then unreachable))
+        (if (i32.ne (i32.load8_u (i32.const 604)) (i32.const 1)) (then unreachable)))))
+"#;
+
+/// `net_echo`: one guest is both ends of a connection on loopback. It listens on port 0,
+/// connects to the port `local-address` reports, accepts, sends `ping` one way and `pong`
+/// back, then shuts the sending side down and sees the end of input.
+const NET_ECHO: &str = r#"
+  (func (export "net_echo")
+    (local $srv i32) (local $cli i32) (local $port i32)
+    (local $cin i32) (local $cout i32) (local $conn i32) (local $sin i32) (local $sout i32)
+    (local.set $srv (call $new_socket (i32.const 0)))
+    (call $bind4 (local.get $srv) (i32.const 127) (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 0))
+    (call $ok)
+    (call $finish_bind (local.get $srv) (i32.const 512))
+    (call $ok)
+    (call $start_listen (local.get $srv) (i32.const 512))
+    (call $ok)
+    (call $finish_listen (local.get $srv) (i32.const 512))
+    (call $ok)
+    ;; result<ip-socket-address> at 528: ipv4 (tag 0), port at 536, address at 538
+    (call $local_address (local.get $srv) (i32.const 528))
+    (if (i32.load8_u (i32.const 528)) (then unreachable))
+    (if (i32.load8_u (i32.const 532)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 538)) (i32.const 127)) (then unreachable))
+    (local.set $port (i32.load16_u (i32.const 536)))
+    (if (i32.eqz (local.get $port)) (then unreachable))
+    ;; nothing to accept yet
+    (call $accept (local.get $srv) (i32.const 512))
+    (call $err_at (i32.const 4) (i32.const 8))
+    ;; the client
+    (local.set $cli (call $new_socket (i32.const 0)))
+    (call $connect4 (local.get $cli) (i32.const 127) (i32.const 0) (i32.const 0) (i32.const 1) (local.get $port))
+    (call $ok)
+    (call $finish_connect (local.get $cli) (i32.const 512))
+    (call $ok)
+    (local.set $cin (i32.load (i32.const 516)))
+    (local.set $cout (i32.load (i32.const 520)))
+    ;; the listener is ready, and accepts
+    (call $wait (call $socket_subscribe (local.get $srv)))
+    (call $accept (local.get $srv) (i32.const 512))
+    (call $ok)
+    (local.set $conn (i32.load (i32.const 516)))
+    (local.set $sin (i32.load (i32.const 520)))
+    (local.set $sout (i32.load (i32.const 524)))
+    ;; the accepted end sees the client's address as its remote
+    (call $remote_address (local.get $conn) (i32.const 528))
+    (if (i32.load8_u (i32.const 528)) (then unreachable))
+    (if (i32.ne (i32.load8_u (i32.const 538)) (i32.const 127)) (then unreachable))
+    ;; ping out, pong back
+    (call $write (local.get $cout) (i32.const 640) (i32.const 4) (i32.const 576))
+    (if (i32.load8_u (i32.const 576)) (then unreachable))
+    (call $read_exactly (local.get $sin) (i32.const 640))
+    (call $write (local.get $sout) (i32.const 650) (i32.const 4) (i32.const 576))
+    (if (i32.load8_u (i32.const 576)) (then unreachable))
+    (call $read_exactly (local.get $cin) (i32.const 650))
+    ;; the end of the client's output is the end of the accepted input
+    (call $shutdown (local.get $cli) (i32.const 1) (i32.const 512))
+    (call $ok)
+    (call $read_exactly (local.get $sin) (i32.const 0))
+    (call $drop_stream (local.get $cin))
+    (call $drop_out (local.get $cout))
+    (call $drop_stream (local.get $sin))
+    (call $drop_out (local.get $sout))
+    (call $drop_socket (local.get $cli))
+    (call $drop_socket (local.get $conn))
+    (call $drop_socket (local.get $srv))
+    (call $drop_network (call $network)))
+"#;
+
+#[test]
+fn tcp_sockets_connect_accept_and_exchange_bytes_over_loopback() {
+    let bin = compile(
+        "net_echo",
+        &hello_with(SOCKET_IMPORTS, &format!("{SOCKET_HELPERS}{NET_ECHO}")),
+        "P2Host::new(vec![], vec![])",
+        "inst.net_echo();",
+    );
+    run_ok(&bin);
+}
+
+/// `net_checks`: addresses outside loopback are `access-denied`, and calls in the wrong
+/// state or with the wrong address family fail with the error the interface names.
+const NET_CHECKS: &str = r#"
+  (func (export "net_checks") (local $s i32) (local $v6 i32) (local $l i32)
+    (local.set $s (call $new_socket (i32.const 0)))
+    ;; not loopback: access-denied (1), for bind and connect
+    (call $bind4 (local.get $s) (i32.const 8) (i32.const 8) (i32.const 8) (i32.const 8) (i32.const 0))
+    (call $err (i32.const 1))
+    (call $bind4 (local.get $s) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))
+    (call $err (i32.const 1))
+    (call $connect4 (local.get $s) (i32.const 8) (i32.const 8) (i32.const 8) (i32.const 8) (i32.const 53))
+    (call $err (i32.const 1))
+    ;; nothing has been started on it
+    (call $finish_bind (local.get $s) (i32.const 512))
+    (call $err (i32.const 7))
+    (call $finish_connect (local.get $s) (i32.const 512))
+    (call $err_at (i32.const 4) (i32.const 7))
+    (call $finish_listen (local.get $s) (i32.const 512))
+    (call $err (i32.const 7))
+    ;; not bound or not listening: invalid-state (9)
+    (call $start_listen (local.get $s) (i32.const 512))
+    (call $err (i32.const 9))
+    (call $accept (local.get $s) (i32.const 512))
+    (call $err_at (i32.const 4) (i32.const 9))
+    (call $local_address (local.get $s) (i32.const 512))
+    (call $err_at (i32.const 4) (i32.const 9))
+    (call $remote_address (local.get $s) (i32.const 512))
+    (call $err_at (i32.const 4) (i32.const 9))
+    ;; bound once: bound for good
+    (local.set $l (call $new_socket (i32.const 0)))
+    (call $bind4 (local.get $l) (i32.const 127) (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 0))
+    (call $ok)
+    (call $finish_bind (local.get $l) (i32.const 512))
+    (call $ok)
+    (call $bind4 (local.get $l) (i32.const 127) (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 0))
+    (call $err (i32.const 9))
+    ;; an ipv4 address on an ipv6 socket (invalid-argument 3), `::` on it is not loopback
+    (local.set $v6 (call $new_socket (i32.const 1)))
+    (call $bind4 (local.get $v6) (i32.const 127) (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 0))
+    (call $err (i32.const 3))
+    (i32.store (i32.const 512) (i32.const 0x09090909))
+    (call $start_bind (local.get $v6) (call $network) (i32.const 1)
+      (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
+      (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 512))
+    (call $err (i32.const 1))
+    ;; nobody listens on port 1: the connection is refused (14), reported by `finish-connect`
+    (call $connect4 (local.get $s) (i32.const 127) (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 1))
+    (call $ok)
+    (call $finish_connect (local.get $s) (i32.const 512))
+    (call $err_at (i32.const 4) (i32.const 14)))
+  ;; with `with_external_network` the unspecified address is bindable
+  (func (export "net_external") (local $s i32)
+    (local.set $s (call $new_socket (i32.const 0)))
+    (call $bind4 (local.get $s) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))
+    (call $ok)
+    (call $finish_bind (local.get $s) (i32.const 512))
+    (call $ok)
+    (call $local_address (local.get $s) (i32.const 528))
+    (if (i32.load8_u (i32.const 528)) (then unreachable))
+    (if (i32.eqz (i32.load16_u (i32.const 536))) (then unreachable)))
+"#;
+
+#[test]
+fn tcp_sockets_refuse_addresses_outside_loopback_and_calls_in_the_wrong_state() {
+    let bin = compile(
+        "net_checks",
+        &hello_with(SOCKET_IMPORTS, &format!("{SOCKET_HELPERS}{NET_CHECKS}")),
+        "P2Host::new(vec![], vec![])",
+        "inst.net_checks();",
+    );
+    run_ok(&bin);
+}
+
+#[test]
+fn with_external_network_permits_binding_beyond_loopback() {
+    let bin = compile(
+        "net_external",
+        &hello_with(SOCKET_IMPORTS, &format!("{SOCKET_HELPERS}{NET_CHECKS}")),
+        "P2Host::new(vec![], vec![]).with_external_network()",
+        "inst.net_external();",
+    );
+    run_ok(&bin);
 }
