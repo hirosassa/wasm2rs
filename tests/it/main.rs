@@ -118,6 +118,7 @@ mod wasi_shared_memory;
 mod wasi_threads;
 mod wasip2_host;
 mod wasip2_typed_fs;
+mod wasip2_typed_fs_write;
 mod wasip2_typed_host;
 mod wasip2_typed_random;
 mod wit_glue;
