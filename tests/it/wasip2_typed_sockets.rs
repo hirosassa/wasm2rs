@@ -698,3 +698,36 @@ fn blocking_write_and_flush_sends_on_a_connection() {
          assert_eq!(read_all(&mut inst, s_in, 4), b\"ping\");",
     ));
 }
+
+#[test]
+fn a_zero_length_connection_request_is_ok_while_open_consumes_nothing_and_closed_after_the_end() {
+    assert_succeeded(&run_with_main(
+        "use std::io::Write;
+         let (s, port) = serve(&mut inst);
+         let mut client = std::net::TcpStream::connect((\"127.0.0.1\", port)).unwrap();
+         accept(&mut inst, s);
+         let s_in = inst.s_in();
+         // open and idle: ok and empty
+         assert_eq!(inst.read(s_in, 0), 0);
+         assert_eq!(inst.blocking_read(s_in, 0), 0);
+         assert_eq!(inst.skip(s_in, 0), 0);
+         assert_eq!(inst.blocking_skip(s_in, 0), 0);
+         // with data pending a zero length still succeeds and consumes nothing
+         client.write_all(b\"abc\").unwrap();
+         client.flush().unwrap();
+         std::thread::sleep(std::time::Duration::from_millis(100));
+         assert_eq!(inst.read(s_in, 0), 0);
+         assert_eq!(read_all(&mut inst, s_in, 3), b\"abc\");
+         // the peer hangs up: every zero-length call is `closed` (stream-error case 1)
+         drop(client);
+         let mut ended = false;
+         for _ in 0..2000 {
+             if inst.read(s_in, 0) == -2 { ended = true; break; }
+             std::thread::sleep(std::time::Duration::from_millis(1));
+         }
+         assert!(ended);
+         assert_eq!(inst.blocking_read(s_in, 0), -2);
+         assert_eq!(inst.skip(s_in, 0), -2);
+         assert_eq!(inst.blocking_skip(s_in, 0), -2);",
+    ));
+}

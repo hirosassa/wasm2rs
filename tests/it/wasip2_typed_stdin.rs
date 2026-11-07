@@ -151,6 +151,36 @@ const CORE: &str = r#"
     (call $skip (call $stdin) (i64.const 16) (i32.const 200))
     (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable))
     (if (i32.ne (i32.load8_u (i32.const 208)) (i32.const 1)) (then unreachable)))
+  ;; a zero-length request on an open, idle stdin succeeds (read: empty list, skip: 0)
+  (func (export "idle_zero_len_stdin")
+    (call $read (call $stdin) (i64.const 0) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (call $bread (call $stdin) (i64.const 0) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (call $skip (call $stdin) (i64.const 0) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (call $bskip (call $stdin) (i64.const 0) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable)))
+  ;; stdin holds "ab" and then ends: a zero-length request consumes nothing while data is
+  ;; left, and at the end of the input all four calls say `closed`
+  (func (export "zero_len_stdin_at_end")
+    (call $wait_stdin)
+    (call $read (call $stdin) (i64.const 0) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (call $skip (call $stdin) (i64.const 0) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (call $read (call $stdin) (i64.const 16) (i32.const 200))
+    (if (i32.load8_u (i32.const 200)) (then unreachable))
+    (if (i32.ne (i32.load (i32.const 208)) (i32.const 2)) (then unreachable))
+    (call $wait_stdin)
+    (call $read (call $stdin) (i64.const 0) (i32.const 200))
+    (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable))
+    (call $bread (call $stdin) (i64.const 0) (i32.const 200))
+    (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable))
+    (call $skip (call $stdin) (i64.const 0) (i32.const 200))
+    (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable))
+    (call $bskip (call $stdin) (i64.const 0) (i32.const 200))
+    (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable)))
   ;; stdin holds "ab\ncd": reads it, then end of input is `closed` (error tag 1 at 204)
   (func (export "read_stdin")
     (call $wait_stdin)
@@ -263,4 +293,16 @@ fn blocking_read_waits_for_stdin_data_and_reports_the_end_as_closed() {
 #[test]
 fn skip_discards_without_waiting_and_blocking_skip_waits_for_stdin_data() {
     run_with_late_data("inst.skip_stdin();");
+}
+
+#[test]
+fn a_zero_length_request_on_an_open_stdin_succeeds_and_at_its_end_is_closed() {
+    use std::io::Write;
+    let mut child = spawn("inst.zero_len_stdin_at_end();");
+    child.stdin.take().unwrap().write_all(b"ab").unwrap();
+    finish_within_30_seconds(child);
+
+    let mut child = spawn("inst.idle_zero_len_stdin();");
+    let _stdin = child.stdin.take().unwrap(); // still open
+    finish_within_30_seconds(child);
 }

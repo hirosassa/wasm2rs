@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `examples/wasip2_host/typed.rs`: a zero-length `read`/`blocking-read`/`skip`/`blocking-skip` on
+  stdin, a connection or a file succeeds (empty) only while the stream is open and is `closed` at its
+  end (as `wasi:io` 0.2 specifies); the host probes without consuming data. The blocking variants
+  still do not wait for readiness when the length is 0.
 - `wit_host_trait` / `wit_host_glue` / `wit_functions` (and `--wit-host`, `--glue`) declare
   `[resource-drop]<r>` only for resources whose `canon resource.drop` the component lowers (with no
   top-level core module, a nested component that lowers a drop, or an unresolvable drop, every drop is kept). A `wasm32-wasip2` program using
