@@ -1100,3 +1100,130 @@ fn main() {{
     let bin = common::build("wit_host_prelude", &program);
     assert!(Command::new(bin).status().unwrap().success());
 }
+
+/// A component around the core module `core` (wrapped by `wit-component`, which lowers
+/// exactly the functions the core imports) importing `a:b/res`, which defines the resource `r`.
+fn component_around(core: &str) -> Vec<u8> {
+    use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve
+        .push_str(
+            "test.wit",
+            "package a:b;
+             interface res { resource r { poke: func(); } }
+             world w { import res; }",
+        )
+        .unwrap();
+    let world = resolve.select_world(&[package], Some("w")).unwrap();
+    let mut module = wat::parse_str(core).unwrap();
+    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
+    ComponentEncoder::default()
+        .module(&module)
+        .unwrap()
+        .validate(true)
+        .encode()
+        .unwrap()
+}
+
+const POKE: &str = r#"(import "a:b/res" "[method]r.poke" (func $poke (param i32)))"#;
+const DROP: &str = r#"(import "a:b/res" "[resource-drop]r" (func $drop (param i32)))"#;
+
+#[test]
+fn a_resource_drop_the_component_does_not_lower_is_not_declared() {
+    let component = component_around(&format!("(module {POKE})"));
+    let names: Vec<String> = wasm2rs::wit_functions(&component)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    assert_eq!(names, ["[method]r.poke"]);
+    assert!(!host(&component).contains("resource_drop"));
+}
+
+#[test]
+fn a_resource_drop_the_component_lowers_is_declared() {
+    let component = component_around(&format!("(module {POKE} {DROP})"));
+    let names: Vec<String> = wasm2rs::wit_functions(&component)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    assert_eq!(names, ["[method]r.poke", "[resource-drop]r"]);
+}
+
+/// The glue's `impl Imports for Glue` and the trait derived from the core's imports agree
+/// (whether or not the core imports the drop), and the glue builds with `host_impl`.
+fn glue_builds_with(core: &str, host_impl: &str) {
+    let component = component_around(core);
+    let glue = wasm2rs::wit_host_glue(&component).unwrap();
+    let opts = TranspileOptions {
+        named_imports: true,
+        reentrant_imports: true,
+        ..TranspileOptions::default()
+    };
+    let generated = transpile_with_options(&wat::parse_str(core).unwrap(), &opts).unwrap();
+    let program = format!(
+        "{generated}\n{glue}\n{host_impl}\nfn main() {{ let _inst = Instance::new(Glue(H)); }}\n"
+    );
+    common::build("wit_host_drop", &program);
+}
+
+#[test]
+fn the_glue_builds_when_the_core_does_not_import_the_drop() {
+    glue_builds_with(
+        &format!("(module {POKE})"),
+        "struct H;
+         impl Host for H { fn a_b_res_method_r_poke(&mut self, _self: R) {} }",
+    );
+}
+
+#[test]
+fn the_glue_builds_when_the_core_imports_the_drop() {
+    glue_builds_with(
+        &format!("(module {POKE} {DROP})"),
+        "struct H;
+         impl Host for H {
+             fn a_b_res_method_r_poke(&mut self, _self: R) {}
+             fn a_b_res_resource_drop_r(&mut self, _handle: R) {}
+         }",
+    );
+}
+
+/// An outer component importing `a:b/res` (with the resource `r`) and holding a nested
+/// component with its own core module. The outer body has no `canon resource.drop`; the
+/// nested one is not read, so the drop must stay declared (the inner core may import it).
+fn composed_component() -> Vec<u8> {
+    wat::parse_str(
+        r#"(component
+          (import "a:b/res" (instance $i
+            (export "r" (type $r (sub resource)))
+            (export "poke" (func (param "self" (borrow $r))))))
+          (component $inner
+            (core module (func)))
+          (instance (instantiate $inner)))"#,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_nested_component_keeps_every_resource_drop() {
+    let names: Vec<String> = wasm2rs::wit_functions(&composed_component())
+        .unwrap()
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    assert_eq!(names, ["poke", "[resource-drop]r"]);
+}
+
+#[test]
+fn a_component_without_a_core_module_keeps_every_resource_drop() {
+    let names: Vec<String> = wasm2rs::wit_functions(&component("", "a:b/c", POLL))
+        .unwrap()
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    assert!(
+        names.contains(&"[resource-drop]pollable".to_string()),
+        "{names:?}"
+    );
+}

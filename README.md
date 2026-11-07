@@ -142,7 +142,7 @@ let rust = transpile_with_options(&wasm, &TranspileOptions::default())?;
 
 `wasm2rs::dump(&wasm)` returns the same summary as `--dump` (a `ModuleSummary` that implements `Display`).
 `wasm2rs::extract_core_modules(&component)` returns a component's core modules as `Vec<Vec<u8>>`.
-`wasm2rs::wit_host_trait(&component)` returns the Rust source of the typed `Host` trait that `--wit-host` writes, `wasm2rs::wit_host_glue(&component)` that text plus the `Glue` of `--wit-host --glue`, and `wasm2rs::wit_functions(&component)` the decoded `Vec<WitFunc>` (interface, function name, parameter and result `WitType`s, with `WitType::Own`/`Borrow` of a `WitResource`; one synthetic `[resource-drop]<r>` function per defined resource) behind it.
+`wasm2rs::wit_host_trait(&component)` returns the Rust source of the typed `Host` trait that `--wit-host` writes, `wasm2rs::wit_host_glue(&component)` that text plus the `Glue` of `--wit-host --glue`, and `wasm2rs::wit_functions(&component)` the decoded `Vec<WitFunc>` (interface, function name, parameter and result `WitType`s, with `WitType::Own`/`Borrow` of a `WitResource`; one synthetic `[resource-drop]<r>` function per defined resource whose `resource.drop` the component lowers; every drop if the component has no top-level core module or has a nested component) behind it.
 
 Code generation is configured through `TranspileOptions` (`unsafe_memory`, `split_dispatch`, `entry_exports`, `jobs`). It is `Clone` and `Default` but not `Copy`, so pass it by reference.
 `transpile(&wasm)` is the shortcut for the default options.

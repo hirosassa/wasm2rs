@@ -163,3 +163,66 @@ world w {
     assert!(stderr.contains("E0046"), "{stderr}");
     assert!(stderr.contains("does not implement"), "{stderr}");
 }
+
+/// `run` writes its first argument (argv[0]) to stdout.
+const CORE_ARGV0: &str = r#"
+(module
+  (import "wasi:io/error@0.2.0" "[resource-drop]error" (func (param i32)))
+  (import "wasi:io/streams@0.2.0" "[resource-drop]output-stream" (func $drop_out (param i32)))
+  (import "wasi:cli/environment@0.2.0" "get-arguments" (func $args (param i32)))
+  (import "wasi:cli/stdout@0.2.0" "get-stdout" (func $stdout (result i32)))
+  (import "wasi:io/streams@0.2.0" "[method]output-stream.write" (func $write (param i32 i32 i32 i32)))
+  (memory (export "memory") 1)
+  (global $brk (mut i32) (i32.const 1024))
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (local $p i32)
+    (local.set $p (i32.and (i32.add (global.get $brk) (i32.sub (local.get 2) (i32.const 1)))
+                           (i32.sub (i32.const 0) (local.get 2))))
+    (global.set $brk (i32.add (local.get $p) (local.get 3)))
+    (local.get $p))
+  (func (export "wasi:cli/run@0.2.0#run") (result i32) (local $list i32) (local $out i32)
+    (call $args (i32.const 72))
+    (local.set $list (i32.load (i32.const 72)))
+    (local.set $out (call $stdout))
+    (call $write (local.get $out) (i32.load (local.get $list)) (i32.load offset=4 (local.get $list)) (i32.const 100))
+    (call $drop_out (local.get $out))
+    (i32.const 0)))
+"#;
+
+#[test]
+fn argv0_is_the_component_path_given_on_the_command_line() {
+    let out = run_example(&component_of(WORLD, CORE_ARGV0), "argv0", &["x"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.ends_with("component.wasm") && !stdout.ends_with("/program"),
+        "{stdout} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("wasm2rs-run-example"), "{stdout}");
+}
+
+#[test]
+fn a_guest_that_traps_exits_134_after_its_own_message() {
+    let core = r#"
+(module
+  (import "wasi:cli/environment@0.2.0" "get-arguments" (func $args (param i32)))
+  (memory (export "memory") 1)
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "wasi:cli/run@0.2.0#run") (result i32) unreachable))
+"#;
+    let world = r#"
+package test:t;
+world w {
+  import wasi:cli/environment@0.2.0;
+  export wasi:cli/run@0.2.0;
+}
+"#;
+    let out = run_example(&component_of(world, core), "trap", &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(134), "{stderr}");
+    assert!(stderr.contains("unreachable"), "{stderr}");
+    assert!(
+        stderr.contains("wasip2_run: the program trapped"),
+        "{stderr}"
+    );
+    assert_eq!(stderr.matches("panicked").count(), 1, "{stderr}");
+}
