@@ -197,7 +197,7 @@ impl TypedHost {
     /// `with_writable_preopen`.
     fn with_preopen(mut self, root: PathBuf) -> Self {
         let root = root.canonicalize().expect("preopen: directory does not exist");
-        self.descriptors.insert(OpenDescriptor { path: root.clone(), write: false, file: None }); // slot 0
+        self.descriptors.insert(OpenDescriptor { path: root.clone(), write: false, read: true, file: None }); // slot 0
         self.root = Some(root);
         self
     }
@@ -462,6 +462,8 @@ struct OpenDescriptor {
     path: PathBuf,
     /// Whether a file was opened for `write`.
     write: bool,
+    /// Whether a file was opened for reading.
+    read: bool,
     file: Option<std::fs::File>,
 }
 
@@ -2315,27 +2317,32 @@ impl Host for TypedHost {
                 .open(&full)
                 .map_err(io_error_code)?;
         }
+        // a file that only writes need not be readable (and one with no flags reads)
+        let reads = flags.contains(DescriptorFlags::READ) || !writes;
         let file = if is_dir {
             None
         } else {
-            // a file that only writes need not be readable (and one with no flags reads)
-            let reads = flags.contains(DescriptorFlags::READ) || !writes;
             let opened = std::fs::OpenOptions::new().read(reads).write(writes).open(&full);
             Some(opened.map_err(io_error_code)?)
         };
-        let slot = self.descriptors.insert(OpenDescriptor { path: full, write: writes, file });
+        let slot = self.descriptors.insert(OpenDescriptor { path: full, write: writes, read: reads, file });
         Ok(Descriptor(slot as u32))
     }
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_read_via_stream
-    /// A new stream over the file, starting at `offset`.
+    /// A new stream over the file, starting at `offset`: `is-directory` for a directory,
+    /// `bad-descriptor` if the descriptor was not opened for reading.
     fn wasi_filesystem_types_method_descriptor_read_via_stream(
         &mut self,
         self_: Descriptor,
         offset: u64,
     ) -> Result<InputStream, FsErrorCode> {
-        let file = self.open_descriptor(self_.0)?.file.as_ref().ok_or(Fs::IsDirectory)?;
+        let d = self.open_descriptor(self_.0)?;
+        let file = d.file.as_ref().ok_or(Fs::IsDirectory)?;
+        if !d.read {
+            return Err(Fs::BadDescriptor.into());
+        }
         let stream = FileStream::over(file, offset, false)?;
         let slot = self.files.insert(stream);
         Ok(InputStream(FIRST_FILE_STREAM + slot as u32))
@@ -2583,13 +2590,15 @@ impl Host for TypedHost {
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_get_flags
-    /// Every descriptor is `read`, plus `write` if it was opened for writing.
+    /// `read` and `write` as the descriptor was opened (the preopen and directories read).
     fn wasi_filesystem_types_method_descriptor_get_flags(
         &mut self,
         self_: Descriptor,
     ) -> Result<DescriptorFlags, FsErrorCode> {
-        let write = self.open_descriptor(self_.0)?.write;
-        Ok(if write { DescriptorFlags::READ.union(DescriptorFlags::WRITE) } else { DescriptorFlags::READ })
+        let d = self.open_descriptor(self_.0)?;
+        let read = if d.read { DescriptorFlags::READ.0 } else { 0 };
+        let write = if d.write { DescriptorFlags::WRITE.0 } else { 0 };
+        Ok(DescriptorFlags(read | write))
     }
     // end optional
 

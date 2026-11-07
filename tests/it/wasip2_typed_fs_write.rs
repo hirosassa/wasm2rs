@@ -431,7 +431,11 @@ fn open_at_create_exclusive_and_truncate() {
          // a missing file without create is no-entry 20, a directory for write is-directory 14
          assert_eq!(inst.fs_open({NOPARENT}, 0, 2), 100 + 20);
          assert_eq!(inst.fs_open({D}, 0, 2), 100 + 14);
-         // a descriptor opened for write reports read and write (3), one for read only 1
+         // a descriptor reports what it was opened for: write only 2 (no read, as its
+         // read-via-stream is bad-descriptor), read and write 3, read only 1
+         assert_eq!(inst.fs_open({G}, 0, 2), 0);
+         let w = inst.fs_last();
+         assert_eq!(inst.fs_flags(w), 2);
          assert_eq!(inst.fs_open({G}, 0, 3), 0);
          let rw = inst.fs_last();
          assert_eq!(inst.fs_flags(rw), 3);
