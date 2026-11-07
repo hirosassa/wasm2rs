@@ -99,19 +99,22 @@ fn a_full_queue_is_not_writable_until_the_peer_reads() {
          // bit 1 (the input) only
          assert_eq!(inst.poll2(sub_out, sub_in), 0b10);
          assert_eq!(inst.check_write(out), 0);
-         // the peer starts reading: the output stream becomes writable
+         // the peer starts reading and keeps reading until told to stop: how much one read
+         // frees, and when the kernel sends a window update, depends on the OS
+         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+         let stopped = stop.clone();
          let reader = std::thread::spawn(move || {{
              let mut buf = vec![0u8; 65536];
-             client.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
-             let mut got = 0;
-             while got < 1 {{
-                 got += client.read(&mut buf).unwrap();
+             client.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
+             while !stopped.load(std::sync::atomic::Ordering::SeqCst) {{
+                 let _ = client.read(&mut buf);
              }}
              client
          }});
          inst.block(sub_out);
          assert!(inst.check_write(out) > 0);
          assert_eq!(inst.poll2(sub_out, sub_in) & 1, 1);
+         stop.store(true, std::sync::atomic::Ordering::SeqCst);
          drop(reader.join().unwrap());"
     )));
 }
