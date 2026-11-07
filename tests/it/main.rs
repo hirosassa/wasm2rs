@@ -129,6 +129,7 @@ mod wasip2_typed_fs_write;
 mod wasip2_typed_host;
 mod wasip2_typed_name_lookup;
 mod wasip2_typed_random;
+mod wasip2_typed_send_queue;
 mod wasip2_typed_sockets;
 mod wasip2_typed_splice;
 mod wasip2_typed_stdin;

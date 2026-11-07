@@ -93,6 +93,7 @@ fn main() {
          let status = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inst.func{run}())) {{\n        \
          Ok(status) => status,\n        \
          Err(_) => {{ eprintln!(\"wasip2_run: the program trapped\"); std::process::exit(134) }}\n    }};\n    \
+         drop(inst); // flushes the connections' send queues\n    \
          std::process::exit(status);\n    \
          }}"
     );
