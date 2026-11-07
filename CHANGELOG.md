@@ -20,7 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/wasip2_host/typed.rs`: a zero-length `read`/`blocking-read`/`skip`/`blocking-skip` on
   stdin, a connection or a file succeeds (empty) only while the stream is open and is `closed` at its
   end (as `wasi:io` 0.2 specifies); the host probes without consuming data. The blocking variants
-  still do not wait for readiness when the length is 0.
+  wait until the stream is readable (data or its end) first, as wasmtime does, then answer the same.
+- `examples/wasip2_host/typed.rs`: `descriptor.open-at` honors `symlink-follow`. Without it a symlink
+  as the last component is `loop` (like `O_NOFOLLOW`), also with `create` (`exist` with `create` +
+  `exclusive`); links earlier in the path
+  and paths naming a directory itself resolve as before, and a link out of the preopen is `loop`
+  without the flag and `not-permitted` with it.
 - `examples/wasip2_host/typed.rs`: `descriptor.stat-at` and `descriptor.metadata-hash-at` honor
   `symlink-follow`. Without it they describe the symlink itself (type `symbolic-link`, the link's own
   metadata hash) instead of its target, and a link that leads out of the preopen is not an error then.

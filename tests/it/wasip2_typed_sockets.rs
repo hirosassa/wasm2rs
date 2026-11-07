@@ -647,8 +647,8 @@ fn blocking_read_waits_for_a_connections_data_and_reports_its_end_as_closed() {
          });
          assert_eq!(inst.blocking_read(s_in, 16), 4);
          assert_eq!(inst.rbyte(0), i32::from(b'l'));
-         // a zero length does not wait
-         assert_eq!(inst.blocking_read(s_in, 0), 0);
+         // nothing is left, so a zero length waits too, and the hang-up makes it `closed`
+         assert_eq!(inst.blocking_read(s_in, 0), -2);
          // the peer hangs up: `closed` (stream-error case 1)
          assert_eq!(inst.blocking_read(s_in, 16), -2);
          peer.join().unwrap();",
@@ -709,9 +709,7 @@ fn a_zero_length_connection_request_is_ok_while_open_consumes_nothing_and_closed
          let s_in = inst.s_in();
          // open and idle: ok and empty
          assert_eq!(inst.read(s_in, 0), 0);
-         assert_eq!(inst.blocking_read(s_in, 0), 0);
          assert_eq!(inst.skip(s_in, 0), 0);
-         assert_eq!(inst.blocking_skip(s_in, 0), 0);
          // with data pending a zero length still succeeds and consumes nothing
          client.write_all(b\"abc\").unwrap();
          client.flush().unwrap();
@@ -729,5 +727,37 @@ fn a_zero_length_connection_request_is_ok_while_open_consumes_nothing_and_closed
          assert_eq!(inst.blocking_read(s_in, 0), -2);
          assert_eq!(inst.skip(s_in, 0), -2);
          assert_eq!(inst.blocking_skip(s_in, 0), -2);",
+    ));
+}
+
+#[test]
+fn a_zero_length_blocking_request_waits_for_a_connection_to_be_readable() {
+    assert_succeeded(&run_with_main(
+        "use std::io::Write;
+         let (s, port) = serve(&mut inst);
+         let mut client = std::net::TcpStream::connect((\"127.0.0.1\", port)).unwrap();
+         accept(&mut inst, s);
+         let s_in = inst.s_in();
+         // the peer is silent for 300 ms, then sends a byte (then, later, hangs up)
+         let started = std::time::Instant::now();
+         let peer = std::thread::spawn(move || {
+             std::thread::sleep(std::time::Duration::from_millis(300));
+             client.write_all(b\"x\").unwrap();
+             std::thread::sleep(std::time::Duration::from_millis(300));
+             client
+         });
+         assert_eq!(inst.blocking_read(s_in, 0), 0);
+         assert!(started.elapsed() >= std::time::Duration::from_millis(250), \"did not wait\");
+         // the byte is still there; consume it, then wait again, this time for the hang-up
+         assert_eq!(read_all(&mut inst, s_in, 1), b\"x\");
+         let client = peer.join().unwrap();
+         let started = std::time::Instant::now();
+         let closer = std::thread::spawn(move || {
+             std::thread::sleep(std::time::Duration::from_millis(300));
+             drop(client);
+         });
+         assert_eq!(inst.blocking_skip(s_in, 0), -2);
+         assert!(started.elapsed() >= std::time::Duration::from_millis(250), \"did not wait\");
+         closer.join().unwrap();",
     ));
 }

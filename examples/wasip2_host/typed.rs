@@ -538,6 +538,7 @@ enum Fs {
     Invalid,
     Io,
     IsDirectory,
+    Loop,
     NoEntry,
     NotDirectory,
     NotEmpty,
@@ -830,11 +831,13 @@ impl TypedHost {
 
     // optional: wasi_io_streams_method_input_stream_blocking_read | wasi_io_streams_method_input_stream_blocking_skip
     /// `read_stream`, but waits (as the stream's `subscribe` would) while an open stream has
-    /// nothing yet: stdin and connections; a file never waits.
+    /// nothing yet: stdin and connections; a file never waits. A zero length waits, too, until
+    /// the stream is readable (data or its end), then answers like `read_stream(.., 0)`: ok
+    /// and empty while open, `closed` at the end.
     fn read_stream_waiting(&mut self, stream: u32, len: u64) -> Result<Vec<u8>, StreamError> {
         loop {
             let data = self.read_stream(stream, len)?;
-            if !data.is_empty() || len == 0 {
+            if !data.is_empty() {
                 return Ok(data);
             }
             let wait = match tcp_slot(stream) {
@@ -843,6 +846,9 @@ impl TypedHost {
                 None => return Ok(data),
             };
             self.wait_any(&[wait]);
+            if len == 0 {
+                return self.read_stream(stream, 0);
+            }
         }
     }
     // end optional
@@ -1103,6 +1109,7 @@ impl From<Fs> for FsErrorCode {
             Fs::Invalid => FsErrorCode::Invalid,
             Fs::Io => FsErrorCode::Io,
             Fs::IsDirectory => FsErrorCode::IsDirectory,
+            Fs::Loop => FsErrorCode::Loop,
             Fs::NoEntry => FsErrorCode::NoEntry,
             Fs::NotDirectory => FsErrorCode::NotDirectory,
             Fs::NotEmpty => FsErrorCode::NotEmpty,
@@ -1114,7 +1121,7 @@ impl From<Fs> for FsErrorCode {
 }
 // end optional
 
-// optional: wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_descriptor_metadata_hash_at
+// optional: wasi_filesystem_types_method_descriptor_open_at | wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_descriptor_metadata_hash_at
 /// Whether `path` ends in a real name that `symlink-follow` can apply to: not empty, not
 /// `.` and without a trailing `/` or `/.` (those name a directory, which is never a link).
 fn names_an_entry(path: &str) -> bool {
@@ -1857,14 +1864,16 @@ impl Host for TypedHost {
     // end optional
 
     // optional: wasi_filesystem_types_method_descriptor_open_at
-    /// Path flags are ignored (links are always followed, within the preopen). Creating,
+    /// Without `symlink-follow` a symlink as the last component is `loop` (like `O_NOFOLLOW`),
+    /// also when creating (`exist` with `create` + `exclusive`); links in the rest of the path, and a path naming a directory itself
+    /// (`names_an_entry`), are resolved as ever, always within the preopen. Creating,
     /// truncating and writing are `read-only` unless the preopen is writable; then `create`,
     /// `exclusive` and `truncate` act at once, and the descriptor remembers whether it was
     /// opened for `write`.
     fn wasi_filesystem_types_method_descriptor_open_at(
         &mut self,
         self_: Descriptor,
-        _path_flags: PathFlags,
+        path_flags: PathFlags,
         path: String,
         open_flags: OpenFlags,
         flags: DescriptorFlags,
@@ -1880,6 +1889,13 @@ impl Host for TypedHost {
         let wants_directory = open_flags.contains(OpenFlags::DIRECTORY);
         if wants_directory && (changes || writes) {
             return Err(Fs::Invalid.into());
+        }
+        if !path_flags.contains(PathFlags::SYMLINK_FOLLOW) && names_an_entry(&path) {
+            let entry = self.resolve_entry(self_.0, &path)?;
+            if entry.symlink_metadata().is_ok_and(|meta| meta.is_symlink()) {
+                // `create` + `exclusive` never follows: the name exists (before `loop`)
+                return Err(if create && exclusive { Fs::Exist } else { Fs::Loop }.into());
+            }
         }
         let full = if create {
             self.resolve_to_create(self_.0, &path)?
