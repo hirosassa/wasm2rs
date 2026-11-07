@@ -121,6 +121,7 @@ mod wasip2_typed_both;
 mod wasip2_typed_cli;
 mod wasip2_typed_clocks;
 mod wasip2_typed_fs;
+mod wasip2_typed_fs_identity;
 mod wasip2_typed_fs_write;
 mod wasip2_typed_host;
 mod wasip2_typed_random;
