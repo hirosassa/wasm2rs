@@ -9,7 +9,9 @@ use crate::wasip2_typed_host::{assert_succeeded, build_program, component_from_w
 const IO: &str = r#"
 package wasi:io@0.2.0;
 interface error {
-  resource error;
+  resource error {
+    to-debug-string: func() -> string;
+  }
 }
 interface poll {
   resource pollable {
@@ -66,7 +68,8 @@ world w {
 
 const CORE: &str = r#"
 (module
-  (import "wasi:io/error@0.2.0" "[resource-drop]error" (func (param i32)))
+  (import "wasi:io/error@0.2.0" "[resource-drop]error" (func $drop_error (param i32)))
+  (import "wasi:io/error@0.2.0" "[method]error.to-debug-string" (func $debug (param i32 i32)))
   (import "wasi:io/poll@0.2.0" "[resource-drop]pollable" (func (param i32)))
   (import "wasi:io/poll@0.2.0" "[method]pollable.block" (func (param i32)))
   (import "wasi:io/poll@0.2.0" "poll" (func $poll (param i32 i32 i32)))
@@ -101,6 +104,54 @@ const CORE: &str = r#"
     (call $poll (i32.const 96) (i32.const 2) (i32.const 104))
     (if (i32.ne (i32.load (i32.const 108)) (i32.const 1)) (then unreachable))
     (i32.load (i32.load (i32.const 104))))
+  ;; stdin's reads fail (it is a directory): `poll` returns at once, the first call of each
+  ;; kind is `last-operation-failed` with a live error that has a debug string, and every call
+  ;; after it is `closed`. `$err` is where the stream-error sits (204 after a list, 208 after a u64)
+  (func $expect_failed (param $err i32)
+    (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable))
+    (if (i32.load8_u (local.get $err)) (then unreachable))
+    (call $debug (i32.load (i32.add (local.get $err) (i32.const 4))) (i32.const 600))
+    (if (i32.eqz (i32.load (i32.const 604))) (then unreachable))
+    (call $drop_error (i32.load (i32.add (local.get $err) (i32.const 4)))))
+  (func $expect_closed (param $err i32)
+    (if (i32.ne (i32.load8_u (i32.const 200)) (i32.const 1)) (then unreachable))
+    (if (i32.ne (i32.load8_u (local.get $err)) (i32.const 1)) (then unreachable)))
+  ;; every kind of call on the failed stdin says `closed`, and a later poll does not hang
+  (func $then_closed
+    (call $read (call $stdin) (i64.const 4) (i32.const 200))
+    (call $expect_closed (i32.const 204))
+    (call $read (call $stdin) (i64.const 0) (i32.const 200))
+    (call $expect_closed (i32.const 204))
+    (call $bread (call $stdin) (i64.const 4) (i32.const 200))
+    (call $expect_closed (i32.const 204))
+    (call $skip (call $stdin) (i64.const 4) (i32.const 200))
+    (call $expect_closed (i32.const 208))
+    (call $bskip (call $stdin) (i64.const 4) (i32.const 200))
+    (call $expect_closed (i32.const 208))
+    (call $wait_stdin))
+  (func (export "failing_stdin_read")
+    (call $wait_stdin)
+    (call $read (call $stdin) (i64.const 4) (i32.const 200))
+    (call $expect_failed (i32.const 204))
+    (call $then_closed))
+  (func (export "failing_stdin_zero_read")
+    (call $wait_stdin)
+    (call $read (call $stdin) (i64.const 0) (i32.const 200))
+    (call $expect_failed (i32.const 204))
+    (call $then_closed))
+  (func (export "failing_stdin_blocking_read")
+    (call $bread (call $stdin) (i64.const 4) (i32.const 200))
+    (call $expect_failed (i32.const 204))
+    (call $then_closed))
+  (func (export "failing_stdin_skip")
+    (call $wait_stdin)
+    (call $skip (call $stdin) (i64.const 4) (i32.const 200))
+    (call $expect_failed (i32.const 208))
+    (call $then_closed))
+  (func (export "failing_stdin_blocking_skip")
+    (call $bskip (call $stdin) (i64.const 4) (i32.const 200))
+    (call $expect_failed (i32.const 208))
+    (call $then_closed))
   ;; nothing has been written to stdin (and it is still open): `read` returns an empty
   ;; list at once, and `poll` on it times out with the 30 ms timer
   (func (export "idle_stdin")
@@ -214,6 +265,11 @@ const CORE: &str = r#"
 
 /// Starts the program that runs `body` with all three standard streams piped.
 fn spawn(body: &str) -> Child {
+    spawn_with_stdin(body, Stdio::piped())
+}
+
+/// Like [`spawn`], with `stdin` as the program's standard input.
+fn spawn_with_stdin(body: &str, stdin: Stdio) -> Child {
     let bin = build_program(
         &component_from_wit(&[IO, CLI, CLOCKS], WORLD, "w"),
         CORE,
@@ -221,7 +277,7 @@ fn spawn(body: &str) -> Child {
         body,
     );
     Command::new(bin)
-        .stdin(Stdio::piped())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -353,4 +409,35 @@ fn a_zero_length_blocking_read_waits_until_stdin_is_readable() {
 #[test]
 fn a_zero_length_blocking_skip_waits_until_stdin_is_readable() {
     zero_length_blocking_waits_for_readiness("inst.blocking_zero_skip_waits_stdin();");
+}
+
+/// Runs `body` with a directory as stdin: every read of it fails (`EISDIR`), on Linux and macOS.
+fn run_with_failing_stdin(body: &str) {
+    let dir = std::fs::File::open(std::env::temp_dir()).unwrap();
+    finish_within_30_seconds(spawn_with_stdin(body, Stdio::from(dir)));
+}
+
+#[test]
+fn a_failing_stdin_read_is_last_operation_failed_once_then_closed() {
+    run_with_failing_stdin("inst.failing_stdin_read();");
+}
+
+#[test]
+fn a_failing_stdin_zero_length_read_is_last_operation_failed_once_then_closed() {
+    run_with_failing_stdin("inst.failing_stdin_zero_read();");
+}
+
+#[test]
+fn a_failing_stdin_blocking_read_is_last_operation_failed_once_then_closed() {
+    run_with_failing_stdin("inst.failing_stdin_blocking_read();");
+}
+
+#[test]
+fn a_failing_stdin_skip_is_last_operation_failed_once_then_closed() {
+    run_with_failing_stdin("inst.failing_stdin_skip();");
+}
+
+#[test]
+fn a_failing_stdin_blocking_skip_is_last_operation_failed_once_then_closed() {
+    run_with_failing_stdin("inst.failing_stdin_blocking_skip();");
 }

@@ -38,9 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `closed`. Every such answer carries a fresh `error` handle that the guest drops
   (`resource-drop`), which frees the host's slot; `[method]error.to-debug-string` (when the world
   imports it) returns the OS message. A failed peer in the send-queue test now answers
-  `last-operation-failed` once, then `closed`. Not covered: a stdin read error (it still ends the
-  input as `closed`). Tests in `tests/it/wasip2_typed_io_error.rs`, `wasip2_typed_send_queue.rs`
-  and `wasip2_typed_fs_edges.rs`.
+  `last-operation-failed` once, then `closed`. A stdin read error is reported once (after the bytes
+  read before it) as `last-operation-failed` instead of a plain `closed`; the input is `closed`
+  after that.
+  Tests in `tests/it/wasip2_typed_io_error.rs`, `wasip2_typed_send_queue.rs`,
+  `wasip2_typed_fs_edges.rs` and `wasip2_typed_stdin.rs`.
 
 ### Added
 
