@@ -186,6 +186,29 @@ fn shutting_down_the_send_side_flushes_the_queue_in_order() {
 }
 
 #[test]
+fn shutdown_does_not_flush_the_queue_of_another_connection_that_reused_the_slot() {
+    assert_succeeded(&run(
+        "let (s, port) = serve(&mut inst);
+         let client_a = std::net::TcpStream::connect((\"127.0.0.1\", port)).unwrap();
+         accept(&mut inst, s);
+         let (sock_a, out_a) = (inst.s_sock(), inst.s_out());
+         // A's output stream is dropped; B's takes over its slot
+         inst.drop_out(out_a);
+         let client_b = std::net::TcpStream::connect((\"127.0.0.1\", port)).unwrap();
+         accept(&mut inst, s);
+         let out_b = inst.s_out();
+         assert_eq!(out_b, out_a, \"the slot was not reused\");
+         // B's peer never reads: its queue holds bytes that cannot be sent
+         fill(&mut inst, out_b);
+         // A's shutdown must not wait for B's peer
+         let started = std::time::Instant::now();
+         assert_eq!(inst.shutdown(sock_a, 1), 0);
+         assert!(started.elapsed() < std::time::Duration::from_secs(5), \"{:?}\", started.elapsed());
+         drop((client_a, client_b));",
+    ));
+}
+
+#[test]
 fn a_blocking_write_waits_for_the_queue_and_keeps_the_order() {
     queued_bytes_arrive_in_order(
         "assert_eq!(inst.blocking_write_and_flush(out, 410, 5), 0);",

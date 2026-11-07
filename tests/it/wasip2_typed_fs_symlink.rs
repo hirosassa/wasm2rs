@@ -324,6 +324,8 @@ fn open_at_create_through_a_symlink_name_is_loop_without_symlink_follow() {
     std::fs::write(root.join("tgt.txt"), "twelve bytes").unwrap();
     std::os::unix::fs::symlink("tgt.txt", root.join("ln")).unwrap();
     std::os::unix::fs::symlink("gone-for-good", root.join("dangling")).unwrap();
+    let secret = root.parent().unwrap().join("secret.txt");
+    std::os::unix::fs::symlink(&secret, root.join("out")).unwrap();
     let body = format!(
         "// O_CREAT | O_NOFOLLOW on a symlink is ELOOP, existing target or dangling
          assert_eq!(inst.fs_open(0, {LN}, 1), 100 + 15);
@@ -332,9 +334,13 @@ fn open_at_create_through_a_symlink_name_is_loop_without_symlink_follow() {
          // not-permitted 31 (never created through)
          assert_eq!(inst.fs_open(1, {LN}, 1), 0);
          assert_eq!(inst.fs_open(1, {DANGLING}, 1), 100 + 31);
-         // create + exclusive never follows a link: the name exists, exist 7 (before loop)
-         assert_eq!(inst.fs_open(0, {LN}, 5), 100 + 7);
-         assert_eq!(inst.fs_open(0, {DANGLING}, 5), 100 + 7);
+         // create + exclusive never follows a link, whatever the flags: the name exists,
+         // exist 7 (before loop), dangling, leading out of the preopen or not
+         for flags in [0, 1] {{
+             assert_eq!(inst.fs_open(flags, {LN}, 5), 100 + 7);
+             assert_eq!(inst.fs_open(flags, {DANGLING}, 5), 100 + 7);
+             assert_eq!(inst.fs_open(flags, {OUT}, 5), 100 + 7);
+         }}
          // a new name is created either way
          assert_eq!(inst.fs_open(0, {NOPE}, 1), 0);"
     );
