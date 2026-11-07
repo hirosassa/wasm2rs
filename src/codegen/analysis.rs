@@ -118,6 +118,9 @@ pub(crate) struct BodyScan {
     /// Whether any body has a `switch`, which hands a continuation a new type that
     /// the `cont_types` table does not follow.
     pub(crate) uses_switch: bool,
+    /// The concrete type indices that `ref.test`/`ref.cast`/`br_on_cast` target (any
+    /// kind; the driver keeps the continuation ones).
+    pub(crate) cast_targets: Vec<u32>,
     /// Per defined function (0-based): the callees of its direct
     /// `call`/`return_call` edges (full index space). Shared by the `can_suspend`
     /// and `step_functions` fixpoints so neither re-scans.
@@ -155,6 +158,17 @@ impl LocalFlags {
     }
 }
 
+impl BodyScan {
+    /// Records the type index a cast or test names, if it is a concrete one.
+    fn note_cast_target(&mut self, hty: HeapType) {
+        if let HeapType::Concrete(idx) = hty
+            && let Some(i) = idx.as_module_index()
+        {
+            self.cast_targets.push(i);
+        }
+    }
+}
+
 /// Scan every function body exactly once, collecting all the whole-module
 /// operator facts `build_ctx` needs (see [`BodyScan`]). Each of the flagged
 /// operators forces the module to be emitted as a `struct Instance` because it
@@ -167,6 +181,7 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
         calls: vec![Vec::new(); funcs.len()],
         uses_extern_box: false,
         uses_switch: false,
+        cast_targets: Vec::new(),
         uses_call_ref: false,
         uses_array_segment_ops: false,
     };
@@ -194,6 +209,16 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
                 }
                 Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
                     mutated.insert(local_index);
+                }
+                Operator::RefTestNonNull { hty } | Operator::RefTestNullable { hty } => {
+                    scan.note_cast_target(hty);
+                }
+                Operator::RefCastNonNull { hty } | Operator::RefCastNullable { hty } => {
+                    scan.note_cast_target(hty);
+                }
+                Operator::BrOnCast { to_ref_type, .. }
+                | Operator::BrOnCastFail { to_ref_type, .. } => {
+                    scan.note_cast_target(to_ref_type.heap_type());
                 }
                 Operator::Suspend { .. } => scan.suspends[i] = true,
                 Operator::Switch { .. } => {

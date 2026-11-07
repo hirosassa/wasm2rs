@@ -120,3 +120,46 @@ fn a_module_that_creates_no_continuation_has_only_null_to_test() {
         "assert_eq!(func0(), 1); assert_eq!(func1(), 0);",
     );
 }
+
+#[test]
+fn a_reference_kept_across_cont_bind_still_has_its_own_type() {
+    // `cont.bind` consumes `$k` (a `$ct3`) into a new `$ct2`; the old reference is
+    // still a `$ct3`, and is no longer resumable.
+    common::compile_run(
+        "cont_cast_old_bind",
+        r#"(module
+          (type $ft3 (func (param i32 i32) (result i32)))
+          (type $ct3 (cont $ft3))
+          (type $ft2 (func (param i32) (result i32)))
+          (type $ct2 (cont $ft2))
+          (func $add (type $ft3) (i32.add (local.get 0) (local.get 1)))
+          (elem declare func $add)
+          (func (export "run") (result i32) (local $k (ref null $ct3))
+            (local.set $k (cont.new $ct3 (ref.func $add)))
+            (drop (cont.bind $ct3 $ct2 (i32.const 10) (local.get $k)))
+            (ref.test (ref $ct3) (local.get $k))))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 1);",
+    );
+}
+
+#[test]
+fn a_reference_kept_across_a_suspend_still_has_its_own_type() {
+    common::compile_run(
+        "cont_cast_old_suspend",
+        r#"(module
+          (type $ft (func (result i32)))
+          (type $ct (cont $ft))
+          (type $cth (sub (cont $ft)))
+          (tag $yield (param i32))
+          (func $gen (type $ft) (suspend $yield (i32.const 5)) (i32.const 9))
+          (elem declare func $gen)
+          (func (export "run") (result i32) (local $k1 (ref null $ct))
+            (local.set $k1 (cont.new $ct (ref.func $gen)))
+            (block $on_yield (result i32 (ref $cth))
+              (resume $ct (on $yield $on_yield) (local.get $k1))
+              return)
+            drop drop
+            (ref.test (ref $ct) (local.get $k1))))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func1(), 1);",
+    );
+}

@@ -159,8 +159,15 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         // continuation's `bound` prefix and hands the (same, in this backend)
         // handle back typed as the partially-applied continuation. The next
         // resume prepends the prefix to its own arguments (see `cont_step`).
+        // With casts to continuation types, the bound continuation moves to a new
+        // handle (the old reference is consumed and keeps its own type).
         "#[allow(dead_code)]".to_string(),
         "pub fn cont_bind(&mut self, __h: u32, __prefix: &[i64], __ty: u32) -> u32 {".to_string(),
+        if ctx.cont.casts {
+            "    let __h = self.cont_retype(__h, __ty);".to_string()
+        } else {
+            String::new()
+        },
         "    match self.conts[__h as usize]".to_string(),
         "        .as_mut()".to_string(),
         "        .expect(\"cont.bind of a consumed continuation\")".to_string(),
@@ -177,5 +184,21 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "    __h".to_string(),
         "}".to_string(),
     ]);
+    if ctx.cont.casts {
+        lines.extend([
+            String::new(),
+            // The continuation behind `__h` moved to a fresh handle of type `__ty`; the
+            // old handle is consumed and keeps the type it had.
+            "#[allow(dead_code)]".to_string(),
+            "pub fn cont_retype(&mut self, __h: u32, __ty: u32) -> u32 {".to_string(),
+            "    let __obj = self.conts[__h as usize]".to_string(),
+            "        .take()".to_string(),
+            "        .expect(\"retype of a consumed continuation\");".to_string(),
+            "    self.conts.push(Some(__obj));".to_string(),
+            "    self.cont_types.push(__ty);".to_string(),
+            "    (self.conts.len() - 1) as u32".to_string(),
+            "}".to_string(),
+        ]);
+    }
     lines
 }

@@ -32,6 +32,11 @@ pub(crate) struct ContInfo {
     /// Whether the module has a `switch`: a switch retypes a continuation without
     /// updating `cont_types`, so a cast to a concrete continuation type is rejected.
     pub(crate) uses_switch: bool,
+    /// Whether the module tests or casts to a concrete continuation type. Then a
+    /// `cont.bind` or a `resume` handler moves the continuation to a new handle, so a
+    /// reference kept from before still has its own type; otherwise the handle is
+    /// reused, which spares the handle table a slot per suspend.
+    pub(crate) casts: bool,
 }
 
 /// The per-tag payload/result types for one module, grouped so `ctx.tags.params`
@@ -412,6 +417,10 @@ pub(crate) fn build_ctx<'a>(
     let scan = scan_bodies(funcs)?;
     let uses_extern_box = scan.uses_extern_box;
     let uses_switch = scan.uses_switch;
+    let casts = scan
+        .cast_targets
+        .iter()
+        .any(|&t| matches!(type_kinds.get(t as usize), Some(CompositeKind::Cont(_))));
     // Continuations carry per-instance state (the `conts` handle table), so any
     // module that creates one is stateful even without other mutable state.
     let cont_bodies = scan.cont_bodies;
@@ -517,6 +526,7 @@ pub(crate) fn build_ctx<'a>(
             checkpoint_callee,
             step_locals,
             uses_switch,
+            casts,
         },
         unsafe_memory: parts.unsafe_memory,
         reentrant_imports: parts.reentrant_imports,

@@ -644,10 +644,18 @@ impl<'a> super::FuncGen<'a> {
         ));
         self.assign_decoded(&vars, &payload_tys, "__pl")?;
         let cont_var = vars.last().ok_or(TranspileError::StackUnderflow)?;
-        self.line(format!("{cont_var} = {handle_var};"));
         // The handler block gives the suspended continuation its own type.
-        if let Some(ty) = self.label_cont_type(label_depth) {
-            self.line(format!("self.cont_types[{handle_var} as usize] = {ty}u32;"));
+        match self.label_cont_type(label_depth) {
+            Some(ty) if self.ctx.cont.casts => {
+                self.line(format!(
+                    "{cont_var} = self.cont_retype({handle_var}, {ty}u32);"
+                ));
+            }
+            Some(ty) => {
+                self.line(format!("{cont_var} = {handle_var};"));
+                self.line(format!("self.cont_types[{handle_var} as usize] = {ty}u32;"));
+            }
+            None => self.line(format!("{cont_var} = {handle_var};")),
         }
         let keyword = if is_loop { "continue" } else { "break" };
         self.line(format!("{keyword} 'l{label};"));
