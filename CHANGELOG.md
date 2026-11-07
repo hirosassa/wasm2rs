@@ -7,49 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- `examples/wasip2_host/typed.rs`: `read-via-stream` on a descriptor opened for writing only
-  returns `bad-descriptor` (as wasmtime does) instead of a stream whose reads fail; a descriptor
-  with `read`, or with no flags at all, still reads. `get-flags` reports what the descriptor was
-  opened for (a write-only one no longer reports `read`). Tests in
-  `tests/it/wasip2_typed_fs_edges.rs` and `tests/it/wasip2_typed_fs_write.rs`.
-
-- `examples/wasip2_host/typed.rs`: `open-at` with `create` + `exclusive` on a symlink name returns
-  `exist` also with `symlink-follow` (it used to be `not-permitted` for a dangling link, as POSIX
-  `O_CREAT | O_EXCL` never follows a link). `shutdown` finds the connection's send queue
-  through a slot (and a unique id, so a slot reused by another connection is not mistaken for
-  it) kept in `NetState::Connected`, not by matching socket addresses; it no longer flushes (and
-  waits on) another connection's queue after the guest dropped the output stream. Tests in
-  `tests/it/wasip2_typed_fs_symlink.rs` and `tests/it/wasip2_typed_send_queue.rs`.
-
-- `examples/wasip2_host/typed.rs`: `splice` and `blocking-splice` to a TCP output stream respect
-  `check-write`. They used to read `min(len, 4096)` from the source and then wait for the peer
-  to read the whole send queue, so a stalled peer hung the guest and the bytes could not be
-  taken back. Now a connection takes at most the permit: with a full queue (permit 0) `splice`
-  returns `ok(0)` and leaves the source untouched; `blocking-splice` first waits for the queue
-  to empty (the peer to read), then moves up to the permit. The bytes are queued like `write`'s
-  and neither call waits for the peer afterwards. stdout, stderr and files are unchanged.
-  Tests in `tests/it/wasip2_typed_splice_permit.rs`.
-
-### Changed
-
-- `examples/wasip2_host/typed.rs`: a failed stream operation is `stream-error::last-operation-failed`
-  with a live `wasi:io/error` resource, as the spec says, instead of `closed` (guest-visible
-  change). It is reported once, by the first operation that finds the failure; after that the
-  stream is `closed` for every operation (a zero-length read and `subscribe` readiness included:
-  a failed stream stays ready). A connection whose socket failed (a reset, or a send queue that
-  could not be flushed), a read error on a connection or a file, and a failed write to stdout,
-  stderr or a file are `last-operation-failed`; the end of a stream and a dropped one stay
-  `closed`. Every such answer carries a fresh `error` handle that the guest drops
-  (`resource-drop`), which frees the host's slot; `[method]error.to-debug-string` (when the world
-  imports it) returns the OS message. A failed peer in the send-queue test now answers
-  `last-operation-failed` once, then `closed`. A stdin read error is reported once (after the bytes
-  read before it) as `last-operation-failed` instead of a plain `closed`; the input is `closed`
-  after that.
-  Tests in `tests/it/wasip2_typed_io_error.rs`, `wasip2_typed_send_queue.rs`,
-  `wasip2_typed_fs_edges.rs` and `wasip2_typed_stdin.rs`.
-
 ### Added
 
 - `examples/wasip2_host/typed.rs`: a TCP output stream has a host-side send queue (64 KiB). `write`
@@ -75,55 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/wasip2_host/typed.rs`: the TCP socket options (`is-listening`, `set-listen-backlog-size`,
   keep-alive enabled/idle-time/interval/count, `hop-limit`, `receive-buffer-size`,
   `send-buffer-size`) are recorded per socket with default values, validated (zero is
-  `invalid-argument`; the backlog size is `invalid-state` once a connection is started or made),
-  read back and inherited by accepted sockets, but not applied to the OS socket. A real `std::net` TCP program now builds.
-
-### Fixed
-
-- `examples/wasip2_host/typed.rs`: `output-stream.write` of more than 4096 bytes (what `check-write`
-  returns) traps, like `blocking-write-and-flush`, `write-zeroes` and
-  `blocking-write-zeroes-and-flush` (`wasi:io` 0.2: writing more than `check-write` allows is a trap).
-- `examples/wasip2_host/typed.rs`: a zero-length `read`/`blocking-read`/`skip`/`blocking-skip` on
-  stdin, a connection or a file succeeds (empty) only while the stream is open and is `closed` at its
-  end (as `wasi:io` 0.2 specifies); the host probes without consuming data. The blocking variants
-  wait until the stream is readable (data or its end) first, as wasmtime does, then answer the same.
-- `examples/wasip2_host/typed.rs`: `descriptor.open-at` honors `symlink-follow`. Without it a symlink
-  as the last component is `loop` (like `O_NOFOLLOW`), also with `create` (`exist` with `create` +
-  `exclusive`); links earlier in the path
-  and paths naming a directory itself resolve as before, and a link out of the preopen is `loop`
-  without the flag and `not-permitted` with it.
-- `examples/wasip2_host/typed.rs`: `descriptor.stat-at` and `descriptor.metadata-hash-at` honor
-  `symlink-follow`. Without it they describe the symlink itself (type `symbolic-link`, the link's own
-  metadata hash) instead of its target, and a link that leads out of the preopen is not an error then.
-- `wit_host_trait` / `wit_host_glue` / `wit_functions` (and `--wit-host`, `--glue`) declare
-  `[resource-drop]<r>` only for resources whose `canon resource.drop` the component lowers (with no
-  top-level core module, a nested component that lowers a drop, or an unresolvable drop, every drop is kept). A `wasm32-wasip2` program using
-  `std::net` never drops `network`, so its glue no longer fails with E0407 (a method that is
-  not a member of `Imports`).
-- `examples/wasip2_run.rs`: a panic during the `run` call (a guest trap, or a panic inside a
-  host import it calls) exits with code 134 and `wasip2_run: the program trapped` after its
-  panic message, instead of a second host-side panic (101); panics outside the call (host
-  setup) stay 101. The guest's `argv[0]` is the component path as given on the command
-  line (it was `<work dir>/program`).
-
-### Removed
-
-- The hand-written WASI preview2 host `examples/wasip2_host/host.rs` (`P2Host`, written against
-  the flat `Imports`) and its tests `tests/it/wasip2_host.rs` are removed in favor of the typed
-  host `examples/wasip2_host/typed.rs`, generated from WIT. Both hosts map `wasi:cli/exit` to
-  the exit codes 0 and 1 (`exit` takes only ok/err).
-
-### Changed
-
-- **Breaking (example):** `examples/wasip2_run.rs` now takes a `wasm32-wasip2` component
-  (`cargo run --release --example wasip2_run -- <component.wasm> [args...]`), not an
-  extracted core module. It runs the component's largest core module through the typed host
-  `examples/wasip2_host/typed.rs` and the generated glue (`wit_host_glue`) instead of
-  the hand-written `examples/wasip2_host/host.rs` (since removed). A component importing
-  something `typed.rs` does not implement fails to build with rustc's E0046 errors and a hint
-  (exit code 2). Tested end to end in `tests/it/wasip2_run_example.rs`.
-
-### Added
+  `invalid-argument`), read back and inherited by accepted sockets, but not applied to the OS
+  socket. The backlog size is not recorded: it is only validated (`invalid-argument` for zero,
+  `invalid-state` once a connection is started or made) and ignored. A real `std::net` TCP program now builds.
 
 - `examples/wasip2_host/typed.rs`: a WASI preview2 host written against the generated typed `Host`
   trait (no canonical-ABI code): stdout/stderr, the environment, exit, output streams,
@@ -160,8 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wait on stdin or a connection like the stream's `subscribe` pollable; a file never waits; at
   most 4096 bytes per call), and `output-stream.flush`, `blocking-write-and-flush`,
   `write-zeroes` and `blocking-write-zeroes-and-flush` (more than 4096 bytes, what `check-write`
-  returns, traps). A write to a connection still waits for room in the send buffer, so it does
-  not return while the peer never reads. Tests in `tests/it/wasip2_typed_stdin.rs`,
+  returns, traps). (At this point a write to a connection waited for room in the socket's send
+  buffer; the send queue entry above replaced that: `write` never waits; the blocking
+  writes and flushes, dropping the output stream, `shutdown` of the send side and
+  `blocking-splice` to a connection still wait for the peer to read.) Tests in `tests/it/wasip2_typed_stdin.rs`,
   `tests/it/wasip2_typed_sockets.rs`, `tests/it/wasip2_typed_fs_write.rs` and
   `tests/it/wasip2_typed_streams.rs`.
 - The `// optional: a | b` marker of the host sources (`filter.rs`) keeps a block if the generated
@@ -197,7 +110,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pub struct F(pub u8|u16|u32)` (the canonical ABI width; flag `i` is bit `i`) with one associated
   constant per flag plus `contains`/`union` (all emitted once, in the namespace shared with records
   and resources; `WitType::Variant`/`Enum`/`Flags`). `future`, `stream` and `error-context`
-  are an `Unsupported` error naming the type. `wit_functions` returns the decoded `WitFunc`/`WitType` list. No lowering glue yet.
+  are an `Unsupported` error naming the type. `wit_functions` returns the decoded `WitFunc`/`WitType` list. (The glue came with `wit_host_glue`, above.)
 - `ref.test`, `ref.cast` and `br_on_cast` against a concrete function type: a non-null funcref
   matches when its function's declared type is the target or a declared subtype of it
   (`sub` chains, final vs. open types and equivalent types across rec groups included; the
@@ -253,7 +166,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `accept`, `local-address`, `remote-address`, `subscribe` and `shutdown`, with the connection's
   streams and pollables working like the others. An address outside 127.0.0.0/8 and `::1` is
   `access-denied` unless the host calls `P2Host::with_external_network`. UDP, `ip-name-lookup`
-  and the socket options (keep-alive, buffer sizes, hop limit, backlog) are not implemented.
+  and the socket options (keep-alive, buffer sizes, hop limit, backlog) were not implemented then (they are recorded or validated now, see above).
 - `wasm2rs_macros::include_wasm!` accepts `named_imports`, `import_memory` and
   `reentrant_imports` (the `TranspileOptions` of the same name), so a host such as the
   WASI preview2 example can embed a module without a build script.
@@ -321,7 +234,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runtime operators) are now accepted in global initializers and in active data and
   element segment offsets.
 
+- `TranspileOptions::named_exports` / `--named-exports`: emit a method or free function
+  named after each exported function, forwarding to `func{N}`, so callers no longer
+  need to know function indices. Off by default; output is unchanged unless set.
+- Modules may define several tables. Table 0 keeps the `table` field and accessors
+  (single-table output is unchanged); table `i > 0` gets `table{i}`. `table.get/set/
+  size/grow/fill/copy/init`, `call_indirect` and active element segments address the
+  named table. An imported table combined with other tables is still unsupported.
+- Tests: a harness that replays vendored WebAssembly spec testsuite `.wast` files
+  (`tests/spec/`, `tests/it/spec_wast.rs`). Modules whose only imports are
+  `spectest.print*` run against a no-op host; `return_call` and `return_call_indirect`
+  are replayed too.
+- Tables of a typed function reference (`(table 3 (ref null $ft))`) are supported;
+  they are stored like a `funcref` table. Element segments may use `ref.func`
+  expression items.
+
 ### Changed
+
+- `examples/wasip2_host/typed.rs`: a failed stream operation is `stream-error::last-operation-failed`
+  with a live `wasi:io/error` resource, as the spec says, instead of `closed` (guest-visible
+  change). It is reported once, by the first operation that finds the failure; after that the
+  stream is `closed` for every operation (a zero-length read and `subscribe` readiness included:
+  a failed stream stays ready). A connection whose socket failed (a reset, or a send queue that
+  could not be flushed), a read error on a connection or a file, and a failed write to stdout,
+  stderr or a file are `last-operation-failed`; the end of a stream and a dropped one stay
+  `closed`. Every such answer carries a fresh `error` handle that the guest drops
+  (`resource-drop`), which frees the host's slot; `[method]error.to-debug-string` (when the world
+  imports it) returns the OS message. A failed peer in the send-queue test now answers
+  `last-operation-failed` once, then `closed`. A stdin read error is reported once (after the bytes
+  read before it) as `last-operation-failed` instead of a plain `closed`; the input is `closed`
+  after that.
+  Tests in `tests/it/wasip2_typed_io_error.rs`, `wasip2_typed_send_queue.rs`,
+  `wasip2_typed_fs_edges.rs` and `wasip2_typed_stdin.rs`.
+
+- **Breaking (example):** `examples/wasip2_run.rs` now takes a `wasm32-wasip2` component
+  (`cargo run --release --example wasip2_run -- <component.wasm> [args...]`), not an
+  extracted core module. It runs the component's largest core module through the typed host
+  `examples/wasip2_host/typed.rs` and the generated glue (`wit_host_glue`) instead of
+  the hand-written `examples/wasip2_host/host.rs` (since removed). A component importing
+  something `typed.rs` does not implement fails to build with rustc's E0046 errors and a hint
+  (exit code 2). Tested end to end in `tests/it/wasip2_run_example.rs`.
 
 - `wasm2rs --dump` and `--extract-core` refuse the flags that only change the generated code
   (`--unsafe-memory`, `--named-exports`, `--named-imports`, `--import-memory`,
@@ -330,7 +282,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/component-model-poc.md`: what a wasip2 component contains, that its core module
   already transpiles, and how far its preview2 imports are from the preview1 support.
 
+### Removed
+
+- The hand-written WASI preview2 host `examples/wasip2_host/host.rs` (`P2Host`, written against
+  the flat `Imports`) and its tests `tests/it/wasip2_host.rs` are removed in favor of the typed
+  host `examples/wasip2_host/typed.rs`, generated from WIT. Both hosts map `wasi:cli/exit` to
+  the exit codes 0 and 1 (`exit` takes only ok/err).
+
 ### Fixed
+
+- `examples/wasip2_host/typed.rs`: `read-via-stream` on a descriptor opened for writing only
+  returns `bad-descriptor` (as wasmtime does) instead of a stream whose reads fail; a descriptor
+  with `read`, or with no flags at all, still reads. `get-flags` reports what the descriptor was
+  opened for (a write-only one no longer reports `read`). Tests in
+  `tests/it/wasip2_typed_fs_edges.rs` and `tests/it/wasip2_typed_fs_write.rs`.
+
+- `examples/wasip2_host/typed.rs`: `open-at` with `create` + `exclusive` on a symlink name returns
+  `exist` also with `symlink-follow` (it used to be `not-permitted` for a dangling link, as POSIX
+  `O_CREAT | O_EXCL` never follows a link). `shutdown` finds the connection's send queue
+  through a slot (and a unique id, so a slot reused by another connection is not mistaken for
+  it) kept in `NetState::Connected`, not by matching socket addresses; it no longer flushes (and
+  waits on) another connection's queue after the guest dropped the output stream. Tests in
+  `tests/it/wasip2_typed_fs_symlink.rs` and `tests/it/wasip2_typed_send_queue.rs`.
+
+- `examples/wasip2_host/typed.rs`: `splice` and `blocking-splice` to a TCP output stream respect
+  `check-write`. They used to read `min(len, 4096)` from the source and then wait for the peer
+  to read the whole send queue, so a stalled peer hung the guest and the bytes could not be
+  taken back. Now a connection takes at most the permit: with a full queue (permit 0) `splice`
+  returns `ok(0)` and leaves the source untouched; `blocking-splice` first waits for the queue
+  to empty (the peer to read), then moves up to the permit. The bytes are queued like `write`'s
+  and neither call waits for the peer afterwards. stdout, stderr and files are unchanged.
+  Tests in `tests/it/wasip2_typed_splice_permit.rs`.
+
+- `examples/wasip2_host/typed.rs`: `output-stream.write` of more than 4096 bytes (what `check-write`
+  returns) traps, like `blocking-write-and-flush`, `write-zeroes` and
+  `blocking-write-zeroes-and-flush` (`wasi:io` 0.2: writing more than `check-write` allows is a trap).
+- `examples/wasip2_host/typed.rs`: a zero-length `read`/`blocking-read`/`skip`/`blocking-skip` on
+  stdin, a connection or a file succeeds (empty) only while the stream is open and is `closed` at its
+  end (as `wasi:io` 0.2 specifies); the host probes without consuming data. The blocking variants
+  wait until the stream is readable (data or its end) first, as wasmtime does, then answer the same.
+- `examples/wasip2_host/typed.rs`: `descriptor.open-at` honors `symlink-follow`. Without it a symlink
+  as the last component is `loop` (like `O_NOFOLLOW`), also with `create` (`exist` with `create` +
+  `exclusive`); links earlier in the path
+  and paths naming a directory itself resolve as before, and a link out of the preopen is `loop`
+  without the flag and `not-permitted` with it.
+- `examples/wasip2_host/typed.rs`: `descriptor.stat-at` and `descriptor.metadata-hash-at` honor
+  `symlink-follow`. Without it they describe the symlink itself (type `symbolic-link`, the link's own
+  metadata hash) instead of its target, and a link that leads out of the preopen is not an error then.
+- `wit_host_trait` / `wit_host_glue` / `wit_functions` (and `--wit-host`, `--glue`) declare
+  `[resource-drop]<r>` only for resources whose `canon resource.drop` the component lowers (with no
+  top-level core module, a nested component that lowers a drop, or an unresolvable drop, every drop is kept). A `wasm32-wasip2` program using
+  `std::net` never drops `network`, so its glue no longer fails with E0407 (a method that is
+  not a member of `Imports`).
+- `examples/wasip2_run.rs`: a panic during the `run` call (a guest trap, or a panic inside a
+  host import it calls) exits with code 134 and `wasip2_run: the program trapped` after its
+  panic message, instead of a second host-side panic (101); panics outside the call (host
+  setup) stay 101. The guest's `argv[0]` is the component path as given on the command
+  line (it was `<work dir>/program`).
 
 - A function reachable only through `array.new_elem`/`array.init_elem` was treated as dead when
   `entry_exports` limited the roots.
@@ -393,23 +401,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Constant operands such as `i32.const MIN; i32.const -1; i32.div_s` or a constant
   divisor of zero no longer make rustc reject the generated program
   (`unconditional_panic`); they still trap at run time (found by the spec testsuite).
-
-### Added
-
-- `TranspileOptions::named_exports` / `--named-exports`: emit a method or free function
-  named after each exported function, forwarding to `func{N}`, so callers no longer
-  need to know function indices. Off by default; output is unchanged unless set.
-- Modules may define several tables. Table 0 keeps the `table` field and accessors
-  (single-table output is unchanged); table `i > 0` gets `table{i}`. `table.get/set/
-  size/grow/fill/copy/init`, `call_indirect` and active element segments address the
-  named table. An imported table combined with other tables is still unsupported.
-- Tests: a harness that replays vendored WebAssembly spec testsuite `.wast` files
-  (`tests/spec/`, `tests/it/spec_wast.rs`). Modules whose only imports are
-  `spectest.print*` run against a no-op host; `return_call` and `return_call_indirect`
-  are replayed too.
-- Tables of a typed function reference (`(table 3 (ref null $ft))`) are supported;
-  they are stored like a `funcref` table. Element segments may use `ref.func`
-  expression items.
 
 ## [0.2.0] - 2026-11-01
 

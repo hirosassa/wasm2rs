@@ -625,7 +625,7 @@ fn push_alias(stack: &mut [Scope], slot: AliasSlot) -> Result<(), TranspileError
 
 /// Every function of every imported interface instance of `component`, in import order.
 ///
-/// An unsupported type used by a function (see the [module docs](self)) is an
+/// An unsupported type used by a function (see the module docs) is an
 /// [`Unsupported`](TranspileError::Unsupported) error naming the type and the function.
 /// A core module, which has no interfaces, is an error too.
 pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {

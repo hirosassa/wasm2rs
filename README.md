@@ -188,6 +188,8 @@ cargo test --release                 # whole suite (a single integration-test bi
 cargo test --release --test it <name> # a subset, by module name
 ```
 
+The typed WASI preview2 host behind `examples/wasip2_run.rs` (streams, the TCP send queue, error reporting, limitations) is described in [docs/typed-host-design.md](docs/typed-host-design.md).
+
 See [docs/wasi-threads-e2e.md](docs/wasi-threads-e2e.md) for the end-to-end tests that run real wasi-sdk and Rust `wasm32-wasip1-threads` binaries (they need extra tools and skip when those are missing).
 
 ## License

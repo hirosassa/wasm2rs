@@ -44,11 +44,11 @@
 // numeric IPv4 and IPv6 addresses resolve locally; any other name needs `with_external_network`
 // (then `std`'s resolver runs at `resolve-addresses`) and is `permanent-resolver-failure` without it;
 // a name that is not a host name is `invalid-argument`. The TCP socket options (keep-alive
-// enabled, idle time, interval and count, hop limit, receive and send buffer sizes, listen
-// backlog size) are only recorded, not applied to the OS socket: a socket starts with the
-// defaults, a set value is read back, zero is `invalid-argument` (so the backlog size, which
-// is also `invalid-state` once a connection is started or made, and ignored while listening),
-// and an accepted socket inherits the listener's values. The UDP ones (hop limit, buffer sizes, `ipv6-only`) answer
+// enabled, idle time, interval and count, hop limit, receive and send buffer sizes) are only
+// recorded, not applied to the OS socket: a socket starts with the defaults, a set value is
+// read back, zero is `invalid-argument`, and an accepted socket inherits the listener's values.
+// The listen backlog size is only validated (zero is `invalid-argument`, `invalid-state` once a
+// connection is started or made, ignored while listening): it is not stored or read back. The UDP ones (hop limit, buffer sizes, `ipv6-only`) answer
 // `not-supported`.
 //
 // A component that imports both filesystem and sockets gets two `error-code` enums, which the
@@ -1222,9 +1222,6 @@ impl TypedHost {
         self.sockets.get_mut(handle as usize).expect("unknown or dropped tcp-socket")
     }
 
-    /// `Ok` if the guest may use `addr` on a socket of the family `ipv6`: it must be of
-    /// that family, a unicast address that is not an IPv4-mapped IPv6 one, and loopback
-    /// unless the host allows the network.
     /// `check_address` for the address of a peer to connect or send to: also not port 0 nor an
     /// unspecified address (`0.0.0.0`, `::`), which is `invalid-argument` whether or not the
     /// network is allowed (so those checks come before the loopback one, after the family one).
@@ -1239,6 +1236,9 @@ impl TypedHost {
         self.check_address(ipv6, addr)
     }
 
+    /// `Ok` if the guest may use `addr` on a socket of the family `ipv6`: it must be of
+    /// that family, a unicast address that is not an IPv4-mapped IPv6 one, and loopback
+    /// unless the host allows the network.
     fn check_address(&self, ipv6: bool, addr: &SocketAddr) -> Result<(), Net> {
         let mapped = matches!(addr, SocketAddr::V6(a) if a.ip().to_ipv4_mapped().is_some());
         if addr.is_ipv6() != ipv6 || mapped || addr.ip().is_multicast() {
@@ -2259,8 +2259,9 @@ impl Host for TypedHost {
 
     // optional: wasi_filesystem_types_method_descriptor_open_at
     /// Without `symlink-follow` a symlink as the last component is `loop` (like `O_NOFOLLOW`),
-    /// also when creating (`exist` with `create` + `exclusive`); links in the rest of the path, and a path naming a directory itself
-    /// (`names_an_entry`), are resolved as ever, always within the preopen. Creating,
+    /// also when creating; `create` + `exclusive` on a symlink name is `exist` whatever the
+    /// flags (it never follows, dangling or not). Links in the rest of the path, and a path
+    /// naming a directory itself (`names_an_entry`), are resolved as ever, always within the preopen. Creating,
     /// truncating and writing are `read-only` unless the preopen is writable; then `create`,
     /// `exclusive` and `truncate` act at once, and the descriptor remembers whether it was
     /// opened for `write`.

@@ -76,6 +76,8 @@ or hand-written bridge.
 Not exercised by this program, and harder: `wasi:sockets`, `wasi:http`, the rest of
 `filesystem` (readdir, rename, ...), async/streams in WASI 0.3.
 
+The current design of the typed host (`typed.rs`) is in [typed-host-design.md](typed-host-design.md); the Results below are the investigation history.
+
 ## Result 3: a minimal preview2 host runs hello world natively
 
 First finding: an `Imports` method receives only its integer arguments, and a module's
@@ -189,7 +191,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   handles `3..`; a failed write answers `last-operation-failed` once, with an `error` handle, then `closed`; `closed` is also the end of a stream). A new file is named under an
   existing directory that must itself resolve under the preopen, and a symlink that
   leads nowhere or out (even a dangling one) is `not-permitted`, not a place to create
-  a file. The path is checked when the file is opened, and a file descriptor then
+  a file (`create` + `exclusive` on a symlink name is `exist`, never following it). The path is checked when the file is opened, and a file descriptor then
   holds the open `File`: every operation on it goes through that `File`, so it stays on
   the file it opened even if the path is unlinked, renamed over or reused. A program
   that swaps a directory for a symlink between the check and the open can still escape,
@@ -215,16 +217,19 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   opened for `write`; nanoseconds of a second or more are `invalid`) are done. On a read-only
   preopen `set-size` and `set-times` are `read-only`, while `sync` succeeds since it
   changes nothing. `set-times-at` and `readlink-at` are done too (a symlink's own times cannot be set: `unsupported`; a link target that is absolute or has `..` is `not-permitted`); `symlink-at` (a target that is absolute or has `..` is `not-permitted`) and `link-at` are done too.
-- Sockets: TCP over loopback is done (`tcp-create-socket`, `start-bind`/`finish-bind`, `start-listen`/`finish-listen`, `start-connect`/`finish-connect`, `accept`, `local-address`, `remote-address`, `subscribe`, `shutdown`, `instance-network`); the streams are the ordinary `input-stream`/`output-stream` handles. An address outside 127.0.0.0/8 and `::1` is `access-denied` unless the host calls `TypedHost::with_external_network`. `std` binds and listens in one call, so `finish-bind` does both, a bound socket cannot connect (`not-supported`), and `start-connect` connects at once. UDP and `ip-name-lookup` are done in the typed host only (below); the TCP socket options (keep-alive, buffer sizes, hop limit, backlog) are not implemented.
+- Sockets: TCP over loopback is done (`tcp-create-socket`, `start-bind`/`finish-bind`, `start-listen`/`finish-listen`, `start-connect`/`finish-connect`, `accept`, `local-address`, `remote-address`, `subscribe`, `shutdown`, `instance-network`); the streams are the ordinary `input-stream`/`output-stream` handles. An address outside 127.0.0.0/8 and `::1` is `access-denied` unless the host calls `TypedHost::with_external_network`. `std` binds and listens in one call, so `finish-bind` does both, a bound socket cannot connect (`not-supported`), and `start-connect` connects at once. UDP and `ip-name-lookup` are done in the typed host only (below); the TCP socket options keep-alive, buffer sizes and hop limit are only recorded (validated, read back, inherited by accepted sockets, not applied to the OS socket); the listen backlog size is only validated (zero is `invalid-argument`, `invalid-state` once a connection is started) and otherwise ignored.
 - Paths must stay under the preopen: an absolute path or any `..` is `not-permitted`
   (stricter than WASI, which allows `..` that stays inside), and so is a symlink that
   leads out (the resolved path is checked against the preopen). Without
   `symlink-follow`, `open-at` on a symlink as the last component is `loop` (also when
   creating; `exist` with create+exclusive), and `stat-at`/`metadata-hash-at` describe the link
   itself; links earlier in the path are still followed.
-- A file's input stream shares `input-stream.read` with stdin (handle 0).
-- Handles are reused: `resource-drop` of a pollable, descriptor, file input stream or
-  directory-entry-stream frees its slot, and the next resource of that kind takes the
+- A file's input stream shares `input-stream.read` with stdin (handle 0). `read-via-stream` needs a
+  descriptor opened for reading (`bad-descriptor` for a write-only one; one opened with no
+  flags still reads) and gives `is-directory` for a directory.
+- Handles are reused: `resource-drop` of a descriptor, file input stream, file output
+  stream, directory-entry-stream or `error` frees its slot (a pollable keeps its slot: the
+  host's pollable table only grows), and the next resource of that kind takes the
   most recently freed one, so a program that opens and drops in a loop does not grow
   the host's tables. The preopen (descriptor 0) is never freed.
 - **Contract:** a guest must not use a handle after dropping it (the Component Model
@@ -232,7 +237,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   stale handle may fail (`bad-descriptor` or a panic) or quietly succeed, depending on
   the call; once it is reused, the stale handle silently names the newer resource.
 - Metadata and directories: `stat`, `stat-at` (type, link count, size, access and
-  modification times; the status-change time is `none`), `get-flags` (always `read`),
+  modification times; the status-change time is `none`), `get-flags` (`read` and `write` as the descriptor was opened; a descriptor opened with no flags reads),
   `metadata-hash` (a hash of the canonical path) and `read-directory` /
   `read-directory-entry` (a snapshot taken when the directory is opened, without `.`
   and `..`, in the OS's order). `std::fs::metadata`, `File::metadata` and `read_dir`
