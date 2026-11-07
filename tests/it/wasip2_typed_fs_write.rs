@@ -23,6 +23,10 @@ interface streams {
     check-write: func() -> result<u64, stream-error>;
     write: func(contents: list<u8>) -> result<_, stream-error>;
     blocking-flush: func() -> result<_, stream-error>;
+    flush: func() -> result<_, stream-error>;
+    blocking-write-and-flush: func(contents: list<u8>) -> result<_, stream-error>;
+    write-zeroes: func(len: u64) -> result<_, stream-error>;
+    blocking-write-zeroes-and-flush: func(len: u64) -> result<_, stream-error>;
   }
 }
 "#;
@@ -95,6 +99,10 @@ const CORE: &str = r#"
   (import "wasi:io/streams@0.2.0" "[method]output-stream.check-write" (func $check (param i32 i32)))
   (import "wasi:io/streams@0.2.0" "[method]output-stream.write" (func $write (param i32 i32 i32 i32)))
   (import "wasi:io/streams@0.2.0" "[method]output-stream.blocking-flush" (func $flush (param i32 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]output-stream.flush" (func $flush_nb (param i32 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]output-stream.blocking-write-and-flush" (func $bwf (param i32 i32 i32 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]output-stream.write-zeroes" (func $zeroes (param i32 i64 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]output-stream.blocking-write-zeroes-and-flush" (func $bzf (param i32 i64 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.get-flags" (func $flags (param i32 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.write-via-stream" (func $wvs (param i32 i64 i32)))
   (import "wasi:filesystem/types@0.2.0" "[method]descriptor.append-via-stream" (func $avs (param i32 i32)))
@@ -194,6 +202,18 @@ const CORE: &str = r#"
   ;; write the bytes at (p, n): 0, or 1 for an error
   (func (export "out_write") (param $s i32) (param $p i32) (param $n i32) (result i32)
     (call $write (local.get $s) (local.get $p) (local.get $n) (i32.const 280))
+    (i32.load8_u (i32.const 280)))
+  (func (export "out_flush_nb") (param $s i32) (result i32)
+    (call $flush_nb (local.get $s) (i32.const 280))
+    (i32.load8_u (i32.const 280)))
+  (func (export "out_bwf") (param $s i32) (param $p i32) (param $n i32) (result i32)
+    (call $bwf (local.get $s) (local.get $p) (local.get $n) (i32.const 280))
+    (i32.load8_u (i32.const 280)))
+  (func (export "out_zeroes") (param $s i32) (param $n i64) (result i32)
+    (call $zeroes (local.get $s) (local.get $n) (i32.const 280))
+    (i32.load8_u (i32.const 280)))
+  (func (export "out_bzf") (param $s i32) (param $n i64) (result i32)
+    (call $bzf (local.get $s) (local.get $n) (i32.const 280))
     (i32.load8_u (i32.const 280)))
   (func (export "out_flush") (param $s i32) (result i32)
     (call $flush (local.get $s) (i32.const 280))
@@ -764,4 +784,49 @@ fn a_read_only_preopen_answers_read_only_to_every_changing_method() {
         .collect();
     names.sort();
     assert_eq!(names, ["d", "f.txt"]);
+}
+
+#[test]
+fn blocking_write_and_flush_flush_and_write_zeroes_write_a_file() {
+    let root = fresh_root("blocking_writes");
+    let body = format!(
+        "assert_eq!(inst.fs_open({F}, 1, 2), 0);
+         let f = inst.fs_last();
+         let s = inst.fs_wstream(f, 0);
+         assert_eq!(inst.out_bwf(s, {HELLO_DATA}), 0);
+         assert_eq!(inst.out_flush_nb(s), 0);
+         assert_eq!(inst.out_zeroes(s, 3), 0);
+         assert_eq!(inst.out_bzf(s, 2), 0);
+         assert_eq!(inst.out_bwf(s, {WORLD_DATA}), 0);
+         // zero bytes, and the full budget of check-write, are fine
+         assert_eq!(inst.out_zeroes(s, 0), 0);
+         assert_eq!(inst.out_bzf(s, 4096), 0);"
+    );
+    assert_succeeded(&run(&root, true, &body));
+    let mut expected = b"hello\0\0\0\0\0world".to_vec();
+    expected.extend(std::iter::repeat_n(0u8, 4096));
+    assert_eq!(std::fs::read(root.join("f.txt")).unwrap(), expected);
+}
+
+#[test]
+fn a_write_over_the_check_write_budget_traps() {
+    for call in [
+        "inst.out_zeroes(s, 4097)",
+        "inst.out_bzf(s, 4097)",
+        "inst.out_bwf(s, 0, 4097)",
+    ] {
+        let root = fresh_root("budget_trap");
+        let body = format!(
+            "assert_eq!(inst.fs_open({F}, 1, 2), 0);
+             let f = inst.fs_last();
+             let s = inst.fs_wstream(f, 0);
+             {call};"
+        );
+        let out = run(&root, true, &body);
+        assert!(!out.status.success(), "{call} did not trap");
+        assert!(
+            std::fs::read(root.join("f.txt")).unwrap().is_empty(),
+            "{call}"
+        );
+    }
 }

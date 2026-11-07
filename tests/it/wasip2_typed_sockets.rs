@@ -21,12 +21,16 @@ interface streams {
   variant stream-error { last-operation-failed(error), closed }
   resource input-stream {
     read: func(len: u64) -> result<list<u8>, stream-error>;
+    blocking-read: func(len: u64) -> result<list<u8>, stream-error>;
+    skip: func(len: u64) -> result<u64, stream-error>;
+    blocking-skip: func(len: u64) -> result<u64, stream-error>;
     subscribe: func() -> pollable;
   }
   resource output-stream {
     check-write: func() -> result<u64, stream-error>;
     write: func(contents: list<u8>) -> result<_, stream-error>;
     blocking-flush: func() -> result<_, stream-error>;
+    blocking-write-and-flush: func(contents: list<u8>) -> result<_, stream-error>;
     subscribe: func() -> pollable;
   }
 }
@@ -101,6 +105,10 @@ const CORE: &str = r#"
   (import "wasi:io/streams@0.2.0" "[method]output-stream.subscribe" (func $sub_out (param i32) (result i32)))
   (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.subscribe" (func $sub_sock (param i32) (result i32)))
   (import "wasi:io/streams@0.2.0" "[method]input-stream.read" (func $read (param i32 i64 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]input-stream.blocking-read" (func $bread (param i32 i64 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]input-stream.skip" (func $skip (param i32 i64 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]input-stream.blocking-skip" (func $bskip (param i32 i64 i32)))
+  (import "wasi:io/streams@0.2.0" "[method]output-stream.blocking-write-and-flush" (func $bwf (param i32 i32 i32 i32)))
   (import "wasi:io/streams@0.2.0" "[resource-drop]input-stream" (func $drop_in (param i32)))
   (import "wasi:io/streams@0.2.0" "[method]output-stream.check-write" (func $check_write (param i32 i32)))
   (import "wasi:io/streams@0.2.0" "[method]output-stream.write" (func $write (param i32 i32 i32 i32)))
@@ -252,6 +260,26 @@ const CORE: &str = r#"
     (if (result i32) (i32.load8_u (i32.const 220))
       (then (i32.sub (i32.const -1) (i32.load8_u (i32.const 224))))
       (else (i32.load (i32.const 228)))))
+  ;; blocking-read: like read
+  (func (export "blocking_read") (param $h i32) (param $len i64) (result i32)
+    (call $bread (local.get $h) (local.get $len) (i32.const 220))
+    (if (result i32) (i32.load8_u (i32.const 220))
+      (then (i32.sub (i32.const -1) (i32.load8_u (i32.const 224))))
+      (else (i32.load (i32.const 228)))))
+  ;; skip and blocking-skip: the count, or -1 - the stream-error case
+  (func (export "skip") (param $h i32) (param $len i64) (result i64)
+    (call $skip (local.get $h) (local.get $len) (i32.const 240))
+    (if (result i64) (i32.load8_u (i32.const 240))
+      (then (i64.sub (i64.const -1) (i64.load8_u (i32.const 248))))
+      (else (i64.load (i32.const 248)))))
+  (func (export "blocking_skip") (param $h i32) (param $len i64) (result i64)
+    (call $bskip (local.get $h) (local.get $len) (i32.const 240))
+    (if (result i64) (i32.load8_u (i32.const 240))
+      (then (i64.sub (i64.const -1) (i64.load8_u (i32.const 248))))
+      (else (i64.load (i32.const 248)))))
+  (func (export "blocking_write_and_flush") (param $h i32) (param $ptr i32) (param $len i32) (result i32)
+    (call $bwf (local.get $h) (local.get $ptr) (local.get $len) (i32.const 180))
+    (call $status4 (i32.const 180)))
   ;; the i-th byte of the last list `read` returned
   (func (export "rbyte") (param $i i32) (result i32)
     (i32.load8_u (i32.add (i32.load (i32.const 224)) (local.get $i))))
@@ -599,5 +627,74 @@ fn shutdown_of_the_send_side_ends_the_peers_input_but_not_the_other_direction() 
          assert_eq!(inst.shutdown(s, 2), 109);
          let t = inst.create(0);
          assert_eq!(inst.shutdown(t, 0), 109);",
+    ));
+}
+
+#[test]
+fn blocking_read_waits_for_a_connections_data_and_reports_its_end_as_closed() {
+    assert_succeeded(&run_with_main(
+        "use std::io::Write;
+         let (s, port) = serve(&mut inst);
+         let mut client = std::net::TcpStream::connect((\"127.0.0.1\", port)).unwrap();
+         accept(&mut inst, s);
+         let s_in = inst.s_in();
+         // `read` has nothing yet; the peer sends after 200 ms, then hangs up
+         assert_eq!(inst.read(s_in, 16), 0);
+         let peer = std::thread::spawn(move || {
+             std::thread::sleep(std::time::Duration::from_millis(200));
+             client.write_all(b\"late\").unwrap();
+             std::thread::sleep(std::time::Duration::from_millis(200));
+         });
+         assert_eq!(inst.blocking_read(s_in, 16), 4);
+         assert_eq!(inst.rbyte(0), i32::from(b'l'));
+         // a zero length does not wait
+         assert_eq!(inst.blocking_read(s_in, 0), 0);
+         // the peer hangs up: `closed` (stream-error case 1)
+         assert_eq!(inst.blocking_read(s_in, 16), -2);
+         peer.join().unwrap();",
+    ));
+}
+
+#[test]
+fn skip_discards_without_waiting_and_blocking_skip_waits_for_a_connections_data() {
+    assert_succeeded(&run_with_main(
+        "use std::io::Write;
+         let (s, port) = serve(&mut inst);
+         let mut client = std::net::TcpStream::connect((\"127.0.0.1\", port)).unwrap();
+         accept(&mut inst, s);
+         let s_in = inst.s_in();
+         assert_eq!(inst.skip(s_in, 16), 0);
+         let peer = std::thread::spawn(move || {
+             std::thread::sleep(std::time::Duration::from_millis(200));
+             client.write_all(b\"abcdef\").unwrap();
+             std::thread::sleep(std::time::Duration::from_millis(200));
+         });
+         // at most `len` bytes are discarded: \"abcdef\" is 6 (one segment on loopback)
+         let mut skipped = inst.blocking_skip(s_in, 4);
+         assert!((1..=4).contains(&skipped), \"{skipped}\");
+         while skipped < 6 {
+             let n = inst.blocking_skip(s_in, 4);
+             assert!(n > 0, \"blocking-skip made no progress after {skipped} bytes\");
+             skipped += n;
+         }
+         assert_eq!(skipped, 6);
+         // what was skipped is gone; the hang-up is `closed`
+         assert_eq!(inst.blocking_skip(s_in, 16), -2);
+         assert_eq!(inst.skip(s_in, 16), -2);
+         peer.join().unwrap();",
+    ));
+}
+
+#[test]
+fn blocking_write_and_flush_sends_on_a_connection() {
+    assert_succeeded(&run_with_main(
+        "let (s, port) = serve(&mut inst);
+         let c = inst.create(0);
+         assert_eq!(inst.connect(c, port.into(), 127, 0, 0, 1), 0);
+         assert_eq!(inst.finish_connect(c), 0);
+         accept(&mut inst, s);
+         let (c_out, s_in) = (inst.c_out(), inst.s_in());
+         assert_eq!(inst.blocking_write_and_flush(c_out, 400, 4), 0);
+         assert_eq!(read_all(&mut inst, s_in, 4), b\"ping\");",
     ));
 }

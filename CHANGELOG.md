@@ -48,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem and socket interfaces: the second of their two `error-code` enums gets a numeric suffix
   (`ErrorCode2`) in the generated trait, depending on import order, so the host names them through `FsErrorCode` / `NetErrorCode` aliases that
   `type_aliases` (`filter.rs`) emits (test in `tests/it/wasip2_typed_both.rs`).
+- `examples/wasip2_host/typed.rs`: the remaining `wasi:io/streams` methods except `splice` and
+  `blocking-splice`: `input-stream.blocking-read`, `skip` and `blocking-skip` (the blocking ones
+  wait on stdin or a connection like the stream's `subscribe` pollable; a file never waits; at
+  most 4096 bytes per call), and `output-stream.flush`, `blocking-write-and-flush`,
+  `write-zeroes` and `blocking-write-zeroes-and-flush` (more than 4096 bytes, what `check-write`
+  returns, traps). A write to a connection still waits for room in the send buffer, so it does
+  not return while the peer never reads. Tests in `tests/it/wasip2_typed_stdin.rs`,
+  `tests/it/wasip2_typed_sockets.rs`, `tests/it/wasip2_typed_fs_write.rs` and
+  `tests/it/wasip2_typed_streams.rs`.
 - The `// optional: a | b` marker of the host sources (`filter.rs`) keeps a block if the generated
   trait declares any of the listed methods.
 - `wit_host_glue` and `--wit-host --glue`: the glue from the typed `Host` trait to the flat

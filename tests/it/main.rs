@@ -127,6 +127,7 @@ mod wasip2_typed_host;
 mod wasip2_typed_random;
 mod wasip2_typed_sockets;
 mod wasip2_typed_stdin;
+mod wasip2_typed_streams;
 mod wit_glue;
 mod wit_glue_memory;
 mod wit_host;
