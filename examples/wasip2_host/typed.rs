@@ -231,6 +231,14 @@ impl TypedHost {
         if d.write { Ok(file) } else { Err(Fs::BadDescriptor) }
     }
 
+    /// The open file behind a descriptor opened for reading: `is-directory` for a directory,
+    /// `bad-descriptor` if it was not opened for reading.
+    fn readable_descriptor_file(&self, descriptor: u32) -> Result<&std::fs::File, Fs> {
+        let d = self.open_descriptor(descriptor)?;
+        let file = d.file.as_ref().ok_or(Fs::IsDirectory)?;
+        if d.read { Ok(file) } else { Err(Fs::BadDescriptor) }
+    }
+
     /// A new output stream over `writable_descriptor_file`, from `pos` (`append`: always
     /// at its end): the handle.
     fn open_output_stream(&mut self, descriptor: u32, pos: u64, append: bool) -> Result<u32, Fs> {
@@ -1435,7 +1443,7 @@ impl TypedHost {
 // The next blocks use generated types, so each is kept only if the component imports one of
 // the methods that need it.
 
-// optional: wasi_filesystem_types_method_descriptor_open_at | wasi_filesystem_types_method_descriptor_read_via_stream | wasi_filesystem_types_method_descriptor_get_flags | wasi_filesystem_types_method_descriptor_read_directory | wasi_filesystem_types_method_descriptor_stat | wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_descriptor_readlink_at | wasi_filesystem_types_method_descriptor_metadata_hash | wasi_filesystem_types_method_descriptor_metadata_hash_at | wasi_filesystem_types_method_directory_entry_stream_read_directory_entry | wasi_filesystem_types_method_descriptor_create_directory_at | wasi_filesystem_types_method_descriptor_remove_directory_at | wasi_filesystem_types_method_descriptor_unlink_file_at | wasi_filesystem_types_method_descriptor_write_via_stream | wasi_filesystem_types_method_descriptor_append_via_stream | wasi_filesystem_types_method_descriptor_set_size | wasi_filesystem_types_method_descriptor_sync | wasi_filesystem_types_method_descriptor_sync_data | wasi_filesystem_types_method_descriptor_rename_at | wasi_filesystem_types_method_descriptor_symlink_at | wasi_filesystem_types_method_descriptor_link_at | wasi_filesystem_types_method_descriptor_set_times | wasi_filesystem_types_method_descriptor_set_times_at | wasi_filesystem_types_method_descriptor_get_type | wasi_filesystem_types_method_descriptor_read | wasi_filesystem_types_method_descriptor_write | wasi_filesystem_types_method_descriptor_advise | wasi_filesystem_types_method_descriptor_is_same_object | wasi_filesystem_types_filesystem_error_code
+// optional: wasi_filesystem_types_method_descriptor_open_at | wasi_filesystem_types_method_descriptor_read_via_stream | wasi_filesystem_types_method_descriptor_get_flags | wasi_filesystem_types_method_descriptor_read_directory | wasi_filesystem_types_method_descriptor_stat | wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_descriptor_readlink_at | wasi_filesystem_types_method_descriptor_metadata_hash | wasi_filesystem_types_method_descriptor_metadata_hash_at | wasi_filesystem_types_method_directory_entry_stream_read_directory_entry | wasi_filesystem_types_method_descriptor_create_directory_at | wasi_filesystem_types_method_descriptor_remove_directory_at | wasi_filesystem_types_method_descriptor_unlink_file_at | wasi_filesystem_types_method_descriptor_write_via_stream | wasi_filesystem_types_method_descriptor_append_via_stream | wasi_filesystem_types_method_descriptor_set_size | wasi_filesystem_types_method_descriptor_sync | wasi_filesystem_types_method_descriptor_sync_data | wasi_filesystem_types_method_descriptor_rename_at | wasi_filesystem_types_method_descriptor_symlink_at | wasi_filesystem_types_method_descriptor_link_at | wasi_filesystem_types_method_descriptor_set_times | wasi_filesystem_types_method_descriptor_set_times_at | wasi_filesystem_types_method_descriptor_get_type | wasi_filesystem_types_method_descriptor_read | wasi_filesystem_types_method_descriptor_write | wasi_filesystem_types_method_descriptor_advise | wasi_filesystem_types_filesystem_error_code
 impl From<Fs> for FsErrorCode {
     fn from(e: Fs) -> Self {
         match e {
@@ -2395,12 +2403,7 @@ impl Host for TypedHost {
         self_: Descriptor,
         offset: u64,
     ) -> Result<InputStream, FsErrorCode> {
-        let d = self.open_descriptor(self_.0)?;
-        let file = d.file.as_ref().ok_or(Fs::IsDirectory)?;
-        if !d.read {
-            return Err(Fs::BadDescriptor.into());
-        }
-        let stream = FileStream::over(file, offset, false)?;
+        let stream = FileStream::over(self.readable_descriptor_file(self_.0)?, offset, false)?;
         let slot = self.files.insert(stream);
         Ok(InputStream(FIRST_FILE_STREAM + slot as u32))
     }
@@ -2669,12 +2672,8 @@ impl Host for TypedHost {
         offset: u64,
     ) -> Result<(Vec<u8>, bool), FsErrorCode> {
         const LIMIT: u64 = 1 << 20;
-        let d = self.open_descriptor(self_.0)?;
-        let file = d.file.as_ref().ok_or(Fs::IsDirectory)?;
-        if !d.read {
-            return Err(Fs::BadDescriptor.into());
-        }
-        let mut stream = FileStream::over(file, offset, false)?;
+        let mut stream =
+            FileStream::over(self.readable_descriptor_file(self_.0)?, offset, false)?;
         let wanted = length.min(LIMIT) as usize;
         let mut data = Vec::new();
         let mut chunk = [0u8; 8192];

@@ -38,7 +38,7 @@ fn error_type_of(generated: &str, prefix: &str) -> Option<String> {
 
 /// The `X` of the generated `filesystem-error-code`, which returns `Option<X>`.
 #[allow(dead_code, reason = "only the typed host callers use it")]
-fn option_type_of(generated: &str) -> Option<String> {
+fn fs_error_code_option_type(generated: &str) -> Option<String> {
     generated.lines().find_map(|line| {
         let line = line.trim();
         if !line.starts_with("fn wasi_filesystem_types_filesystem_error_code(") {
@@ -69,7 +69,7 @@ fn type_aliases(generated: &str) -> String {
         let name = prefixes.iter().find_map(|prefix| error_type_of(generated, prefix));
         let name = name.or_else(|| {
             // a component may import only `filesystem-error-code` (`-> Option<X>`)
-            (alias == "FsErrorCode").then(|| option_type_of(generated)).flatten()
+            if alias == "FsErrorCode" { fs_error_code_option_type(generated) } else { None }
         });
         if let Some(name) = name {
             out.push_str(&format!("type {alias} = {name};\n"));

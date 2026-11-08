@@ -272,7 +272,7 @@ fn read_at_an_offset_no_file_has_is_an_error_not_the_end() {
     let body = format!(
         "assert_eq!(inst.fs_open(0, {F}, 0, 1), 0);
          let last = inst.fs_last();
-         assert!(inst.fs_pread(last, 4, i64::MIN as u64 as i64) < 0);"
+         assert!(inst.fs_pread(last, 4, i64::MIN) < 0);"
     );
     assert_succeeded(&run(&root, false, &body));
 }
