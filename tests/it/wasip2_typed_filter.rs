@@ -138,6 +138,18 @@ const LOOKUP: &str =
     "fn wasi_sockets_ip_name_lookup_resolve(&mut self) -> Result<u32, ErrorCode4>;";
 
 #[test]
+fn the_fs_alias_comes_from_filesystem_error_code_when_no_descriptor_method_is_imported() {
+    // that function returns `Option<error-code>`, not a `Result`
+    let only = "fn wasi_filesystem_types_filesystem_error_code(&mut self, err: Error) -> Option<ErrorCode2>;";
+    assert_eq!(type_aliases(only), "type FsErrorCode = ErrorCode2;\n");
+    // a descriptor method, which names the same enum, wins when both are there
+    assert_eq!(
+        type_aliases(&format!("{only}\n{FS}")),
+        "type FsErrorCode = ErrorCode;\n"
+    );
+}
+
+#[test]
 fn aliases_for_fs_only_net_only_both_and_neither() {
     assert_eq!(type_aliases(FS), "type FsErrorCode = ErrorCode;\n");
     assert_eq!(type_aliases(TCP), "type NetErrorCode = ErrorCode;\n");

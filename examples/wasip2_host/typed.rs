@@ -99,7 +99,7 @@ struct TypedHost {
     stdin: SharedStdin,
     /// The messages behind the live `error` handles (`last-operation-failed`); a dropped
     /// handle frees its slot.
-    errors: Slab<String>,
+    errors: Slab<ErrorEntry>,
     /// The input streams (handles) whose failure was reported: they answer `closed` from then
     /// on. A dropped stream is forgotten.
     failed_in: std::collections::HashSet<u32>,
@@ -229,6 +229,14 @@ impl TypedHost {
         let d = self.open_descriptor(descriptor)?;
         let file = d.file.as_ref().ok_or(Fs::IsDirectory)?;
         if d.write { Ok(file) } else { Err(Fs::BadDescriptor) }
+    }
+
+    /// The open file behind a descriptor opened for reading: `is-directory` for a directory,
+    /// `bad-descriptor` if it was not opened for reading.
+    fn readable_descriptor_file(&self, descriptor: u32) -> Result<&std::fs::File, Fs> {
+        let d = self.open_descriptor(descriptor)?;
+        let file = d.file.as_ref().ok_or(Fs::IsDirectory)?;
+        if d.read { Ok(file) } else { Err(Fs::BadDescriptor) }
     }
 
     /// A new output stream over `writable_descriptor_file`, from `pos` (`append`: always
@@ -501,6 +509,14 @@ impl FileStream {
         self.pos += bytes.len() as u64;
         Ok(())
     }
+}
+
+/// What an `error` handle stands for: the message, and the filesystem `error-code` when the
+/// failure came from a file stream (what `filesystem-error-code` reports).
+#[allow(dead_code)]
+struct ErrorEntry {
+    message: String,
+    fs: Option<Fs>,
 }
 
 /// A table of live handles: a handle is a slot's index, and the slot of a dropped handle
@@ -928,20 +944,38 @@ impl TypedHost {
     /// `error` handle (one per call, live until the guest drops it) that carries `message`.
     /// The caller reports it once: the stream is `closed` from then on.
     fn last_operation_failed(&mut self, message: impl std::fmt::Display) -> StreamError {
-        StreamError::LastOperationFailed(Error(self.errors.insert(message.to_string()) as u32))
+        self.last_operation_failed_with(message, None)
+    }
+
+    /// `last_operation_failed`, remembering the filesystem `error-code` behind the failure.
+    fn last_operation_failed_with(
+        &mut self,
+        message: impl std::fmt::Display,
+        fs: Option<Fs>,
+    ) -> StreamError {
+        let entry = ErrorEntry { message: message.to_string(), fs };
+        StreamError::LastOperationFailed(Error(self.errors.insert(entry) as u32))
+    }
+
+    /// `last_operation_failed` for an I/O failure of `stream`: only a file stream's carries a
+    /// filesystem `error-code`; a connection's is not a filesystem error.
+    fn stream_failed(&mut self, stream: u32, e: &std::io::Error) -> StreamError {
+        let is_file = tcp_slot(stream).is_none() && file_index(stream).is_some();
+        let fs = is_file.then(|| io_error_code(std::io::Error::from(e.kind())));
+        self.last_operation_failed_with(e, fs)
     }
 
     /// The first read failure of the input stream `stream` is `last-operation-failed`; the
     /// stream is `closed` after it (see `read_stream`).
     fn fail_input(&mut self, stream: u32, e: &std::io::Error) -> StreamError {
         self.failed_in.insert(stream);
-        self.last_operation_failed(e)
+        self.stream_failed(stream, e)
     }
 
     /// `fail_input` for the output stream `stream` that is not a connection.
     fn fail_output(&mut self, stream: u32, e: &std::io::Error) -> StreamError {
         self.failed_out.insert(stream);
-        self.last_operation_failed(e)
+        self.stream_failed(stream, e)
     }
 
     /// Why the output stream in `tcp_out` at `slot` cannot be written: `last-operation-failed`
@@ -1409,7 +1443,7 @@ impl TypedHost {
 // The next blocks use generated types, so each is kept only if the component imports one of
 // the methods that need it.
 
-// optional: wasi_filesystem_types_method_descriptor_open_at | wasi_filesystem_types_method_descriptor_read_via_stream | wasi_filesystem_types_method_descriptor_get_flags | wasi_filesystem_types_method_descriptor_read_directory | wasi_filesystem_types_method_descriptor_stat | wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_descriptor_readlink_at | wasi_filesystem_types_method_descriptor_metadata_hash | wasi_filesystem_types_method_descriptor_metadata_hash_at | wasi_filesystem_types_method_directory_entry_stream_read_directory_entry | wasi_filesystem_types_method_descriptor_create_directory_at | wasi_filesystem_types_method_descriptor_remove_directory_at | wasi_filesystem_types_method_descriptor_unlink_file_at | wasi_filesystem_types_method_descriptor_write_via_stream | wasi_filesystem_types_method_descriptor_append_via_stream | wasi_filesystem_types_method_descriptor_set_size | wasi_filesystem_types_method_descriptor_sync | wasi_filesystem_types_method_descriptor_sync_data | wasi_filesystem_types_method_descriptor_rename_at | wasi_filesystem_types_method_descriptor_symlink_at | wasi_filesystem_types_method_descriptor_link_at | wasi_filesystem_types_method_descriptor_set_times | wasi_filesystem_types_method_descriptor_set_times_at
+// optional: wasi_filesystem_types_method_descriptor_open_at | wasi_filesystem_types_method_descriptor_read_via_stream | wasi_filesystem_types_method_descriptor_get_flags | wasi_filesystem_types_method_descriptor_read_directory | wasi_filesystem_types_method_descriptor_stat | wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_descriptor_readlink_at | wasi_filesystem_types_method_descriptor_metadata_hash | wasi_filesystem_types_method_descriptor_metadata_hash_at | wasi_filesystem_types_method_directory_entry_stream_read_directory_entry | wasi_filesystem_types_method_descriptor_create_directory_at | wasi_filesystem_types_method_descriptor_remove_directory_at | wasi_filesystem_types_method_descriptor_unlink_file_at | wasi_filesystem_types_method_descriptor_write_via_stream | wasi_filesystem_types_method_descriptor_append_via_stream | wasi_filesystem_types_method_descriptor_set_size | wasi_filesystem_types_method_descriptor_sync | wasi_filesystem_types_method_descriptor_sync_data | wasi_filesystem_types_method_descriptor_rename_at | wasi_filesystem_types_method_descriptor_symlink_at | wasi_filesystem_types_method_descriptor_link_at | wasi_filesystem_types_method_descriptor_set_times | wasi_filesystem_types_method_descriptor_set_times_at | wasi_filesystem_types_method_descriptor_get_type | wasi_filesystem_types_method_descriptor_read | wasi_filesystem_types_method_descriptor_write | wasi_filesystem_types_method_descriptor_advise | wasi_filesystem_types_filesystem_error_code
 impl From<Fs> for FsErrorCode {
     fn from(e: Fs) -> Self {
         match e {
@@ -1439,7 +1473,7 @@ fn names_an_entry(path: &str) -> bool {
 }
 // end optional
 
-// optional: wasi_filesystem_types_method_descriptor_stat | wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_directory_entry_stream_read_directory_entry
+// optional: wasi_filesystem_types_method_descriptor_stat | wasi_filesystem_types_method_descriptor_stat_at | wasi_filesystem_types_method_directory_entry_stream_read_directory_entry | wasi_filesystem_types_method_descriptor_get_type
 /// Directory 3, regular file 6, symlink 5 (seen only for a directory entry or a
 /// `symlink_metadata` lookup), otherwise unknown.
 fn descriptor_type(t: std::fs::FileType) -> DescriptorType {
@@ -1492,28 +1526,50 @@ fn deadline_after(base: Instant, when: u64) -> Instant {
 }
 // end optional
 
-// optional: wasi_filesystem_types_method_descriptor_metadata_hash | wasi_filesystem_types_method_descriptor_metadata_hash_at
-/// A hash of the file's identity (device and inode; its path where there are none), so
-/// the same file gives the same value within one run and two files never do.
-fn metadata_hash(meta: &std::fs::Metadata, path: &Path) -> MetadataHashValue {
-    use std::hash::{DefaultHasher, Hash, Hasher};
+// optional: wasi_filesystem_types_method_descriptor_metadata_hash | wasi_filesystem_types_method_descriptor_metadata_hash_at | wasi_filesystem_types_method_descriptor_is_same_object
+/// What names a file within one run: its device and inode (its path where there are none).
+fn file_identity(meta: &std::fs::Metadata, path: &Path) -> (u64, u64, String) {
     #[cfg(unix)]
-    let identity = {
+    {
         use std::os::unix::fs::MetadataExt;
         let _ = path;
         (meta.dev(), meta.ino(), String::new())
-    };
+    }
     #[cfg(not(unix))]
-    let identity = {
+    {
         let _ = meta;
         (0u64, 0u64, path.to_string_lossy().into_owned())
-    };
+    }
+}
+// end optional
+
+// optional: wasi_filesystem_types_method_descriptor_metadata_hash | wasi_filesystem_types_method_descriptor_metadata_hash_at
+/// A hash of the file's identity (see `file_identity`), so the same file gives the same
+/// value within one run and two files never do.
+fn metadata_hash(meta: &std::fs::Metadata, path: &Path) -> MetadataHashValue {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let identity = file_identity(meta, path);
     let hash = |salt: u8| {
         let mut hasher = DefaultHasher::new();
         (salt, &identity).hash(&mut hasher);
         hasher.finish()
     };
     MetadataHashValue { lower: hash(0), upper: hash(1) }
+}
+// end optional
+
+// optional: wasi_filesystem_types_method_descriptor_is_same_object
+#[allow(dead_code)]
+impl TypedHost {
+    /// Whether two descriptors name the same file or directory; one the host cannot read
+    /// (unknown, or a directory that was moved out of the preopen) is not the same as anything.
+    fn same_object(&self, a: u32, b: u32) -> bool {
+        let identity = |descriptor: u32| {
+            let path = &self.open_descriptor(descriptor).ok()?.path;
+            Some(file_identity(&self.descriptor_metadata(descriptor).ok()?, path))
+        };
+        matches!((identity(a), identity(b)), (Some(x), Some(y)) if x == y)
+    }
 }
 // end optional
 
@@ -1927,7 +1983,15 @@ impl Host for TypedHost {
     // optional: wasi_io_error_method_error_to_debug_string
     /// The message of the failure behind an `error` handle (an unknown one is empty).
     fn wasi_io_error_method_error_to_debug_string(&mut self, self_: Error) -> String {
-        self.errors.get(self_.0 as usize).cloned().unwrap_or_default()
+        self.errors.get(self_.0 as usize).map(|e| e.message.clone()).unwrap_or_default()
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_filesystem_error_code
+    /// The filesystem `error-code` behind an `error` handle: only a failure of a file stream
+    /// has one (`None` for a connection's or stdout's, and for a handle the host does not hold).
+    fn wasi_filesystem_types_filesystem_error_code(&mut self, err: Error) -> Option<FsErrorCode> {
+        self.errors.get(err.0 as usize)?.fs.map(FsErrorCode::from)
     }
     // end optional
 
@@ -2339,12 +2403,7 @@ impl Host for TypedHost {
         self_: Descriptor,
         offset: u64,
     ) -> Result<InputStream, FsErrorCode> {
-        let d = self.open_descriptor(self_.0)?;
-        let file = d.file.as_ref().ok_or(Fs::IsDirectory)?;
-        if !d.read {
-            return Err(Fs::BadDescriptor.into());
-        }
-        let stream = FileStream::over(file, offset, false)?;
+        let stream = FileStream::over(self.readable_descriptor_file(self_.0)?, offset, false)?;
         let slot = self.files.insert(stream);
         Ok(InputStream(FIRST_FILE_STREAM + slot as u32))
     }
@@ -2587,6 +2646,87 @@ impl Host for TypedHost {
         path: String,
     ) -> Result<String, FsErrorCode> {
         Ok(self.read_link_target(self_.0, &path)?)
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_get_type
+    /// `directory` for a directory and `regular-file` for a file; a descriptor stays on the
+    /// file it opened, so never `symbolic-link`.
+    fn wasi_filesystem_types_method_descriptor_get_type(
+        &mut self,
+        self_: Descriptor,
+    ) -> Result<DescriptorType, FsErrorCode> {
+        Ok(descriptor_type(self.descriptor_metadata(self_.0)?.file_type()))
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_read
+    /// Up to `length` bytes of the file from `offset`, without a stream or a position, and
+    /// whether the end of the file was reached. Like `read-via-stream`: `is-directory` for a
+    /// directory, `bad-descriptor` if it was not opened for reading. At most 1 MiB is
+    /// returned per call (the guest asks again), so a huge `length` allocates nothing extra.
+    fn wasi_filesystem_types_method_descriptor_read(
+        &mut self,
+        self_: Descriptor,
+        length: u64,
+        offset: u64,
+    ) -> Result<(Vec<u8>, bool), FsErrorCode> {
+        const LIMIT: u64 = 1 << 20;
+        let mut stream =
+            FileStream::over(self.readable_descriptor_file(self_.0)?, offset, false)?;
+        let wanted = length.min(LIMIT) as usize;
+        let mut data = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while data.len() < wanted {
+            let room = (wanted - data.len()).min(chunk.len());
+            match stream.read(&mut chunk[..room]).map_err(io_error_code)? {
+                0 => return Ok((data, true)),
+                n => data.extend_from_slice(&chunk[..n]),
+            }
+        }
+        Ok((data, false))
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_write
+    /// Writes `buffer` at `offset` without a stream or a position; past the end of the file
+    /// the gap is zeros. Like `write-via-stream`: `read-only` unless the preopen is writable,
+    /// and the descriptor must have been opened for `write`.
+    fn wasi_filesystem_types_method_descriptor_write(
+        &mut self,
+        self_: Descriptor,
+        buffer: Vec<u8>,
+        offset: u64,
+    ) -> Result<u64, FsErrorCode> {
+        let file = self.writable_descriptor_file(self_.0)?;
+        FileStream::over(file, offset, false)?.write_all(&buffer).map_err(io_error_code)?;
+        Ok(buffer.len() as u64)
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_advise
+    /// Only a hint, so nothing is done with it (the range and the advice are not checked);
+    /// like `read`, it needs a file: `is-directory` for a directory.
+    fn wasi_filesystem_types_method_descriptor_advise(
+        &mut self,
+        self_: Descriptor,
+        _offset: u64,
+        _length: u64,
+        _advice: Advice,
+    ) -> Result<(), FsErrorCode> {
+        self.open_descriptor(self_.0)?.file.as_ref().ok_or(Fs::IsDirectory)?;
+        Ok(())
+    }
+    // end optional
+
+    // optional: wasi_filesystem_types_method_descriptor_is_same_object
+    /// Whether both descriptors name the same file (or directory).
+    fn wasi_filesystem_types_method_descriptor_is_same_object(
+        &mut self,
+        self_: Descriptor,
+        other: Descriptor,
+    ) -> bool {
+        self.same_object(self_.0, other.0)
     }
     // end optional
 

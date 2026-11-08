@@ -123,6 +123,7 @@ mod wasip2_typed_clocks;
 mod wasip2_typed_filter;
 mod wasip2_typed_fs;
 mod wasip2_typed_fs_edges;
+mod wasip2_typed_fs_gaps;
 mod wasip2_typed_fs_identity;
 mod wasip2_typed_fs_symlink;
 mod wasip2_typed_fs_write;

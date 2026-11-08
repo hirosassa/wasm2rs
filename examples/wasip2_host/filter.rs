@@ -36,6 +36,20 @@ fn error_type_of(generated: &str, prefix: &str) -> Option<String> {
     })
 }
 
+/// The `X` of the generated `filesystem-error-code`, which returns `Option<X>`.
+#[allow(dead_code, reason = "only the typed host callers use it")]
+fn fs_error_code_option_type(generated: &str) -> Option<String> {
+    generated.lines().find_map(|line| {
+        let line = line.trim();
+        if !line.starts_with("fn wasi_filesystem_types_filesystem_error_code(") {
+            return None;
+        }
+        let (_, option) = line.split_once("-> Option<")?;
+        let name = option.strip_suffix(">;")?;
+        name.chars().all(|c| c.is_ascii_alphanumeric()).then(|| name.to_string())
+    })
+}
+
 /// `type FsErrorCode = ...;` and `type NetErrorCode = ...;` for the interfaces the generated
 /// code declares (`NetErrorCode` from tcp, udp or ip-name-lookup, whichever it imports). The
 /// `error-code` enums of `wasi:filesystem` and `wasi:sockets` get a numeric suffix when one
@@ -52,7 +66,12 @@ fn type_aliases(generated: &str) -> String {
             &["wasi_sockets_tcp_", "wasi_sockets_udp_", "wasi_sockets_ip_name_lookup_"][..],
         ),
     ] {
-        if let Some(name) = prefixes.iter().find_map(|prefix| error_type_of(generated, prefix)) {
+        let name = prefixes.iter().find_map(|prefix| error_type_of(generated, prefix));
+        let name = name.or_else(|| {
+            // a component may import only `filesystem-error-code` (`-> Option<X>`)
+            if alias == "FsErrorCode" { fs_error_code_option_type(generated) } else { None }
+        });
+        if let Some(name) = name {
             out.push_str(&format!("type {alias} = {name};\n"));
         }
     }
