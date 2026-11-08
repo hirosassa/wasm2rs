@@ -12,15 +12,12 @@ per component by `--wit-host --glue`, so `typed.rs` cannot be a compiled module.
 the generated program as source text:
 
 - `keep_declared_methods` (`filter.rs`) drops, line by line, the `// optional:` blocks whose methods
-  the component's trait does not declare (15 markers).
+  the component's trait does not declare (over 150 markers).
 - `type_aliases` scrapes `-> Result<_, X>` out of the generated text to name `FsErrorCode` and
   `NetErrorCode`, because a component importing both interfaces gets `ErrorCode` and `ErrorCode2` in
   import order.
 - `rustc` runs at run time. A component importing something `typed.rs` lacks fails with E0046 only
   there.
-
-So the host is not reusable as a library, needs a toolchain at run time, and depends on string
-scraping of generated output.
 
 ## Decisions
 
@@ -68,7 +65,7 @@ let mut inst = Instance::new(Glue(host));
 No `rustc` at run time: the transpile (plus glue) happens in `build.rs` or, later, in an
 `include_component!` macro (A3).
 
-### Configuration surface (all in the first release)
+### Configuration surface
 
 | Area | API |
 |---|---|
@@ -84,7 +81,7 @@ contract as today (the generated code turns it into a trap).
 
 ### What moves
 
-`typed.rs` is split along the report's finding: the `impl Host` (about 1,550 lines, 275 methods)
+`typed.rs` splits in two: the `impl Host` (about 1,550 lines, 136 methods)
 needs the generated types; the rest (`Slab`, `Wait`, `SharedStdin`, `FileStream`, `TcpOut`, path
 resolution with the preopen escape rules, socket-address helpers, clocks) does not and becomes
 ordinary library modules. The `// optional:` markers, `keep_declared_methods` and `type_aliases`
@@ -97,9 +94,10 @@ are deleted.
 | P0 | Generator: external-types glue mode; interface-qualified type names. Tests against the existing hand-written WIT subsets. |
 | P1 | Create `wasm2rs-wasi`: generate and check in the trait; move the host logic; add the freshness test; switch the test helpers (`build_program`) and `wasip2_run` to the library. |
 | P2 | Configuration surface above, including the injectable clocks, random and streams. |
-| P3 | Known limitations (pollable slots never freed, stdin thread never joined, TOCTOU preopen escape). Out of scope here. |
 
-Each phase is its own PR; P1 depends on P0, P2 on P1.
+Each phase is its own PR; P1 depends on P0, P2 on P1. Out of scope: the known limitations of
+[typed-host-design.md](typed-host-design.md) (pollable slots never freed, stdin thread never joined,
+TOCTOU preopen escape).
 
 ## Risks and constraints
 
@@ -114,5 +112,4 @@ Each phase is its own PR; P1 depends on P0, P2 on P1.
 - **Compatibility.** The library targets WASI 0.2.0; import names drop the version suffix
   (`named_imports`), so 0.2.x components using only the 0.2.0 surface work. A host trait for a
   different WASI version would be a different crate version.
-- **`wasi:http`.** Stays trapping until the export side (`canon lift`, A2) exists; the allowlist
-  tracks it.
+- **`wasi:http`.** Needs the export side (`canon lift`, A2) first.
