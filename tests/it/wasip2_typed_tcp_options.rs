@@ -232,6 +232,25 @@ fn run(body: &str) -> std::process::Output {
 const INVALID_ARGUMENT: i32 = 103;
 const INVALID_STATE: i32 = 109;
 
+/// Starts listening on the ipv4 socket `l`, connects a new socket to it and accepts the
+/// connection as `a`.
+const LISTEN_CONNECT_ACCEPT: &str = "assert_eq!(inst.bind_listen(l), 0);
+         assert_eq!(inst.start_listen(l), 0);
+         assert_eq!(inst.finish_listen(l), 0);
+         let c = inst.create(0);
+         let port = inst.port(l);
+         assert_eq!(inst.connect(c, port), 0);
+         // the connection may not be queued yet: would-block (-1 - 8) means try again
+         let mut a = inst.accept(l);
+         for _ in 0..2000 {
+             if a != -9 {
+                 break;
+             }
+             std::thread::sleep(std::time::Duration::from_millis(1));
+             a = inst.accept(l);
+         }
+         assert!(a >= 0, \"{a}\");";
+
 #[test]
 fn a_new_socket_has_the_spec_defaults() {
     assert_succeeded(&run("let s = inst.create(0);
@@ -313,30 +332,17 @@ fn the_backlog_size_is_accepted_until_a_connection_is_made() {
 
 #[test]
 fn an_accepted_socket_inherits_the_listeners_options() {
-    assert_succeeded(&run("let l = inst.create(0);
+    assert_succeeded(&run(&format!(
+        "let l = inst.create(0);
          assert_eq!(inst.set_ka_count(l, 3), 0);
          assert_eq!(inst.set_hop(l, 7), 0);
          assert_eq!(inst.set_rcv(l, 12345), 0);
-         assert_eq!(inst.bind_listen(l), 0);
-         assert_eq!(inst.start_listen(l), 0);
-         assert_eq!(inst.finish_listen(l), 0);
-         let c = inst.create(0);
-         let port = inst.port(l);
-         assert_eq!(inst.connect(c, port), 0);
-         // the connection may not be queued yet: would-block (-1 - 8) means try again
-         let mut a = inst.accept(l);
-         for _ in 0..2000 {
-             if a != -9 {
-                 break;
-             }
-             std::thread::sleep(std::time::Duration::from_millis(1));
-             a = inst.accept(l);
-         }
-         assert!(a >= 0, \"{a}\");
+         {LISTEN_CONNECT_ACCEPT}
          assert_eq!(inst.ka_count(a), 3);
          assert_eq!(inst.hop(a), 7);
          assert_eq!(inst.rcv(a), 12345);
-         assert_eq!(inst.snd(a), 65536);"));
+         assert_eq!(inst.snd(a), 65536);"
+    )));
 }
 
 #[test]
@@ -351,21 +357,9 @@ fn the_address_family_is_the_one_the_socket_was_created_with() {
 
 #[test]
 fn an_accepted_socket_has_the_address_family_of_the_listener() {
-    assert_succeeded(&run("let l = inst.create(0);
-         assert_eq!(inst.bind_listen(l), 0);
-         assert_eq!(inst.start_listen(l), 0);
-         assert_eq!(inst.finish_listen(l), 0);
-         let c = inst.create(0);
-         let port = inst.port(l);
-         assert_eq!(inst.connect(c, port), 0);
-         let mut a = inst.accept(l);
-         for _ in 0..2000 {
-             if a != -9 {
-                 break;
-             }
-             std::thread::sleep(std::time::Duration::from_millis(1));
-             a = inst.accept(l);
-         }
-         assert!(a >= 0, \"{a}\");
-         assert_eq!(inst.address_family(a), 0);"));
+    assert_succeeded(&run(&format!(
+        "let l = inst.create(0);
+         {LISTEN_CONNECT_ACCEPT}
+         assert_eq!(inst.address_family(a), 0);"
+    )));
 }
