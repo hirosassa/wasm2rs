@@ -8,6 +8,7 @@ package wasi:io@0.2.0;
 interface poll {
   resource pollable {
     block: func();
+    ready: func() -> bool;
   }
   poll: func(in: list<borrow<pollable>>) -> list<u32>;
 }
@@ -18,12 +19,14 @@ package wasi:clocks@0.2.0;
 interface monotonic-clock {
   use wasi:io/poll@0.2.0.{pollable};
   now: func() -> u64;
+  resolution: func() -> u64;
   subscribe-instant: func(when: u64) -> pollable;
   subscribe-duration: func(when: u64) -> pollable;
 }
 interface wall-clock {
   record datetime { seconds: u64, nanoseconds: u32 }
   now: func() -> datetime;
+  resolution: func() -> datetime;
 }
 "#;
 
@@ -45,9 +48,22 @@ const CORE: &str = r#"
   (import "wasi:clocks/monotonic-clock@0.2.0" "subscribe-instant" (func $at (param i64) (result i32)))
   (import "wasi:clocks/monotonic-clock@0.2.0" "subscribe-duration" (func $dur (param i64) (result i32)))
   (import "wasi:clocks/wall-clock@0.2.0" "now" (func $wall (param i32)))
+  (import "wasi:io/poll@0.2.0" "[method]pollable.ready" (func $ready (param i32) (result i32)))
+  (import "wasi:clocks/monotonic-clock@0.2.0" "resolution" (func $mono_res (result i64)))
+  (import "wasi:clocks/wall-clock@0.2.0" "resolution" (func $wall_res (param i32)))
   (memory (export "memory") 1)
   (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 0))
   (func (export "now") (result i64) (call $now))
+  ;; whether a timer `ns` nanoseconds away is ready, without waiting for it
+  (func (export "ready_after") (param $ns i64) (result i32) (call $ready (call $dur (local.get $ns))))
+  ;; `ready` on one timer before and after blocking on it: before times ten, plus after
+  (func (export "ready_before_after") (param $ns i64) (result i32) (local $p i32)
+    (local.set $p (call $dur (local.get $ns)))
+    (i32.add (i32.mul (call $ready (local.get $p)) (i32.const 10))
+      (block (result i32) (call $block (local.get $p)) (call $ready (local.get $p)))))
+  (func (export "mono_resolution") (result i64) (call $mono_res))
+  (func (export "wall_res_secs") (result i64) (call $wall_res (i32.const 136)) (i64.load (i32.const 136)))
+  (func (export "wall_res_nanos") (result i32) (call $wall_res (i32.const 136)) (i32.load (i32.const 144)))
   ;; waits on a timer `ns` nanoseconds away
   (func (export "block_for") (param $ns i64) (call $block (call $dur (local.get $ns))))
   ;; waits on the instant `at` (on the monotonic clock)
@@ -153,4 +169,26 @@ fn the_wall_clock_reports_the_time_since_the_unix_epoch() {
          assert!(secs <= now && now - secs < 60, \"{secs} {now}\"); \
          assert!(nanos < 1_000_000_000, \"{nanos}\");",
     ));
+}
+
+#[test]
+fn ready_reports_a_due_timer_and_not_a_far_one_without_waiting() {
+    assert_succeeded(&run("let start = std::time::Instant::now(); \
+         assert_eq!(inst.ready_after(0), 1); \
+         assert_eq!(inst.ready_after(10_000_000_000), 0); \
+         assert!(start.elapsed() < std::time::Duration::from_secs(9));"));
+}
+
+#[test]
+fn ready_turns_true_on_the_same_timer_once_it_has_passed() {
+    // not ready right after the subscription (tens digit 0), ready once blocked on (units 1)
+    assert_succeeded(&run("assert_eq!(inst.ready_before_after(30_000_000), 1);"));
+}
+
+#[test]
+fn the_clock_resolutions_match_the_precision_of_now() {
+    // `now` counts nanoseconds from an `Instant`, and the wall clock reads nanoseconds
+    assert_succeeded(&run("assert_eq!(inst.mono_resolution(), 1); \
+         assert_eq!(inst.wall_res_secs(), 0); \
+         assert_eq!(inst.wall_res_nanos(), 1);"));
 }

@@ -55,7 +55,7 @@ interface instance-network {
 }
 interface tcp {
   use wasi:io/streams@0.2.0.{input-stream, output-stream};
-  use network.{network, error-code, ip-socket-address};
+  use network.{network, error-code, ip-socket-address, ip-address-family};
   type duration = u64;
   resource tcp-socket {
     start-connect: func(network: borrow<network>, remote-address: ip-socket-address) -> result<_, error-code>;
@@ -66,6 +66,7 @@ interface tcp {
     start-listen: func() -> result<_, error-code>;
     finish-listen: func() -> result<_, error-code>;
     is-listening: func() -> bool;
+    address-family: func() -> ip-address-family;
     set-listen-backlog-size: func(value: u64) -> result<_, error-code>;
     keep-alive-enabled: func() -> result<bool, error-code>;
     set-keep-alive-enabled: func(value: bool) -> result<_, error-code>;
@@ -116,6 +117,7 @@ const CORE: &str = r#"
   (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.start-listen" (func $start_listen (param i32 i32)))
   (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.finish-listen" (func $finish_listen (param i32 i32)))
   (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.is-listening" (func $is_listening (param i32) (result i32)))
+  (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.address-family" (func $family (param i32) (result i32)))
   (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.set-listen-backlog-size" (func $set_backlog (param i32 i64 i32)))
   (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.keep-alive-enabled" (func $ka_enabled (param i32 i32)))
   (import "wasi:sockets/tcp@0.2.0" "[method]tcp-socket.set-keep-alive-enabled" (func $set_ka_enabled (param i32 i32 i32)))
@@ -145,6 +147,8 @@ const CORE: &str = r#"
       (then (i64.sub (i64.const -1) (i64.load8_u (i32.add (i32.const 64) (local.get $off)))))
       (else (i64.load (i32.add (i32.const 64) (local.get $off))))))
 
+  ;; 0 for ipv4, 1 for ipv6
+  (func (export "address_family") (param i32) (result i32) (call $family (local.get 0)))
   (func (export "create") (param $family i32) (result i32)
     (call $create (local.get $family) (i32.const 100))
     (i32.load (i32.const 104)))
@@ -228,6 +232,25 @@ fn run(body: &str) -> std::process::Output {
 const INVALID_ARGUMENT: i32 = 103;
 const INVALID_STATE: i32 = 109;
 
+/// Starts listening on the ipv4 socket `l`, connects a new socket to it and accepts the
+/// connection as `a`.
+const LISTEN_CONNECT_ACCEPT: &str = "assert_eq!(inst.bind_listen(l), 0);
+         assert_eq!(inst.start_listen(l), 0);
+         assert_eq!(inst.finish_listen(l), 0);
+         let c = inst.create(0);
+         let port = inst.port(l);
+         assert_eq!(inst.connect(c, port), 0);
+         // the connection may not be queued yet: would-block (-1 - 8) means try again
+         let mut a = inst.accept(l);
+         for _ in 0..2000 {
+             if a != -9 {
+                 break;
+             }
+             std::thread::sleep(std::time::Duration::from_millis(1));
+             a = inst.accept(l);
+         }
+         assert!(a >= 0, \"{a}\");";
+
 #[test]
 fn a_new_socket_has_the_spec_defaults() {
     assert_succeeded(&run("let s = inst.create(0);
@@ -309,28 +332,34 @@ fn the_backlog_size_is_accepted_until_a_connection_is_made() {
 
 #[test]
 fn an_accepted_socket_inherits_the_listeners_options() {
-    assert_succeeded(&run("let l = inst.create(0);
+    assert_succeeded(&run(&format!(
+        "let l = inst.create(0);
          assert_eq!(inst.set_ka_count(l, 3), 0);
          assert_eq!(inst.set_hop(l, 7), 0);
          assert_eq!(inst.set_rcv(l, 12345), 0);
-         assert_eq!(inst.bind_listen(l), 0);
-         assert_eq!(inst.start_listen(l), 0);
-         assert_eq!(inst.finish_listen(l), 0);
-         let c = inst.create(0);
-         let port = inst.port(l);
-         assert_eq!(inst.connect(c, port), 0);
-         // the connection may not be queued yet: would-block (-1 - 8) means try again
-         let mut a = inst.accept(l);
-         for _ in 0..2000 {
-             if a != -9 {
-                 break;
-             }
-             std::thread::sleep(std::time::Duration::from_millis(1));
-             a = inst.accept(l);
-         }
-         assert!(a >= 0, \"{a}\");
+         {LISTEN_CONNECT_ACCEPT}
          assert_eq!(inst.ka_count(a), 3);
          assert_eq!(inst.hop(a), 7);
          assert_eq!(inst.rcv(a), 12345);
-         assert_eq!(inst.snd(a), 65536);"));
+         assert_eq!(inst.snd(a), 65536);"
+    )));
+}
+
+#[test]
+fn the_address_family_is_the_one_the_socket_was_created_with() {
+    assert_succeeded(&run("let v4 = inst.create(0); let v6 = inst.create(1);
+         assert_eq!(inst.address_family(v4), 0);
+         assert_eq!(inst.address_family(v6), 1);
+         // it does not change when the socket is bound
+         assert_eq!(inst.bind_listen(v4), 0);
+         assert_eq!(inst.address_family(v4), 0);"));
+}
+
+#[test]
+fn an_accepted_socket_has_the_address_family_of_the_listener() {
+    assert_succeeded(&run(&format!(
+        "let l = inst.create(0);
+         {LISTEN_CONNECT_ACCEPT}
+         assert_eq!(inst.address_family(a), 0);"
+    )));
 }
