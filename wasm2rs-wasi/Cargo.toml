@@ -1,0 +1,16 @@
+[package]
+name = "wasm2rs-wasi"
+version = "0.1.0"
+edition = "2024"
+description = "Typed WASI 0.2 host for programs transpiled by wasm2rs."
+license = "MIT"
+repository = "https://github.com/hirosassa/wasm2rs"
+readme = "README.md"
+keywords = ["webassembly", "wasm", "wasi"]
+categories = ["wasm"]
+
+# The root `[lints]` tables are not inherited by workspace members; the hardening
+# lints that this crate's host logic must satisfy are set here once it holds any.
+[lints.rust]
+warnings = "deny"
+unsafe_code = "deny"

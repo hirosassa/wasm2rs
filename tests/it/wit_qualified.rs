@@ -293,45 +293,7 @@ fn the_external_glue_runs_against_a_library_that_declares_the_types() {
     );
 }
 
-/// The component of every WASI 0.2.0 interface, assembled like `wasip2_wit_regression.rs`
-/// does (`world all` of `tests/wasi_p2_wit`).
-fn wasi_p2_component() -> Vec<u8> {
-    use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
-    use wit_parser::{ManglingAndAbi, Resolve};
-    let mut resolve = Resolve::default();
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/wasi_p2_wit");
-    for package in [
-        "io",
-        "clocks",
-        "random",
-        "filesystem",
-        "sockets",
-        "cli",
-        "http",
-    ] {
-        resolve.push_dir(root.join(package)).unwrap();
-    }
-    let package = resolve
-        .push_str(
-            "all.wit",
-            "package audit:all;
-             world all {
-               include wasi:cli/imports@0.2.0;
-               import wasi:http/types@0.2.0;
-               import wasi:http/outgoing-handler@0.2.0;
-             }",
-        )
-        .unwrap();
-    let world = resolve.select_world(&[package], Some("all")).unwrap();
-    let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
-    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
-    ComponentEncoder::default()
-        .module(&module)
-        .unwrap()
-        .validate(true)
-        .encode()
-        .unwrap()
-}
+use crate::wasi_generated::wasi_p2_component;
 
 #[test]
 fn the_qualified_surface_of_all_of_wasi_p2_compiles() {
@@ -387,4 +349,57 @@ fn the_cli_writes_the_external_glue_and_rejects_misuse() {
         .output()
         .unwrap();
     assert!(!dump.status.success());
+}
+
+fn default_trap() -> WitOptions {
+    WitOptions {
+        default_trap: true,
+        ..WitOptions::default()
+    }
+}
+
+#[test]
+fn default_trap_gives_every_method_a_body() {
+    let wasm = component(&[error_code_import(
+        "wasi:filesystem/types@0.2.0",
+        r#""access" "busy""#,
+    )]);
+    let plain = wit_host_trait(&wasm).unwrap();
+    assert!(plain.contains("-> ErrorCode;"), "{plain}");
+    let rust = wit_host_trait_with_options(&wasm, &default_trap()).unwrap();
+    assert!(!rust.contains("-> ErrorCode;"), "{rust}");
+    assert!(
+        rust.contains("not implemented: wasi_filesystem_types_last_error"),
+        "{rust}"
+    );
+}
+
+#[test]
+fn a_host_may_override_some_default_trap_methods_and_run() {
+    let wasm = wat::parse_str(
+        r#"(component
+          (import "a:b/c" (instance
+            (export "one" (func (result u32)))
+            (export "two" (func (param "n" u32) (result u32))))))"#,
+    )
+    .unwrap();
+    let trait_src = wit_host_trait_with_options(&wasm, &default_trap()).unwrap();
+    let program = format!(
+        r#"{trait_src}
+struct H;
+impl Host for H {{
+    fn a_b_c_one(&mut self) -> u32 {{ 7 }}
+}}
+fn main() {{
+    let mut h = H;
+    assert_eq!(h.a_b_c_one(), 7);
+    let r = std::panic::catch_unwind(move || {{ let mut h = H; h.a_b_c_two(1) }});
+    let payload = r.unwrap_err();
+    let msg = payload.downcast_ref::<&str>().copied().unwrap_or("");
+    assert!(msg.contains("a_b_c_two"), "{{msg}}");
+}}
+"#
+    );
+    let bin = common::build("wit_default_trap", &program);
+    assert!(std::process::Command::new(bin).status().unwrap().success());
 }
