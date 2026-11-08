@@ -1379,6 +1379,11 @@ pub enum WitNaming {
     /// `wasi_sockets_network::ErrorCode`) and keeps its WIT name; the path of a type depends
     /// only on its defining interface and its name, never on the other imports or their order.
     /// A type used by several interfaces is declared once, in the module of its definer.
+    ///
+    /// The version of an interface is not part of the module name (nor of the method names),
+    /// so a component importing two versions of one interface gets a numbered module for the
+    /// later one, which depends on import order; this is not supported with
+    /// [`WitOptions::external_types`].
     Qualified,
 }
 
@@ -1538,20 +1543,15 @@ fn write_resource(out: &mut String, name: &str) {
 }
 
 /// One record, variant, enum or flags declaration named `name`, whose member types are spelled
-/// as from inside the module that holds it (the same as at the top level when not qualified).
+/// as from inside the module that holds it (when not qualified no type has a module, so the
+/// `super::` prefix is never written and the spelling is the top-level one).
 fn write_decl(
     out: &mut String,
     records: &Records,
     decl: &Decl,
     name: &str,
 ) -> Result<(), TranspileError> {
-    let rust = |ty: &WitType| {
-        if records.qualified {
-            records.rust_in_module(ty)
-        } else {
-            records.rust(ty)
-        }
-    };
+    let rust = |ty: &WitType| records.rust_in_module(ty);
     match decl {
         Decl::Record(record) => {
             let idents = unique_idents(record.fields.iter().map(|(n, _)| n.as_str()));

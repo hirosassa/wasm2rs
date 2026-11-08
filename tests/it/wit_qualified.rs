@@ -14,6 +14,14 @@ fn qualified() -> WitOptions {
     }
 }
 
+/// The external-types glue mode, naming the library at `path`.
+fn external(path: &str) -> WitOptions {
+    WitOptions {
+        external_types: Some(path.to_string()),
+        ..WitOptions::default()
+    }
+}
+
 /// An interface that defines the enum `error-code` with `cases` and a function returning it.
 fn error_code_import(interface: &str, cases: &str) -> String {
     format!(
@@ -262,11 +270,7 @@ fn the_external_glue_runs_against_a_library_that_declares_the_types() {
     let wasm = ops_component();
     // The library: the whole qualified surface in a module the glue refers to by path.
     let surface = wit_host_trait_with_options(&wasm, &qualified()).unwrap();
-    let external = WitOptions {
-        external_types: Some("host_lib".to_string()),
-        ..WitOptions::default()
-    };
-    let glue = wit_host_glue_with_options(&wasm, &external).unwrap();
+    let glue = wit_host_glue_with_options(&wasm, &external("host_lib")).unwrap();
     assert!(!glue.contains("pub trait Host"), "{glue}");
     assert!(!glue.contains("pub enum Color"), "{glue}");
     assert!(glue.contains("use host_lib::Host;"), "{glue}");
@@ -367,14 +371,7 @@ fn the_cli_writes_the_external_glue_and_rejects_misuse() {
         "{}",
         String::from_utf8_lossy(&printed.stderr)
     );
-    let expected = wit_host_glue_with_options(
-        &wasm,
-        &WitOptions {
-            external_types: Some("my_host::wasi".to_string()),
-            ..WitOptions::default()
-        },
-    )
-    .unwrap();
+    let expected = wit_host_glue_with_options(&wasm, &external("my_host::wasi")).unwrap();
     assert_eq!(String::from_utf8_lossy(&printed.stdout), expected);
 
     // The glue is what refers to a library's types; the trait alone has nothing to refer to.
