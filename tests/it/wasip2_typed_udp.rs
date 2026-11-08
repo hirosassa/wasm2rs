@@ -48,8 +48,6 @@ interface udp {
     local-address: func() -> result<ip-socket-address, error-code>;
     remote-address: func() -> result<ip-socket-address, error-code>;
     address-family: func() -> ip-address-family;
-    ipv6-only: func() -> result<bool, error-code>;
-    set-ipv6-only: func(value: bool) -> result<_, error-code>;
     unicast-hop-limit: func() -> result<u8, error-code>;
     set-unicast-hop-limit: func(value: u8) -> result<_, error-code>;
     receive-buffer-size: func() -> result<u64, error-code>;
@@ -105,8 +103,6 @@ const CORE: &str = r#"
   (import "wasi:sockets/udp@0.2.0" "[method]udp-socket.local-address" (func $local (param i32 i32)))
   (import "wasi:sockets/udp@0.2.0" "[method]udp-socket.remote-address" (func $remote (param i32 i32)))
   (import "wasi:sockets/udp@0.2.0" "[method]udp-socket.address-family" (func $family (param i32) (result i32)))
-  (import "wasi:sockets/udp@0.2.0" "[method]udp-socket.ipv6-only" (func $ipv6_only (param i32 i32)))
-  (import "wasi:sockets/udp@0.2.0" "[method]udp-socket.set-ipv6-only" (func $set_ipv6_only (param i32 i32 i32)))
   (import "wasi:sockets/udp@0.2.0" "[method]udp-socket.unicast-hop-limit" (func $hop (param i32 i32)))
   (import "wasi:sockets/udp@0.2.0" "[method]udp-socket.set-unicast-hop-limit" (func $set_hop (param i32 i32 i32)))
   (import "wasi:sockets/udp@0.2.0" "[method]udp-socket.receive-buffer-size" (func $rbuf (param i32 i32)))
@@ -301,10 +297,6 @@ const CORE: &str = r#"
     (call $hop (local.get 0) (i32.const 300)) (call $status (i32.const 300)))
   (func (export "set_hop_limit") (param i32) (param i32) (result i32)
     (call $set_hop (local.get 0) (local.get 1) (i32.const 300)) (call $status (i32.const 300)))
-  (func (export "ipv6_only") (param i32) (result i32)
-    (call $ipv6_only (local.get 0) (i32.const 300)) (call $status (i32.const 300)))
-  (func (export "set_ipv6_only") (param i32) (param i32) (result i32)
-    (call $set_ipv6_only (local.get 0) (local.get 1) (i32.const 300)) (call $status (i32.const 300)))
   (func (export "receive_buffer") (param i32) (result i32)
     (call $rbuf (local.get 0) (i32.const 320)) (call $status8 (i32.const 320)))
   (func (export "set_receive_buffer") (param i32) (param i64) (result i32)
@@ -558,8 +550,6 @@ fn the_socket_options_are_not_supported() {
     assert_succeeded(&run("let (a, _) = udp(&mut inst);
          assert_eq!(inst.hop_limit(a), 102);
          assert_eq!(inst.set_hop_limit(a, 5), 102);
-         assert_eq!(inst.ipv6_only(a), 102);
-         assert_eq!(inst.set_ipv6_only(a, 1), 102);
          assert_eq!(inst.receive_buffer(a), 102);
          assert_eq!(inst.set_receive_buffer(a, 4096), 102);
          assert_eq!(inst.send_buffer(a), 102);

@@ -17,6 +17,7 @@ package wasi:cli@0.2.0;
 interface environment {
   get-environment: func() -> list<tuple<string, string>>;
   get-arguments: func() -> list<string>;
+  initial-cwd: func() -> option<string>;
 }
 "#;
 
@@ -41,6 +42,7 @@ const CORE: &str = r#"
 (module
   (import "wasi:cli/environment@0.2.0" "get-arguments" (func $args (param i32)))
   (import "wasi:cli/environment@0.2.0" "get-environment" (func $env (param i32)))
+  (import "wasi:cli/environment@0.2.0" "initial-cwd" (func $cwd (param i32)))
   (import "wasi:io/poll@0.2.0" "[resource-drop]pollable" (func (param i32)))
   (import "wasi:io/poll@0.2.0" "poll" (func $poll (param i32 i32 i32)))
   (import "wasi:clocks/monotonic-clock@0.2.0" "subscribe-duration" (func $dur (param i64) (result i32)))
@@ -59,6 +61,12 @@ const CORE: &str = r#"
     (i32.load8_u (i32.add
       (i32.load (i32.add (i32.load (i32.const 72)) (i32.shl (local.get $i) (i32.const 3))))
       (local.get $j))))
+  ;; option<string> at 120: tag (u8) at 120, (ptr, len) at 124
+  (func (export "cwd_some") (result i32) (call $cwd (i32.const 120)) (i32.load8_u (i32.const 120)))
+  (func (export "cwd_len") (result i32) (call $cwd (i32.const 120)) (i32.load (i32.const 128)))
+  (func (export "cwd_byte") (param $j i32) (result i32)
+    (call $cwd (i32.const 120))
+    (i32.load8_u (i32.add (i32.load (i32.const 124)) (local.get $j))))
   ;; list<tuple<string, string>> at 80: 16-byte elements (key, value)
   (func (export "envc") (result i32) (call $env (i32.const 80)) (i32.load (i32.const 84)))
   (func (export "key_len") (param $i i32) (result i32)
@@ -148,4 +156,27 @@ fn poll_returns_the_indices_of_all_ready_pollables() {
         "assert_eq!(inst.poll_two(), 2); assert_eq!(inst.poll_index(0), 0); \
          assert_eq!(inst.poll_index(1), 1);",
     ));
+}
+
+#[test]
+fn a_host_without_a_preopen_has_no_initial_cwd() {
+    assert_succeeded(&run(
+        "TypedHost::new(Vec::new())",
+        "assert_eq!(inst.cwd_some(), 0);",
+    ));
+}
+
+#[test]
+fn the_initial_cwd_is_the_root_of_the_preopen() {
+    // the preopen is shown as "/", so that is where the guest starts
+    let dir = std::env::temp_dir();
+    let out = run(
+        &format!(
+            "TypedHost::new(Vec::new()).with_preopen(std::path::PathBuf::from({:?}))",
+            dir
+        ),
+        "assert_eq!(inst.cwd_some(), 1); assert_eq!(inst.cwd_len(), 1); \
+         assert_eq!(inst.cwd_byte(0), b'/' as i32);",
+    );
+    assert_succeeded(&out);
 }

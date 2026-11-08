@@ -48,7 +48,7 @@
 // recorded, not applied to the OS socket: a socket starts with the defaults, a set value is
 // read back, zero is `invalid-argument`, and an accepted socket inherits the listener's values.
 // The listen backlog size is only validated (zero is `invalid-argument`, `invalid-state` once a
-// connection is started or made, ignored while listening): it is not stored or read back. The UDP ones (hop limit, buffer sizes, `ipv6-only`) answer
+// connection is started or made, ignored while listening): it is not stored or read back. The UDP ones (hop limit, buffer sizes) answer
 // `not-supported`.
 //
 // A component that imports both filesystem and sockets gets two `error-code` enums, which the
@@ -1970,6 +1970,13 @@ impl Host for TypedHost {
     }
     // end optional
 
+    // optional: wasi_cli_environment_initial_cwd
+    /// "/", the preopened directory, when there is one; `None` without a preopen.
+    fn wasi_cli_environment_initial_cwd(&mut self) -> Option<String> {
+        self.root.as_ref().map(|_| "/".to_string())
+    }
+    // end optional
+
     // optional: wasi_cli_exit_exit
     /// `exit(status: result)`: `ok` is 0, `error` is 1. The send queues of the connections are
     /// flushed first (see `flush_all_connections`).
@@ -2075,6 +2082,20 @@ impl Host for TypedHost {
     }
     // end optional
 
+    // optional: wasi_clocks_monotonic_clock_resolution
+    /// 1 ns: `now` counts the nanoseconds of an `Instant`.
+    fn wasi_clocks_monotonic_clock_resolution(&mut self) -> u64 {
+        1
+    }
+    // end optional
+
+    // optional: wasi_clocks_wall_clock_resolution
+    /// 1 ns: `now` reads the nanoseconds of the system clock.
+    fn wasi_clocks_wall_clock_resolution(&mut self) -> Datetime {
+        Datetime { seconds: 0, nanoseconds: 1 }
+    }
+    // end optional
+
     // optional: wasi_clocks_wall_clock_now
     fn wasi_clocks_wall_clock_now(&mut self) -> Datetime {
         let since = std::time::SystemTime::now()
@@ -2105,6 +2126,15 @@ impl Host for TypedHost {
         } else if let Some(index) = file_index(handle.0) {
             self.outputs.remove(index);
         }
+    }
+    // end optional
+
+    // optional: wasi_io_poll_method_pollable_ready
+    /// Whether the pollable is ready now, without waiting.
+    fn wasi_io_poll_method_pollable_ready(&mut self, self_: Pollable) -> bool {
+        let (buf, _) = &*self.stdin;
+        let buf = buf.lock().unwrap();
+        self.wait_of(self_).is_ready(Instant::now(), &buf, self)
     }
     // end optional
 
@@ -3020,6 +3050,12 @@ impl Host for TypedHost {
     }
     // end optional
 
+    // optional: wasi_sockets_tcp_method_tcp_socket_address_family
+    fn wasi_sockets_tcp_method_tcp_socket_address_family(&mut self, self_: TcpSocket) -> IpAddressFamily {
+        if self.socket(self_.0).ipv6 { IpAddressFamily::Ipv6 } else { IpAddressFamily::Ipv4 }
+    }
+    // end optional
+
     // optional: wasi_sockets_tcp_method_tcp_socket_set_listen_backlog_size
     fn wasi_sockets_tcp_method_tcp_socket_set_listen_backlog_size(
         &mut self,
@@ -3303,25 +3339,6 @@ impl Host for TypedHost {
     // optional: wasi_sockets_udp_method_udp_socket_address_family
     fn wasi_sockets_udp_method_udp_socket_address_family(&mut self, self_: UdpSocket) -> IpAddressFamily {
         if self.udp_socket(self_.0).ipv6 { IpAddressFamily::Ipv6 } else { IpAddressFamily::Ipv4 }
-    }
-    // end optional
-
-    // optional: wasi_sockets_udp_method_udp_socket_ipv6_only
-    fn wasi_sockets_udp_method_udp_socket_ipv6_only(
-        &mut self,
-        _self_: UdpSocket,
-    ) -> Result<bool, NetErrorCode> {
-        Err(NetErrorCode::NotSupported)
-    }
-    // end optional
-
-    // optional: wasi_sockets_udp_method_udp_socket_set_ipv6_only
-    fn wasi_sockets_udp_method_udp_socket_set_ipv6_only(
-        &mut self,
-        _self_: UdpSocket,
-        _value: bool,
-    ) -> Result<(), NetErrorCode> {
-        Err(NetErrorCode::NotSupported)
     }
     // end optional
 
