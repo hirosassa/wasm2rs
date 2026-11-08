@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::LazyLock;
 
 use wasm2rs::wit_host_trait;
 
@@ -69,6 +70,13 @@ fn component_of_all_world() -> Vec<u8> {
         .validate(true)
         .encode()
         .unwrap()
+}
+
+/// The generated `Host` trait source, built once for the tests of this module.
+fn generated() -> &'static str {
+    static GENERATED: LazyLock<String> =
+        LazyLock::new(|| wit_host_trait(&component_of_all_world()).unwrap());
+    &GENERATED
 }
 
 /// `fn wasi_*(..) -> ..` of every method in `source` (up to its `;` or `{`), by name, with
@@ -120,10 +128,10 @@ fn typed_methods(generated: &str) -> BTreeMap<String, String> {
 fn replace_word(text: &str, word: &str, with: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
+    let is_ident = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
     while let Some(at) = rest.find(word) {
         let before = rest[..at].chars().next_back();
         let after = rest[at + word.len()..].chars().next();
-        let is_ident = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
         out.push_str(&rest[..at]);
         out.push_str(if is_ident(before) || is_ident(after) {
             word
@@ -144,10 +152,14 @@ fn differences(
     let mut diffs = BTreeSet::new();
     for (name, signature) in generated {
         match typed.get(name) {
-            None => diffs.insert(format!("missing {name}")),
-            Some(host) if host != signature => diffs.insert(format!("mismatch {name}")),
-            Some(_) => false,
-        };
+            None => {
+                diffs.insert(format!("missing {name}"));
+            }
+            Some(host) if host != signature => {
+                diffs.insert(format!("mismatch {name}"));
+            }
+            Some(_) => {}
+        }
     }
     for name in typed.keys().filter(|name| !generated.contains_key(*name)) {
         diffs.insert(format!("extra {name}"));
@@ -166,16 +178,16 @@ fn allowlist() -> BTreeSet<String> {
 
 #[test]
 fn the_all_world_declares_every_wasi_0_2_0_interface() {
-    let generated = wit_host_trait(&component_of_all_world()).unwrap();
-    let methods = generated_methods(&generated);
+    let generated = generated();
+    let methods = generated_methods(generated);
     // 199 methods in the 29 interfaces of the official 0.2.0 WIT
     assert_eq!(methods.len(), 199, "the generated Host trait is complete");
 }
 
 #[test]
 fn typed_host_matches_the_official_wit_up_to_the_allowlist() {
-    let generated = wit_host_trait(&component_of_all_world()).unwrap();
-    let actual = differences(&generated_methods(&generated), &typed_methods(&generated));
+    let generated = generated();
+    let actual = differences(&generated_methods(generated), &typed_methods(generated));
     let allowed = allowlist();
     let unlisted: Vec<_> = actual.difference(&allowed).collect();
     let stale: Vec<_> = allowed.difference(&actual).collect();
