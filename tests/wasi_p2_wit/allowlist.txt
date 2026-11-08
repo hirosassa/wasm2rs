@@ -69,12 +69,6 @@ missing wasi_http_types_static_outgoing_body_finish
 missing wasi_http_types_static_response_outparam_set
 
 # Not implemented yet (11 methods).
-missing wasi_filesystem_types_filesystem_error_code
-missing wasi_filesystem_types_method_descriptor_advise
-missing wasi_filesystem_types_method_descriptor_get_type
-missing wasi_filesystem_types_method_descriptor_is_same_object
-missing wasi_filesystem_types_method_descriptor_read
-missing wasi_filesystem_types_method_descriptor_write
 
 # In typed.rs but not in WASI 0.2.0.
 
