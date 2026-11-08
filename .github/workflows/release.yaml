@@ -91,5 +91,14 @@ jobs:
       # the dependency of `wasm2rs-macros` resolves.
       - name: Publish wasm2rs-macros to crates.io
         run: cargo publish -p wasm2rs-macros --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # The crate has its own version, so most tags leave it unchanged: publish only a
+      # version that crates.io does not have yet.
       - name: Publish wasm2rs-wasi to crates.io
-        run: cargo publish -p wasm2rs-wasi --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wasm2rs-wasi") | .version')
+          status=$(curl -s -o /dev/null -w '%{http_code}' -A "wasm2rs-release" "https://crates.io/api/v1/crates/wasm2rs-wasi/$version")
+          if [ "$status" = "200" ]; then
+            echo "wasm2rs-wasi $version is already published; skipping"
+          else
+            cargo publish -p wasm2rs-wasi --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          fi

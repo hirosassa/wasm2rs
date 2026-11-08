@@ -2,6 +2,7 @@
 //! glue mode (`WitOptions::external_types`).
 
 use crate::common;
+use crate::wasi_generated::wasi_p2_component;
 use wasm2rs::{
     WitNaming, WitOptions, WitType, wit_functions, wit_host_glue_with_options, wit_host_trait,
     wit_host_trait_with_options,
@@ -292,8 +293,6 @@ fn the_external_glue_runs_against_a_library_that_declares_the_types() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
-
-use crate::wasi_generated::wasi_p2_component;
 
 #[test]
 fn the_qualified_surface_of_all_of_wasi_p2_compiles() {

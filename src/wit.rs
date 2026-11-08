@@ -1479,7 +1479,11 @@ fn write_declarations(
     out.push_str("\npub trait Host {\n");
     for (f, name) in funcs.iter().zip(names) {
         // Debug-escaped: an interface or function name may hold any characters.
-        let _ = writeln!(out, "    /// {:?} {:?}", f.interface, f.name);
+        // `[method]x` would read as an intra-doc link.
+        let doc = format!("{:?} {:?}", f.interface, f.name)
+            .replace('[', "\\[")
+            .replace(']', "\\]");
+        let _ = writeln!(out, "    /// {doc}");
         let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
         let mut sig = format!("    fn {name}(&mut self");
         for (ident, (_, ty)) in idents.iter().zip(&f.params) {

@@ -3,6 +3,8 @@
 //! difference. After a generator change, refresh the file with
 //! `WASM2RS_BLESS=1 cargo test --test it wasi_generated`.
 
+use std::path::Path;
+
 use wasm2rs::{WitNaming, WitOptions, wit_host_trait_with_options};
 
 const GENERATED: &str = "wasm2rs-wasi/src/generated.rs";
@@ -12,7 +14,7 @@ pub fn wasi_p2_component() -> Vec<u8> {
     use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
     use wit_parser::{ManglingAndAbi, Resolve};
     let mut resolve = Resolve::default();
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/wasi_p2_wit");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/wasi_p2_wit");
     for package in [
         "io",
         "clocks",
@@ -47,7 +49,7 @@ pub fn wasi_p2_component() -> Vec<u8> {
 }
 
 /// The library's trait and types: qualified names, every method trapping by default.
-pub fn generate() -> String {
+fn generate() -> String {
     let options = WitOptions {
         naming: WitNaming::Qualified,
         default_trap: true,
@@ -58,7 +60,7 @@ pub fn generate() -> String {
 
 #[test]
 fn the_checked_in_trait_is_what_the_generator_produces() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(GENERATED);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(GENERATED);
     let fresh = generate();
     if std::env::var_os("WASM2RS_BLESS").is_some() {
         std::fs::write(&path, &fresh).unwrap();
