@@ -194,6 +194,12 @@ fn import_ident(module: &str, field: &str) -> String {
     }
 }
 
+/// The prefix `import_ident` gives to the functions of the interface `module`
+/// (`wasi:filesystem/types@0.2.0` is `wasi_filesystem_types`).
+pub(crate) fn interface_ident(module: &str) -> String {
+    import_ident(module, "")
+}
+
 /// Whether `name` is `{prefix}{digits}`, e.g. the generated `get_global0`.
 fn numbered(name: &str, prefix: &str) -> bool {
     name.strip_prefix(prefix)

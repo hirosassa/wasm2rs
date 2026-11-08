@@ -4,9 +4,10 @@
 //! `wasm2rs --dump <input.wasm>` to summarize a module, or
 //! `wasm2rs --extract-core <component.wasm> <dir>` to write a component's core
 //! modules to `<dir>/module{n}.wasm`, or
-//! `wasm2rs --wit-host [--glue] <component.wasm> [output]` to write a typed `Host` trait for
-//! the interfaces the component imports (with `--glue`, also the `Glue` that lowers it to
-//! the flat `Imports` trait).
+//! `wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]` to write a
+//! typed `Host` trait for the interfaces the component imports (with `--glue`, also the `Glue`
+//! that lowers it to the flat `Imports` trait; with `--external-types=<path>`, only the `Glue`,
+//! naming the `Host` trait and the interface-qualified types of the library at `<path>`).
 //!
 //! Reads a WebAssembly binary and writes the transpiled Rust source. With no
 //! `funcs_per_file`/`max_bytes_per_file`, the whole module is one file, written
@@ -39,7 +40,7 @@ use wasm2rs::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue] <component.wasm> [output]";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -96,6 +97,7 @@ fn run() -> Result<(), String> {
     let mut extract_core = false;
     let mut wit_host = false;
     let mut glue = false;
+    let mut external_types: Option<String> = None;
     let mut named_exports = false;
     let mut named_imports = false;
     let mut import_memory = false;
@@ -115,6 +117,16 @@ fn run() -> Result<(), String> {
             jobs = n
                 .parse()
                 .map_err(|_| format!("invalid --jobs value: {n}"))?;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("--external-types=") {
+            if path.is_empty() {
+                return Err(
+                    "--external-types needs a Rust path, e.g. --external-types=my_host::wasi"
+                        .to_string(),
+                );
+            }
+            external_types = Some(path.to_string());
             continue;
         }
         if let Some(list) = arg.strip_prefix("--entry-exports=") {
@@ -161,6 +173,8 @@ fn run() -> Result<(), String> {
             (split_dispatch > 0, "--split-dispatch"),
             (jobs > 0, "--jobs"),
             (entry_exports.is_some(), "--entry-exports"),
+            // The one code flag that `--wit-host --glue` itself takes.
+            (external_types.is_some() && !wit_host, "--external-types"),
         ];
         match code_flags
             .into_iter()
@@ -176,6 +190,9 @@ fn run() -> Result<(), String> {
     if glue && !wit_host {
         return Err("--glue only applies to --wit-host".to_string());
     }
+    if external_types.is_some() && !glue {
+        return Err("--external-types only applies to --wit-host --glue".to_string());
+    }
     let wasm = std::fs::read(&input).map_err(|e| format!("cannot read {input}: {e}"))?;
     if wit_host {
         for (given, flag) in [(dump, "--dump"), (extract_core, "--extract-core")] {
@@ -189,7 +206,11 @@ fn run() -> Result<(), String> {
             funcs_per_file > 0 || max_bytes_per_file > 0,
         )?;
         let rust = if glue {
-            wasm2rs::wit_host_glue(&wasm)
+            let options = wasm2rs::WitOptions {
+                external_types,
+                ..wasm2rs::WitOptions::default()
+            };
+            wasm2rs::wit_host_glue_with_options(&wasm, &options)
         } else {
             wasm2rs::wit_host_trait(&wasm)
         }

@@ -26,7 +26,7 @@ use wasmparser::{
 };
 
 use crate::TranspileError;
-use crate::codegen::{assign_import_names, plain_ident};
+use crate::codegen::{assign_import_names, interface_ident, plain_ident};
 
 mod glue;
 
@@ -75,6 +75,9 @@ pub struct WitResource {
     pub name: String,
     /// Identifies the resource within one component.
     pub id: u32,
+    /// The interface that defines the type, as imported (e.g. `wasi:io/error@0.2.0`), however
+    /// many interfaces re-export it; `None` for a type no imported interface defines.
+    pub interface: Option<String>,
 }
 
 /// A WIT record: its name (as the interface exports it, kebab-case) and its fields.
@@ -87,6 +90,9 @@ pub struct WitRecord {
     pub name: String,
     /// The field names and types, in order.
     pub fields: Vec<(String, Arc<WitType>)>,
+    /// The interface that defines the type, as imported (e.g. `wasi:io/error@0.2.0`), however
+    /// many interfaces re-export it; `None` for a type no imported interface defines.
+    pub interface: Option<String>,
 }
 
 /// A WIT variant: its name (as the interface exports it, kebab-case) and its cases.
@@ -96,6 +102,9 @@ pub struct WitVariant {
     pub name: String,
     /// The case names and their payload types (`None` for a case without payload), in order.
     pub cases: Vec<(String, Option<Arc<WitType>>)>,
+    /// The interface that defines the type, as imported (e.g. `wasi:io/error@0.2.0`), however
+    /// many interfaces re-export it; `None` for a type no imported interface defines.
+    pub interface: Option<String>,
 }
 
 /// A WIT enum: its name and its case names, in order.
@@ -105,6 +114,9 @@ pub struct WitEnum {
     pub name: String,
     /// The case names, in order.
     pub cases: Vec<String>,
+    /// The interface that defines the type, as imported (e.g. `wasi:io/error@0.2.0`), however
+    /// many interfaces re-export it; `None` for a type no imported interface defines.
+    pub interface: Option<String>,
 }
 
 /// A WIT flags type: its name and its flag names, in order (at most 32).
@@ -114,6 +126,9 @@ pub struct WitFlags {
     pub name: String,
     /// The flag names, in order; flag `i` is bit `i`.
     pub flags: Vec<String>,
+    /// The interface that defines the type, as imported (e.g. `wasi:io/error@0.2.0`), however
+    /// many interfaces re-export it; `None` for a type no imported interface defines.
+    pub interface: Option<String>,
 }
 
 /// A function of an imported interface instance.
@@ -177,6 +192,7 @@ fn new_resource(stack: &mut [Scope], name: &str) -> Result<Arc<WitResource>, Tra
     Ok(Arc::new(WitResource {
         name: name.to_string(),
         id,
+        interface: None,
     }))
 }
 
@@ -259,6 +275,7 @@ fn defined(scope: &Scope, d: &ComponentDefinedType<'_>) -> Soft<WitType> {
         ComponentDefinedType::Record(f) => WitType::Record(WitRecord {
             name: format!("record{}", scope.types.len()),
             fields: fields(scope, f)?,
+            interface: None,
         }),
         ComponentDefinedType::List(t) => WitType::List(val(scope, *t)?),
         ComponentDefinedType::Option(t) => WitType::Option(val(scope, *t)?),
@@ -277,10 +294,12 @@ fn defined(scope: &Scope, d: &ComponentDefinedType<'_>) -> Soft<WitType> {
                 .iter()
                 .map(|c| Ok((c.name.to_string(), opt_val(scope, c.ty)?)))
                 .collect::<Soft<Vec<_>>>()?,
+            interface: None,
         }),
         ComponentDefinedType::Enum(cases) => WitType::Enum(WitEnum {
             name: format!("enum{}", scope.types.len()),
             cases: cases.iter().map(|c| (*c).to_string()).collect(),
+            interface: None,
         }),
         ComponentDefinedType::Flags(names) => {
             if names.len() > MAX_FLAGS {
@@ -292,6 +311,7 @@ fn defined(scope: &Scope, d: &ComponentDefinedType<'_>) -> Soft<WitType> {
             WitType::Flags(WitFlags {
                 name: format!("flags{}", scope.types.len()),
                 flags: names.iter().map(|n| (*n).to_string()).collect(),
+                interface: None,
             })
         }
         ComponentDefinedType::Own(i) => WitType::Own(resource_at(scope, *i)?),
@@ -342,18 +362,22 @@ fn export_type(def: Def, name: &str) -> Def {
             WitType::Record(r) => WitType::Record(WitRecord {
                 name,
                 fields: r.fields.clone(),
+                interface: r.interface.clone(),
             }),
             WitType::Variant(v) => WitType::Variant(WitVariant {
                 name,
                 cases: v.cases.clone(),
+                interface: v.interface.clone(),
             }),
             WitType::Enum(e) => WitType::Enum(WitEnum {
                 name,
                 cases: e.cases.clone(),
+                interface: e.interface.clone(),
             }),
             WitType::Flags(f) => WitType::Flags(WitFlags {
                 name,
                 flags: f.flags.clone(),
+                interface: f.interface.clone(),
             }),
             _ => return def,
         };
@@ -418,18 +442,25 @@ fn alias_type(
 
 /// The types of one import of `declared`: every resource it defines is a new resource
 /// (the declaration may be imported several times), and the types that mention it are
-/// rewritten to match. Resources that came from outside keep their identity.
+/// rewritten to match. Resources that came from outside keep their identity. Every type the
+/// declaration defines (one that no earlier import defined) is recorded as defined by
+/// `interface`, the name of this import.
 fn instantiate(
     stack: &mut [Scope],
     declared: &Arc<Instance>,
+    interface: &str,
 ) -> Result<Arc<Instance>, TranspileError> {
-    if declared.resources.is_empty() {
-        return Ok(declared.clone());
-    }
-    let mut subst = Subst::default();
+    let mut subst = Subst {
+        interface: interface.to_string(),
+        ..Subst::default()
+    };
     let mut resources = Vec::new();
     for r in &declared.resources {
         let fresh = new_resource(stack, &r.name)?;
+        let fresh = Arc::new(WitResource {
+            interface: Some(interface.to_string()),
+            ..(*fresh).clone()
+        });
         subst.resources.insert(r.id, fresh.clone());
         resources.push(fresh);
     }
@@ -453,6 +484,8 @@ fn instantiate(
 /// Replaces resources by id, keeping shared types shared (each `Arc` is rewritten once).
 #[derive(Default)]
 struct Subst {
+    /// The interface an unattributed type is defined by.
+    interface: String,
     resources: HashMap<u32, Arc<WitResource>>,
     memo: HashMap<*const WitType, Arc<WitType>>,
 }
@@ -475,6 +508,11 @@ impl Subst {
         t.as_ref().map(|t| self.arc(t))
     }
 
+    /// The defining interface of a type: the one it has, else this import's.
+    fn definer(&self, interface: &Option<String>) -> Option<String> {
+        interface.clone().or_else(|| Some(self.interface.clone()))
+    }
+
     fn ty(&mut self, t: &WitType) -> WitType {
         match t {
             WitType::List(t) => WitType::List(self.arc(t)),
@@ -491,6 +529,7 @@ impl Subst {
                     .iter()
                     .map(|(n, t)| (n.clone(), self.arc(t)))
                     .collect(),
+                interface: self.definer(&r.interface),
             }),
             WitType::Variant(v) => WitType::Variant(WitVariant {
                 name: v.name.clone(),
@@ -499,6 +538,15 @@ impl Subst {
                     .iter()
                     .map(|(n, t)| (n.clone(), self.opt(t)))
                     .collect(),
+                interface: self.definer(&v.interface),
+            }),
+            WitType::Enum(e) => WitType::Enum(WitEnum {
+                interface: self.definer(&e.interface),
+                ..e.clone()
+            }),
+            WitType::Flags(f) => WitType::Flags(WitFlags {
+                interface: self.definer(&f.interface),
+                ..f.clone()
             }),
             WitType::Own(r) => WitType::Own(self.resource(r)),
             WitType::Borrow(r) => WitType::Borrow(self.resource(r)),
@@ -742,7 +790,7 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
                                 )));
                             };
                             // Each import makes its own resource types.
-                            let inst = instantiate(&mut stack, &declared)?;
+                            let inst = instantiate(&mut stack, &declared, &name)?;
                             innermost_mut(&mut stack)?
                                 .instances
                                 .push(Some(inst.clone()));
@@ -841,20 +889,47 @@ impl Decl {
             Decl::Flags(f) => &f.name,
         }
     }
+
+    /// The interface that defines the declared type.
+    fn interface(&self) -> Option<&str> {
+        match self {
+            Decl::Record(r) => r.interface.as_deref(),
+            Decl::Variant(v) => v.interface.as_deref(),
+            Decl::Enum(e) => e.interface.as_deref(),
+            Decl::Flags(f) => f.interface.as_deref(),
+        }
+    }
+}
+
+/// What the Rust name of a declared type or resource is, and where it lives.
+#[derive(Clone)]
+struct Placed {
+    /// The `pub mod` that holds it (`Qualified` naming); `None` when all types are top-level.
+    module: Option<String>,
+    /// The type's name inside that scope.
+    name: String,
 }
 
 /// The records, variants, enums, flags and resources the trait's functions use, with the
-/// Rust names they were given (one namespace).
+/// Rust names they were given (one namespace, or one per defining interface when qualified).
 #[derive(Default)]
 struct Records {
-    /// Resource ids and their Rust names.
-    resource_names: HashMap<u32, String>,
-    /// The resources in the order they must be emitted, with their Rust names.
-    resources: Vec<String>,
+    /// Types live in one `pub mod` per defining interface and are named by interface and WIT
+    /// name only, never by a counter.
+    qualified: bool,
+    /// What goes before `<module>::<Type>` where the trait and the glue spell a type: empty,
+    /// or the path of the library that defines the types.
+    prefix: String,
+    /// The module of every defining interface seen (`None` = no interface defines it).
+    modules: HashMap<Option<String>, String>,
+    /// Resource ids and where they are named.
+    resource_names: HashMap<u32, Placed>,
+    /// The resources in the order they must be emitted.
+    resources: Vec<Placed>,
     /// Each distinct declared type (by kind, name and rendered members) and its Rust name.
-    names: HashMap<String, String>,
+    names: HashMap<String, Placed>,
     /// The declared types in the order they must be emitted, with their Rust names.
-    list: Vec<(Decl, String)>,
+    list: Vec<(Decl, Placed)>,
     /// Type nodes visited so far, against [`NODE_BUDGET`].
     visited: Cell<usize>,
 }
@@ -915,7 +990,41 @@ fn type_name(name: &str) -> String {
     out
 }
 
+/// The module (`pub mod`) of the types defined by `interface`: the interface name as a
+/// method-name prefix (`wasi:filesystem/types@0.2.0` is `wasi_filesystem_types`), made not to
+/// collide with a keyword or a name the glue puts at the top level.
+fn module_ident(interface: Option<&str>) -> String {
+    let Some(interface) = interface else {
+        return "component".to_string();
+    };
+    let ident = interface_ident(interface);
+    const TOP_LEVEL: [&str; 9] = [
+        "glue_abi",
+        "glue_mem",
+        "glue_alloc",
+        "std",
+        "core",
+        "alloc",
+        "crate",
+        "self",
+        "super",
+    ];
+    if TOP_LEVEL.contains(&ident.as_str()) || plain_ident(&ident) != ident {
+        format!("{ident}_")
+    } else {
+        ident
+    }
+}
+
 impl Records {
+    fn new(naming: WitNaming, prefix: String) -> Self {
+        Records {
+            qualified: naming == WitNaming::Qualified,
+            prefix,
+            ..Records::default()
+        }
+    }
+
     fn visit(&self) -> Result<(), TranspileError> {
         let n = self.visited.get().saturating_add(1);
         self.visited.set(n);
@@ -927,9 +1036,15 @@ impl Records {
         Ok(())
     }
 
-    /// What identifies a declared type: its kind, name and members as rendered.
+    /// What identifies a declared type: its kind, name and members as rendered, and (when
+    /// qualified) the interface that defines it. A type shared by several interfaces has one
+    /// definer, so it is still one type; two interfaces that each define a type of the same
+    /// name and shape have two.
     fn key(&self, decl: &Decl) -> Result<String, TranspileError> {
         let mut key = String::new();
+        if self.qualified {
+            let _ = write!(key, "{:?}|", decl.interface());
+        }
         match decl {
             Decl::Record(r) => {
                 let _ = write!(key, "record|{}", r.name);
@@ -979,18 +1094,49 @@ impl Records {
         if self.names.contains_key(&key) {
             return Ok(());
         }
-        let rust_name = self.fresh_name(decl.name());
-        self.names.insert(key, rust_name.clone());
-        self.list.push((decl, rust_name));
+        let placed = self.place(decl.interface(), decl.name());
+        self.names.insert(key, placed.clone());
+        self.list.push((decl, placed));
         Ok(())
     }
 
-    /// A Rust type name for `wit_name` that no declared type or resource has yet.
-    fn fresh_name(&self, wit_name: &str) -> String {
+    /// The module that holds the types `interface` defines. Two interfaces whose names make
+    /// the same module name get distinct ones (the later gets a number).
+    fn module_for(&mut self, interface: Option<&str>) -> String {
+        let key = interface.map(str::to_string);
+        if let Some(module) = self.modules.get(&key) {
+            return module.clone();
+        }
+        let base = module_ident(interface);
+        let mut module = base.clone();
+        let mut n = 1usize;
+        while self.modules.values().any(|taken| *taken == module) {
+            n = n.saturating_add(1);
+            module = format!("{base}_{n}");
+        }
+        self.modules.insert(key, module.clone());
+        module
+    }
+
+    /// Where a type named `wit_name`, defined by `interface`, goes.
+    fn place(&mut self, interface: Option<&str>, wit_name: &str) -> Placed {
+        let module = self.qualified.then(|| self.module_for(interface));
+        Placed {
+            name: self.fresh_name(module.as_deref(), wit_name),
+            module,
+        }
+    }
+
+    /// A Rust type name for `wit_name` that no declared type or resource of `module` has yet.
+    fn fresh_name(&self, module: Option<&str>, wit_name: &str) -> String {
         let base = type_name(wit_name);
         let mut name = base.clone();
         let mut n = 1usize;
-        while self.list.iter().any(|(_, taken)| *taken == name) || self.resources.contains(&name) {
+        let taken = |name: &str| {
+            let same = |p: &Placed| p.module.as_deref() == module && p.name == name;
+            self.list.iter().any(|(_, p)| same(p)) || self.resources.iter().any(same)
+        };
+        while taken(&name) {
             n = n.saturating_add(1);
             name = format!("{base}{n}");
         }
@@ -999,9 +1145,9 @@ impl Records {
 
     fn add_resource(&mut self, r: &Arc<WitResource>) {
         if !self.resource_names.contains_key(&r.id) {
-            let name = self.fresh_name(&r.name);
-            self.resource_names.insert(r.id, name.clone());
-            self.resources.push(name);
+            let placed = self.place(r.interface.as_deref(), &r.name);
+            self.resource_names.insert(r.id, placed.clone());
+            self.resources.push(placed);
         }
     }
 
@@ -1028,18 +1174,36 @@ impl Records {
         }
     }
 
-    /// The Rust name of an already registered declared type.
-    fn declared(&self, decl: Decl) -> Result<String, TranspileError> {
+    /// How `placed` is spelled after `prefix`.
+    fn path(placed: &Placed, prefix: &str) -> String {
+        match &placed.module {
+            Some(module) => format!("{prefix}{module}::{}", placed.name),
+            None => placed.name.clone(),
+        }
+    }
+
+    /// The Rust name of an already registered declared type, spelled after `prefix`.
+    fn declared(&self, decl: Decl, prefix: &str) -> Result<String, TranspileError> {
         Ok(match self.names.get(&self.key(&decl)?) {
-            Some(name) => name.clone(),
+            Some(placed) => Self::path(placed, prefix),
             None => type_name(decl.name()),
         })
     }
 
+    /// The type as the trait and the glue spell it.
     fn rust(&self, ty: &WitType) -> Result<String, TranspileError> {
+        self.rust_in(ty, &self.prefix)
+    }
+
+    /// The type as spelled from inside a type's own module (`super::` reaches the others).
+    fn rust_in_module(&self, ty: &WitType) -> Result<String, TranspileError> {
+        self.rust_in(ty, "super::")
+    }
+
+    fn rust_in(&self, ty: &WitType, prefix: &str) -> Result<String, TranspileError> {
         self.visit()?;
         let inner = |t: &Option<Arc<WitType>>| match t {
-            Some(t) => self.rust(t),
+            Some(t) => self.rust_in(t, prefix),
             None => Ok("()".to_string()),
         };
         Ok(match ty {
@@ -1056,25 +1220,25 @@ impl Records {
             WitType::Bool => "bool".into(),
             WitType::Char => "char".into(),
             WitType::String => "String".into(),
-            WitType::List(t) => format!("Vec<{}>", self.rust(t)?),
-            WitType::Option(t) => format!("Option<{}>", self.rust(t)?),
+            WitType::List(t) => format!("Vec<{}>", self.rust_in(t, prefix)?),
+            WitType::Option(t) => format!("Option<{}>", self.rust_in(t, prefix)?),
             WitType::Result { ok, err } => format!("Result<{}, {}>", inner(ok)?, inner(err)?),
             WitType::Tuple(ts) => {
                 let parts = ts
                     .iter()
-                    .map(|t| self.rust(t))
+                    .map(|t| self.rust_in(t, prefix))
                     .collect::<Result<Vec<_>, _>>()?;
                 match parts.as_slice() {
                     [one] => format!("({one},)"),
                     many => format!("({})", many.join(", ")),
                 }
             }
-            WitType::Record(r) => self.declared(Decl::Record(r.clone()))?,
-            WitType::Variant(v) => self.declared(Decl::Variant(v.clone()))?,
-            WitType::Enum(e) => self.declared(Decl::Enum(e.clone()))?,
-            WitType::Flags(f) => self.declared(Decl::Flags(f.clone()))?,
+            WitType::Record(r) => self.declared(Decl::Record(r.clone()), prefix)?,
+            WitType::Variant(v) => self.declared(Decl::Variant(v.clone()), prefix)?,
+            WitType::Enum(e) => self.declared(Decl::Enum(e.clone()), prefix)?,
+            WitType::Flags(f) => self.declared(Decl::Flags(f.clone()), prefix)?,
             WitType::Own(r) | WitType::Borrow(r) => match self.resource_names.get(&r.id) {
-                Some(name) => name.clone(),
+                Some(placed) => Self::path(placed, prefix),
                 None => type_name(&r.name),
             },
         })
@@ -1199,14 +1363,90 @@ fn write_flags(out: &mut String, name: &str, flags: &WitFlags) {
 /// interface instance, or a function using an unsupported type
 /// ([`TranspileError::Unsupported`], naming the type, the function and the interface).
 pub fn wit_host_trait(component: &[u8]) -> Result<String, TranspileError> {
-    let funcs = wit_functions(component)?;
-    Ok(render_host(&funcs)?.0)
+    wit_host_trait_with_options(component, &WitOptions::default())
 }
 
-/// The text of [`wit_host_trait`], with what the glue needs to name things the same way: the
-/// registered types and the method name of every function (parallel to `funcs`).
-fn render_host(funcs: &[WitFunc]) -> Result<(String, Records, Vec<String>), TranspileError> {
-    let mut records = Records::default();
+/// How the generated types are named.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WitNaming {
+    /// All types are top-level, named after the WIT type; a name used again by another type
+    /// gets a number (`ErrorCode`, `ErrorCode2`), so a name depends on what else the
+    /// component imports.
+    #[default]
+    Default,
+    /// Each type is in a `pub mod` named after the interface that defines it (the prefix of
+    /// the interface's method names: `wasi_filesystem_types::ErrorCode`,
+    /// `wasi_sockets_network::ErrorCode`) and keeps its WIT name; the path of a type depends
+    /// only on its defining interface and its name, never on the other imports or their order.
+    /// A type used by several interfaces is declared once, in the module of its definer.
+    ///
+    /// The version of an interface is not part of the module name (nor of the method names),
+    /// so a component importing two versions of one interface gets a numbered module for the
+    /// later one, which depends on import order; this is not supported with
+    /// [`WitOptions::external_types`].
+    Qualified,
+}
+
+/// Options of [`wit_host_trait_with_options`] and [`wit_host_glue_with_options`]. The default
+/// is what [`wit_host_trait`] and [`wit_host_glue`] produce.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WitOptions {
+    /// How the types are named.
+    pub naming: WitNaming,
+    /// Glue only: the Rust path of a library that already declares the types and `trait Host`
+    /// (the output of [`WitNaming::Qualified`] for a component with at least these imports).
+    /// The glue then declares neither, and refers to `<path>::Host` and
+    /// `<path>::<interface module>::<Type>`. Implies [`WitNaming::Qualified`].
+    pub external_types: Option<String>,
+}
+
+impl WitOptions {
+    fn naming(&self) -> WitNaming {
+        if self.external_types.is_some() {
+            WitNaming::Qualified
+        } else {
+            self.naming
+        }
+    }
+
+    fn records(&self) -> Records {
+        let prefix = self
+            .external_types
+            .as_ref()
+            .map(|path| format!("{path}::"))
+            .unwrap_or_default();
+        Records::new(self.naming(), prefix)
+    }
+}
+
+/// [`wit_host_trait`] with [`WitOptions`].
+///
+/// # Errors
+///
+/// Those of [`wit_host_trait`]; and [`WitOptions::external_types`] is an
+/// [`Unsupported`](TranspileError::Unsupported) error, since only the glue refers to a library's
+/// trait (the library declares it).
+pub fn wit_host_trait_with_options(
+    component: &[u8],
+    options: &WitOptions,
+) -> Result<String, TranspileError> {
+    if options.external_types.is_some() {
+        return Err(unsupported(
+            "external types apply to the glue only (the trait is what the library declares)",
+        ));
+    }
+    let funcs = wit_functions(component)?;
+    let (records, names) = register(&funcs, options)?;
+    write_declarations(&funcs, &records, &names)
+}
+
+/// Registers the types of `funcs` and assigns the method names (parallel to `funcs`): what
+/// the trait and the glue must agree on.
+fn register(
+    funcs: &[WitFunc],
+    options: &WitOptions,
+) -> Result<(Records, Vec<String>), TranspileError> {
+    let mut records = options.records();
     for f in funcs {
         for (_, ty) in &f.params {
             records.add_in(ty)?;
@@ -1220,62 +1460,19 @@ fn render_host(funcs: &[WitFunc]) -> Result<(String, Records, Vec<String>), Tran
         let index = u32::try_from(i).map_err(|_| unsupported("too many imported functions"))?;
         indexed.push((f.interface.as_str(), f.name.as_str(), index));
     }
-    let names = assign_import_names(indexed);
+    Ok((records, assign_import_names(indexed)))
+}
 
+/// The declarations of the registered types and the `Host` trait.
+fn write_declarations(
+    funcs: &[WitFunc],
+    records: &Records,
+    names: &[String],
+) -> Result<String, TranspileError> {
     let mut out = String::from("// Generated by wasm2rs --wit-host.\n");
-    for name in &records.resources {
-        let _ = writeln!(
-            out,
-            "\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct {name}(pub u32);"
-        );
-    }
-    for (decl, name) in &records.list {
-        match decl {
-            Decl::Record(record) => {
-                let idents = unique_idents(record.fields.iter().map(|(n, _)| n.as_str()));
-                let _ = writeln!(
-                    out,
-                    "\n#[derive(Debug, Clone, PartialEq)]\npub struct {name} {{"
-                );
-                for (ident, (_, ty)) in idents.iter().zip(&record.fields) {
-                    let _ = writeln!(out, "    pub {ident}: {},", records.rust(ty)?);
-                }
-                out.push_str("}\n");
-            }
-            Decl::Variant(variant) => {
-                let idents = case_idents(variant.cases.iter().map(|(n, _)| n.as_str()));
-                let _ = writeln!(
-                    out,
-                    "\n#[derive(Debug, Clone, PartialEq)]\npub enum {name} {{"
-                );
-                for (ident, (_, ty)) in idents.iter().zip(&variant.cases) {
-                    match ty {
-                        Some(t) => {
-                            let _ = writeln!(out, "    {ident}({}),", records.rust(t)?);
-                        }
-                        None => {
-                            let _ = writeln!(out, "    {ident},");
-                        }
-                    }
-                }
-                out.push_str("}\n");
-            }
-            Decl::Enum(e) => {
-                let idents = case_idents(e.cases.iter().map(String::as_str));
-                let _ = writeln!(
-                    out,
-                    "\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum {name} {{"
-                );
-                for ident in &idents {
-                    let _ = writeln!(out, "    {ident},");
-                }
-                out.push_str("}\n");
-            }
-            Decl::Flags(f) => write_flags(&mut out, name, f),
-        }
-    }
+    write_types(&mut out, records)?;
     out.push_str("\npub trait Host {\n");
-    for (f, name) in funcs.iter().zip(&names) {
+    for (f, name) in funcs.iter().zip(names) {
         // Debug-escaped: an interface or function name may hold any characters.
         let _ = writeln!(out, "    /// {:?} {:?}", f.interface, f.name);
         let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
@@ -1290,7 +1487,115 @@ fn render_host(funcs: &[WitFunc]) -> Result<(String, Records, Vec<String>), Tran
         let _ = writeln!(out, "{sig};");
     }
     out.push_str("}\n");
-    Ok((out, records, names))
+    Ok(out)
+}
+
+/// The type declarations: top-level, or (qualified) one `pub mod` per defining interface,
+/// ordered by module and name so that the text does not depend on the order of the functions.
+fn write_types(out: &mut String, records: &Records) -> Result<(), TranspileError> {
+    if !records.qualified {
+        for placed in &records.resources {
+            write_resource(out, &placed.name);
+        }
+        for (decl, placed) in &records.list {
+            write_decl(out, records, decl, &placed.name)?;
+        }
+        return Ok(());
+    }
+    let mut modules: Vec<&String> = records.modules.values().collect();
+    modules.sort();
+    for module in modules {
+        let in_module = |p: &Placed| p.module.as_deref() == Some(module.as_str());
+        let mut resources: Vec<&Placed> =
+            records.resources.iter().filter(|p| in_module(p)).collect();
+        resources.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut decls: Vec<&(Decl, Placed)> =
+            records.list.iter().filter(|(_, p)| in_module(p)).collect();
+        decls.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+        if resources.is_empty() && decls.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "\npub mod {module} {{");
+        let mut body = String::new();
+        for placed in resources {
+            write_resource(&mut body, &placed.name);
+        }
+        for (decl, placed) in decls {
+            write_decl(&mut body, records, decl, &placed.name)?;
+        }
+        for line in body.lines() {
+            if line.is_empty() {
+                out.push('\n');
+            } else {
+                let _ = writeln!(out, "    {line}");
+            }
+        }
+        out.push_str("}\n");
+    }
+    Ok(())
+}
+
+fn write_resource(out: &mut String, name: &str) {
+    let _ = writeln!(
+        out,
+        "\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct {name}(pub u32);"
+    );
+}
+
+/// One record, variant, enum or flags declaration named `name`, whose member types are spelled
+/// as from inside the module that holds it (when not qualified no type has a module, so the
+/// `super::` prefix is never written and the spelling is the top-level one).
+fn write_decl(
+    out: &mut String,
+    records: &Records,
+    decl: &Decl,
+    name: &str,
+) -> Result<(), TranspileError> {
+    let rust = |ty: &WitType| records.rust_in_module(ty);
+    match decl {
+        Decl::Record(record) => {
+            let idents = unique_idents(record.fields.iter().map(|(n, _)| n.as_str()));
+            let _ = writeln!(
+                out,
+                "\n#[derive(Debug, Clone, PartialEq)]\npub struct {name} {{"
+            );
+            for (ident, (_, ty)) in idents.iter().zip(&record.fields) {
+                let _ = writeln!(out, "    pub {ident}: {},", rust(ty)?);
+            }
+            out.push_str("}\n");
+        }
+        Decl::Variant(variant) => {
+            let idents = case_idents(variant.cases.iter().map(|(n, _)| n.as_str()));
+            let _ = writeln!(
+                out,
+                "\n#[derive(Debug, Clone, PartialEq)]\npub enum {name} {{"
+            );
+            for (ident, (_, ty)) in idents.iter().zip(&variant.cases) {
+                match ty {
+                    Some(t) => {
+                        let _ = writeln!(out, "    {ident}({}),", rust(t)?);
+                    }
+                    None => {
+                        let _ = writeln!(out, "    {ident},");
+                    }
+                }
+            }
+            out.push_str("}\n");
+        }
+        Decl::Enum(e) => {
+            let idents = case_idents(e.cases.iter().map(String::as_str));
+            let _ = writeln!(
+                out,
+                "\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum {name} {{"
+            );
+            for ident in &idents {
+                let _ = writeln!(out, "    {ident},");
+            }
+            out.push_str("}\n");
+        }
+        Decl::Flags(f) => write_flags(out, name, f),
+    }
+    Ok(())
 }
 
 /// [`wit_host_trait`] plus the glue that lowers it to the flat reentrant `Imports` trait of
@@ -1319,8 +1624,26 @@ fn render_host(funcs: &[WitFunc]) -> Result<(String, Records, Vec<String>), Tran
 /// result, more than 16 flat parameters, or a result of more than one flat value): not
 /// supported yet, so no glue is returned at all rather than a partial one.
 pub fn wit_host_glue(component: &[u8]) -> Result<String, TranspileError> {
+    wit_host_glue_with_options(component, &WitOptions::default())
+}
+
+/// [`wit_host_glue`] with [`WitOptions`]. With
+/// [`external_types`](WitOptions::external_types) the text holds only the glue (and a
+/// `use <path>::Host;`), which names the library's trait and types by path.
+///
+/// # Errors
+///
+/// Those of [`wit_host_glue`].
+pub fn wit_host_glue_with_options(
+    component: &[u8],
+    options: &WitOptions,
+) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
-    let (mut out, records, names) = render_host(&funcs)?;
+    let (records, names) = register(&funcs, options)?;
+    let mut out = match &options.external_types {
+        Some(path) => format!("// Generated by wasm2rs --wit-host.\nuse {path}::Host;\n"),
+        None => write_declarations(&funcs, &records, &names)?,
+    };
     glue::write(&mut out, &funcs, &names, &records)?;
     Ok(out)
 }
