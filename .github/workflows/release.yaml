@@ -73,7 +73,9 @@ jobs:
 
   # Publish the crates to crates.io last: it is irreversible, so it runs only
   # after the release and all binaries have been produced successfully.
-  # `wasm2rs-macros` depends on `wasm2rs`, so it goes second.
+  # `wasm2rs-macros` depends on `wasm2rs`, so it goes second. `wasm2rs-wasi` has its own
+  # version and no dependency on them; it is published last so a failure there leaves the
+  # transpiler release complete.
   publish-crate:
     needs: upload-assets
     runs-on: ubuntu-latest
@@ -89,3 +91,14 @@ jobs:
       # the dependency of `wasm2rs-macros` resolves.
       - name: Publish wasm2rs-macros to crates.io
         run: cargo publish -p wasm2rs-macros --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # The crate has its own version, so most tags leave it unchanged: publish only a
+      # version that crates.io does not have yet.
+      - name: Publish wasm2rs-wasi to crates.io
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wasm2rs-wasi") | .version')
+          status=$(curl -s -o /dev/null -w '%{http_code}' -A "wasm2rs-release" "https://crates.io/api/v1/crates/wasm2rs-wasi/$version")
+          if [ "$status" = "200" ]; then
+            echo "wasm2rs-wasi $version is already published; skipping"
+          else
+            cargo publish -p wasm2rs-wasi --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          fi

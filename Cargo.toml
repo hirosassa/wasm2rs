@@ -31,7 +31,7 @@ default = ["cli"]
 cli = ["dep:mimalloc"]
 
 [workspace]
-members = ["wasm2rs-macros"]
+members = ["wasm2rs-macros", "wasm2rs-wasi"]
 
 [dependencies]
 wasmparser = "0.263.0"
