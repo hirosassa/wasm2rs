@@ -143,3 +143,4 @@ mod wasip2_wit_regression;
 mod wit_glue;
 mod wit_glue_memory;
 mod wit_host;
+mod wit_qualified;

@@ -18,7 +18,8 @@ mod wit_abi;
 pub use dump::{ModuleSummary, dump};
 pub use extract::extract_core_modules;
 pub use wit::{
-    WitFunc, WitRecord, WitResource, WitType, wit_functions, wit_host_glue, wit_host_trait,
+    WitFunc, WitNaming, WitOptions, WitRecord, WitResource, WitType, wit_functions, wit_host_glue,
+    wit_host_glue_with_options, wit_host_trait, wit_host_trait_with_options,
 };
 
 use wasmparser::{

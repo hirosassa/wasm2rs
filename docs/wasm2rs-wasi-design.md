@@ -91,9 +91,18 @@ are deleted.
 
 | Phase | Content |
 |---|---|
-| P0 | Generator: external-types glue mode; interface-qualified type names. Tests against the existing hand-written WIT subsets. |
+| P0 | Generator: external-types glue mode; interface-qualified type names. Tests against the existing hand-written WIT subsets. **Done**: `WitOptions { naming, external_types }` with `wit_host_trait_with_options` / `wit_host_glue_with_options`, and `--wit-host --glue --external-types=<path>`; see the note below. |
 | P1 | Create `wasm2rs-wasi`: generate and check in the trait; move the host logic; add the freshness test; switch the test helpers (`build_program`) and `wasip2_run` to the library. |
 | P2 | Configuration surface above, including the injectable clocks, random and streams. |
+
+P0 as built: with `WitNaming::Qualified` each type is in a `pub mod` named like the method-name
+prefix of its defining interface (`wasi_filesystem_types::ErrorCode`; the decoder records the
+definer on every record, variant, enum, flags and resource), with its WIT name and no counter. The
+type identity key includes the definer (a type shared by several interfaces has one definer, so it is
+declared once; two interfaces that each define the same name and shape are two types). Only if two
+different interface names make the same module name (e.g. two versions of one interface) does the
+later get a `_2` suffix. The default naming and its output are unchanged. The CLI writes only the
+external glue (`--external-types`); the library's trait comes from the API.
 
 Each phase is its own PR; P1 depends on P0, P2 on P1. Out of scope: the known limitations of
 [typed-host-design.md](typed-host-design.md) (pollable slots never freed, stdin thread never joined,

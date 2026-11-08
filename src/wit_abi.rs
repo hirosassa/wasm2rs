@@ -323,6 +323,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, t)| (format!("f{i}"), arc(t)))
                 .collect(),
+            interface: None,
         })
     }
 
@@ -334,6 +335,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, t)| (format!("c{i}"), t.map(arc)))
                 .collect(),
+            interface: None,
         })
     }
 
@@ -366,6 +368,7 @@ mod tests {
         let e = WitType::Enum(WitEnum {
             name: "e".into(),
             cases: (0..257).map(|i| format!("c{i}")).collect(),
+            interface: None,
         });
         assert_eq!(layout(&e), (2, 2));
     }
@@ -376,6 +379,7 @@ mod tests {
             WitType::Flags(WitFlags {
                 name: "f".into(),
                 flags: (0..n).map(|i| format!("f{i}")).collect(),
+                interface: None,
             })
         };
         assert_eq!(layout(&flags(0)), (0, 1));
