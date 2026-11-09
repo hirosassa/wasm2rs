@@ -152,8 +152,6 @@ README. Each section names the code or test that backs it.
 - The stdin thread is never joined, and a read blocked inside the reader cannot be cancelled. It
   is started lazily (only when the guest uses stdin) and holds the stdin buffer weakly, so after
   the host is dropped it exits as soon as that pending read returns; until then it lingers.
-  (Resolved: pollable slots are freed on `pollable.drop` and reused, so a subscribe/drop loop no
-  longer grows the table.)
 - Waiting for a peer (flushes, `blocking-splice` on a connection, `shutdown`, dropping an output
   stream) polls with 1 ms sleeps and has no deadline except in `exit`/drop (5 s). A peer that
   stays alive and never reads blocks the guest there.

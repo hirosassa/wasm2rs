@@ -8,6 +8,7 @@ use wasm2rs_wasi::wasi_clocks_wall_clock::Datetime;
 use wasm2rs_wasi::wasi_filesystem_types::{
     Descriptor, DescriptorFlags, ErrorCode as Fs, OpenFlags, PathFlags,
 };
+use wasm2rs_wasi::wasi_io_poll::Pollable;
 use wasm2rs_wasi::wasi_sockets_network::{
     ErrorCode as Net, IpSocketAddress, Ipv4SocketAddress, Network,
 };
@@ -610,6 +611,9 @@ fn the_stdin_reader_starts_on_first_use() {
     let touched = Arc::new(AtomicBool::new(false));
     let mut host = builder().stdin(Flag(touched.clone())).build().unwrap();
     let i = host.wasi_cli_stdin_get_stdin();
+    // other host calls do not start the thread either
+    let _ = host.wasi_clocks_monotonic_clock_subscribe_duration(1);
+    let _ = host.wasi_cli_stdout_get_stdout();
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert!(!touched.load(Ordering::SeqCst), "read before first use");
     let _ = host.wasi_io_streams_method_input_stream_blocking_read(i, 1);
@@ -636,7 +640,6 @@ fn a_failing_stdout_writer_is_a_stream_error_not_a_panic() {
 
 #[test]
 fn a_dropped_pollable_slot_is_reused_and_the_table_does_not_grow() {
-    use wasm2rs_wasi::wasi_io_poll::Pollable;
     let mut host = builder().build().unwrap();
     let first = host.wasi_clocks_monotonic_clock_subscribe_duration(1);
     let kept = host.wasi_clocks_monotonic_clock_subscribe_duration(1);
@@ -644,10 +647,11 @@ fn a_dropped_pollable_slot_is_reused_and_the_table_does_not_grow() {
     let reused = host.wasi_clocks_monotonic_clock_subscribe_duration(1);
     assert_eq!(reused.0, first.0, "the freed slot is the next one used");
     assert_ne!(reused.0, kept.0);
+    host.wasi_io_poll_resource_drop_pollable(reused);
     // a program that subscribes and drops in a loop stays on one slot
     for _ in 0..10_000 {
         let p = host.wasi_clocks_monotonic_clock_subscribe_duration(1);
-        assert!(p.0 <= kept.0.max(first.0) + 1, "table grew to slot {}", p.0);
+        assert_eq!(p.0, first.0, "table grew");
         host.wasi_io_poll_resource_drop_pollable(p);
     }
 }
@@ -656,28 +660,9 @@ fn a_dropped_pollable_slot_is_reused_and_the_table_does_not_grow() {
 fn a_stale_pollable_handle_is_ready_not_blocking() {
     let mut host = builder().build().unwrap();
     let p = host.wasi_clocks_monotonic_clock_subscribe_duration(u64::MAX / 2);
-    let stale = wasm2rs_wasi::wasi_io_poll::Pollable(p.0);
+    let stale = Pollable(p.0);
     host.wasi_io_poll_resource_drop_pollable(p);
     assert!(host.wasi_io_poll_method_pollable_ready(stale));
-}
-
-#[test]
-fn no_stdin_thread_is_started_without_stdin_use() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    struct Flag(Arc<AtomicBool>);
-    impl Read for Flag {
-        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-            self.0.store(true, Ordering::SeqCst);
-            Ok(0)
-        }
-    }
-    let touched = Arc::new(AtomicBool::new(false));
-    let mut host = builder().stdin(Flag(touched.clone())).build().unwrap();
-    let _ = host.wasi_clocks_monotonic_clock_subscribe_duration(1);
-    let _ = host.wasi_cli_stdout_get_stdout();
-    drop(host);
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    assert!(!touched.load(Ordering::SeqCst), "stdin thread ran unused");
 }
 
 #[test]
@@ -704,7 +689,6 @@ fn the_stdin_thread_ends_once_the_host_is_dropped() {
     let mut host = builder().stdin(Fed(rx, ended)).build().unwrap();
     let i = host.wasi_cli_stdin_get_stdin();
     let _ = host.wasi_io_streams_method_input_stream_read(i, 1); // starts the thread
-    std::thread::sleep(std::time::Duration::from_millis(50));
     drop(host);
     feed.send(b"late".to_vec()).unwrap(); // unblocks the pending read
     ended_rx
