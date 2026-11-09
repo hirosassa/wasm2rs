@@ -100,6 +100,8 @@ impl WasiHostBuilder {
 
     /// Shows the host directory `host_path` to the guest as `guest_name`. Descriptors
     /// 0, 1, ... are the preopens in the order of these calls.
+    /// Each preopen is confined and checked for access on its own: if one directory lies
+    /// inside another, the guest reaches it through the outer preopen with the outer access.
     pub fn preopen(
         mut self,
         guest_name: impl Into<String>,

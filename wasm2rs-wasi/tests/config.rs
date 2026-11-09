@@ -139,7 +139,7 @@ fn several_preopens_have_their_own_name_root_and_access() {
         Ok(())
     );
     assert!(rw.join("d").is_dir() && !ro.join("d").exists());
-    // a descriptor opened below a read-only preopen stays read-only
+    // a descriptor opened below a writable preopen inherits its access
     let sub = host
         .wasi_filesystem_types_method_descriptor_open_at(
             Descriptor(1),

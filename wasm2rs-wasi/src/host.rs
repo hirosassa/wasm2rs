@@ -22,10 +22,10 @@
 //! `blocking-write-and-flush`/`write-zeroes`/`blocking-write-zeroes-and-flush`,
 //! `create-directory-at`, `remove-directory-at`, `unlink-file-at`, `rename-at`, `symlink-at`,
 //! `link-at`, `set-size`, `sync`, `sync-data`, `set-times` and `set-times-at`. The semantics:
-//! one preopened directory shown as "/", descriptors and streams in
-//! slabs (the preopen is descriptor 0 and never freed; a file's input or output stream is
-//! `FIRST_FILE_STREAM + slot` in its own slab, clear of the stdio handles), paths resolved
-//! under the preopen (absolute paths, `..` and symlinks that lead out are `not-permitted`).
+//! preopened directories under their guest names, descriptors and streams in
+//! slabs (the preopens are the first descriptors and never freed; a file's input or output
+//! stream is `FIRST_FILE_STREAM + slot` in its own slab, clear of the stdio handles), paths
+//! resolved under the descriptor's preopen (absolute paths, `..` and symlinks that lead out are `not-permitted`).
 //! It also serves TCP over loopback (`wasi:sockets` network, instance-network, tcp,
 //! tcp-create-socket) with these semantics: an address outside
 //! 127.0.0.0/8 and ::1 is `access-denied` unless `with_external_network` was called, `finish-bind`

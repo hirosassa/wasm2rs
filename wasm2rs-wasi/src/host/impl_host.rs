@@ -14,7 +14,7 @@ impl Host for WasiHost {
         self.env.clone()
     }
 
-    /// "/", the preopened directory, when there is one; `None` without a preopen.
+    /// The configured initial cwd; by default "/" if a preopen is named "/", else `None`.
     fn wasi_cli_environment_initial_cwd(&mut self) -> Option<String> {
         match &self.cwd {
             Some(cwd) => cwd.clone(),
@@ -333,7 +333,7 @@ impl Host for WasiHost {
         self.listings.remove(handle.0 as usize);
     }
 
-    /// The preopen, named "/", if there is one.
+    /// The preopens with their guest names, in descriptor order.
     fn wasi_filesystem_preopens_get_directories(&mut self) -> Vec<(Descriptor, String)> {
         (0u32..)
             .zip(&self.preopens)
