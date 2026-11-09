@@ -15,6 +15,7 @@
 //!
 //! `include_component!("name")` includes the `$OUT_DIR/name.rs` that a build script wrote with
 //! `wasm2rs::build::transpile_component_to_out_dir("assets/name.wasm", &options)`.
+//! Pass the name without the `.wasm` extension: `include_component!("name.wasm")` is a compile error.
 //!
 //! The generated source is parsed into a token stream, which costs time and
 //! memory on a very large module; for those prefer a build script
@@ -28,7 +29,7 @@ use wasm2rs::{TranspileOptions, transpile_with_options};
 /// Include the Rust that `wasm2rs::build::transpile_component_to_out_dir` wrote for a component.
 ///
 /// `include_component!("run")` expands to `include!` of `$OUT_DIR/run.rs`: the name is the input
-/// file's name without its extension.
+/// file's name without its extension (a name ending in `.wasm` is a compile error).
 #[proc_macro]
 pub fn include_component(input: TokenStream) -> TokenStream {
     match component_file_name(input) {
@@ -50,12 +51,32 @@ fn component_file_name(input: TokenStream) -> Result<String, String> {
         return Err(usage.into());
     }
     let name = string_literal(&lit.to_string()).ok_or(usage)?;
+    component_rs_file(&name)
+}
+
+/// The `{name}.rs` that `transpile_component_to_out_dir` writes for the component `name`.
+///
+/// The builder names the file after the input's *file stem*, so a name ending in `.wasm` would
+/// make the macro look for `run.wasm.rs` and fail with a confusing "file not found"; refuse it
+/// here with the fix instead. Any other dot (`foo.bar`) belongs to the stem and is kept.
+fn component_rs_file(name: &str) -> Result<String, String> {
     if name.is_empty() || name.contains(['/', '\\']) {
         return Err(format!(
             "`{name}` is not a file name; pass the component's name without directory or extension"
         ));
     }
+    if let Some(stem) = strip_wasm_extension(name) {
+        return Err(format!(
+            "`{name}` has the `.wasm` extension; pass the name without it: `include_component!({stem:?})`"
+        ));
+    }
     Ok(format!("{name}.rs"))
+}
+
+/// `name` without a trailing `.wasm` (any case, as `file_stem` would drop it), if it has one.
+fn strip_wasm_extension(name: &str) -> Option<&str> {
+    let (stem, ext) = name.rsplit_once('.')?;
+    ext.eq_ignore_ascii_case("wasm").then_some(stem)
 }
 
 /// Transpile a `.wasm` file at compile time and expand to the generated Rust.
@@ -178,6 +199,29 @@ mod tests {
         assert_eq!(string_literal("r#\"a\"b\"#"), Some("a\"b".into()));
         assert_eq!(string_literal("r#\"a\""), None);
         assert_eq!(string_literal("12"), None);
+    }
+
+    #[test]
+    fn a_wasm_extension_is_refused_with_the_fix() {
+        let err = component_rs_file("run.wasm").unwrap_err();
+        assert!(err.contains("without it"), "{err}");
+        assert!(err.contains("include_component!(\"run\")"), "{err}");
+        assert!(component_rs_file("run.WASM").is_err());
+        assert!(
+            component_rs_file("foo.bar.wasm")
+                .unwrap_err()
+                .contains("\"foo.bar\"")
+        );
+        assert!(component_rs_file(".wasm").is_err());
+    }
+
+    #[test]
+    fn other_dots_belong_to_the_name() {
+        assert_eq!(component_rs_file("run"), Ok("run.rs".into()));
+        assert_eq!(component_rs_file("foo.bar"), Ok("foo.bar.rs".into()));
+        assert_eq!(component_rs_file("wasm"), Ok("wasm.rs".into()));
+        assert!(component_rs_file("a/b").is_err());
+        assert!(component_rs_file("").is_err());
     }
 
     #[test]
