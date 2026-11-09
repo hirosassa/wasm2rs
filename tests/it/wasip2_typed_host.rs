@@ -42,8 +42,21 @@ pub(crate) fn build_program(
     host: &str,
     body: &str,
 ) -> std::path::PathBuf {
+    build_program_with(component, core_wat, host, body, false)
+}
+
+/// [`build_program`], with the glue's `Exports` trait when `exports` is set (the component's
+/// exported functions are then called as `Exports::..(&mut inst, ..)`).
+fn build_program_with(
+    component: &[u8],
+    core_wat: &str,
+    host: &str,
+    body: &str,
+    exports: bool,
+) -> std::path::PathBuf {
     let options = WitOptions {
         external_types: Some("wasm2rs_wasi".to_string()),
+        exports,
         ..WitOptions::default()
     };
     let glue = wit_host_glue_with_options(component, &options).unwrap();
@@ -68,9 +81,20 @@ pub(crate) fn run_program(component: &[u8], core_wat: &str, host: &str, body: &s
     run_program_within(component, core_wat, host, body, RUN_LIMIT)
 }
 
+/// [`run_program`] for a component that exports functions, which the glue's `Exports` trait
+/// then calls.
+pub(crate) fn run_exporting_program(
+    component: &[u8],
+    core_wat: &str,
+    host: &str,
+    body: &str,
+) -> Output {
+    let bin = build_program_with(component, core_wat, host, body, true);
+    run_binary(&bin, RUN_LIMIT)
+}
+
 /// Like [`run_program`], but kills the program and panics if it runs longer than `limit`
 /// (a guest blocked forever must fail the test, not hang CI).
-#[allow(clippy::panic, reason = "a test helper: a timeout must fail the test")]
 pub(crate) fn run_program_within(
     component: &[u8],
     core_wat: &str,
@@ -78,7 +102,12 @@ pub(crate) fn run_program_within(
     body: &str,
     limit: Duration,
 ) -> Output {
-    let mut child = Command::new(build_program(component, core_wat, host, body))
+    run_binary(&build_program(component, core_wat, host, body), limit)
+}
+
+#[allow(clippy::panic, reason = "a test helper: a timeout must fail the test")]
+fn run_binary(bin: &std::path::Path, limit: Duration) -> Output {
+    let mut child = Command::new(bin)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

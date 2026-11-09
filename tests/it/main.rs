@@ -129,6 +129,7 @@ mod wasip2_typed_fs_symlink;
 mod wasip2_typed_fs_write;
 mod wasip2_typed_host;
 mod wasip2_typed_http_fields;
+mod wasip2_typed_http_incoming;
 mod wasip2_typed_io_error;
 mod wasip2_typed_name_lookup;
 mod wasip2_typed_random;

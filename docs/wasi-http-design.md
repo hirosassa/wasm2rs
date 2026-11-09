@@ -17,9 +17,8 @@ needs).
   `read_stream` / `write_stream`. Pollables are `Wait` values (`Copy`, slot indexes into host tables)
   waited in `wait_any`; stdin is fed by a thread through shared state.
 - Pluggable parts (`Clock`, `RandomSource`) are boxed trait objects set through the builder.
-- There are no HTTP dependencies. `tests/it/wasip2_wit_regression.rs` requires every non-http method to
-  be overridden and every http method to still trap; each phase below shrinks that exemption, which
-  is the progress measure.
+- There are no HTTP dependencies. `tests/it/wasip2_wit_regression.rs` requires every method, `wasi:http`
+  included, to be overridden (until H5 the http ones were exempt, which was the progress measure).
 
 ## Decisions
 
@@ -58,9 +57,9 @@ needs).
 | H2 ✅ | `outgoing-handler.handle`, `future-incoming-response` (thread, `Wait`), `incoming-response`, `incoming-body` (receive side), `http-error-code`. The `HttpClient` signature is unchanged; the host shares the client between request threads behind a mutex (`send` runs one at a time, bodies are read outside it). A client error is `internal-error` with its message; a policy refusal is `HTTP-request-denied`. `incoming-body.finish` returns a `future-trailers` that can only be dropped (H3 adds its methods). |
 | H3 ✅ | `outgoing-request.body`, `outgoing-body.write` / `finish`, `future-trailers.subscribe` / `get`. The body is a buffer behind an output stream (`HTTP_OUT_STREAM`, range above the input streams): `check-write` is the room left under the limit (`max_request_body`, 1 MiB) up to 4096, a write past the limit fails the stream (`last-operation-failed` carrying `HTTP-request-body-size`, then `closed`) and `finish` / the future report the same code. `handle` may come before or after the body is written: its thread waits for `finish` and only then calls the client; a body dropped without `finish` (or finished with trailers) fails the future with `internal-error` and the client never runs. **Trailers are not supported**: `HttpRequest` has no field for them and the `HttpClient` trait stays as it is (`ureq` cannot send them either), so `finish` with trailers is `internal-error("request trailers are not supported")`. A received message has no trailers either (`HttpResponse` carries none; `ureq` exposes none), so `future-trailers.get` answers `some(ok(ok(none)))` once, then `some(err)`; both are for H5/a richer client to lift. `UreqClient` refuses a non-empty body on `HEAD`/`CONNECT` (`ureq`'s `run` would send it); like every client error it reaches the guest as `internal-error`. |
 | H4 ✅ | `ureq` client behind feature `http-client`; end-to-end tests against a loopback server. |
-| H5 | incoming: mint API, `outgoing-response`, `response-outparam`, `incoming-handler#handle` through `Exports`; tests with a `proxy`-world component. |
+| H5 ✅ | incoming: `incoming-request` (method, path-with-query, scheme, authority, headers, `consume`), `outgoing-response` (status `100..=599`, default `200`; headers immutable once built; `body` once), `response-outparam.set`, and their drops. The embedder mints `new_incoming_request(IncomingRequestParts)` and `new_response_outparam()`, calls `Exports::export_wasi_http_incoming_handler_0_2_0_handle` (no change to the glue or `src/wit` was needed: `own<..>` resource parameters of an export already work) and then `take_response(outparam)`, which returns `None` when the guest never set one, else `Some(Result<ServedResponse, ErrorCode>)`: `ServedResponse` is plain data (status, headers, body), not a handle. The response body reuses the `outgoing-body` buffer of H3 (`HTTP_OUT_STREAM`) with the same limit (`max_request_body`); a body over it reports `HTTP-response-body-size`. The outparam slot belongs to the embedder: a guest dropping it leaves it for `take_response` to free. A body the guest left unfinished (or dropped) fails the answer with `internal-error`: the response is read once `handle` returns, so **streaming a response after `set` and trailers are not supported** (`finish` with trailers is `internal-error("trailers are not supported")`). Tests: `wasm2rs-wasi/tests/http_incoming.rs` (host) and `tests/it/wasip2_typed_http_incoming.rs` (a component with `import types` / `export incoming-handler`). |
 
-Each phase updates the exemption in `wasip2_wit_regression.rs` and the README.
+`wasip2_wit_regression.rs` now requires every method to be overridden.
 
 ## Risks
 

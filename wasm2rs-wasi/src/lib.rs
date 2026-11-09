@@ -2,7 +2,7 @@
 //!
 //! [`Host`] declares every method of the WASI 0.2.0 surface; a method a host does not
 //! override traps (panics, naming the method), so one implementation always compiles and an
-//! unsupported interface (today most of `wasi:http`) fails at the call instead of at build time.
+//! unsupported interface fails at the call instead of at build time.
 
 #[rustfmt::skip]
 #[expect(
@@ -26,6 +26,6 @@ pub use ureq_client::UreqClient;
 pub use host::OsRandom;
 pub use host::{
     Access, Clock, ConfigError, HttpClient, HttpClientError, HttpRequest, HttpResponse,
-    InsecureRandom, NetworkPolicy, RandomError, RandomSource, SystemClock, WasiHost,
-    WasiHostBuilder,
+    IncomingRequestParts, InsecureRandom, NetworkPolicy, RandomError, RandomSource, ServedResponse,
+    SystemClock, WasiHost, WasiHostBuilder,
 };

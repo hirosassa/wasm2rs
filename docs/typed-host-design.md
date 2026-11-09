@@ -16,8 +16,9 @@ README. Each section names the code or test that backs it.
   regenerates it and fails on any difference.
 - `wasm2rs-wasi/src/host.rs` is `WasiHost` and the pure logic around it (slabs, streams, send
   queue, path resolution, socket helpers); `host/impl_host.rs` is `impl Host for WasiHost`
-  (136 methods, no canonical-ABI code: the glue does all of that). The `wasi:http` methods keep
-  the trapping default; `tests/it/wasip2_wit_regression.rs` pins that this is the only gap.
+  (all 199 methods, no canonical-ABI code: the glue does all of that, `wasi:http` included, see
+  `docs/wasi-http-design.md`); `tests/it/wasip2_wit_regression.rs` pins that none is left at the
+  trapping default.
 - **Per-component glue.** The glue still depends on the component, so it is generated per
   component, in the external-types mode (`--wit-host --glue --external-types=wasm2rs_wasi`, or
   `WitOptions::external_types`): only `Glue<H: wasm2rs_wasi::Host>`, naming the library's types by

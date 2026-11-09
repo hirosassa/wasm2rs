@@ -51,8 +51,13 @@
 //! `not-supported`.
 //!
 //! The trait and its types are the library's own (`crate::Host`, `crate::wasi_filesystem_types`,
-//! ...); a method this host does not implement (most of `wasi:http` still) keeps the trait's
-//! trapping default.
+//! ...); a method this host does not implement keeps the trait's trapping default (today
+//! there is none: `WasiHost` overrides every method of the 0.2.0 surface).
+//!
+//! Incoming HTTP (`incoming-handler#handle` exported by the guest) is driven by the embedder:
+//! `new_incoming_request` and `new_response_outparam` mint the handles passed to `handle`, and
+//! `take_response` returns what the guest set once `handle` has returned (as plain data; a body
+//! the guest did not finish by then fails the answer, and trailers are not supported).
 
 use crate::wasi_cli_terminal_input::*;
 use crate::wasi_cli_terminal_output::*;
@@ -60,8 +65,9 @@ use crate::wasi_clocks_wall_clock::*;
 use crate::wasi_filesystem_types::ErrorCode as FsErrorCode;
 use crate::wasi_filesystem_types::*;
 use crate::wasi_http_types::{
-    ErrorCode as HttpErrorCode, Fields, FutureIncomingResponse, IncomingBody, IncomingResponse,
-    OutgoingBody, OutgoingRequest, RequestOptions,
+    ErrorCode as HttpErrorCode, Fields, FutureIncomingResponse, IncomingBody, IncomingRequest,
+    IncomingResponse, OutgoingBody, OutgoingRequest, OutgoingResponse, RequestOptions,
+    ResponseOutparam,
 };
 use crate::wasi_io_error::*;
 use crate::wasi_io_poll::*;
@@ -86,6 +92,7 @@ mod config;
 mod http;
 mod sources;
 pub use config::{Access, ConfigError, NetworkPolicy, WasiHostBuilder};
+pub use http::{IncomingRequestParts, ServedResponse};
 #[cfg(feature = "os-random")]
 pub use sources::OsRandom;
 pub use sources::{
@@ -173,7 +180,14 @@ pub struct WasiHost {
     /// The bodies behind `outgoing-body` handles; the output stream of slot `i` is
     /// `HTTP_OUT_STREAM + i`.
     http_out_bodies: Slab<http::HttpOutgoingBody>,
-    /// The most a request body may hold.
+    /// The `incoming-request` resources the embedder minted for `incoming-handler#handle`.
+    http_in_requests: Slab<http::HttpIncomingRequest>,
+    /// The `outgoing-response` resources a guest built.
+    http_out_responses: Slab<http::HttpOutgoingResponse>,
+    /// The `response-outparam` resources the embedder minted: empty until the guest sets one.
+    /// The slot is the embedder's, freed by `take_response` (the guest's drop leaves it).
+    http_outparams: Slab<Option<Result<http::HttpOutgoingResponse, HttpErrorCode>>>,
+    /// The most a request or response body may hold.
     http_max_body: usize,
     /// The `future-trailers` handed out by `incoming-body.finish`; a received message has no
     /// trailers here (an `HttpResponse` carries none), so each answers `none`.
@@ -207,6 +221,29 @@ impl WasiHost {
             .unwrap_or_else(|| http_missing("fields"))
     }
 
+    fn http_new_fields(&mut self, fields: http::HttpFields) -> Fields {
+        Fields(self.http_fields.insert(fields) as u32)
+    }
+
+    /// Takes over the `fields` handle's contents, for a constructor the guest gave it to.
+    fn http_take_fields(&mut self, h: Fields) -> http::HttpFields {
+        self.http_fields
+            .take(h.0 as usize)
+            .unwrap_or_else(|| http_missing("fields"))
+    }
+
+    /// A new `outgoing-body` and the handle its owner keeps; `too_large` is the `error-code`
+    /// of a body over `http_max_body`.
+    fn http_new_out_body(
+        &mut self,
+        too_large: fn(Option<u64>) -> HttpErrorCode,
+    ) -> (http::OutBodyHandle, OutgoingBody) {
+        let body = http::HttpOutgoingBody::new(self.http_max_body, too_large);
+        let handle = body.handle();
+        let slot = self.http_out_bodies.insert(body);
+        (handle, OutgoingBody(slot as u32))
+    }
+
     fn http_option(&self, h: RequestOptions) -> &http::HttpOptions {
         self.http_options
             .get(h.0 as usize)
@@ -235,6 +272,24 @@ impl WasiHost {
         self.http_futures
             .get_mut(h.0 as usize)
             .unwrap_or_else(|| http_missing("future-incoming-response"))
+    }
+
+    fn http_in_request(&self, h: IncomingRequest) -> &http::HttpIncomingRequest {
+        self.http_in_requests
+            .get(h.0 as usize)
+            .unwrap_or_else(|| http_missing("incoming-request"))
+    }
+
+    fn http_out_response(&self, h: OutgoingResponse) -> &http::HttpOutgoingResponse {
+        self.http_out_responses
+            .get(h.0 as usize)
+            .unwrap_or_else(|| http_missing("outgoing-response"))
+    }
+
+    fn http_out_response_mut(&mut self, h: OutgoingResponse) -> &mut http::HttpOutgoingResponse {
+        self.http_out_responses
+            .get_mut(h.0 as usize)
+            .unwrap_or_else(|| http_missing("outgoing-response"))
     }
 
     fn http_response(&self, h: IncomingResponse) -> &http::HttpIncomingResponse {
@@ -329,6 +384,34 @@ impl WasiHost {
         ))
     }
 
+    /// Mints the `incoming-request` for a call of `incoming-handler#handle` (see the `Exports`
+    /// trait of the generated glue). The guest owns the handle from then on; one that is not
+    /// consumed or dropped stays in the table.
+    pub fn new_incoming_request(&mut self, parts: IncomingRequestParts) -> IncomingRequest {
+        IncomingRequest(
+            self.http_in_requests
+                .insert(http::HttpIncomingRequest::new(parts)) as u32,
+        )
+    }
+
+    /// Mints the `response-outparam` for a call of `incoming-handler#handle`; pass the same
+    /// handle to `take_response` afterwards.
+    pub fn new_response_outparam(&mut self) -> ResponseOutparam {
+        ResponseOutparam(self.http_outparams.insert(None) as u32)
+    }
+
+    /// What the guest answered through `outparam`, once `handle` returned: `None` if it did
+    /// not set one (or the handle is unknown), `Some(Err(code))` for an error it set or a
+    /// response whose body it did not finish. The `outparam` is spent. The response is read
+    /// whole: a guest that streams its body after `set` is not supported.
+    pub fn take_response(
+        &mut self,
+        outparam: ResponseOutparam,
+    ) -> Option<Result<ServedResponse, HttpErrorCode>> {
+        let answer = self.http_outparams.take(outparam.0 as usize)??;
+        Some(answer.and_then(http::HttpOutgoingResponse::serve))
+    }
+
     pub fn new(env: Vec<(String, String)>) -> Self {
         WasiHost {
             args: Vec::new(),
@@ -371,6 +454,9 @@ impl WasiHost {
             http_responses: Slab::new(),
             http_bodies: Slab::new(),
             http_out_bodies: Slab::new(),
+            http_in_requests: Slab::new(),
+            http_out_responses: Slab::new(),
+            http_outparams: Slab::new(),
             http_max_body: DEFAULT_MAX_REQUEST_BODY,
             http_trailers: Slab::new(),
         }
