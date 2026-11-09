@@ -288,9 +288,10 @@ impl HttpOutgoingResponse {
     }
 }
 
-/// Whether `status` is an HTTP status code (`100..=599`).
+/// Whether `status` is accepted as a status code: `100..=999`, as wasmtime does (a client may
+/// send a three-digit code beyond the registered `100..=599`).
 pub(super) fn valid_status(status: u16) -> bool {
-    (100..=599).contains(&status)
+    (100..=999).contains(&status)
 }
 
 /// Whether `method` is a token (the named methods always are).

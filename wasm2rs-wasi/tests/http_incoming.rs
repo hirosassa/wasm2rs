@@ -135,19 +135,22 @@ fn a_response_starts_as_200_and_takes_status_codes_of_http() {
         h.wasi_http_types_method_outgoing_response_status_code(response),
         200
     );
-    for bad in [0, 99, 600, 1000] {
+    for bad in [0, 99, 1000, u16::MAX] {
         assert!(
             h.wasi_http_types_method_outgoing_response_set_status_code(response, bad)
                 .is_err(),
             "{bad}"
         );
     }
-    h.wasi_http_types_method_outgoing_response_set_status_code(response, 404)
-        .unwrap();
-    assert_eq!(
-        h.wasi_http_types_method_outgoing_response_status_code(response),
-        404
-    );
+    // wasmtime accepts 100..=999, so 600 and above are not refused here either
+    for ok in [100, 404, 600, 999] {
+        h.wasi_http_types_method_outgoing_response_set_status_code(response, ok)
+            .unwrap();
+        assert_eq!(
+            h.wasi_http_types_method_outgoing_response_status_code(response),
+            ok
+        );
+    }
 }
 
 #[test]
@@ -332,4 +335,34 @@ fn a_dropped_request_or_response_frees_its_slot() {
     let response = new_response(&mut h);
     h.wasi_http_types_resource_drop_outgoing_response(response);
     assert_eq!(new_response(&mut h), response);
+}
+
+#[test]
+fn an_outparam_that_was_taken_cannot_set_a_reused_slot() {
+    let mut h = host();
+    let old = h.new_response_outparam();
+    let response = new_response(&mut h);
+    set_ok(&mut h, old, response);
+    assert!(h.take_response(old).is_some());
+
+    // the next call's outparam may reuse the old one's storage
+    let fresh = h.new_response_outparam();
+    let late = new_response(&mut h);
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        set_ok(&mut h, old, late);
+    }));
+    assert!(refused.is_err(), "a spent outparam must be refused");
+    assert!(
+        h.take_response(fresh).is_none(),
+        "the fresh outparam must stay unset"
+    );
+}
+
+#[test]
+fn a_dropped_guest_outparam_handle_stays_distinct_after_take() {
+    let mut h = host();
+    let old = h.new_response_outparam();
+    assert!(h.take_response(old).is_none());
+    let fresh = h.new_response_outparam();
+    assert_ne!(old, fresh);
 }

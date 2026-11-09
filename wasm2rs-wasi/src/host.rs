@@ -187,8 +187,13 @@ pub struct WasiHost {
     /// The `outgoing-response` resources a guest built.
     http_out_responses: Slab<http::HttpOutgoingResponse>,
     /// The `response-outparam` resources the embedder minted: empty until the guest sets one.
-    /// The slot is the embedder's, freed by `take_response` (the guest's drop leaves it).
-    http_outparams: Slab<Option<Result<http::HttpOutgoingResponse, HttpErrorCode>>>,
+    /// The entry is the embedder's, freed by `take_response` (the guest's drop leaves it).
+    http_outparams:
+        std::collections::HashMap<u32, Option<Result<http::HttpOutgoingResponse, HttpErrorCode>>>,
+    /// The id of the next `response-outparam`. Ids are never reused while the host lives (a
+    /// wrapped counter skips the live ones), so an outparam a guest kept after `take_response`
+    /// cannot write into another call's answer.
+    next_outparam: u32,
     /// The most a request or response body may hold.
     http_max_body: usize,
     /// The `future-trailers` handed out by `incoming-body.finish`; a received message has no
@@ -320,16 +325,16 @@ impl WasiHost {
 
     /// Whether `get` of the future in `http_futures` at `slot` has an answer (a dropped one
     /// has: nothing is left to wait for).
-    fn http_future_ready(&self, slot: usize) -> bool {
+    fn http_future_ready(&self, r: SlotRef) -> bool {
         self.http_futures
-            .get(slot)
+            .get_ref(r)
             .is_none_or(http::HttpFuture::is_ready)
     }
 
     /// Whether the body in `http_bodies` at `slot` has bytes or its end to read.
-    fn http_body_readable(&self, slot: usize) -> bool {
+    fn http_body_readable(&self, r: SlotRef) -> bool {
         self.http_bodies
-            .get(slot)
+            .get_ref(r)
             .is_none_or(|body| body.shared().readable())
     }
 
@@ -399,7 +404,13 @@ impl WasiHost {
     /// Mints the `response-outparam` for a call of `incoming-handler#handle`; pass the same
     /// handle to `take_response` afterwards.
     pub fn new_response_outparam(&mut self) -> ResponseOutparam {
-        ResponseOutparam(self.http_outparams.insert(None) as u32)
+        while self.http_outparams.contains_key(&self.next_outparam) {
+            self.next_outparam = self.next_outparam.wrapping_add(1);
+        }
+        let id = self.next_outparam;
+        self.next_outparam = id.wrapping_add(1);
+        self.http_outparams.insert(id, None);
+        ResponseOutparam(id)
     }
 
     /// What the guest answered through `outparam`, once `handle` returned: `None` if it did
@@ -410,7 +421,7 @@ impl WasiHost {
         &mut self,
         outparam: ResponseOutparam,
     ) -> Option<Result<ServedResponse, HttpErrorCode>> {
-        let answer = self.http_outparams.take(outparam.0 as usize)??;
+        let answer = self.http_outparams.remove(&outparam.0)??;
         Some(answer.and_then(http::HttpOutgoingResponse::serve))
     }
 
@@ -458,7 +469,8 @@ impl WasiHost {
             http_out_bodies: Slab::new(),
             http_in_requests: Slab::new(),
             http_out_responses: Slab::new(),
-            http_outparams: Slab::new(),
+            http_outparams: std::collections::HashMap::new(),
+            next_outparam: 0,
             http_max_body: DEFAULT_MAX_REQUEST_BODY,
             http_trailers: Slab::new(),
         }
@@ -846,6 +858,16 @@ struct ErrorEntry {
 struct Slab<T> {
     slots: Vec<Option<T>>,
     free: Vec<usize>,
+    /// How often each slot was freed: a `SlotRef` taken earlier no longer matches once it grew.
+    epochs: Vec<u32>,
+}
+
+/// A slot of a `Slab` together with the epoch it had when the reference was made, so a
+/// pollable made for a resource cannot be confused with whatever is put in its slot later.
+#[derive(Clone, Copy, Debug)]
+struct SlotRef {
+    slot: usize,
+    epoch: u32,
 }
 
 impl<T> Slab<T> {
@@ -853,6 +875,7 @@ impl<T> Slab<T> {
         Slab {
             slots: Vec::new(),
             free: Vec::new(),
+            epochs: Vec::new(),
         }
     }
 
@@ -864,6 +887,7 @@ impl<T> Slab<T> {
             }
             None => {
                 self.slots.push(Some(value));
+                self.epochs.push(0);
                 self.slots.len() - 1
             }
         }
@@ -877,9 +901,29 @@ impl<T> Slab<T> {
         self.slots.get_mut(slot)?.as_mut()
     }
 
+    /// A reference to what the slot holds now (or to a slot that is free: it then matches
+    /// nothing live).
+    fn slot_ref(&self, slot: usize) -> SlotRef {
+        SlotRef {
+            slot,
+            epoch: self.epochs.get(slot).copied().unwrap_or(0),
+        }
+    }
+
+    /// What `r` was made for, `None` once it was freed (even if the slot is in use again).
+    fn get_ref(&self, r: SlotRef) -> Option<&T> {
+        if self.epochs.get(r.slot) != Some(&r.epoch) {
+            return None;
+        }
+        self.get(r.slot)
+    }
+
     /// Frees a slot and hands back its value; `None` for an unknown or already free one.
     fn take(&mut self, slot: usize) -> Option<T> {
         let value = self.slots.get_mut(slot)?.take()?;
+        if let Some(epoch) = self.epochs.get_mut(slot) {
+            *epoch = epoch.wrapping_add(1);
+        }
         self.free.push(slot);
         Some(value)
     }
@@ -1017,18 +1061,18 @@ enum Wait {
     Stdin,
     /// Ready when the listening socket in the slot has a connection to accept (or is not
     /// listening).
-    TcpAccept(usize),
+    TcpAccept(SlotRef),
     /// Ready when the stream in `tcp_in` at the slot has data, is at its end or failed.
-    TcpReadable(usize),
+    TcpReadable(SlotRef),
     /// Ready when the stream in `tcp_out` at the slot has room in its send queue (after it
     /// was drained as far as the socket takes) or failed.
-    TcpWritable(usize),
+    TcpWritable(SlotRef),
     /// Ready when the stream in `udp_in` at the slot has a datagram it would return (or failed).
-    UdpReadable(usize),
+    UdpReadable(SlotRef),
     /// Ready when the future in `http_futures` at the slot has its result.
-    HttpResponse(usize),
+    HttpResponse(SlotRef),
     /// Ready when the body in `http_bodies` at the slot has bytes or its end to read.
-    HttpReadable(usize),
+    HttpReadable(SlotRef),
 }
 
 impl Wait {
@@ -1037,12 +1081,12 @@ impl Wait {
             Wait::Ready => true,
             Wait::Deadline(d) => d <= now,
             Wait::Stdin => !stdin.bytes.is_empty() || stdin.eof,
-            Wait::TcpAccept(slot) => host.accept_ready(slot),
-            Wait::TcpReadable(slot) => host.readable(slot),
-            Wait::TcpWritable(slot) => host.tcp_writable(slot),
-            Wait::UdpReadable(slot) => host.udp_readable(slot),
-            Wait::HttpResponse(slot) => host.http_future_ready(slot),
-            Wait::HttpReadable(slot) => host.http_body_readable(slot),
+            Wait::TcpAccept(r) => host.accept_ready(r),
+            Wait::TcpReadable(r) => host.readable(r),
+            Wait::TcpWritable(r) => host.tcp_writable(r),
+            Wait::UdpReadable(r) => host.udp_readable(r),
+            Wait::HttpResponse(r) => host.http_future_ready(r),
+            Wait::HttpReadable(r) => host.http_body_readable(r),
         }
     }
 
@@ -1501,8 +1545,8 @@ impl WasiHost {
                 return Ok(data);
             }
             let wait = match (tcp_slot(stream), http_slot(stream)) {
-                (Some(slot), _) => Wait::TcpReadable(slot),
-                (None, Some(slot)) => Wait::HttpReadable(slot),
+                (Some(slot), _) => Wait::TcpReadable(self.tcp_in.slot_ref(slot)),
+                (None, Some(slot)) => Wait::HttpReadable(self.http_bodies.slot_ref(slot)),
                 (None, None) if stream == 0 => Wait::Stdin,
                 (None, None) => return Ok(data),
             };
@@ -1691,11 +1735,11 @@ impl WasiHost {
 
     /// Whether `accept` on the socket in `slot` would not block (or the socket is not
     /// listening, so `accept` answers at once). A connection found here is kept for `accept`.
-    fn accept_ready(&self, slot: usize) -> bool {
+    fn accept_ready(&self, r: SlotRef) -> bool {
         let Some(NetSocket {
             state: NetState::Listening { listener, pending },
             ..
-        }) = self.sockets.get(slot)
+        }) = self.sockets.get_ref(r)
         else {
             return true;
         };
@@ -1712,8 +1756,8 @@ impl WasiHost {
     }
 
     /// Whether the input stream in `tcp_in` at `slot` has data, is at its end or failed.
-    fn readable(&self, slot: usize) -> bool {
-        let Some(stream) = self.tcp_in.get(slot) else {
+    fn readable(&self, r: SlotRef) -> bool {
+        let Some(stream) = self.tcp_in.get_ref(r) else {
             return true;
         };
         match stream.peek(&mut [0u8; 1]) {
@@ -1738,8 +1782,8 @@ impl WasiHost {
     }
 
     /// Whether the output stream in `tcp_out` at `slot` is writable (or failed or dropped).
-    fn tcp_writable(&self, slot: usize) -> bool {
-        self.tcp_out.get(slot).is_none() || self.tcp_permit(slot) != Some(0)
+    fn tcp_writable(&self, r: SlotRef) -> bool {
+        self.tcp_out.get_ref(r).is_none() || self.tcp_permit(r.slot) != Some(0)
     }
 
     /// The socket behind a handle.
@@ -2347,8 +2391,8 @@ impl WasiHost {
     /// Whether the incoming stream at `slot` has a datagram `receive` would return, or failed.
     /// A datagram from another sender than a connected stream's peer is dropped here. A stale
     /// stream is always ready (so a waiting guest wakes up and traps) and takes nothing.
-    fn udp_readable(&self, slot: usize) -> bool {
-        let Some(end) = self.udp_in.get(slot) else {
+    fn udp_readable(&self, r: SlotRef) -> bool {
+        let Some(end) = self.udp_in.get_ref(r) else {
             return true;
         };
         if end.is_stale() {

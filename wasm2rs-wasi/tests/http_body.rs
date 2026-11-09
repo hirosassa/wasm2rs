@@ -391,3 +391,27 @@ fn a_full_body_still_permits_a_write_that_then_fails() {
         "{error:?}"
     );
 }
+
+#[test]
+fn a_pollable_of_a_dropped_future_does_not_follow_the_future_in_its_slot() {
+    let (mut h, _requests) = host();
+    let first = post(&mut h);
+    let done = h.wasi_http_outgoing_handler_handle(first, None).unwrap();
+    let stale = h.wasi_http_types_method_future_incoming_response_subscribe(done);
+    h.wasi_io_poll_method_pollable_block(stale);
+    h.wasi_http_types_resource_drop_future_incoming_response(done);
+
+    // the next future reuses the slot and stays pending: its request waits for `finish`
+    let second = post(&mut h);
+    let _body = h
+        .wasi_http_types_method_outgoing_request_body(second)
+        .unwrap();
+    let pending = h.wasi_http_outgoing_handler_handle(second, None).unwrap();
+    let live = h.wasi_http_types_method_future_incoming_response_subscribe(pending);
+    assert!(!h.wasi_io_poll_method_pollable_ready(live));
+
+    assert!(
+        h.wasi_io_poll_method_pollable_ready(stale),
+        "a pollable of a dropped resource is ready, whatever took its slot"
+    );
+}
