@@ -1,6 +1,6 @@
 //! A WASI preview2 host written against the typed [`Host`](crate::Host) trait. It has no
 //! canonical-ABI code: strings, lists, results and resources arrive as Rust values, and the
-//! `Glue` that `wasm2rs --wit-host --glue --external-types` generates per component lowers
+//! `Glue` that `wasm2rs --wit-host --glue --external-types=wasm2rs_wasi` generates per component lowers
 //! them to the module's flat `Imports`. It covers
 //! the interfaces a `println!` program uses: stdout, the environment, the arguments
 //! (`with_arguments`), exit, output streams and pollables, stderr and the terminal
@@ -84,12 +84,10 @@ fn os_seed() -> u64 {
 }
 
 pub struct WasiHost {
-    /// The program's arguments; set by `with_arguments`, read only by the optional
-    /// `get-arguments` block.
+    /// The program's arguments; set by `with_arguments`.
     args: Vec<String>,
     env: Vec<(String, String)>,
-    /// The monotonic clock's zero: when the host was created; read only by the optional
-    /// clock blocks.
+    /// The monotonic clock's zero: when the host was created.
     start: Instant,
     /// Filled by the stdin thread, which `start_stdin` spawns on first use.
     stdin: SharedStdin,
@@ -123,7 +121,7 @@ pub struct WasiHost {
     /// Directory listings behind `directory-entry-stream` handles: the entries (type, name)
     /// still to be read.
     listings: Slab<std::vec::IntoIter<(std::fs::FileType, String)>>,
-    // sockets: the fields below are read only by the optional `wasi:sockets` blocks
+    // sockets
     /// Whether the guest may use addresses outside loopback; set by `with_external_network`.
     external_network: bool,
     /// TCP sockets behind `tcp-socket` handles.
@@ -616,8 +614,7 @@ fn file_index(stream: u32) -> Option<usize> {
     stream.checked_sub(FIRST_FILE_STREAM).map(|i| i as usize)
 }
 
-/// The `error-code`s this host returns, without the generated type (which a component
-/// that imports no filesystem interface does not have); `From<Fs> for FsErrorCode` below.
+/// The filesystem `error-code`s this host returns; `From<Fs> for FsErrorCode` below.
 #[derive(Clone, Copy)]
 enum Fs {
     Access,
@@ -667,8 +664,7 @@ fn stays_below(path: &Path) -> bool {
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
-// Sockets: the types and helpers below use `std` only; the generated types come in the
-// optional blocks that follow.
+// Sockets: the types and helpers below use `std` only.
 
 /// The bytes the stdin thread has read and not yet handed to the guest.
 #[derive(Default)]
@@ -740,8 +736,7 @@ fn tcp_slot(stream: u32) -> Option<usize> {
     (stream as usize).checked_sub(TCP_STREAM)
 }
 
-/// The `wasi:sockets` `error-code`s this host returns, without the generated type;
-/// `From<Net> for NetErrorCode` below.
+/// The `wasi:sockets` `error-code`s this host returns; `From<Net> for NetErrorCode` below.
 #[derive(Clone, Copy)]
 enum Net {
     Unknown,
@@ -1504,8 +1499,7 @@ impl WasiHost {
     }
 }
 
-// The next blocks use generated types, so each is kept only if the component imports one of
-// the methods that need it.
+// The next blocks use the library's generated types.
 
 impl From<Fs> for FsErrorCode {
     fn from(e: Fs) -> Self {

@@ -8,8 +8,8 @@
 //! glue from `wasm2rs::wit_host_glue_with_options` (the `Glue` that lowers the library's
 //! `Host` trait to the module's imports) and a `main` calling the `wasi:cli/run` export are
 //! appended, and the result is built with `rustc -C opt-level=1`, linked against the
-//! `wasm2rs-wasi` rlib (built by `cargo build -p wasm2rs-wasi`), and run with `args` as the program's arguments and this
-//! process's environment. The guest's `argv[0]` is `<component.wasm>` as given on the command
+//! `wasm2rs-wasi` rlib (built by `cargo build -p wasm2rs-wasi`), and run with `args` as the
+//! program's arguments and this process's environment. The guest's `argv[0]` is `<component.wasm>` as given on the command
 //! line (like a real process's), followed by `args`.
 //!
 //! Exit codes: 0 when `run` returns ok, 1 on an error result or `wasi:cli/exit` with an
@@ -142,6 +142,12 @@ fn main() {
         .args(["--edition", "2024", "-C", "opt-level=1", "-A", "warnings"])
         .arg("--extern")
         .arg(format!("wasm2rs_wasi={}", rlib.display()))
+        .arg("-L")
+        .arg(format!(
+            "dependency={}",
+            rlib.parent()
+                .map_or_else(String::new, |d| d.display().to_string())
+        ))
         .arg(&src)
         .arg("-o")
         .arg(&bin)

@@ -1,8 +1,8 @@
 //! The typed WASI preview2 host of the `wasm2rs-wasi` crate: it implements the library's
 //! `Host` trait (no canonical-ABI code of its own) for the interfaces a `println!` program
-//! uses. The component declares those imports; a core module imports
-//! the same lowered functions, is transpiled with `named_imports` + `reentrant_imports` +
-//! `named_exports`, and runs with the generated glue and the typed host.
+//! uses. The component declares those imports; a core module imports the same lowered
+//! functions, is transpiled with `named_imports` + `reentrant_imports` + `named_exports`, and
+//! runs with the generated glue and the typed host.
 
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
