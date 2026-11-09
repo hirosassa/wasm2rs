@@ -211,3 +211,27 @@ fn extension_methods_are_sent() {
     assert_eq!(response.status, 204);
     assert!(server.join().unwrap().starts_with("PURGE /x HTTP/1.1"));
 }
+
+#[test]
+fn a_body_on_head_or_connect_is_refused_before_sending() {
+    for method in ["HEAD", "CONNECT"] {
+        // nothing listens: a refusal must come before the connection is tried
+        let mut req = request(method, "127.0.0.1:1", "/");
+        req.body = b"x".to_vec();
+        let error = UreqClient::new().send(req).err().expect("refused");
+        assert!(error.to_string().contains(method), "{error}");
+    }
+}
+
+#[test]
+fn an_empty_body_on_head_is_fine() {
+    let (addr, server) = serve(|mut s| {
+        let (head, _) = read_request(&mut s);
+        s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+            .unwrap();
+        head
+    });
+    let response = UreqClient::new().send(request("HEAD", &addr, "/")).unwrap();
+    assert_eq!(response.status, 200);
+    assert!(server.join().unwrap().starts_with("HEAD / HTTP/1.1"));
+}

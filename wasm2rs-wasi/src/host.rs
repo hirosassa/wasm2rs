@@ -61,7 +61,7 @@ use crate::wasi_filesystem_types::ErrorCode as FsErrorCode;
 use crate::wasi_filesystem_types::*;
 use crate::wasi_http_types::{
     ErrorCode as HttpErrorCode, Fields, FutureIncomingResponse, IncomingBody, IncomingResponse,
-    OutgoingRequest, RequestOptions,
+    OutgoingBody, OutgoingRequest, RequestOptions,
 };
 use crate::wasi_io_error::*;
 use crate::wasi_io_poll::*;
@@ -170,8 +170,15 @@ pub struct WasiHost {
     /// The bodies behind `incoming-body` handles; the input stream of slot `i` is
     /// `HTTP_STREAM + i`.
     http_bodies: Slab<http::HttpIncomingBody>,
-    /// The `future-trailers` handed out by `incoming-body.finish` (trailers come with H3).
-    http_trailers: Slab<()>,
+    /// The bodies behind `outgoing-body` handles; the output stream of slot `i` is
+    /// `HTTP_OUT_STREAM + i`.
+    http_out_bodies: Slab<http::HttpOutgoingBody>,
+    /// The most a request body may hold.
+    http_max_body: usize,
+    /// The `future-trailers` handed out by `incoming-body.finish`; a received message has no
+    /// trailers here (an `HttpResponse` carries none), so each answers `none`.
+    /// Whether `get` answered already.
+    http_trailers: Slab<bool>,
 }
 
 impl Drop for WasiHost {
@@ -242,6 +249,12 @@ impl WasiHost {
             .unwrap_or_else(|| http_missing("incoming-response"))
     }
 
+    fn http_out_body_mut(&mut self, h: OutgoingBody) -> &mut http::HttpOutgoingBody {
+        self.http_out_bodies
+            .get_mut(h.0 as usize)
+            .unwrap_or_else(|| http_missing("outgoing-body"))
+    }
+
     fn http_body_mut(&mut self, h: IncomingBody) -> &mut http::HttpIncomingBody {
         self.http_bodies
             .get_mut(h.0 as usize)
@@ -271,7 +284,7 @@ impl WasiHost {
         handle: OutgoingRequest,
         options: Option<RequestOptions>,
     ) -> Result<FutureIncomingResponse, HttpErrorCode> {
-        let request = self
+        let mut request = self
             .http_requests
             .take(handle.0 as usize)
             .unwrap_or_else(|| http_missing("outgoing-request"));
@@ -300,6 +313,7 @@ impl WasiHost {
         let path = request.path_with_query.as_deref().unwrap_or("/");
         let separator = if path.starts_with('/') { "" } else { "/" };
         let options = options.unwrap_or_default();
+        let body = request.body.take();
         let request = HttpRequest {
             method: http::method_name(&request.method),
             url: format!("{scheme}://{authority}{separator}{path}"),
@@ -309,7 +323,7 @@ impl WasiHost {
             first_byte_timeout: options.first_byte,
             between_bytes_timeout: options.between_bytes,
         };
-        let future = http::HttpFuture::spawn(client, request);
+        let future = http::HttpFuture::spawn(client, request, body);
         Ok(FutureIncomingResponse(
             self.http_futures.insert(future) as u32
         ))
@@ -356,6 +370,8 @@ impl WasiHost {
             http_futures: Slab::new(),
             http_responses: Slab::new(),
             http_bodies: Slab::new(),
+            http_out_bodies: Slab::new(),
+            http_max_body: DEFAULT_MAX_REQUEST_BODY,
             http_trailers: Slab::new(),
         }
     }
@@ -970,10 +986,23 @@ const TCP_STREAM: usize = 1 << 30;
 /// is added to it. The range lies between the file streams and `TCP_STREAM`.
 const HTTP_STREAM: usize = 1 << 29;
 
+/// The first handle of the streams of outgoing bodies: the slot in `http_out_bodies` is added to
+/// it. Input streams take the range below it.
+const HTTP_OUT_STREAM: usize = HTTP_STREAM + (1 << 28);
+
+/// The default of [`WasiHostBuilder::max_request_body`](WasiHostBuilder::max_request_body).
+const DEFAULT_MAX_REQUEST_BODY: usize = 1 << 20;
+
 /// The slot in `http_bodies` of a stream handle, `None` for any other stream.
 fn http_slot(stream: u32) -> Option<usize> {
     let slot = (stream as usize).checked_sub(HTTP_STREAM)?;
-    (slot < TCP_STREAM - HTTP_STREAM).then_some(slot)
+    (slot < HTTP_OUT_STREAM - HTTP_STREAM).then_some(slot)
+}
+
+/// The slot in `http_out_bodies` of a stream handle, `None` for any other stream.
+fn http_out_slot(stream: u32) -> Option<usize> {
+    let slot = (stream as usize).checked_sub(HTTP_OUT_STREAM)?;
+    (slot < TCP_STREAM - HTTP_OUT_STREAM).then_some(slot)
 }
 
 /// The slot in `tcp_in` or `tcp_out` of a stream handle, `None` for any other stream.
@@ -1238,6 +1267,7 @@ impl WasiHost {
     fn stream_failed(&mut self, stream: u32, e: &std::io::Error) -> StreamError {
         let is_file = tcp_slot(stream).is_none()
             && http_slot(stream).is_none()
+            && http_out_slot(stream).is_none()
             && file_index(stream).is_some();
         let fs = is_file.then(|| io_error_code(std::io::Error::from(e.kind())));
         self.last_operation_failed_with(e, fs, None)
@@ -1399,6 +1429,8 @@ impl WasiHost {
     fn output_is_open(&self, stream: u32) -> bool {
         if let Some(slot) = tcp_slot(stream) {
             self.tcp_out.get(slot).is_some()
+        } else if let Some(slot) = http_out_slot(stream) {
+            self.http_out_bodies.get(slot).is_some()
         } else if let Some(index) = file_index(stream) {
             self.outputs.get(index).is_some()
         } else {
@@ -1459,6 +1491,8 @@ impl WasiHost {
             return self.tcp_status(slot);
         } else if self.failed_out.contains(&stream) {
             return Err(StreamError::Closed); // a failure was reported: the stream is closed
+        } else if let Some(slot) = http_out_slot(stream) {
+            return self.http_out_write(stream, slot, contents);
         } else {
             match (stream, file_index(stream)) {
                 (_, Some(index)) => match self.outputs.get_mut(index) {
@@ -1473,6 +1507,42 @@ impl WasiHost {
             std::io::ErrorKind::NotFound => StreamError::Closed,
             _ => self.fail_output(stream, &e),
         })
+    }
+
+    /// Appends to the body behind an output stream; a body over the limit fails the stream
+    /// (`last-operation-failed` once, then `closed`).
+    fn http_out_write(
+        &mut self,
+        stream: u32,
+        slot: usize,
+        contents: &[u8],
+    ) -> Result<(), StreamError> {
+        let body = self
+            .http_out_bodies
+            .get(slot)
+            .ok_or(StreamError::Closed)?
+            .handle();
+        body.push(contents)
+            .map_err(|code| self.fail_http_out(stream, code))
+    }
+
+    /// `check-write` of an output stream that is a request body.
+    fn http_out_permit(&mut self, stream: u32, slot: usize) -> Result<u64, StreamError> {
+        if self.failed_out.contains(&stream) {
+            return Err(StreamError::Closed);
+        }
+        let body = self
+            .http_out_bodies
+            .get(slot)
+            .ok_or(StreamError::Closed)?
+            .handle();
+        body.permit()
+            .map_err(|code| self.fail_http_out(stream, code))
+    }
+
+    fn fail_http_out(&mut self, stream: u32, code: HttpErrorCode) -> StreamError {
+        self.failed_out.insert(stream);
+        self.last_operation_failed_with(format!("{code:?}"), None, Some(code))
     }
 
     /// Runs `f` on stderr for stream 2 and on stdout otherwise: the given writer, else the

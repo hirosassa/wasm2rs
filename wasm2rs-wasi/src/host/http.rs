@@ -1,6 +1,6 @@
 //! The state and validation behind the `wasi:http/types` resources `fields`, `request-options`
 //! and `outgoing-request`, and the threads behind `future-incoming-response` and
-//! `incoming-body`.
+//! `incoming-body`, and the buffer behind `outgoing-body`.
 
 use super::NetworkPolicy;
 use super::sources::{HttpClient, HttpClientError, HttpRequest, HttpResponse};
@@ -187,14 +187,15 @@ pub(super) struct HttpOptions {
     pub(super) between_bytes: Option<u64>,
 }
 
-/// An `outgoing-request` resource. Its body is not implemented yet (H3).
-#[derive(Debug, Clone)]
+/// An `outgoing-request` resource. `body` is set once the guest asked for it.
+#[derive(Clone)]
 pub(super) struct HttpOutgoingRequest {
     pub(super) method: Method,
     pub(super) path_with_query: Option<String>,
     pub(super) scheme: Option<Scheme>,
     pub(super) authority: Option<String>,
     pub(super) headers: HttpFields,
+    pub(super) body: Option<OutBodyHandle>,
 }
 
 impl HttpOutgoingRequest {
@@ -205,6 +206,7 @@ impl HttpOutgoingRequest {
             scheme: None,
             authority: None,
             headers: headers.freeze(),
+            body: None,
         }
     }
 }
@@ -307,7 +309,7 @@ pub(super) fn scheme_name(scheme: &Scheme) -> String {
 
 /// What the thread of a `future-incoming-response` fills.
 struct FutureShared {
-    result: Mutex<Option<Result<HttpResponse, HttpClientError>>>,
+    result: Mutex<Option<Result<HttpResponse, ErrorCode>>>,
     /// The guest dropped the future: a late response is dropped, not kept.
     cancelled: AtomicBool,
 }
@@ -322,16 +324,34 @@ pub(super) struct HttpFuture {
 impl HttpFuture {
     /// Starts `send` of `request` on a thread. The client is shared by all requests, so two
     /// requests in flight take turns inside `send` (the body is read outside it).
-    pub(super) fn spawn(client: Arc<Mutex<Box<dyn HttpClient>>>, request: HttpRequest) -> Self {
+    ///
+    /// With a `body`, the thread first waits for the guest to finish it (the guest may call
+    /// `handle` before it writes the body); a body dropped or refused instead fails the future
+    /// without running the client.
+    pub(super) fn spawn(
+        client: Arc<Mutex<Box<dyn HttpClient>>>,
+        mut request: HttpRequest,
+        body: Option<OutBodyHandle>,
+    ) -> Self {
         let shared = Arc::new(FutureShared {
             result: Mutex::new(None),
             cancelled: AtomicBool::new(false),
         });
         let slot = Arc::clone(&shared);
         std::thread::spawn(move || {
-            // a client that panics must not leave the guest waiting for ever
-            let result = std::panic::catch_unwind(AssertUnwindSafe(|| lock(&client).send(request)))
-                .unwrap_or_else(|_| Err(HttpClientError::new("the http client panicked")));
+            let ready = match body {
+                Some(body) => body.wait_finished().map(|bytes| request.body = bytes),
+                None => Ok(()),
+            };
+            let result = match ready {
+                Err(code) => Err(code),
+                // a client that panics must not leave the guest waiting for ever
+                Ok(()) => {
+                    std::panic::catch_unwind(AssertUnwindSafe(|| lock(&client).send(request)))
+                        .unwrap_or_else(|_| Err(HttpClientError::new("the http client panicked")))
+                        .map_err(|e| ErrorCode::InternalError(Some(e.to_string())))
+                }
+            };
             if !slot.cancelled.load(Ordering::SeqCst) {
                 *lock(&slot.result) = Some(result);
             }
@@ -348,7 +368,7 @@ impl HttpFuture {
     }
 
     /// `get`: `None` while pending, the result once, then `Some(Err(()))`.
-    pub(super) fn take(&mut self) -> Option<Result<Result<HttpResponse, HttpClientError>, ()>> {
+    pub(super) fn take(&mut self) -> Option<Result<Result<HttpResponse, ErrorCode>, ()>> {
         if self.taken {
             return Some(Err(()));
         }
@@ -378,6 +398,142 @@ impl HttpIncomingResponse {
             headers: HttpFields::received(response.headers),
             body: Some(response.body),
         }
+    }
+}
+
+/// How an `outgoing-body` stands.
+enum OutPhase {
+    Open,
+    Finished,
+    /// Dropped before `finish`, refused (trailers) or over the limit.
+    Failed(ErrorCode),
+}
+
+struct OutState {
+    bytes: Vec<u8>,
+    phase: OutPhase,
+}
+
+struct OutBodyShared {
+    state: Mutex<OutState>,
+    changed: Condvar,
+    limit: usize,
+}
+
+/// The most a stream's `check-write` allows at once.
+const WRITE_PERMIT: usize = 4096;
+
+/// A reference to the buffer of an `outgoing-body`, for the output stream and the request
+/// thread.
+#[derive(Clone)]
+pub(super) struct OutBodyHandle(Arc<OutBodyShared>);
+
+impl OutBodyHandle {
+    /// What `check-write` answers: the room left under the limit, up to 4096.
+    pub(super) fn permit(&self) -> Result<u64, ErrorCode> {
+        let state = lock(&self.0.state);
+        if let OutPhase::Failed(code) = &state.phase {
+            return Err(code.clone());
+        }
+        let room = self.0.limit.saturating_sub(state.bytes.len());
+        Ok(room.min(WRITE_PERMIT) as u64)
+    }
+
+    /// Appends `contents`; a body that would pass the limit fails for good instead.
+    pub(super) fn push(&self, contents: &[u8]) -> Result<(), ErrorCode> {
+        let mut state = lock(&self.0.state);
+        if let OutPhase::Failed(code) = &state.phase {
+            return Err(code.clone());
+        }
+        let size = state.bytes.len().saturating_add(contents.len());
+        if size > self.0.limit {
+            let code = ErrorCode::HTTPRequestBodySize(Some(size as u64));
+            state.phase = OutPhase::Failed(code.clone());
+            drop(state);
+            self.0.changed.notify_all();
+            return Err(code);
+        }
+        state.bytes.extend_from_slice(contents);
+        Ok(())
+    }
+
+    /// Closes the body for the request thread; a failed body stays failed.
+    pub(super) fn finish(&self) -> Result<(), ErrorCode> {
+        let mut state = lock(&self.0.state);
+        if let OutPhase::Failed(code) = &state.phase {
+            return Err(code.clone());
+        }
+        state.phase = OutPhase::Finished;
+        drop(state);
+        self.0.changed.notify_all();
+        Ok(())
+    }
+
+    /// Fails an open body (`finish` with trailers, a drop): the request will not run.
+    pub(super) fn fail(&self, code: ErrorCode) {
+        let mut state = lock(&self.0.state);
+        if matches!(state.phase, OutPhase::Open) {
+            state.phase = OutPhase::Failed(code);
+            drop(state);
+            self.0.changed.notify_all();
+        }
+    }
+
+    /// The bytes, once the guest finished the body; the failure if it never will.
+    fn wait_finished(&self) -> Result<Vec<u8>, ErrorCode> {
+        let mut state = lock(&self.0.state);
+        loop {
+            match &state.phase {
+                OutPhase::Finished => return Ok(std::mem::take(&mut state.bytes)),
+                OutPhase::Failed(code) => return Err(code.clone()),
+                OutPhase::Open => {
+                    state = self
+                        .0
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+            }
+        }
+    }
+}
+
+/// An `outgoing-body`. Dropping it before `finish` fails the request.
+pub(super) struct HttpOutgoingBody {
+    handle: OutBodyHandle,
+    stream_taken: bool,
+}
+
+impl HttpOutgoingBody {
+    pub(super) fn new(limit: usize) -> Self {
+        HttpOutgoingBody {
+            handle: OutBodyHandle(Arc::new(OutBodyShared {
+                state: Mutex::new(OutState {
+                    bytes: Vec::new(),
+                    phase: OutPhase::Open,
+                }),
+                changed: Condvar::new(),
+                limit,
+            })),
+            stream_taken: false,
+        }
+    }
+
+    pub(super) fn handle(&self) -> OutBodyHandle {
+        self.handle.clone()
+    }
+
+    /// `write` can be called once.
+    pub(super) fn take_stream(&mut self) -> bool {
+        !std::mem::replace(&mut self.stream_taken, true)
+    }
+}
+
+impl Drop for HttpOutgoingBody {
+    fn drop(&mut self) {
+        self.handle.fail(ErrorCode::InternalError(Some(
+            "the request body was dropped before finish".into(),
+        )));
     }
 }
 
