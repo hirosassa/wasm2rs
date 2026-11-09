@@ -189,6 +189,8 @@ mod run {
 }
 ```
 
+Pass the name *without* the `.wasm` extension: `include_component!("run.wasm")` is a `compile_error!` that says so (the file is named after the input's file stem, `run.rs`). A dot inside the name (`include_component!("foo.bar")` for `assets/foo.bar.wasm`) is fine.
+
 ### Using the proc macro
 
 For a one-line embed without a build script, use the `wasm2rs-macros` crate:

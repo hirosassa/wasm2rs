@@ -67,6 +67,7 @@ mod i64;
 mod imported_memory;
 mod imported_table;
 mod imports;
+mod include_component_project;
 mod inline_consumed;
 mod int_arith;
 mod labeled_block;
