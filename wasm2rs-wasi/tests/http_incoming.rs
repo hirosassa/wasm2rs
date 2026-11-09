@@ -3,13 +3,15 @@
 //! `incoming-handler#handle` does. The component path is covered by the `proxy` tests of the
 //! workspace; these are the edges.
 
+use std::io::Read;
+use std::time::Duration;
+
 use wasm2rs_wasi::wasi_http_types::{
     ErrorCode, Method, OutgoingResponse, ResponseOutparam, Scheme,
 };
 use wasm2rs_wasi::wasi_io_streams::StreamError;
 use wasm2rs_wasi::{
-    Host, IncomingRequestParts, RandomError, RandomSource, ServedResponse, WasiHost,
-    WasiHostBuilder,
+    Host, IncomingRequestParts, RandomError, RandomSource, ServedBody, WasiHost, WasiHostBuilder,
 };
 
 /// A random source for the build without the `os-random` feature, which has no default one.
@@ -52,7 +54,15 @@ fn parts() -> IncomingRequestParts {
             ("accept".into(), b"b".to_vec()),
         ],
         body: b"payload".to_vec(),
+        trailers: None,
     }
+}
+
+/// Reads a served body to its end.
+fn read_all(body: &mut ServedBody) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    body.read_to_end(&mut out)?;
+    Ok(out)
 }
 
 /// A response the guest builds: empty headers.
@@ -197,14 +207,12 @@ fn a_set_response_is_taken_with_its_body() {
         .unwrap();
     write_body(&mut h, response, b"made");
     set_ok(&mut h, out, response);
-    assert_eq!(
-        h.take_response(out),
-        Some(Ok(ServedResponse {
-            status: 201,
-            headers: vec![],
-            body: b"made".to_vec(),
-        }))
-    );
+    let mut served = h.take_response(out).unwrap().unwrap();
+    assert_eq!(served.status, 201);
+    assert!(served.headers.is_empty());
+    assert_eq!(served.body.finished_len(), Some(4));
+    assert_eq!(read_all(&mut served.body).unwrap(), b"made");
+    assert_eq!(served.body.trailers(), None);
 }
 
 #[test]
@@ -213,7 +221,8 @@ fn a_response_without_a_body_call_has_an_empty_body() {
     let out = h.new_response_outparam();
     let response = new_response(&mut h);
     set_ok(&mut h, out, response);
-    assert_eq!(h.take_response(out).unwrap().unwrap().body, b"");
+    let mut served = h.take_response(out).unwrap().unwrap();
+    assert_eq!(read_all(&mut served.body).unwrap(), b"");
 }
 
 #[test]
@@ -254,22 +263,101 @@ fn an_error_the_guest_set_is_the_answer() {
     let mut h = host();
     let out = h.new_response_outparam();
     h.wasi_http_types_static_response_outparam_set(out, Err(ErrorCode::LoopDetected));
-    assert_eq!(h.take_response(out), Some(Err(ErrorCode::LoopDetected)));
+    assert!(matches!(
+        h.take_response(out),
+        Some(Err(ErrorCode::LoopDetected))
+    ));
 }
 
 #[test]
-fn a_body_the_guest_did_not_finish_fails_the_response() {
+fn a_body_the_guest_did_not_finish_is_streamed_as_it_is_written() {
+    let mut h = host();
+    let out = h.new_response_outparam();
+    let response = new_response(&mut h);
+    let body = h
+        .wasi_http_types_method_outgoing_response_body(response)
+        .unwrap();
+    let stream = h.wasi_http_types_method_outgoing_body_write(body).unwrap();
+    h.wasi_io_streams_method_output_stream_write(stream, b"one ".to_vec())
+        .unwrap();
+    set_ok(&mut h, out, response);
+
+    // `handle` returned with the body open: the answer is there, the end is not
+    let mut served = h.take_response(out).unwrap().unwrap();
+    assert!(!served.body.is_finished());
+    assert_eq!(served.body.finished_len(), None);
+    let reader = std::thread::spawn(move || read_all(&mut served.body));
+
+    std::thread::sleep(Duration::from_millis(50));
+    h.wasi_io_streams_method_output_stream_write(stream, b"two".to_vec())
+        .unwrap();
+    h.wasi_io_streams_resource_drop_output_stream(stream);
+    h.wasi_http_types_static_outgoing_body_finish(body, None)
+        .unwrap();
+    assert_eq!(reader.join().unwrap().unwrap(), b"one two");
+}
+
+#[test]
+fn a_streamed_body_may_pass_the_buffer_limit_while_it_is_read() {
+    let mut h = builder().max_request_body(4).build().unwrap();
+    let out = h.new_response_outparam();
+    let response = new_response(&mut h);
+    let body = h
+        .wasi_http_types_method_outgoing_response_body(response)
+        .unwrap();
+    let stream = h.wasi_http_types_method_outgoing_body_write(body).unwrap();
+    set_ok(&mut h, out, response);
+    let mut served = h.take_response(out).unwrap().unwrap();
+    for chunk in [b"abcd", b"efgh"] {
+        h.wasi_io_streams_method_output_stream_write(stream, chunk.to_vec())
+            .unwrap();
+        let mut got = [0u8; 4];
+        served.body.read_exact(&mut got).unwrap();
+        assert_eq!(&got, chunk);
+    }
+}
+
+#[test]
+fn reading_an_open_body_gives_up_after_the_idle_timeout() {
     let mut h = host();
     let out = h.new_response_outparam();
     let response = new_response(&mut h);
     h.wasi_http_types_method_outgoing_response_body(response)
         .unwrap();
     set_ok(&mut h, out, response);
-    let answer = h.take_response(out).unwrap();
-    assert!(
-        matches!(answer, Err(ErrorCode::InternalError(Some(_)))),
-        "{answer:?}"
-    );
+    let mut served = h.take_response(out).unwrap().unwrap();
+    served
+        .body
+        .set_idle_timeout(Some(Duration::from_millis(50)));
+    let err = read_all(&mut served.body).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+}
+
+#[test]
+fn a_body_that_fails_while_streamed_ends_the_read_with_an_error() {
+    let mut h = host();
+    let out = h.new_response_outparam();
+    let response = new_response(&mut h);
+    let body = h
+        .wasi_http_types_method_outgoing_response_body(response)
+        .unwrap();
+    set_ok(&mut h, out, response);
+    let mut served = h.take_response(out).unwrap().unwrap();
+    h.wasi_http_types_resource_drop_outgoing_body(body);
+    assert!(read_all(&mut served.body).is_err());
+}
+
+#[test]
+fn dropping_the_host_fails_a_body_that_was_still_open() {
+    let mut h = host();
+    let out = h.new_response_outparam();
+    let response = new_response(&mut h);
+    h.wasi_http_types_method_outgoing_response_body(response)
+        .unwrap();
+    set_ok(&mut h, out, response);
+    let mut served = h.take_response(out).unwrap().unwrap();
+    drop(h);
+    assert!(read_all(&mut served.body).is_err());
 }
 
 #[test]
@@ -306,24 +394,91 @@ fn a_response_body_over_the_limit_reports_the_response_body_size() {
         Err(ErrorCode::HTTPResponseBodySize(Some(5)))
     );
     set_ok(&mut h, out, response);
-    assert_eq!(
+    assert!(matches!(
         h.take_response(out),
         Some(Err(ErrorCode::HTTPResponseBodySize(Some(5))))
-    );
+    ));
+}
+
+fn fields_of(h: &mut WasiHost, entries: &[(&str, &str)]) -> wasm2rs_wasi::wasi_http_types::Fields {
+    let fields = h.wasi_http_types_constructor_fields();
+    for (name, value) in entries {
+        h.wasi_http_types_method_fields_append(fields, name.to_string(), value.as_bytes().to_vec())
+            .unwrap();
+    }
+    fields
 }
 
 #[test]
-fn finishing_a_response_body_with_trailers_is_refused() {
+fn trailers_finishing_a_response_body_come_with_the_served_body() {
     let mut h = host();
+    let out = h.new_response_outparam();
     let response = new_response(&mut h);
     let body = h
         .wasi_http_types_method_outgoing_response_body(response)
         .unwrap();
-    let trailers = h.wasi_http_types_constructor_fields();
-    assert!(matches!(
-        h.wasi_http_types_static_outgoing_body_finish(body, Some(trailers)),
-        Err(ErrorCode::InternalError(Some(_)))
-    ));
+    let trailers = fields_of(&mut h, &[("x-sum", "42"), ("x-sum", "43")]);
+    h.wasi_http_types_static_outgoing_body_finish(body, Some(trailers))
+        .unwrap();
+    set_ok(&mut h, out, response);
+    let mut served = h.take_response(out).unwrap().unwrap();
+    assert_eq!(read_all(&mut served.body).unwrap(), b"");
+    assert_eq!(
+        served.body.trailers(),
+        Some(vec![
+            ("x-sum".to_string(), b"42".to_vec()),
+            ("x-sum".to_string(), b"43".to_vec()),
+        ])
+    );
+}
+
+#[test]
+fn trailers_of_an_incoming_request_arrive_through_future_trailers() {
+    let mut h = host();
+    let mut p = parts();
+    p.trailers = Some(vec![("x-end".into(), b"done".to_vec())]);
+    let r = h.new_incoming_request(p);
+    let body = h
+        .wasi_http_types_method_incoming_request_consume(r)
+        .unwrap();
+    let future = h.wasi_http_types_static_incoming_body_finish(body);
+    let got = h
+        .wasi_http_types_method_future_trailers_get(future)
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .expect("the trailers");
+    assert_eq!(
+        h.wasi_http_types_method_fields_get(got, "X-End".into()),
+        vec![b"done".to_vec()]
+    );
+    // immutable, like any received fields
+    assert!(
+        h.wasi_http_types_method_fields_set(got, "x-end".into(), vec![])
+            .is_err()
+    );
+    assert!(
+        h.wasi_http_types_method_future_trailers_get(future)
+            .unwrap()
+            .is_err()
+    );
+}
+
+#[test]
+fn a_request_without_trailers_answers_none_through_future_trailers() {
+    let mut h = host();
+    let r = h.new_incoming_request(parts());
+    let body = h
+        .wasi_http_types_method_incoming_request_consume(r)
+        .unwrap();
+    let future = h.wasi_http_types_static_incoming_body_finish(body);
+    assert!(
+        h.wasi_http_types_method_future_trailers_get(future)
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
