@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `WitOptions::default_trap`: every method of the generated `Host` trait gets a default body that
   panics naming the method.
 
+- `wasm2rs-wasi`: `wasi:http/types` `fields`, `request-options` and the parts of `outgoing-request`
+  (method, path-with-query, scheme, authority, headers), and the `HttpClient` trait with
+  `WasiHostBuilder::http_client` (stored only; `outgoing-handler.handle` and bodies are still to come).
+
 ### Changed
 - `examples/wasip2_run.rs` links the `wasm2rs-wasi` rlib instead of embedding the host source; a
   component importing a function the host lacks (`wasi:http`) now builds and traps at the call

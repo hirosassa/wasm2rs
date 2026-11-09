@@ -79,11 +79,15 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 mod config;
+mod http;
 mod sources;
 pub use config::{Access, ConfigError, NetworkPolicy, WasiHostBuilder};
 #[cfg(feature = "os-random")]
 pub use sources::OsRandom;
-pub use sources::{Clock, InsecureRandom, RandomError, RandomSource, SystemClock};
+pub use sources::{
+    Clock, HttpClient, HttpClientError, HttpRequest, HttpResponse, InsecureRandom, RandomError,
+    RandomSource, SystemClock,
+};
 
 pub struct WasiHost {
     /// The program's arguments; set by `with_arguments`.
@@ -149,6 +153,12 @@ pub struct WasiHost {
     udp_out: Slab<UdpEnd>,
     /// The addresses still to be read from `resolve-address-stream` handles.
     resolutions: Slab<VecDeque<IpAddr>>,
+    /// The client for `outgoing-handler.handle`; stored only until that is implemented.
+    http_client: Option<Box<dyn HttpClient>>,
+    /// The `wasi:http` `fields` resources.
+    http_fields: Slab<http::HttpFields>,
+    http_options: Slab<http::HttpOptions>,
+    http_requests: Slab<http::HttpOutgoingRequest>,
 }
 
 impl Drop for WasiHost {
@@ -158,7 +168,58 @@ impl Drop for WasiHost {
     }
 }
 
+/// The slot of a `wasi:http` resource handle that the guest must still own: using a dropped
+/// one traps, like any other bad handle.
+fn http_missing(kind: &str) -> ! {
+    panic!("wasi:http: unknown {kind} handle")
+}
+
 impl WasiHost {
+    fn http_fields(&self, h: crate::wasi_http_types::Fields) -> &http::HttpFields {
+        self.http_fields
+            .get(h.0 as usize)
+            .unwrap_or_else(|| http_missing("fields"))
+    }
+
+    fn http_fields_mut(&mut self, h: crate::wasi_http_types::Fields) -> &mut http::HttpFields {
+        self.http_fields
+            .get_mut(h.0 as usize)
+            .unwrap_or_else(|| http_missing("fields"))
+    }
+
+    fn http_option(&self, h: crate::wasi_http_types::RequestOptions) -> &http::HttpOptions {
+        self.http_options
+            .get(h.0 as usize)
+            .unwrap_or_else(|| http_missing("request-options"))
+    }
+
+    fn http_option_mut(
+        &mut self,
+        h: crate::wasi_http_types::RequestOptions,
+    ) -> &mut http::HttpOptions {
+        self.http_options
+            .get_mut(h.0 as usize)
+            .unwrap_or_else(|| http_missing("request-options"))
+    }
+
+    fn http_request(
+        &self,
+        h: crate::wasi_http_types::OutgoingRequest,
+    ) -> &http::HttpOutgoingRequest {
+        self.http_requests
+            .get(h.0 as usize)
+            .unwrap_or_else(|| http_missing("outgoing-request"))
+    }
+
+    fn http_request_mut(
+        &mut self,
+        h: crate::wasi_http_types::OutgoingRequest,
+    ) -> &mut http::HttpOutgoingRequest {
+        self.http_requests
+            .get_mut(h.0 as usize)
+            .unwrap_or_else(|| http_missing("outgoing-request"))
+    }
+
     pub fn new(env: Vec<(String, String)>) -> Self {
         WasiHost {
             args: Vec::new(),
@@ -192,6 +253,10 @@ impl WasiHost {
             udp_in: Slab::new(),
             udp_out: Slab::new(),
             resolutions: Slab::new(),
+            http_client: None,
+            http_fields: Slab::new(),
+            http_options: Slab::new(),
+            http_requests: Slab::new(),
         }
     }
 

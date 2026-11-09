@@ -1,7 +1,8 @@
 # `wasi:http` host (0.2.0)
 
-Status: design. Nothing of `wasi:http` is implemented; all 63 `wasi_http_*` methods in
-`wasm2rs-wasi/src/generated.rs` keep the default trap.
+Status: H1 is implemented (29 of the 63 `wasi_http_*` methods in `wasm2rs-wasi/src/generated.rs`:
+fields, request-options, the parts of outgoing-request, their drops); the others keep the default
+trap.
 Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library),
 [component-exports-design.md](component-exports-design.md) (the export side that `incoming-handler`
 needs).
@@ -52,7 +53,7 @@ needs).
 
 | Phase | Content |
 |---|---|
-| H1 | `fields`, `request-options`, `outgoing-request`, drops; the `HttpClient` trait and builder method (no real client yet). |
+| H1 ✅ | `fields`, `request-options`, `outgoing-request` (not its `body`, H3), drops; the `HttpClient` trait and builder method (no real client yet; the trait's shape may still change in H2). |
 | H2 | `outgoing-handler.handle`, `future-incoming-response` (thread, `Wait`), `incoming-response`, `incoming-body` (receive side), `http-error-code`. |
 | H3 | `outgoing-body` (send side), `future-trailers`, trailers. |
 | H4 | `ureq` client behind feature `http-client`; end-to-end tests against a loopback server. |

@@ -164,3 +164,66 @@ impl RandomSource for OsRandom {
         (self.insecure.next_u64(), self.insecure.next_u64())
     }
 }
+
+/// A request an [`HttpClient`] executes for `wasi:http/outgoing-handler.handle`.
+///
+/// The body is buffered: the host executes the request once the guest has finished writing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpRequest {
+    /// The method, as the guest wrote it (`GET`, `POST`, or an extension method).
+    pub method: String,
+    /// `scheme://authority/path-with-query`, completed with the defaults of the host.
+    pub url: String,
+    /// Every header value on its own entry, in the guest's order.
+    pub headers: Vec<(String, Vec<u8>)>,
+    pub body: Vec<u8>,
+    /// The `request-options` timeouts, in nanoseconds (`None`: the client's default).
+    pub connect_timeout: Option<u64>,
+    pub first_byte_timeout: Option<u64>,
+    pub between_bytes_timeout: Option<u64>,
+}
+
+/// What an [`HttpClient`] got back. The body is read on a thread of the host, so the client may
+/// stream it.
+pub struct HttpResponse {
+    pub status: u16,
+    pub headers: Vec<(String, Vec<u8>)>,
+    pub body: Box<dyn std::io::Read + Send>,
+}
+
+impl fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("headers", &self.headers)
+            .finish_non_exhaustive()
+    }
+}
+
+/// An [`HttpClient`] could not get a response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpClientError(String);
+
+impl HttpClientError {
+    pub fn new(message: impl Into<String>) -> Self {
+        HttpClientError(message.into())
+    }
+}
+
+impl fmt::Display for HttpClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HttpClientError {}
+
+/// Executes the requests of `wasi:http/outgoing-handler`, set with
+/// [`WasiHostBuilder::http_client`](super::WasiHostBuilder::http_client). Without one, `handle`
+/// fails with `internal-error`.
+///
+/// The host only stores the client so far: nothing calls it until `outgoing-handler.handle` is
+/// implemented, and this shape may still change until then.
+pub trait HttpClient: Send {
+    fn send(&mut self, request: HttpRequest) -> Result<HttpResponse, HttpClientError>;
+}
