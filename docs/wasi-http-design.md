@@ -59,6 +59,38 @@ needs).
 | H4 ✅ | `ureq` client behind feature `http-client`; end-to-end tests against a loopback server. |
 | H5 ✅ | incoming: `incoming-request` (method, path-with-query, scheme, authority, headers, `consume`), `outgoing-response` (status `100..=599`, default `200`; headers immutable once built; `body` once), `response-outparam.set`, and their drops. The embedder mints `new_incoming_request(IncomingRequestParts)` and `new_response_outparam()`, calls `Exports::export_wasi_http_incoming_handler_0_2_0_handle` (no change to the glue or `src/wit` was needed: `own<..>` resource parameters of an export already work) and then `take_response(outparam)`, which returns `None` when the guest never set one, else `Some(Result<ServedResponse, ErrorCode>)`: `ServedResponse` is plain data (status, headers, body), not a handle. The response body reuses the `outgoing-body` buffer of H3 (`HTTP_OUT_STREAM`) with the same limit (`max_request_body`); a body over it reports `HTTP-response-body-size`. The outparam slot belongs to the embedder: a guest dropping it leaves it for `take_response` to free. A body the guest left unfinished (or dropped) fails the answer with `internal-error`: the response is read once `handle` returns, so **streaming a response after `set` and trailers are not supported** (`finish` with trailers is `internal-error("trailers are not supported")`). Tests: `wasm2rs-wasi/tests/http_incoming.rs` (host) and `tests/it/wasip2_typed_http_incoming.rs` (a component with `import types` / `export incoming-handler`). |
 
+## Serving over TCP: `examples/wasip2_serve.rs`
+
+`wasip2_serve <component.wasm> [--listen ADDR]` serves a component exporting
+`wasi:http/incoming-handler` (#195: "listening/accept"). It builds the program like
+`wasip2_run` (the build step is shared in `examples/common`) with the server of
+`examples/wasip2_serve/server.rs` appended in place of the `wasi:cli/run` call, and then
+becomes it (`exec` on unix, so killing the example kills the server).
+
+- **Shape.** `std::net::TcpListener`, default `127.0.0.1:8080` (anything else only when asked).
+  One connection is one request, served in turn; the answer always carries `Connection: close`.
+  No keep-alive, no concurrency. The program prints `listening on <addr>` once bound (`:0`
+  picks a port).
+- **HTTP/1.1 lives in the example, not in `wasm2rs-wasi`**, with no new dependency: a request
+  line (`HTTP/1.0` or `1.1`, origin-form target or `*`), headers, and a `Content-Length` body.
+  `Host` becomes the authority, the scheme is `HTTP`. Malformed request line, header or
+  `Content-Length`: 400. `Transfer-Encoding`: 501 (chunked is not read). Head over 64 KiB or
+  body over 1 MiB: 413, decided from `Content-Length` before the body is read. A client that has not sent
+  its whole request within 5 seconds (a deadline, not a per-read timeout): 408 (the server is serial, so one stalled client must not hold it forever).
+- **Answer.** Read after `handle` returned (`take_response`; streaming is #195). The guest's
+  `content-length`, `connection` and `transfer-encoding` headers are replaced by the server's;
+  `HEAD`, `1xx`, `204` and `304` get no body, and `1xx` and `204` no `content-length`. No response set: 500. `Err(error-code)`: 502 with
+  the code's name in the body.
+- **Traps.** A guest panic is caught around the call: 500, the server stays up, and the
+  `Instance` (with its host and the handles in it) is created anew, since a trap may leave
+  it half-updated. After a normal answer the instance is kept, so guest state lasts across
+  requests.
+- **Tests.** `tests/it/wasip2_serve_example.rs` runs the example as a process and talks real TCP
+  (echo of status/headers/body, 400, 413, 501, 500 after a trap and the next request, 500/502).
+
+Of #195 this covers "listening/accept"; streaming responses, trailers, the outparam generation
+counter and the status range remain.
+
 `wasip2_wit_regression.rs` now requires every method to be overridden.
 
 ## Risks

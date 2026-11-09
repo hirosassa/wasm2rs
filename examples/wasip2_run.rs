@@ -30,79 +30,14 @@
 
 use std::process::Command;
 
+mod common;
+
 use wasm2rs::{
     TranspileOptions, WitExport, WitOptions, extract_core_modules, transpile_with_options,
     wit_exports, wit_host_glue_with_options,
 };
 
 const RUN_INTERFACE: &str = "wasi:cli/run@0.2.0";
-
-/// Builds the `wasm2rs-wasi` library with `cargo` into `dir` (it depends on `getrandom`, which a
-/// bare `rustc` call cannot resolve): the rlib and the directory of its dependencies' rlibs.
-fn build_wasi_rlib(
-    dir: &std::path::Path,
-) -> (
-    std::path::PathBuf,
-    Option<std::path::PathBuf>,
-    Vec<std::path::PathBuf>,
-) {
-    let target = dir.join("wasi-target");
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let out = Command::new(cargo)
-        .args([
-            "build",
-            "--release",
-            "-p",
-            "wasm2rs-wasi",
-            "--message-format=json-render-diagnostics",
-            "--manifest-path",
-        ])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-        .arg("--target-dir")
-        .arg(&target)
-        .stderr(std::process::Stdio::inherit())
-        .output()
-        .expect("run cargo");
-    assert!(out.status.success(), "wasm2rs-wasi failed to build");
-    // cargo says where it put the rlibs (it depends on the version): the library, and the
-    // directories to search for its dependencies.
-    let mut lib = None;
-    let mut rmeta = None;
-    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if !line.contains("\"reason\":\"compiler-artifact\"") {
-            continue;
-        }
-        let Some(list) = line
-            .split("\"filenames\":[")
-            .nth(1)
-            .and_then(|l| l.split(']').next())
-        else {
-            continue;
-        };
-        if line.contains("\"name\":\"wasm2rs_wasi\"") {
-            // newer cargo leaves only a metadata stub in the rlib: the .rmeta must be given too
-            rmeta = list
-                .split('"')
-                .find(|f| f.ends_with(".rmeta"))
-                .map(std::path::PathBuf::from);
-        }
-        for rlib in list.split('"').filter(|f| f.ends_with(".rlib")) {
-            let rlib = std::path::PathBuf::from(rlib);
-            if line.contains("\"name\":\"wasm2rs_wasi\"") {
-                lib = Some(rlib.clone());
-            }
-            if let Some(dir) = rlib.parent().filter(|d| !dirs.iter().any(|x| x == d)) {
-                dirs.push(dir.to_path_buf());
-            }
-        }
-    }
-    (
-        lib.expect("cargo reported no wasm2rs-wasi rlib"),
-        rmeta,
-        dirs,
-    )
-}
 
 fn is_run(export: &WitExport) -> bool {
     export.func.interface == RUN_INTERFACE && export.func.name == "run"
@@ -177,37 +112,15 @@ fn main() {
          std::process::exit(if result.is_ok() {{ 0 }} else {{ 1 }});\n    \
          }}"
     );
-    let src = dir.join("program.rs");
-    let bin = dir.join("program");
-    std::fs::write(&src, format!("{generated}\n{glue}\n{main}\n")).expect("write source");
-    let (rlib, rmeta, deps) = build_wasi_rlib(&dir);
-    let status = Command::new("rustc")
-        .args(["--edition", "2024", "-C", "opt-level=1", "-A", "warnings"])
-        .arg("--extern")
-        .arg(format!("wasm2rs_wasi={}", rlib.display()))
-        .args(rmeta.iter().flat_map(|m| {
-            [
-                "--extern".to_string(),
-                format!("wasm2rs_wasi={}", m.display()),
-            ]
-        }))
-        .args(
-            deps.iter()
-                .flat_map(|d| ["-L".to_string(), format!("dependency={}", d.display())]),
-        )
-        .arg(&src)
-        .arg("-o")
-        .arg(&bin)
-        .status()
-        .expect("run rustc");
-    if !status.success() {
+    let source = format!("{generated}\n{glue}\n{main}\n");
+    let Some(bin) = common::build_program(&dir, &source) else {
         eprintln!(
             "wasip2_run: rustc failed. If the errors above are E0407 (not a member of trait \
              `Host`), the component imports functions outside the WASI 0.2.0 surface that \
              wasm2rs-wasi implements."
         );
         std::process::exit(2);
-    }
+    };
     let code = Command::new(&bin)
         .args(&guest_args)
         .status()
