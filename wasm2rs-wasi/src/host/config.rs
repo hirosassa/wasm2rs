@@ -1,6 +1,6 @@
 //! Configuration of a [`WasiHost`]: [`WasiHostBuilder`] and the types it takes.
 
-use super::{Clock, OpenDescriptor, Preopen, RandomSource, WasiHost};
+use super::{Clock, HttpClient, OpenDescriptor, Preopen, RandomSource, WasiHost};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -84,6 +84,7 @@ pub struct WasiHostBuilder {
     network: NetworkPolicy,
     clock: Option<Box<dyn Clock>>,
     random: Option<Box<dyn RandomSource>>,
+    http_client: Option<Box<dyn HttpClient>>,
     stdin: Option<Box<dyn Read + Send>>,
     stdout: Option<Box<dyn Write + Send>>,
     stderr: Option<Box<dyn Write + Send>>,
@@ -143,6 +144,13 @@ impl WasiHostBuilder {
         self
     }
 
+    /// The client behind `wasi:http/outgoing-handler`. Without one, a guest's requests fail with
+    /// `internal-error`.
+    pub fn http_client(mut self, client: impl HttpClient + 'static) -> Self {
+        self.http_client = Some(Box::new(client));
+        self
+    }
+
     /// What the guest reads as stdin (the process's by default). `reader` is read on a thread
     /// that starts when the guest first uses stdin, and its end or failure reaches the guest
     /// as the stream's.
@@ -179,6 +187,7 @@ impl WasiHostBuilder {
         if let Some(random) = self.random {
             host.random = Some(random);
         }
+        host.http_client = self.http_client;
         if host.random.is_none() {
             return Err(ConfigError::MissingRandomSource);
         }

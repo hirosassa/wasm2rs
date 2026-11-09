@@ -189,7 +189,7 @@ cargo test --release                 # whole suite (a single integration-test bi
 cargo test --release --test it <name> # a subset, by module name
 ```
 
-The typed WASI preview2 host is the `wasm2rs-wasi` crate (`WasiHost` and the `Host` trait for the whole WASI 0.2.0 surface; `examples/wasip2_run.rs` runs a component with it). Its design (streams, the TCP send queue, error reporting, limitations) is described in [docs/typed-host-design.md](docs/typed-host-design.md).
+The typed WASI preview2 host is the `wasm2rs-wasi` crate (`WasiHost` and the `Host` trait for the whole WASI 0.2.0 surface; `examples/wasip2_run.rs` runs a component with it). Its design (streams, the TCP send queue, error reporting, limitations) is described in [docs/typed-host-design.md](docs/typed-host-design.md). Of `wasi:http`, `fields`, `request-options` and the parts of `outgoing-request` are implemented and an `HttpClient` can be set on the builder; the rest still traps ([docs/wasi-http-design.md](docs/wasi-http-design.md)).
 
 See [docs/wasi-threads-e2e.md](docs/wasi-threads-e2e.md) for the end-to-end tests that run real wasi-sdk and Rust `wasm32-wasip1-threads` binaries (they need extra tools and skip when those are missing).
 

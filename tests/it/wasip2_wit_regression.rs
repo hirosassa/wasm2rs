@@ -6,15 +6,50 @@
 //! import wasi:http/types@0.2.0; import wasi:http/outgoing-handler@0.2.0; }`, each with a
 //! trapping default. The signatures cannot drift from the trait (the host is compiled
 //! against it); what this test pins is which methods `WasiHost` overrides: every method
-//! except those of `wasi:http`, which keep the default trap until the export side exists. So
-//! a method that is neither implemented nor on that list fails the test, and so does
-//! implementing an `http` one without updating the list here.
+//! except those of `wasi:http`, which are implemented phase by phase (see
+//! `docs/wasi-http-design.md`) and keep the default trap until then. `IMPLEMENTED_HTTP` names
+//! the ones done so far: a method that is neither implemented nor an `http` one fails the
+//! test, and so does implementing an `http` one without updating the list here.
 
 use std::collections::BTreeSet;
 
 use crate::wasi_generated::generate;
 
 const IMPL_HOST: &str = include_str!("../../wasm2rs-wasi/src/host/impl_host.rs");
+
+/// The `wasi:http` methods implemented so far (H1: fields, request-options, the parts of
+/// outgoing-request; the body of a request is H3).
+const IMPLEMENTED_HTTP: [&str; 29] = [
+    "wasi_http_types_constructor_fields",
+    "wasi_http_types_static_fields_from_list",
+    "wasi_http_types_method_fields_get",
+    "wasi_http_types_method_fields_has",
+    "wasi_http_types_method_fields_set",
+    "wasi_http_types_method_fields_delete",
+    "wasi_http_types_method_fields_append",
+    "wasi_http_types_method_fields_entries",
+    "wasi_http_types_method_fields_clone",
+    "wasi_http_types_constructor_request_options",
+    "wasi_http_types_method_request_options_connect_timeout",
+    "wasi_http_types_method_request_options_set_connect_timeout",
+    "wasi_http_types_method_request_options_first_byte_timeout",
+    "wasi_http_types_method_request_options_set_first_byte_timeout",
+    "wasi_http_types_method_request_options_between_bytes_timeout",
+    "wasi_http_types_method_request_options_set_between_bytes_timeout",
+    "wasi_http_types_constructor_outgoing_request",
+    "wasi_http_types_method_outgoing_request_method",
+    "wasi_http_types_method_outgoing_request_set_method",
+    "wasi_http_types_method_outgoing_request_path_with_query",
+    "wasi_http_types_method_outgoing_request_set_path_with_query",
+    "wasi_http_types_method_outgoing_request_scheme",
+    "wasi_http_types_method_outgoing_request_set_scheme",
+    "wasi_http_types_method_outgoing_request_authority",
+    "wasi_http_types_method_outgoing_request_set_authority",
+    "wasi_http_types_method_outgoing_request_headers",
+    "wasi_http_types_resource_drop_fields",
+    "wasi_http_types_resource_drop_outgoing_request",
+    "wasi_http_types_resource_drop_request_options",
+];
 
 /// The names of the `fn wasi_*(&mut self ..` methods declared (or overridden) in `source`.
 fn methods(source: &str) -> BTreeSet<String> {
@@ -54,9 +89,10 @@ fn the_host_overrides_every_method_except_those_of_wasi_http() {
         missing.is_empty(),
         "methods left at the trapping default (implement them): {missing:#?}"
     );
-    let implemented_http: Vec<_> = http.difference(&trapping).collect();
-    assert!(
-        implemented_http.is_empty(),
-        "wasi:http methods are now implemented (update this test): {implemented_http:#?}"
+    let implemented_http: BTreeSet<_> = http.difference(&trapping).cloned().collect();
+    let expected: BTreeSet<_> = IMPLEMENTED_HTTP.iter().map(|m| m.to_string()).collect();
+    assert_eq!(
+        implemented_http, expected,
+        "the implemented wasi:http methods differ from IMPLEMENTED_HTTP (update this test)"
     );
 }
