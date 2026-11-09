@@ -16,9 +16,9 @@
 //! Exit codes: 0 when `run` returns ok, 1 on an error result or `wasi:cli/exit` with an
 //! error, 2 when the build fails or the component does not lift `wasi:cli/run@0.2.0#run`
 //! directly (no such export, or a shape `wasm2rs::transpile_component` does not read: the
-//! message says which), 134 when a panic occurs during the `run` call (a guest trap, or a panic inside a
-//! host import it calls: the panic message is printed, then `wasip2_run: the program
-//! trapped`); panics outside the call (host setup) stay 101. The build goes in
+//! message says which), 134 when a panic occurs during the `run` call (a guest trap, or a
+//! panic inside a host import it calls: the panic message is printed, then `wasip2_run: the
+//! program trapped`); panics outside the call (host setup) stay 101. The build goes in
 //! `$WASIP2_WORK_DIR` (default: a temporary directory). The program sees the
 //! directory `$WASIP2_PREOPEN`, if set, as its `/`: read-only, or also writable if
 //! `$WASIP2_PREOPEN_WRITABLE=1`. A function the host does not implement (`wasi:http`) traps
@@ -48,8 +48,8 @@ fn main() {
 
     let component = std::fs::read(&input).expect("read component");
     // `wasm2rs::transpile_component` picks the program module and generates the glue;
-    // `exports: true` makes a method for every export of the component, not only `run`: one
-    // the glue cannot lower or lift fails here too.
+    // The default `ComponentOptions` (`exports: true`) make a method for every export of the
+    // component, not only `run`: one the glue cannot lower or lift fails here too.
     let generated =
         common::transpile_exporting(&component, RUN_INTERFACE, "run").unwrap_or_else(|err| {
             eprintln!("wasip2_run: {err}");
