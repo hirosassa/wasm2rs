@@ -204,3 +204,14 @@ fn a_body_the_guest_leaves_open_is_streamed_then_cut_without_the_last_chunk() {
     // what was written arrived, and the chunked body was never terminated
     assert_eq!(body, b"6\r\naccept\r\n");
 }
+
+#[test]
+fn an_http10_client_gets_a_streamed_body_without_chunk_framing() {
+    let server = serve(&streaming_guest(true), "http10");
+    let request = "POST / HTTP/1.0\r\nContent-Length: 0\r\n\r\n";
+    let (status, head, body) = parse(&exchange(&server, request.as_bytes()));
+    assert_eq!(status, 200, "{head}");
+    assert!(!head.contains("transfer-encoding"), "{head}");
+    // delimited by the close; the trailers are dropped
+    assert_eq!(body, b"accept");
+}

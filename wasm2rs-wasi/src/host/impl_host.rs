@@ -160,15 +160,13 @@ impl Host for WasiHost {
                 .take(handle.0 as usize)
                 .unwrap_or_else(|| http_missing("fields"))
         });
-        match trailers {
-            Some(_) if !body.trailers_ok() => {
-                let code =
-                    HttpErrorCode::InternalError(Some("request trailers are not supported".into()));
-                body.handle().fail(code.clone());
-                Err(code)
-            }
-            trailers => body.handle().finish_with(trailers.map(|t| t.entries())),
+        if trailers.is_some() && !body.trailers_ok() {
+            let code =
+                HttpErrorCode::InternalError(Some("request trailers are not supported".into()));
+            body.handle().fail(code.clone());
+            return Err(code);
         }
+        body.handle().finish_with(trailers.map(|t| t.entries()))
     }
 
     fn wasi_http_types_method_incoming_request_method(&mut self, self_: IncomingRequest) -> Method {
@@ -531,11 +529,14 @@ impl Host for WasiHost {
         &mut self,
         this: IncomingBody,
     ) -> FutureTrailers {
-        let body = self
+        let mut body = self
             .http_bodies
             .take(this.0 as usize)
             .unwrap_or_else(|| http_missing("incoming-body"));
-        FutureTrailers(self.http_trailers.insert(Some(body.trailers.clone())) as u32)
+        FutureTrailers(
+            self.http_trailers
+                .insert(Some(std::mem::take(&mut body.trailers))) as u32,
+        )
     }
 
     /// Only failures of a response body have an `error-code` (`None` for any other `error`).

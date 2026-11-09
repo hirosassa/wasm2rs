@@ -264,7 +264,7 @@ impl std::fmt::Debug for ServedBody {
 impl ServedBody {
     /// Whether the guest finished the body (all of it is buffered or already read).
     pub fn is_finished(&self) -> bool {
-        self.handle.finished_len().is_some()
+        self.finished_len().is_some()
     }
 
     /// The bytes still unread, if the body is finished: its length is then known (so a server
@@ -274,7 +274,7 @@ impl ServedBody {
     }
 
     /// The trailers the guest finished the body with, once it has finished it.
-    pub fn trailers(&self) -> Option<Vec<(String, Vec<u8>)>> {
+    pub fn trailers(&self) -> Option<Entries> {
         self.handle.trailers()
     }
 
@@ -299,7 +299,7 @@ pub(super) struct HttpIncomingRequest {
     pub(super) authority: Option<String>,
     pub(super) headers: HttpFields,
     pub(super) body: Option<Vec<u8>>,
-    pub(super) trailers: Option<Vec<(String, Vec<u8>)>>,
+    pub(super) trailers: Option<Entries>,
 }
 
 impl HttpIncomingRequest {
@@ -568,7 +568,7 @@ struct OutState {
     bytes: Vec<u8>,
     phase: OutPhase,
     /// What the body was finished with (a response body only).
-    trailers: Option<Vec<(String, Vec<u8>)>>,
+    trailers: Option<Entries>,
 }
 
 impl OutState {
@@ -668,7 +668,7 @@ impl OutBodyHandle {
         matches!(state.phase, OutPhase::Finished).then_some(state.bytes.len())
     }
 
-    fn trailers(&self) -> Option<Vec<(String, Vec<u8>)>> {
+    fn trailers(&self) -> Option<Entries> {
         let state = lock(&self.0.state);
         match state.phase {
             OutPhase::Finished => state.trailers.clone(),
@@ -677,10 +677,7 @@ impl OutBodyHandle {
     }
 
     /// Closes the body with `trailers` (a response body's `finish`); a failed body stays failed.
-    pub(super) fn finish_with(
-        &self,
-        trailers: Option<Vec<(String, Vec<u8>)>>,
-    ) -> Result<(), ErrorCode> {
+    pub(super) fn finish_with(&self, trailers: Option<Entries>) -> Result<(), ErrorCode> {
         let mut state = lock(&self.0.state);
         state.check_not_failed()?;
         state.trailers = trailers;
@@ -698,8 +695,7 @@ impl OutBodyHandle {
         let mut state = lock(&self.0.state);
         loop {
             if !state.bytes.is_empty() {
-                let n = buf.len().min(state.bytes.len());
-                buf[..n].copy_from_slice(&state.bytes[..n]);
+                let n = Read::read(&mut state.bytes.as_slice(), buf)?;
                 state.bytes.drain(..n);
                 return Ok(n);
             }
@@ -839,7 +835,7 @@ pub(super) struct HttpIncomingBody {
     shared: Arc<BodyShared>,
     stream_taken: bool,
     /// What `finish` hands to `future-trailers`.
-    pub(super) trailers: Option<Vec<(String, Vec<u8>)>>,
+    pub(super) trailers: Option<Entries>,
 }
 
 impl HttpIncomingBody {

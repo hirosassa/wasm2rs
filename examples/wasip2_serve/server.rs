@@ -89,7 +89,11 @@ fn parse_method(s: &str) -> Method {
 }
 
 /// Reads one request: HTTP/1.x, `Content-Length` bodies only.
-fn read_request(stream: &mut TcpStream, deadline: Instant) -> Result<IncomingRequestParts, Reject> {
+/// The flag tells an HTTP/1.0 request (its answer cannot be chunked).
+fn read_request(
+    stream: &mut TcpStream,
+    deadline: Instant,
+) -> Result<(IncomingRequestParts, bool), Reject> {
     let (head, mut body) = read_head(stream, deadline)?;
     let head = std::str::from_utf8(&head).map_err(|_| Reject(400, "head is not UTF-8"))?;
     let mut lines = head.split("\r\n");
@@ -160,7 +164,8 @@ fn read_request(stream: &mut TcpStream, deadline: Instant) -> Result<IncomingReq
             n => body.extend_from_slice(&chunk[..n]),
         }
     }
-    Ok(IncomingRequestParts {
+    Ok((
+        IncomingRequestParts {
         method: parse_method(method),
         path_with_query: Some(target.to_string()),
         scheme: Some(Scheme::HTTP),
@@ -168,7 +173,9 @@ fn read_request(stream: &mut TcpStream, deadline: Instant) -> Result<IncomingReq
         headers,
         body,
         trailers: None,
-    })
+        },
+        version == "HTTP/1.0",
+    ))
 }
 
 fn reason(status: u16) -> &'static str {
@@ -255,7 +262,13 @@ fn respond_bytes(
 /// length and goes with a `content-length`; otherwise it is streamed as chunks while the guest
 /// writes it, with the trailers after the last one. A body that fails or stalls for `idle`
 /// ends the connection without the closing chunk, so the client sees it truncated.
-fn respond(stream: &mut TcpStream, head_only: bool, mut response: ServedResponse, idle: Duration) {
+fn respond(
+    stream: &mut TcpStream,
+    head_only: bool,
+    http10: bool,
+    mut response: ServedResponse,
+    idle: Duration,
+) {
     let status = response.status;
     let known = response.body.finished_len().filter(|_| response.body.trailers().is_none());
     if let Some(len) = known {
@@ -272,8 +285,10 @@ fn respond(stream: &mut TcpStream, head_only: bool, mut response: ServedResponse
         return;
     }
     response.body.set_idle_timeout(Some(idle));
+    // HTTP/1.0 has no chunked coding: the body runs to the close (and drops the trailers)
+    let framing = (!http10).then_some(Framing::Chunked);
     if stream
-        .write_all(&head(status, &response.headers, Some(Framing::Chunked)))
+        .write_all(&head(status, &response.headers, framing))
         .is_err()
     {
         return;
@@ -283,9 +298,14 @@ fn respond(stream: &mut TcpStream, head_only: bool, mut response: ServedResponse
         match response.body.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
-                let mut out = format!("{n:x}\r\n").into_bytes();
-                out.extend_from_slice(&chunk[..n]);
-                out.extend_from_slice(b"\r\n");
+                let mut out = Vec::new();
+                if http10 {
+                    out.extend_from_slice(&chunk[..n]);
+                } else {
+                    out.extend_from_slice(format!("{n:x}\r\n").as_bytes());
+                    out.extend_from_slice(&chunk[..n]);
+                    out.extend_from_slice(b"\r\n");
+                }
                 if stream.write_all(&out).is_err() {
                     return;
                 }
@@ -294,6 +314,10 @@ fn respond(stream: &mut TcpStream, head_only: bool, mut response: ServedResponse
             // not terminated: the truncation is the signal
             Err(_) => return,
         }
+    }
+    if http10 {
+        let _ = stream.flush();
+        return;
     }
     let mut end = b"0\r\n".to_vec();
     for (name, value) in response.body.trailers().unwrap_or_default() {
@@ -362,8 +386,8 @@ fn serve_connection(
     idle: Duration,
 ) -> bool {
     let _ = stream.set_write_timeout(Some(REQUEST_TIME));
-    let parts = match read_request(&mut stream, Instant::now() + REQUEST_TIME) {
-        Ok(parts) => parts,
+    let (parts, http10) = match read_request(&mut stream, Instant::now() + REQUEST_TIME) {
+        Ok(read) => read,
         Err(Reject(status, why)) => {
             respond_text(&mut stream, status, why);
             let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -374,7 +398,7 @@ fn serve_connection(
     let head_only = matches!(parts.method, Method::Head);
     let ok = match call_guest(inst, parts) {
         Served::Response(response) => {
-            respond(&mut stream, head_only, response, idle);
+            respond(&mut stream, head_only, http10, response, idle);
             true
         }
         Served::NoResponse => {
