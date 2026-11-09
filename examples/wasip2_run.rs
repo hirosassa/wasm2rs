@@ -47,7 +47,7 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("create work dir");
 
     let component = std::fs::read(&input).expect("read component");
-    // `wasm2rs::transpile_component` picks the program module and generates the glue;
+    // `wasm2rs::transpile_component` picks the program module and generates the glue.
     // The default `ComponentOptions` (`exports: true`) make a method for every export of the
     // component, not only `run`: one the glue cannot lower or lift fails here too.
     let generated =
