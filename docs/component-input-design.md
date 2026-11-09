@@ -1,6 +1,6 @@
 # Component input: `transpile_component`
 
-Status: A3-1 (the library API) and A3-2 (the examples use it) are implemented; A3-3 and A3-4 are not.
+Status: A3-1 (the library API), A3-2 (the examples use it) and A3-3 (the CLI flag) are implemented; A3-4 is not.
 Background: [component-exports-design.md](component-exports-design.md) (`wit_exports`, the `Exports`
 trait, A2), [typed-host-design.md](typed-host-design.md) (the import glue),
 [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library).
@@ -78,7 +78,7 @@ Each phase is its own PR, in this order.
 |---|---|
 | A3-1 | ✅ `transpile_component` and `ComponentOptions` (`src/component.rs`), the selection above. Tests: `tests/it/component_input.rs`. |
 | A3-2 | ✅ `examples/wasip2_run.rs` and `wasip2_serve.rs` call `transpile_component`; the duplicated assembly in `examples/common` goes away (the `rustc` build helper stays). `common::transpile_exporting` only checks that the wanted export is lifted, then calls `transpile_component`. |
-| A3-3 | CLI `--component`: an explicit flag (a component is still rejected without it, as today). It switches on `--named-imports --named-exports --reentrant-imports --wit-host --glue --exports` together and writes one source. |
+| A3-3 | ✅ CLI `--component`: an explicit flag (a component is still rejected without it, as today). It switches on `--named-imports --named-exports --reentrant-imports --wit-host --glue --exports` together and writes one source (stdout without an output). Combines with `--unsafe-memory`, `--jobs=N`, `--split-dispatch=N` and `--external-types=<path>` (all reach `ComponentOptions`); everything else, including `--entry-exports`, `--import-memory` and the split arguments, is refused by name. Tests: `tests/it/component_input.rs`. |
 | A3-4 | `transpile_component_to_out_dir` for `build.rs`, and an `include_component!` macro in `wasm2rs-macros`. |
 
 ## Findings on real components

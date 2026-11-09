@@ -272,3 +272,166 @@ fn broken_input_is_an_error_not_a_panic() {
         );
     }
 }
+
+// --- the CLI's `--component` ---
+
+/// Write the `run` component to a fresh directory and return `(dir, input)`.
+fn cli_component(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "wasm2rs_cli_component_{name}_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("c.wasm");
+    std::fs::write(&input, component_of(WORLD, CORE)).unwrap();
+    (dir, input)
+}
+
+fn cli(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_wasm2rs"))
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn the_cli_component_flag_writes_what_transpile_component_returns() {
+    let (dir, input) = cli_component("same");
+    let output = dir.join("out.rs");
+    let out = cli(&[
+        "--component".as_ref(),
+        input.as_os_str(),
+        output.as_os_str(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected =
+        transpile_component(&component_of(WORLD, CORE), &ComponentOptions::default()).unwrap();
+    assert_eq!(std::fs::read_to_string(output).unwrap(), expected);
+}
+
+#[test]
+fn the_cli_component_flag_writes_to_stdout_without_an_output() {
+    let (_dir, input) = cli_component("stdout");
+    let out = cli(&["--component".as_ref(), input.as_os_str()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("pub struct Glue"), "glue missing");
+    assert!(stdout.contains("pub trait Exports"), "exports missing");
+}
+
+#[test]
+fn the_cli_component_output_builds_and_runs() {
+    let (_dir, input) = cli_component("run");
+    let out = cli(&["--component".as_ref(), input.as_os_str()]);
+    assert!(out.status.success());
+    let code = String::from_utf8(out.stdout).unwrap();
+    let program = format!(
+        "{code}\nfn main() {{\n    \
+         let host = wasm2rs_wasi::WasiHost::new(Vec::new()).with_arguments(vec![\"p\".to_string(), \"hi\".to_string()]);\n    \
+         let mut inst = Instance::new(Glue(host));\n    \
+         let result = Exports::export_wasi_cli_run_0_2_0_run(&mut inst);\n    \
+         drop(inst);\n    \
+         std::process::exit(if result.is_ok() {{ 0 }} else {{ 1 }});\n}}\n"
+    );
+    let bin = common::build_with_wasi("cli_component_run", &program);
+    let run = Command::new(bin).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "hi");
+    assert!(run.status.success());
+}
+
+#[test]
+fn the_cli_component_flag_takes_the_codegen_flags_it_supports() {
+    let (_dir, input) = cli_component("compat");
+    let out = cli(&[
+        "--component".as_ref(),
+        "--unsafe-memory".as_ref(),
+        "--jobs=2".as_ref(),
+        "--split-dispatch=50".as_ref(),
+        "--external-types=wasm2rs_wasi".as_ref(),
+        input.as_os_str(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let code = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        code.contains("get_unchecked"),
+        "--unsafe-memory not applied"
+    );
+}
+
+#[test]
+fn the_cli_component_flag_without_external_types_declares_its_own_host() {
+    let (_dir, input) = cli_component("own");
+    let out = cli(&[
+        "--component".as_ref(),
+        "--external-types=my_host::wasi".as_ref(),
+        input.as_os_str(),
+    ]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("use my_host::wasi::Host;"));
+}
+
+#[test]
+fn the_cli_component_flag_names_the_flag_it_cannot_combine_with() {
+    let (dir, input) = cli_component("refuse");
+    for flag in [
+        "--entry-exports=a",
+        "--import-memory",
+        "--named-exports",
+        "--named-imports",
+        "--reentrant-imports",
+        "--wit-host",
+        "--glue",
+        "--dump",
+        "--extract-core",
+    ] {
+        let out = cli(&["--component".as_ref(), flag.as_ref(), input.as_os_str()]);
+        assert!(!out.status.success(), "{flag} was accepted");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let name = flag.split('=').next().unwrap();
+        assert!(
+            stderr.contains("--component") && stderr.contains(name),
+            "{flag}: {stderr}"
+        );
+    }
+    // A split needs the `funcs_per_file` positional, which a single source has no use for.
+    let out = cli(&[
+        "--component".as_ref(),
+        input.as_os_str(),
+        dir.join("o.rs").as_os_str(),
+        "10".as_ref(),
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--component"));
+}
+
+#[test]
+fn the_cli_component_flag_rejects_a_core_module() {
+    let dir =
+        std::env::temp_dir().join(format!("wasm2rs_cli_component_core_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("m.wasm");
+    std::fs::write(
+        &input,
+        wat::parse_str("(module (func (export \"f\")))").unwrap(),
+    )
+    .unwrap();
+    let out = cli(&["--component".as_ref(), input.as_os_str()]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not a component") || stderr.contains("core module"),
+        "{stderr}"
+    );
+}
