@@ -171,6 +171,24 @@ mod foo {
 
 `transpile_to_out_dir` also prints `cargo:rerun-if-changed` for the wasm file. `transpile_to_out_dir_with_options` takes a `TranspileOptions` (e.g. `named_exports`), and `transpile_to_dir` writes to an explicit directory.
 
+A component (`wasm32-wasip2`) goes through `transpile_component_to_out_dir`, which writes `$OUT_DIR/{file stem}.rs` (the glue, the `Exports` trait and the program module, see `transpile_component`); `wasm2rs_macros::include_component!` includes it:
+
+```rust
+// build.rs
+fn main() {
+    wasm2rs::build::transpile_component_to_out_dir(
+        "assets/run.wasm",
+        &wasm2rs::ComponentOptions::default(),
+    )
+    .unwrap();
+}
+
+// src/lib.rs (depends on wasm2rs-wasi and wasm2rs-macros)
+mod run {
+    wasm2rs_macros::include_component!("run");
+}
+```
+
 ### Using the proc macro
 
 For a one-line embed without a build script, use the `wasm2rs-macros` crate:

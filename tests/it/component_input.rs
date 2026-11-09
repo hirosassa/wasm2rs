@@ -79,7 +79,7 @@ fn the_generated_source_builds_and_runs_the_typed_run_export() {
 
 /// Build `code` (a transpiled `run` component) with a `main` that calls its typed `run`
 /// export with the argument `arg`, run it and return its output.
-fn build_and_run(code: &str, name: &str, arg: &str) -> std::process::Output {
+pub(crate) fn build_and_run(code: &str, name: &str, arg: &str) -> std::process::Output {
     let program = format!(
         "{code}\nfn main() {{\n    \
          let host = wasm2rs_wasi::WasiHost::new(Vec::new()).with_arguments(vec![\"p\".to_string(), \"{arg}\".to_string()]);\n    \
