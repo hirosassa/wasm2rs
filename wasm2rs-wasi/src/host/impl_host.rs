@@ -584,7 +584,9 @@ impl Host for WasiHost {
         self.http_trailers.remove(handle.0 as usize);
     }
 
-    fn wasi_io_poll_resource_drop_pollable(&mut self, _handle: Pollable) {}
+    fn wasi_io_poll_resource_drop_pollable(&mut self, handle: Pollable) {
+        self.pollables.remove(handle.0 as usize);
+    }
 
     fn wasi_io_streams_resource_drop_input_stream(&mut self, handle: InputStream) {
         self.failed_in.remove(&handle.0);
