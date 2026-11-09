@@ -899,17 +899,25 @@ fn write_exports(
         "}\n\n#[allow(unused_variables, unused_parens, unused_mut)]\n\
          impl<H: Host> Exports for Instance<Glue<H>> {\n",
     );
+    let mut forwarders = String::new();
     for (e, name) in exports.iter().zip(export_names) {
-        write_export(out, gen_, e, name)?;
+        write_export(out, &mut forwarders, gen_, e, name)?;
     }
     out.push_str("}\n");
+    // `Exports` is not in scope here, so a core export the transpiled `Instance` lacks under
+    // this name is a compile error, not a call of the trait method itself.
+    let _ = write!(
+        out,
+        "\nmod glue_core {{\n    use super::{{Glue, Host, Instance}};\n{forwarders}}}\n"
+    );
     Ok(())
 }
 
-/// One method of the `Exports` impl. The core export is called by the same name (the
-/// `named_exports` method of `Instance`, which a method call prefers to the trait's).
+/// One method of the `Exports` impl, and its forwarder to the core export of the same name
+/// (the `named_exports` method of `Instance`) in `forwarders`.
 fn write_export(
     out: &mut String,
+    forwarders: &mut String,
     gen_: &mut Gen<'_>,
     e: &WitExport,
     name: &str,
@@ -984,7 +992,19 @@ fn write_export(
     }
 
     let post = e.post_return.as_deref().and_then(export_method);
-    let call = format!("g.{name}({})", args.join(", "));
+    let mut forwarder = format!("    pub fn {name}<H: Host>(g: &mut Instance<Glue<H>>");
+    let mut forwarded = Vec::new();
+    for (i, flat) in core_params.iter().enumerate() {
+        let _ = write!(forwarder, ", p{i}: {}", core_rust(*flat));
+        forwarded.push(format!("p{i}"));
+    }
+    forwarder.push(')');
+    if let Some(flat) = result_flat {
+        let _ = write!(forwarder, " -> {}", core_rust(flat));
+    }
+    let _ = writeln!(forwarder, " {{ g.{name}({}) }}", forwarded.join(", "));
+    forwarders.push_str(&forwarder);
+    let call = format!("glue_core::{name}(g, {})", args.join(", "));
     let post_call = |arg: &str| {
         post.as_ref()
             .map(|p| format!("        g.{p}({arg});\n"))

@@ -1737,6 +1737,27 @@ pub fn wit_host_glue_with_options(
         export_names.push((e.core_export.as_str(), index));
     }
     let export_names = assign_export_names(export_names);
+    // The core method of an export is named by `named_exports` over the module's whole export
+    // list, which is not known here: a name that depends on the other exports (a clash, or the
+    // same core export lifted twice) could not be told apart, so it is refused.
+    for (e, name) in exports.iter().zip(&export_names) {
+        let alone = assign_export_names([(e.core_export.as_str(), 0)]);
+        if alone.first() != Some(name) {
+            return Err(unsupported(format!(
+                "export `{}`: its method name clashes with another export's",
+                e.core_export
+            )));
+        }
+    }
+    if let Some(other) = exports
+        .iter()
+        .find(|e| e.core_module != exports[0].core_module)
+    {
+        return Err(unsupported(format!(
+            "export `{}`: the exports come from more than one core module",
+            other.core_export
+        )));
+    }
     let exported = options
         .exports
         .then_some((exports.as_slice(), export_names.as_slice()));

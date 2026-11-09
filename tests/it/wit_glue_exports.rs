@@ -352,3 +352,22 @@ fn exports_apply_to_the_glue_only() {
         .to_string();
     assert!(err.contains("exports"), "{err}");
 }
+
+#[test]
+#[should_panic(expected = "no method named `top`")]
+fn a_module_transpiled_without_named_exports_fails_to_build_instead_of_recursing() {
+    let core = r#"(module (func (export "top") ))"#;
+    let wit = "package t:p; world w { export top: func(); }";
+    let glue = wit_host_glue_with_options(&encoded(wit, core), &exports_on()).unwrap();
+    let opts = TranspileOptions {
+        named_imports: true,
+        reentrant_imports: true,
+        ..TranspileOptions::default()
+    };
+    let core = wat::parse_str(with_host_import(core)).unwrap();
+    let generated = transpile_with_options(&core, &opts).unwrap();
+    let program = format!(
+        "{generated}\n{glue}\nstruct H;\nimpl Host for H {{ fn h_h_host_ping(&mut self) {{}} }}\nfn main() {{}}\n"
+    );
+    common::build("wit_glue_exports_no_named", &program);
+}
