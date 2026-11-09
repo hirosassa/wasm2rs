@@ -72,18 +72,24 @@ fn a_run_component_yields_the_module_the_glue_and_the_exports() {
 fn the_generated_source_builds_and_runs_the_typed_run_export() {
     let code =
         transpile_component(&component_of(WORLD, CORE), &ComponentOptions::default()).unwrap();
+    let out = build_and_run(&code, "component_input_run", "hello");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
+    assert!(out.status.success());
+}
+
+/// Build `code` (a transpiled `run` component) with a `main` that calls its typed `run`
+/// export with the argument `arg`, run it and return its output.
+fn build_and_run(code: &str, name: &str, arg: &str) -> std::process::Output {
     let program = format!(
         "{code}\nfn main() {{\n    \
-         let host = wasm2rs_wasi::WasiHost::new(Vec::new()).with_arguments(vec![\"p\".to_string(), \"hello\".to_string()]);\n    \
+         let host = wasm2rs_wasi::WasiHost::new(Vec::new()).with_arguments(vec![\"p\".to_string(), \"{arg}\".to_string()]);\n    \
          let mut inst = Instance::new(Glue(host));\n    \
          let result = Exports::export_wasi_cli_run_0_2_0_run(&mut inst);\n    \
          drop(inst);\n    \
          std::process::exit(if result.is_ok() {{ 0 }} else {{ 1 }});\n}}\n"
     );
-    let bin = common::build_with_wasi("component_input_run", &program);
-    let out = Command::new(bin).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
-    assert!(out.status.success());
+    let bin = common::build_with_wasi(name, &program);
+    Command::new(bin).output().unwrap()
 }
 
 #[test]
@@ -336,16 +342,7 @@ fn the_cli_component_flag_writes_to_stdout_without_an_output() {
 fn the_cli_component_output_builds_and_runs() {
     let (_dir, input) = cli_component("run");
     let code = cli_ok(&["--component".as_ref(), input.as_os_str()]);
-    let program = format!(
-        "{code}\nfn main() {{\n    \
-         let host = wasm2rs_wasi::WasiHost::new(Vec::new()).with_arguments(vec![\"p\".to_string(), \"hi\".to_string()]);\n    \
-         let mut inst = Instance::new(Glue(host));\n    \
-         let result = Exports::export_wasi_cli_run_0_2_0_run(&mut inst);\n    \
-         drop(inst);\n    \
-         std::process::exit(if result.is_ok() {{ 0 }} else {{ 1 }});\n}}\n"
-    );
-    let bin = common::build_with_wasi("cli_component_run", &program);
-    let run = Command::new(bin).output().unwrap();
+    let run = build_and_run(&code, "cli_component_run", "hi");
     assert_eq!(String::from_utf8_lossy(&run.stdout), "hi");
     assert!(run.status.success());
 }
@@ -353,7 +350,7 @@ fn the_cli_component_output_builds_and_runs() {
 #[test]
 fn the_cli_component_flag_takes_the_codegen_flags_it_supports() {
     let (_dir, input) = cli_component("compat");
-    let out = cli(&[
+    let code = cli_ok(&[
         "--component".as_ref(),
         "--unsafe-memory".as_ref(),
         "--jobs=2".as_ref(),
@@ -362,27 +359,20 @@ fn the_cli_component_flag_takes_the_codegen_flags_it_supports() {
         input.as_os_str(),
     ]);
     assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let code = String::from_utf8_lossy(&out.stdout);
-    assert!(
         code.contains("get_unchecked"),
         "--unsafe-memory not applied"
     );
 }
 
 #[test]
-fn the_cli_component_flag_without_external_types_declares_its_own_host() {
+fn the_cli_component_flag_passes_external_types_to_the_glue() {
     let (_dir, input) = cli_component("own");
-    let out = cli(&[
+    let code = cli_ok(&[
         "--component".as_ref(),
         "--external-types=my_host::wasi".as_ref(),
         input.as_os_str(),
     ]);
-    assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("use my_host::wasi::Host;"));
+    assert!(code.contains("use my_host::wasi::Host;"));
 }
 
 #[test]
@@ -421,20 +411,13 @@ fn the_cli_component_flag_names_the_flag_it_cannot_combine_with() {
 
 #[test]
 fn the_cli_component_flag_rejects_a_core_module() {
-    let dir =
-        std::env::temp_dir().join(format!("wasm2rs_cli_component_core_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let input = dir.join("m.wasm");
-    std::fs::write(
-        &input,
-        wat::parse_str("(module (func (export \"f\")))").unwrap(),
-    )
-    .unwrap();
+    let core = wat::parse_str("(module (func (export \"f\")))").unwrap();
+    let (_dir, input) = cli_input("core", &core);
     let out = cli(&["--component".as_ref(), input.as_os_str()]);
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("not a component") || stderr.contains("core module"),
+        stderr.contains("core module") && stderr.contains("transpile"),
         "{stderr}"
     );
 }
