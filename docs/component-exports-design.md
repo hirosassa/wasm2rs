@@ -106,7 +106,9 @@ names (`run_export`, `wasmparser`).
 - **No `run`.** Before the build, `wit_exports` must contain `wasi:cli/run@0.2.0` `run`. If it does
   not, the example says so (`the component does not export ...`) and exits 2, without a panic.
   A shape `wit_exports` does not read (an adapter or a nested component that does more than
-  re-export) is `Unsupported`; its message is printed as is, and the exit code is 2.
+  re-export) is `Unsupported`; its message is printed as is, and the exit code is 2. The same holds for a glue
+  error caused by another export (the glue has a method for every export, not only `run`), so
+  every function the component exports must be supported for the example to run it.
 - **Core module.** Still the largest one. `WitExport::core_module` indexes the *top-level* core
   modules, while `extract_core_modules` also returns the modules of nested components, so the two
   index spaces can differ and the field is not used yet. Selecting the module by `core_module`

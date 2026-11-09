@@ -7,17 +7,18 @@
 //! It is transpiled with `named_imports`, `named_exports` and `reentrant_imports`; the
 //! glue from `wasm2rs::wit_host_glue_with_options` (the `Glue` that lowers the library's
 //! `Host` trait to the module's imports, and with `exports` the typed `Exports` trait) and a
-//! `main` calling the typed `wasi:cli/run` export are appended, and the result is built with `rustc -C opt-level=1`, linked against the
-//! `wasm2rs-wasi` library (built with `cargo` into the work directory first), and run with `args` as the
-//! program's arguments and this process's environment. The guest's `argv[0]` is `<component.wasm>` as given on the command
+//! `main` calling the typed `wasi:cli/run` export are appended, and the result is built with
+//! `rustc -C opt-level=1`, linked against the `wasm2rs-wasi` library (built with `cargo` into
+//! the work directory first), and run with `args` as the program's arguments and this
+//! process's environment. The guest's `argv[0]` is `<component.wasm>` as given on the command
 //! line (like a real process's), followed by `args`.
 //!
 //! Exit codes: 0 when `run` returns ok, 1 on an error result or `wasi:cli/exit` with an
 //! error, 2 when the build fails or the component does not lift `wasi:cli/run@0.2.0#run`
 //! directly (no such export, or a shape `wasm2rs::wit_exports` does not read: the message says
-//! which), 134 when a panic occurs during the `run` call (a guest trap,
-//! or a panic inside a host import it calls: the panic message is printed, then
-//! `wasip2_run: the program trapped`); panics outside the call (host setup) stay 101. The build goes in
+//! which), 134 when a panic occurs during the `run` call (a guest trap, or a panic inside a
+//! host import it calls: the panic message is printed, then `wasip2_run: the program
+//! trapped`); panics outside the call (host setup) stay 101. The build goes in
 //! `$WASIP2_WORK_DIR` (default: a temporary directory). The program sees the
 //! directory `$WASIP2_PREOPEN`, if set, as its `/`: read-only, or also writable if
 //! `$WASIP2_PREOPEN_WRITABLE=1`. A function the host does not implement (`wasi:http`) traps
@@ -33,6 +34,7 @@ use wasm2rs::{
     TranspileOptions, WitExport, WitOptions, extract_core_modules, transpile_with_options,
     wit_exports, wit_host_glue_with_options,
 };
+
 const RUN_INTERFACE: &str = "wasi:cli/run@0.2.0";
 
 /// Builds the `wasm2rs-wasi` library with `cargo` into `dir` (it depends on `getrandom`, which a
@@ -143,7 +145,12 @@ fn main() {
         exports: true,
         ..WitOptions::default()
     };
-    let glue = wit_host_glue_with_options(&component, &options).expect("generate the host glue");
+    // `exports: true` generates a method for every export of the component, not only `run`:
+    // one the glue cannot lower or lift fails here too.
+    let glue = wit_host_glue_with_options(&component, &options).unwrap_or_else(|err| {
+        eprintln!("wasip2_run: {err}");
+        std::process::exit(2);
+    });
     let opts = TranspileOptions {
         named_imports: true,
         named_exports: true,
