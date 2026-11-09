@@ -37,7 +37,13 @@ const RUN_EXPORT: &str = "wasi:cli/run@0.2.0#run";
 
 /// Builds the `wasm2rs-wasi` library with `cargo` into `dir` (it depends on `getrandom`, which a
 /// bare `rustc` call cannot resolve): the rlib and the directory of its dependencies' rlibs.
-fn build_wasi_rlib(dir: &std::path::Path) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
+fn build_wasi_rlib(
+    dir: &std::path::Path,
+) -> (
+    std::path::PathBuf,
+    Option<std::path::PathBuf>,
+    Vec<std::path::PathBuf>,
+) {
     let target = dir.join("wasi-target");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let out = Command::new(cargo)
@@ -59,6 +65,7 @@ fn build_wasi_rlib(dir: &std::path::Path) -> (std::path::PathBuf, Vec<std::path:
     // cargo says where it put the rlibs (it depends on the version): the library, and the
     // directories to search for its dependencies.
     let mut lib = None;
+    let mut rmeta = None;
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         if !line.contains("\"reason\":\"compiler-artifact\"") {
@@ -71,6 +78,13 @@ fn build_wasi_rlib(dir: &std::path::Path) -> (std::path::PathBuf, Vec<std::path:
         else {
             continue;
         };
+        if line.contains("\"name\":\"wasm2rs_wasi\"") {
+            // newer cargo leaves only a metadata stub in the rlib: the .rmeta must be given too
+            rmeta = list
+                .split('"')
+                .find(|f| f.ends_with(".rmeta"))
+                .map(std::path::PathBuf::from);
+        }
         for rlib in list.split('"').filter(|f| f.ends_with(".rlib")) {
             let rlib = std::path::PathBuf::from(rlib);
             if line.contains("\"name\":\"wasm2rs_wasi\"") {
@@ -81,7 +95,11 @@ fn build_wasi_rlib(dir: &std::path::Path) -> (std::path::PathBuf, Vec<std::path:
             }
         }
     }
-    (lib.expect("cargo reported no wasm2rs-wasi rlib"), dirs)
+    (
+        lib.expect("cargo reported no wasm2rs-wasi rlib"),
+        rmeta,
+        dirs,
+    )
 }
 
 /// The index of the core module's `wasi:cli/run` export.
@@ -155,11 +173,17 @@ fn main() {
     let src = dir.join("program.rs");
     let bin = dir.join("program");
     std::fs::write(&src, format!("{generated}\n{glue}\n{main}\n")).expect("write source");
-    let (rlib, deps) = build_wasi_rlib(&dir);
+    let (rlib, rmeta, deps) = build_wasi_rlib(&dir);
     let status = Command::new("rustc")
         .args(["--edition", "2024", "-C", "opt-level=1", "-A", "warnings"])
         .arg("--extern")
         .arg(format!("wasm2rs_wasi={}", rlib.display()))
+        .args(rmeta.iter().flat_map(|m| {
+            [
+                "--extern".to_string(),
+                format!("wasm2rs_wasi={}", m.display()),
+            ]
+        }))
         .args(
             deps.iter()
                 .flat_map(|d| ["-L".to_string(), format!("dependency={}", d.display())]),

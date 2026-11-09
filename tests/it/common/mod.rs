@@ -176,6 +176,8 @@ pub fn build_with_wasi(name: &str, program: &str) -> std::path::PathBuf {
 /// coverage instrumentation cannot leak into the rlib.
 struct WasiLib {
     rlib: std::path::PathBuf,
+    /// The `.rmeta` that goes with it, if cargo built one that the rlib needs.
+    rmeta: Option<std::path::PathBuf>,
     /// The directories holding the rlibs of the library's dependencies.
     deps: Vec<std::path::PathBuf>,
     /// Hash of the rlib's bytes and the toolchain: part of the cache key of every program
@@ -185,8 +187,15 @@ struct WasiLib {
 
 /// The `wasm2rs-wasi` rlib and the directories of all the rlibs that cargo built, from
 /// `cargo build --message-format=json` output (their places depend on the cargo version).
-fn wasi_artifacts(json_lines: &str) -> Option<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
+fn wasi_artifacts(
+    json_lines: &str,
+) -> Option<(
+    std::path::PathBuf,
+    Option<std::path::PathBuf>,
+    Vec<std::path::PathBuf>,
+)> {
     let mut lib = None;
+    let mut rmeta = None;
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     for line in json_lines.lines() {
         if !line.contains("\"reason\":\"compiler-artifact\"") {
@@ -199,6 +208,13 @@ fn wasi_artifacts(json_lines: &str) -> Option<(std::path::PathBuf, Vec<std::path
         else {
             continue;
         };
+        if line.contains("\"name\":\"wasm2rs_wasi\"") {
+            // newer cargo leaves only a metadata stub in the rlib: the .rmeta must be given too
+            rmeta = list
+                .split('"')
+                .find(|f| f.ends_with(".rmeta"))
+                .map(std::path::PathBuf::from);
+        }
         for rlib in list.split('"').filter(|f| f.ends_with(".rlib")) {
             let rlib = std::path::PathBuf::from(rlib);
             if line.contains("\"name\":\"wasm2rs_wasi\"") {
@@ -209,7 +225,7 @@ fn wasi_artifacts(json_lines: &str) -> Option<(std::path::PathBuf, Vec<std::path
             }
         }
     }
-    Some((lib?, dirs))
+    Some((lib?, rmeta, dirs))
 }
 
 fn wasi_lib() -> &'static WasiLib {
@@ -250,25 +266,39 @@ fn wasi_lib() -> &'static WasiLib {
         // Where cargo put the rlib is cargo's business (a separate build directory holds the
         // intermediate files in newer versions): ask for it, and look for the dependencies
         // beside it.
-        let (built, deps) = wasi_artifacts(&String::from_utf8_lossy(&out.stdout))
+        let (built, built_rmeta, deps) = wasi_artifacts(&String::from_utf8_lossy(&out.stdout))
             .expect("cargo reported no wasm2rs-wasi rlib");
         // Link a content-addressed copy, so the digest matches the bytes that are linked
         // even if cargo replaces the file later.
         let bytes = std::fs::read(&built).expect("read wasm2rs-wasi rlib");
+        let meta_bytes = built_rmeta
+            .as_ref()
+            .map(|p| std::fs::read(p).expect("read wasm2rs-wasi rmeta"));
         let mut h = std::collections::hash_map::DefaultHasher::new();
         bytes.hash(&mut h);
+        meta_bytes.hash(&mut h);
         rustc_version().hash(&mut h);
         let digest = h.finish();
-        let rlib = cache_dir.join(format!("libwasm2rs_wasi-{digest:016x}.rlib"));
-        if !rlib.exists() {
-            let staged = cache_dir.join(format!(
-                "libwasm2rs_wasi-{digest:016x}-{}.rlib.tmp",
-                std::process::id()
-            ));
-            std::fs::write(&staged, &bytes).expect("stage rlib");
-            std::fs::rename(&staged, &rlib).expect("publish rlib into cache");
+        let publish = |ext: &str, bytes: &[u8]| {
+            let path = cache_dir.join(format!("libwasm2rs_wasi-{digest:016x}.{ext}"));
+            if !path.exists() {
+                let staged = cache_dir.join(format!(
+                    "libwasm2rs_wasi-{digest:016x}-{}.{ext}.tmp",
+                    std::process::id()
+                ));
+                std::fs::write(&staged, bytes).expect("stage wasm2rs-wasi artifact");
+                std::fs::rename(&staged, &path).expect("publish artifact into cache");
+            }
+            path
+        };
+        let rlib = publish("rlib", &bytes);
+        let rmeta = meta_bytes.map(|m| publish("rmeta", &m));
+        WasiLib {
+            rlib,
+            rmeta,
+            deps,
+            digest,
         }
-        WasiLib { rlib, deps, digest }
     })
 }
 
@@ -300,6 +330,11 @@ fn build_with(name: &str, program: &str, wasi: Option<&WasiLib>) -> std::path::P
         let mut extern_arg = std::ffi::OsString::from("wasm2rs_wasi=");
         extern_arg.push(&lib.rlib);
         cmd.arg("--extern").arg(extern_arg);
+        if let Some(rmeta) = &lib.rmeta {
+            let mut meta_arg = std::ffi::OsString::from("wasm2rs_wasi=");
+            meta_arg.push(rmeta);
+            cmd.arg("--extern").arg(meta_arg);
+        }
         for dir in &lib.deps {
             let mut deps_arg = std::ffi::OsString::from("dependency=");
             deps_arg.push(dir);
