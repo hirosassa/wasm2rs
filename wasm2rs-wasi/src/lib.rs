@@ -15,4 +15,9 @@ pub use generated::*;
 
 mod host;
 
-pub use host::{Access, ConfigError, NetworkPolicy, WasiHost, WasiHostBuilder};
+#[cfg(feature = "os-random")]
+pub use host::OsRandom;
+pub use host::{
+    Access, Clock, ConfigError, InsecureRandom, NetworkPolicy, RandomError, RandomSource,
+    SystemClock, WasiHost, WasiHostBuilder,
+};

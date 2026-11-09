@@ -79,19 +79,18 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 mod config;
+mod sources;
 pub use config::{Access, ConfigError, NetworkPolicy, WasiHostBuilder};
-
-fn os_seed() -> u64 {
-    use std::hash::BuildHasher;
-    std::collections::hash_map::RandomState::new().hash_one(0u8)
-}
+#[cfg(feature = "os-random")]
+pub use sources::OsRandom;
+pub use sources::{Clock, InsecureRandom, RandomError, RandomSource, SystemClock};
 
 pub struct WasiHost {
     /// The program's arguments; set by `with_arguments`.
     args: Vec<String>,
     env: Vec<(String, String)>,
-    /// The monotonic clock's zero: when the host was created.
-    start: Instant,
+    /// The time `wasi:clocks` reports; waits are in real time whatever it says.
+    clock: Box<dyn Clock>,
     /// Filled by the stdin thread, which `start_stdin` spawns on first use.
     stdin: SharedStdin,
     /// The messages behind the live `error` handles (`last-operation-failed`); a dropped
@@ -105,9 +104,9 @@ pub struct WasiHost {
     failed_out: std::collections::HashSet<u32>,
     /// Whether the stdin thread was started.
     stdin_started: bool,
-    /// The generator state (splitmix64, seeded from the OS-seeded `std` hasher): fine for
-    /// `HashMap` seeds and examples, not for keys or tokens.
-    rng: u64,
+    /// The source behind `wasi:random`; `None` only for a host made by `new` without the
+    /// `os-random` feature, whose random calls then trap.
+    random: Option<Box<dyn RandomSource>>,
     /// One entry per subscription: what it waits for. A dropped pollable keeps its slot.
     pollables: Vec<Wait>,
     /// The preopened directories; descriptor slot `i` is `preopens[i]`.
@@ -157,13 +156,16 @@ impl WasiHost {
         WasiHost {
             args: Vec::new(),
             env,
-            start: Instant::now(),
+            clock: Box::new(SystemClock::new()),
             stdin: SharedStdin::default(),
             errors: Slab::new(),
             failed_in: std::collections::HashSet::new(),
             failed_out: std::collections::HashSet::new(),
             stdin_started: false,
-            rng: os_seed(),
+            #[cfg(feature = "os-random")]
+            random: Some(Box::new(OsRandom::new())),
+            #[cfg(not(feature = "os-random"))]
+            random: None,
             pollables: Vec::new(),
             preopens: Vec::new(),
             cwd: None,
@@ -406,19 +408,29 @@ impl WasiHost {
             .map_err(io_error_code)
     }
 
-    fn next_u64(&mut self) -> u64 {
-        self.rng = self.rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.rng;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+    fn random_source(&mut self) -> &mut dyn RandomSource {
+        match self.random.as_deref_mut() {
+            Some(random) => random,
+            None => panic!("wasi:random: no random source (enable `os-random` or use the builder)"),
+        }
     }
 
-    /// `len` random bytes. A guest-chosen length above 64 MiB traps (as in wasmtime), so a
-    /// guest cannot make the host allocate without bound.
-    fn random_bytes(&mut self, len: u64) -> Vec<u8> {
+    /// `len` secure random bytes. A guest-chosen length above 64 MiB traps (as in wasmtime), so
+    /// a guest cannot make the host allocate without bound; so does a source that fails.
+    fn secure_bytes(&mut self, len: u64) -> Vec<u8> {
         assert!(len <= 64 << 20, "random bytes: length over 64 MiB");
-        std::iter::repeat_with(|| self.next_u64().to_le_bytes())
+        let mut bytes = vec![0; len as usize];
+        if let Err(e) = self.random_source().fill_random(&mut bytes) {
+            panic!("wasi:random: the random source failed: {e}");
+        }
+        bytes
+    }
+
+    /// `len` insecure random bytes, with the same length limit.
+    fn insecure_bytes(&mut self, len: u64) -> Vec<u8> {
+        assert!(len <= 64 << 20, "random bytes: length over 64 MiB");
+        let source = self.random_source();
+        std::iter::repeat_with(|| source.insecure_u64().to_le_bytes())
             .flatten()
             .take(len as usize)
             .collect()

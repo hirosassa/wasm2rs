@@ -91,38 +91,28 @@ impl Host for WasiHost {
         self.subscribe(Some(deadline_after(Instant::now(), when)))
     }
 
-    /// An instant is nanoseconds since the host was created (see `monotonic-clock.now`); one
-    /// that has passed is ready at once.
+    /// An instant is on the host's clock (see `monotonic-clock.now`); one that has passed is
+    /// ready at once. The wait itself is in real time.
     fn wasi_clocks_monotonic_clock_subscribe_instant(&mut self, when: u64) -> Pollable {
-        self.subscribe(Some(deadline_after(self.start, when)))
+        let remaining = when.saturating_sub(self.clock.monotonic_now());
+        self.subscribe(Some(deadline_after(Instant::now(), remaining)))
     }
 
-    /// Nanoseconds since the host was created.
+    /// The host clock's monotonic time (by default, nanoseconds since the host was created).
     fn wasi_clocks_monotonic_clock_now(&mut self) -> u64 {
-        u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        self.clock.monotonic_now()
     }
 
-    /// 1 ns: `now` counts the nanoseconds of an `Instant`.
     fn wasi_clocks_monotonic_clock_resolution(&mut self) -> u64 {
-        1
+        self.clock.monotonic_resolution()
     }
 
-    /// 1 ns: `now` reads the nanoseconds of the system clock.
     fn wasi_clocks_wall_clock_resolution(&mut self) -> Datetime {
-        Datetime {
-            seconds: 0,
-            nanoseconds: 1,
-        }
+        self.clock.wall_resolution()
     }
 
     fn wasi_clocks_wall_clock_now(&mut self) -> Datetime {
-        let since = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("the system clock is before the Unix epoch");
-        Datetime {
-            seconds: since.as_secs(),
-            nanoseconds: since.subsec_nanos(),
-        }
+        self.clock.wall_now()
     }
 
     /// The indices of the ready pollables, waiting for the earliest deadline, for data
@@ -300,23 +290,27 @@ impl Host for WasiHost {
     }
 
     fn wasi_random_random_get_random_bytes(&mut self, len: u64) -> Vec<u8> {
-        self.random_bytes(len)
+        self.secure_bytes(len)
     }
 
     fn wasi_random_random_get_random_u64(&mut self) -> u64 {
-        self.next_u64()
+        let mut bytes = [0; 8];
+        if let Err(e) = self.random_source().fill_random(&mut bytes) {
+            panic!("wasi:random: the random source failed: {e}");
+        }
+        u64::from_le_bytes(bytes)
     }
 
     fn wasi_random_insecure_get_insecure_random_bytes(&mut self, len: u64) -> Vec<u8> {
-        self.random_bytes(len)
+        self.insecure_bytes(len)
     }
 
     fn wasi_random_insecure_get_insecure_random_u64(&mut self) -> u64 {
-        self.next_u64()
+        self.random_source().insecure_u64()
     }
 
     fn wasi_random_insecure_seed_insecure_seed(&mut self) -> (u64, u64) {
-        (self.next_u64(), self.next_u64())
+        self.random_source().insecure_seed()
     }
 
     fn wasi_filesystem_types_resource_drop_descriptor(&mut self, handle: Descriptor) {
