@@ -13,8 +13,8 @@ Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library, 
 - `wit_functions` (`src/wit.rs`) parses the export section only for `Type` and `Instance` kinds, to
   grow the index spaces. Func exports, `canon lift` and its options (`memory`, `realloc`,
   `post-return`, string encoding) are skipped, and so are the core instance section and core-func aliases.
-- `examples/wasip2_run.rs` finds `wasi:cli/run@0.2.0#run` by scanning the largest core module's
-  export names and calls `inst.func{N}()`. It never checks that name against a `canon lift`, nor the
+- (Before A3-2) `examples/wasip2_run.rs` found `wasi:cli/run@0.2.0#run` by scanning the largest core module's
+  export names and called `inst.func{N}()`; it never checked that name against a `canon lift`, nor the
   lowered core signature.
 
 So a host cannot call an exported WIT function with typed arguments and results, and `wasi:http`
