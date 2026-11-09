@@ -190,11 +190,12 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   handles `3..`; a failed write answers `last-operation-failed` once, with an `error` handle, then `closed`; `closed` is also the end of a stream). A new file is named under an
   existing directory that must itself resolve under the preopen, and a symlink that
   leads nowhere or out (even a dangling one) is `not-permitted`, not a place to create
-  a file (`create` + `exclusive` on a symlink name is `exist`, never following it). The path is checked when the file is opened, and a file descriptor then
-  holds the open `File`: every operation on it goes through that `File`, so it stays on
-  the file it opened even if the path is unlinked, renamed over or reused. A program
-  that swaps a directory for a symlink between the check and the open can still escape,
-  so only preopen a directory you trust the program with.
+  a file (`create` + `exclusive` on a symlink name is `exist`, never following it). Paths are resolved below the directory descriptor with `cap-std`
+  (`openat` with `O_NOFOLLOW` per component), so the check and the open are one step, and a
+  file descriptor holds the open `File`: every operation on it goes through that `File`, so it
+  stays on the file it opened even if the path is unlinked, renamed over or reused. A program
+  that swaps a directory for a symlink while the host runs cannot escape (see
+  `typed-host-design.md` for what remains).
 - With a writable preopen, `create-directory-at`, `unlink-file-at`,
   `remove-directory-at` and `rename-at` work too (`std::fs::create_dir`,
   `remove_file`, `remove_dir`, `rename`; `create_dir_all` and `remove_dir_all` are built
@@ -202,13 +203,9 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   file's (parent under the preopen; `..`, absolute paths and names ending in `/` or
   `/.` refused), and the entry itself is never followed: `unlink` removes a symlink,
   not its target, `remove-directory-at` on a symlink is `not-directory`, and a symlink
-  cannot be renamed (`not-permitted`: a symlink moved onto the path of an open descriptor
-  would lead it out of the preopen). A directory descriptor has no `File` (std cannot
-  open relative to a directory), so its path is resolved again on every use and must
-  still be under the preopen (`not-permitted` if not), which covers a directory holding
-  a symlink that leads out being renamed over it; the check and the use are separate
-  steps, so a host that must resist a racing guest needs `openat` and friends (a crate
-  such as `rustix`). Errors:
+  cannot be renamed (`not-permitted`, kept from the path-based host). A directory descriptor holds the open directory itself, so it stays
+  on that directory when it is renamed or an ancestor is swapped for a symlink; every path
+  under it is resolved below it. Errors:
   `exist`, `no-entry`, `is-directory`, `not-directory`, `not-empty`. On a read-only
   preopen all four are `read-only`.
 - `set-size` (needs a descriptor opened for `write`; a directory is `is-directory`),
@@ -219,7 +216,8 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
 - Sockets: TCP over loopback is done (`tcp-create-socket`, `start-bind`/`finish-bind`, `start-listen`/`finish-listen`, `start-connect`/`finish-connect`, `accept`, `local-address`, `remote-address`, `subscribe`, `shutdown`, `instance-network`); the streams are the ordinary `input-stream`/`output-stream` handles. An address outside 127.0.0.0/8 and `::1` is `access-denied` unless the host calls `WasiHost::with_external_network`. `std` binds and listens in one call, so `finish-bind` does both, a bound socket cannot connect (`not-supported`), and `start-connect` connects at once. UDP and `ip-name-lookup` are done in the typed host only (below); the TCP socket options keep-alive, buffer sizes and hop limit are only recorded (validated, read back, inherited by accepted sockets, not applied to the OS socket); the listen backlog size is only validated (zero is `invalid-argument`, `invalid-state` once a connection is started) and otherwise ignored.
 - Paths must stay under the preopen: an absolute path or any `..` is `not-permitted`
   (stricter than WASI, which allows `..` that stays inside), and so is a symlink that
-  leads out (the resolved path is checked against the preopen). Without
+  leads out of the descriptor's directory (even if still inside the preopen) or has an
+  absolute target (resolved below the directory, never from a host path). Without
   `symlink-follow`, `open-at` on a symlink as the last component is `loop` (also when
   creating; `exist` with create+exclusive), and `stat-at`/`metadata-hash-at` describe the link
   itself; links earlier in the path are still followed.

@@ -19,6 +19,11 @@ http-client = ["dep:ureq"]
 
 [dependencies]
 getrandom = { version = "0.4", optional = true }
+# Capability-based file access: a directory descriptor holds an open directory and every path
+# is resolved below it in one step (`openat` with `O_NOFOLLOW` per component), so a symlink
+# swapped in after a check cannot lead out of a preopen.
+cap-std = "4"
+cap-fs-ext = "4"
 # `gzip` is left out: the guest must see the body as it came (with its `content-encoding`),
 # not decoded.
 ureq = { version = "3.4.3", optional = true, default-features = false, features = ["rustls"] }
