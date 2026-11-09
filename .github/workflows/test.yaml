@@ -39,10 +39,17 @@ jobs:
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Run cargo clippy with the http-client feature
+        run: cargo clippy -p wasm2rs-wasi --all-targets --features http-client -- -D warnings
+
       # The `os-random` feature (default) pulls in getrandom; without it a random source
       # is required, which `tests/config.rs` checks.
       - name: Test wasm2rs-wasi without default features
         run: cargo test -p wasm2rs-wasi --no-default-features
+
+      # `UreqClient` (feature `http-client`, off by default) against a loopback server.
+      - name: Test wasm2rs-wasi with the http-client feature
+        run: cargo test -p wasm2rs-wasi --features http-client --test http_client
 
       # The Rust wasi-threads E2E test must run here, not skip (see
       # docs/wasi-threads-e2e.md). The wasi-sdk tests skip here; the

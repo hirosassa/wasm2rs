@@ -15,6 +15,13 @@ pub use generated::*;
 
 mod host;
 
+// Declared here, not in `host.rs`, so that the client stays a file of its own.
+#[cfg(feature = "http-client")]
+#[path = "host/ureq_client.rs"]
+mod ureq_client;
+#[cfg(feature = "http-client")]
+pub use ureq_client::UreqClient;
+
 #[cfg(feature = "os-random")]
 pub use host::OsRandom;
 pub use host::{
