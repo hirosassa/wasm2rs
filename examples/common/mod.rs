@@ -1,4 +1,4 @@
-//! Shared by the `wasip2_*` examples: building a generated program against `wasm2rs-wasi`.
+//! Shared by the `wasip2_*` examples: transpiling a component, and building a generated program against `wasm2rs-wasi`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
