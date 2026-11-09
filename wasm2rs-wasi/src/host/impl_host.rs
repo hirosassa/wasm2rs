@@ -127,7 +127,7 @@ impl Host for WasiHost {
         if self.http_request(self_).body.is_some() {
             return Err(());
         }
-        let (handle, body) = self.http_new_out_body(HttpErrorCode::HTTPRequestBodySize);
+        let (handle, body) = self.http_new_out_body(HttpErrorCode::HTTPRequestBodySize, false);
         self.http_request_mut(self_).body = Some(handle);
         Ok(body)
     }
@@ -155,13 +155,18 @@ impl Host for WasiHost {
             .http_out_bodies
             .take(this.0 as usize)
             .unwrap_or_else(|| http_missing("outgoing-body"));
-        if let Some(trailers) = trailers {
-            self.http_fields.remove(trailers.0 as usize);
-            let code = HttpErrorCode::InternalError(Some("trailers are not supported".into()));
+        let trailers = trailers.map(|handle| {
+            self.http_fields
+                .take(handle.0 as usize)
+                .unwrap_or_else(|| http_missing("fields"))
+        });
+        if trailers.is_some() && !body.trailers_ok() {
+            let code =
+                HttpErrorCode::InternalError(Some("request trailers are not supported".into()));
             body.handle().fail(code.clone());
             return Err(code);
         }
-        body.handle().finish()
+        body.handle().finish_with(trailers.map(|t| t.entries()))
     }
 
     fn wasi_http_types_method_incoming_request_method(&mut self, self_: IncomingRequest) -> Method {
@@ -203,17 +208,16 @@ impl Host for WasiHost {
         &mut self,
         self_: IncomingRequest,
     ) -> Result<IncomingBody, ()> {
-        let body = self
+        let request = self
             .http_in_requests
             .get_mut(self_.0 as usize)
-            .unwrap_or_else(|| http_missing("incoming-request"))
-            .body
-            .take()
-            .ok_or(())?;
+            .unwrap_or_else(|| http_missing("incoming-request"));
+        let body = request.body.take().ok_or(())?;
+        let trailers = request.trailers.take();
         let reader = Box::new(std::io::Cursor::new(body));
-        Ok(IncomingBody(
-            self.http_bodies.insert(HttpIncomingBody::spawn(reader)) as u32,
-        ))
+        let mut body = HttpIncomingBody::spawn(reader);
+        body.trailers = trailers;
+        Ok(IncomingBody(self.http_bodies.insert(body) as u32))
     }
 
     /// Takes over the `headers` handle's contents: the guest gave the resource away.
@@ -264,7 +268,7 @@ impl Host for WasiHost {
         if self.http_out_response(self_).body.is_some() {
             return Err(());
         }
-        let (handle, body) = self.http_new_out_body(HttpErrorCode::HTTPResponseBodySize);
+        let (handle, body) = self.http_new_out_body(HttpErrorCode::HTTPResponseBodySize, true);
         self.http_out_response_mut(self_).body = Some(handle);
         Ok(body)
     }
@@ -525,10 +529,14 @@ impl Host for WasiHost {
         &mut self,
         this: IncomingBody,
     ) -> FutureTrailers {
-        self.http_bodies
+        let mut body = self
+            .http_bodies
             .take(this.0 as usize)
             .unwrap_or_else(|| http_missing("incoming-body"));
-        FutureTrailers(self.http_trailers.insert(false) as u32)
+        FutureTrailers(
+            self.http_trailers
+                .insert(Some(std::mem::take(&mut body.trailers))) as u32,
+        )
     }
 
     /// Only failures of a response body have an `error-code` (`None` for any other `error`).
@@ -567,19 +575,21 @@ impl Host for WasiHost {
         self.subscribe(None)
     }
 
-    /// A received message has no trailers here: `none`, once, then `Some(Err(()))`.
+    /// The trailers of the message (`none` for one without): the answer once, then `Some(Err(()))`.
     fn wasi_http_types_method_future_trailers_get(
         &mut self,
         self_: FutureTrailers,
     ) -> Option<Result<Result<Option<Fields>, HttpErrorCode>, ()>> {
-        let answered = self
+        let slot = self
             .http_trailers
             .get_mut(self_.0 as usize)
             .unwrap_or_else(|| http_missing("future-trailers"));
-        if std::mem::replace(answered, true) {
+        let Some(trailers) = slot.take() else {
             return Some(Err(()));
-        }
-        Some(Ok(Ok(None)))
+        };
+        let fields =
+            trailers.map(|entries| self.http_new_fields(http::HttpFields::received(entries)));
+        Some(Ok(Ok(fields)))
     }
 
     fn wasi_http_types_resource_drop_future_trailers(&mut self, handle: FutureTrailers) {

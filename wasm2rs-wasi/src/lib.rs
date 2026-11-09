@@ -26,6 +26,6 @@ pub use ureq_client::UreqClient;
 pub use host::OsRandom;
 pub use host::{
     Access, Clock, ConfigError, HttpClient, HttpClientError, HttpRequest, HttpResponse,
-    IncomingRequestParts, InsecureRandom, NetworkPolicy, RandomError, RandomSource, ServedResponse,
-    SystemClock, WasiHost, WasiHostBuilder,
+    IncomingRequestParts, InsecureRandom, NetworkPolicy, RandomError, RandomSource, ServedBody,
+    ServedResponse, SystemClock, WasiHost, WasiHostBuilder,
 };

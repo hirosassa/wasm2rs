@@ -15,6 +15,8 @@ const MAX_BODY: usize = 1024 * 1024;
 /// request's rest is drained for at most `DRAIN_TIME`.
 const REQUEST_TIME: Duration = Duration::from_secs(5);
 const DRAIN_TIME: Duration = Duration::from_secs(1);
+/// A response body the guest leaves open is cut after this long without a byte (`--body-timeout`).
+const BODY_IDLE: Duration = Duration::from_secs(30);
 
 /// A rejected request: the status and the reason sent back.
 struct Reject(u16, &'static str);
@@ -87,7 +89,11 @@ fn parse_method(s: &str) -> Method {
 }
 
 /// Reads one request: HTTP/1.x, `Content-Length` bodies only.
-fn read_request(stream: &mut TcpStream, deadline: Instant) -> Result<IncomingRequestParts, Reject> {
+/// The flag tells an HTTP/1.0 request (its answer cannot be chunked).
+fn read_request(
+    stream: &mut TcpStream,
+    deadline: Instant,
+) -> Result<(IncomingRequestParts, bool), Reject> {
     let (head, mut body) = read_head(stream, deadline)?;
     let head = std::str::from_utf8(&head).map_err(|_| Reject(400, "head is not UTF-8"))?;
     let mut lines = head.split("\r\n");
@@ -158,14 +164,18 @@ fn read_request(stream: &mut TcpStream, deadline: Instant) -> Result<IncomingReq
             n => body.extend_from_slice(&chunk[..n]),
         }
     }
-    Ok(IncomingRequestParts {
+    Ok((
+        IncomingRequestParts {
         method: parse_method(method),
         path_with_query: Some(target.to_string()),
         scheme: Some(Scheme::HTTP),
         authority,
         headers,
         body,
-    })
+        trailers: None,
+        },
+        version == "HTTP/1.0",
+    ))
 }
 
 fn reason(status: u16) -> &'static str {
@@ -187,16 +197,20 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
-/// Writes the response and closes the connection (always `Connection: close`). The guest's
-/// own `Content-Length`, `Connection` and `Transfer-Encoding` are replaced by ours.
-fn respond(stream: &mut TcpStream, head_only: bool, response: &ServedResponse) {
-    let mut out = format!(
-        "HTTP/1.1 {} {}\r\n",
-        response.status,
-        reason(response.status)
-    )
-    .into_bytes();
-    for (name, value) in &response.headers {
+/// How the body of an answer is delimited.
+enum Framing {
+    /// `content-length` of the known body.
+    Length(usize),
+    /// `transfer-encoding: chunked`, for a body still being written or with trailers.
+    Chunked,
+}
+
+/// The status line and headers of an answer, ending with the blank line. The guest's own
+/// `Content-Length`, `Connection` and `Transfer-Encoding` are replaced by ours, and a
+/// `content-length` is left out where there is none (1xx and 204, RFC 9110 8.6).
+fn head(status: u16, headers: &[(String, Vec<u8>)], framing: Option<Framing>) -> Vec<u8> {
+    let mut out = format!("HTTP/1.1 {status} {}\r\n", reason(status)).into_bytes();
+    for (name, value) in headers {
         if ["content-length", "connection", "transfer-encoding"]
             .iter()
             .any(|h| name.eq_ignore_ascii_case(h))
@@ -208,27 +222,118 @@ fn respond(stream: &mut TcpStream, head_only: bool, response: &ServedResponse) {
         out.extend_from_slice(value);
         out.extend_from_slice(b"\r\n");
     }
-    // no `Content-Length` on 1xx and 204 (RFC 9110 8.6)
-    if response.status >= 200 && response.status != 204 {
-        out.extend_from_slice(format!("content-length: {}\r\n", response.body.len()).as_bytes());
+    if status >= 200 && status != 204 {
+        match framing {
+            Some(Framing::Length(n)) => {
+                out.extend_from_slice(format!("content-length: {n}\r\n").as_bytes());
+            }
+            Some(Framing::Chunked) => out.extend_from_slice(b"transfer-encoding: chunked\r\n"),
+            None => {}
+        }
     }
     out.extend_from_slice(b"connection: close\r\n\r\n");
-    let bodyless = head_only || response.status < 200 || matches!(response.status, 204 | 304);
-    if !bodyless {
-        out.extend_from_slice(&response.body);
+    out
+}
+
+/// Whether an answer to this status (and request method) carries no body.
+fn bodyless(status: u16, head_only: bool) -> bool {
+    head_only || status < 200 || matches!(status, 204 | 304)
+}
+
+/// Writes an answer whose body is all in hand and closes the connection (always
+/// `Connection: close`).
+fn respond_bytes(
+    stream: &mut TcpStream,
+    head_only: bool,
+    status: u16,
+    headers: &[(String, Vec<u8>)],
+    body: &[u8],
+) {
+    let mut out = head(status, headers, Some(Framing::Length(body.len())));
+    if !bodyless(status, head_only) {
+        out.extend_from_slice(body);
     }
     // the peer may be gone: nothing to do about it
     let _ = stream.write_all(&out);
     let _ = stream.flush();
 }
 
+/// Sends the guest's answer. A body the guest finished (and without trailers) has a known
+/// length and goes with a `content-length`; otherwise it is streamed as chunks while the guest
+/// writes it, with the trailers after the last one. A body that fails or stalls for `idle`
+/// ends the connection without the closing chunk, so the client sees it truncated.
+fn respond(
+    stream: &mut TcpStream,
+    head_only: bool,
+    http10: bool,
+    mut response: ServedResponse,
+    idle: Duration,
+) {
+    let status = response.status;
+    let known = response.body.finished_len().filter(|_| response.body.trailers().is_none());
+    if let Some(len) = known {
+        let mut body = Vec::with_capacity(len);
+        if response.body.read_to_end(&mut body).is_err() {
+            body.clear();
+        }
+        respond_bytes(stream, head_only, status, &response.headers, &body);
+        return;
+    }
+    if bodyless(status, head_only) {
+        let _ = stream.write_all(&head(status, &response.headers, None));
+        let _ = stream.flush();
+        return;
+    }
+    response.body.set_idle_timeout(Some(idle));
+    // HTTP/1.0 has no chunked coding: the body runs to the close (and drops the trailers)
+    let framing = (!http10).then_some(Framing::Chunked);
+    if stream
+        .write_all(&head(status, &response.headers, framing))
+        .is_err()
+    {
+        return;
+    }
+    let mut chunk = [0u8; 8192];
+    loop {
+        match response.body.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let mut out = Vec::new();
+                if http10 {
+                    out.extend_from_slice(&chunk[..n]);
+                } else {
+                    out.extend_from_slice(format!("{n:x}\r\n").as_bytes());
+                    out.extend_from_slice(&chunk[..n]);
+                    out.extend_from_slice(b"\r\n");
+                }
+                if stream.write_all(&out).is_err() {
+                    return;
+                }
+                let _ = stream.flush();
+            }
+            // not terminated: the truncation is the signal
+            Err(_) => return,
+        }
+    }
+    if http10 {
+        let _ = stream.flush();
+        return;
+    }
+    let mut end = b"0\r\n".to_vec();
+    for (name, value) in response.body.trailers().unwrap_or_default() {
+        end.extend_from_slice(name.as_bytes());
+        end.extend_from_slice(b": ");
+        end.extend_from_slice(&value);
+        end.extend_from_slice(b"\r\n");
+    }
+    end.extend_from_slice(b"\r\n");
+    let _ = stream.write_all(&end);
+    let _ = stream.flush();
+}
+
 fn respond_text(stream: &mut TcpStream, status: u16, text: &str) {
-    let response = ServedResponse {
-        status,
-        headers: vec![("content-type".to_string(), b"text/plain".to_vec())],
-        body: format!("{text}\n").into_bytes(),
-    };
-    respond(stream, false, &response);
+    let headers = [("content-type".to_string(), b"text/plain".to_vec())];
+    respond_bytes(stream, false, status, &headers, format!("{text}\n").as_bytes());
 }
 
 /// What came of calling the guest.
@@ -275,10 +380,14 @@ fn drain(stream: &mut TcpStream) {
 }
 
 /// Serves one connection. Returns `false` when the guest trapped (its instance is gone).
-fn serve_connection(inst: &mut Instance<Glue<WasiHost>>, mut stream: TcpStream) -> bool {
+fn serve_connection(
+    inst: &mut Instance<Glue<WasiHost>>,
+    mut stream: TcpStream,
+    idle: Duration,
+) -> bool {
     let _ = stream.set_write_timeout(Some(REQUEST_TIME));
-    let parts = match read_request(&mut stream, Instant::now() + REQUEST_TIME) {
-        Ok(parts) => parts,
+    let (parts, http10) = match read_request(&mut stream, Instant::now() + REQUEST_TIME) {
+        Ok(read) => read,
         Err(Reject(status, why)) => {
             respond_text(&mut stream, status, why);
             let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -289,7 +398,7 @@ fn serve_connection(inst: &mut Instance<Glue<WasiHost>>, mut stream: TcpStream) 
     let head_only = matches!(parts.method, Method::Head);
     let ok = match call_guest(inst, parts) {
         Served::Response(response) => {
-            respond(&mut stream, head_only, &response);
+            respond(&mut stream, head_only, http10, response, idle);
             true
         }
         Served::NoResponse => {
@@ -315,10 +424,15 @@ fn serve_connection(inst: &mut Instance<Glue<WasiHost>>, mut stream: TcpStream) 
 
 fn main() {
     let mut listen = "127.0.0.1:8080".to_string();
+    let mut idle = BODY_IDLE;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--listen" => listen = args.next().expect("--listen needs an address"),
+            "--body-timeout" => {
+                let secs = args.next().and_then(|v| v.parse().ok());
+                idle = Duration::from_secs(secs.expect("--body-timeout needs seconds"));
+            }
             other => {
                 eprintln!("wasip2_serve: unexpected argument `{other}`");
                 std::process::exit(2);
@@ -338,7 +452,7 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if !serve_connection(&mut inst, stream) {
+                if !serve_connection(&mut inst, stream, idle) {
                     // a trapped instance may be half-updated: start over
                     inst = new_instance();
                 }

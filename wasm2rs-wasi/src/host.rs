@@ -56,8 +56,9 @@
 //!
 //! Incoming HTTP (`incoming-handler#handle` exported by the guest) is driven by the embedder:
 //! `new_incoming_request` and `new_response_outparam` mint the handles passed to `handle`, and
-//! `take_response` returns what the guest set once `handle` has returned (as plain data; a body
-//! the guest did not finish by then fails the answer, and trailers are not supported).
+//! `take_response` returns what the guest set once `handle` has returned (status and headers as plain
+//! data, the body as a `ServedBody` read while the guest writes it, with the trailers it finished
+//! with).
 
 use crate::wasi_cli_terminal_input::*;
 use crate::wasi_cli_terminal_output::*;
@@ -94,7 +95,7 @@ mod config;
 mod http;
 mod sources;
 pub use config::{Access, ConfigError, NetworkPolicy, WasiHostBuilder};
-pub use http::{IncomingRequestParts, ServedResponse};
+pub use http::{IncomingRequestParts, ServedBody, ServedResponse};
 #[cfg(feature = "os-random")]
 pub use sources::OsRandom;
 pub use sources::{
@@ -195,10 +196,10 @@ pub struct WasiHost {
     next_outparam: u32,
     /// The most a request or response body may hold.
     http_max_body: usize,
-    /// The `future-trailers` handed out by `incoming-body.finish`; a received message has no
-    /// trailers here (an `HttpResponse` carries none), so each answers `none`.
-    /// Whether `get` answered already.
-    http_trailers: Slab<bool>,
+    /// The `future-trailers` handed out by `incoming-body.finish`: the trailers of a request the
+    /// embedder minted with some; a received response has none (an `HttpResponse` carries
+    /// none), so those answer `none`. `None` once `get` answered.
+    http_trailers: Slab<Option<Option<http::Entries>>>,
 }
 
 impl Drop for WasiHost {
@@ -243,8 +244,9 @@ impl WasiHost {
     fn http_new_out_body(
         &mut self,
         too_large: fn(Option<u64>) -> HttpErrorCode,
+        trailers_ok: bool,
     ) -> (http::OutBodyHandle, OutgoingBody) {
-        let body = http::HttpOutgoingBody::new(self.http_max_body, too_large);
+        let body = http::HttpOutgoingBody::new(self.http_max_body, too_large, trailers_ok);
         let handle = body.handle();
         let slot = self.http_out_bodies.insert(body);
         (handle, OutgoingBody(slot as u32))
@@ -414,8 +416,8 @@ impl WasiHost {
 
     /// What the guest answered through `outparam`, once `handle` returned: `None` if it did
     /// not set one (or the handle is unknown), `Some(Err(code))` for an error it set or a
-    /// response whose body it did not finish. The `outparam` is spent. The response is read
-    /// whole: a guest that streams its body after `set` is not supported.
+    /// response whose body failed already. The `outparam` is spent. A body the guest has not
+    /// finished is not an error: `ServedResponse::body` is read as the guest writes it.
     pub fn take_response(
         &mut self,
         outparam: ResponseOutparam,

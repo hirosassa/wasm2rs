@@ -258,6 +258,32 @@ pub(crate) fn echo_handle(pre: &str) -> String {
     )
 }
 
+/// A guest that answers 200 with the body `accept` written, finishing it with the trailer
+/// `x-path: accept` when `trailer` is set and leaving it open (after `set`) otherwise.
+pub(crate) fn streaming_guest(trailer: bool) -> String {
+    let end = if trailer {
+        r#"(local.set $h (call $fields_new))
+    (call $append (local.get $h) (i32.const 500) (i32.const 6) (i32.const 530) (i32.const 6) (i32.const 176))
+    (call $finish (local.get $body) (i32.const 1) (local.get $h) (i32.const 288))"#
+    } else {
+        ""
+    };
+    guest(&format!(
+        r#"(local $resp i32) (local $body i32) (local $ostream i32) (local $h i32)
+    (local.set $resp (call $resp_new (call $fields_new)))
+    (call $resp_body (local.get $resp) (i32.const 192))
+    (local.set $body (i32.load (i32.const 196)))
+    (call $body_write (local.get $body) (i32.const 208))
+    (local.set $ostream (i32.load (i32.const 212)))
+    (call $write (local.get $ostream) (i32.const 530) (i32.const 6) (i32.const 272))
+    (call $drop_ostream (local.get $ostream))
+    (call $drop_req (local.get $req))
+    {end}
+    (call $set (local.get $out) (i32.const 0) (local.get $resp)
+      (i32.const 0) (i64.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))"#
+    ))
+}
+
 /// A guest that gives the request and the outparam back without answering.
 pub(crate) fn silent_guest() -> String {
     guest(
@@ -303,6 +329,7 @@ const MINT_POST: &str = r#"
         authority: Some("example.com:8080".to_string()),
         headers: vec![("Accept".to_string(), b"text/plain".to_vec())],
         body: b"hello".to_vec(),
+        trailers: None,
     });
     let out = host!().new_response_outparam();
 "#;
@@ -310,7 +337,7 @@ const MINT_POST: &str = r#"
 #[test]
 fn the_guest_sees_the_request_and_its_response_comes_back() {
     let checks = r#"
-    let served = host!().take_response(out).unwrap().unwrap();
+    let mut served = host!().take_response(out).unwrap().unwrap();
     // 200 + post (2) + https (1) * 10
     assert_eq!(served.status, 212);
     let header = |name: &str| {
@@ -319,7 +346,9 @@ fn the_guest_sees_the_request_and_its_response_comes_back() {
     assert_eq!(header("x-path"), Some(b"/items?id=7".to_vec()));
     assert_eq!(header("x-auth"), Some(b"example.com:8080".to_vec()));
     assert_eq!(header("x-accept"), Some(b"text/plain".to_vec()));
-    assert_eq!(served.body, b"hello".to_vec());"#;
+    let mut body = Vec::new();
+    std::io::Read::read_to_end(&mut served.body, &mut body).unwrap();
+    assert_eq!(body, b"hello".to_vec());"#;
     assert_succeeded(&run_handle(&echo_guest(), checks));
 }
 

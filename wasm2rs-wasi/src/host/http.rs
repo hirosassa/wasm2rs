@@ -11,6 +11,7 @@ use std::net::IpAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 /// Header names the host does not let a guest set (the same as wasmtime's).
 const FORBIDDEN: [&str; 10] = [
@@ -222,16 +223,72 @@ pub struct IncomingRequestParts {
     /// Header names and values, in order; a name may repeat.
     pub headers: Vec<(String, Vec<u8>)>,
     pub body: Vec<u8>,
+    /// Trailers delivered after the body (`future-trailers.get` of its `incoming-body`);
+    /// `None` for a request without.
+    pub trailers: Option<Vec<(String, Vec<u8>)>>,
 }
 
 /// The response a guest set with `response-outparam.set`, as `WasiHost::take_response` returns
 /// it: the guest's handles are gone, so this is plain data.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ServedResponse {
     pub status: u16,
     /// Header names and values, in order; a name may repeat.
     pub headers: Vec<(String, Vec<u8>)>,
-    pub body: Vec<u8>,
+    /// The body, read as the guest writes it (see `ServedBody`).
+    pub body: ServedBody,
+}
+
+/// The body of a `ServedResponse`: the buffer behind the guest's `outgoing-body`, read as the
+/// guest fills it. It is `Send` and does not borrow the host, so a body the guest still
+/// writes after `handle` returned (from another thread of the guest) can be forwarded while
+/// the host goes on.
+///
+/// `read` waits while the body is open and has nothing buffered, returns `Ok(0)` once the
+/// guest finished it, and fails once the guest dropped it unfinished, wrote past the limit, or
+/// the host was dropped. The limit (`max_request_body`) is on bytes written but not yet read,
+/// so a body larger than it can pass through a reader that keeps up.
+pub struct ServedBody {
+    handle: OutBodyHandle,
+    idle_timeout: Option<Duration>,
+}
+
+impl std::fmt::Debug for ServedBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServedBody")
+            .field("finished", &self.is_finished())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ServedBody {
+    /// Whether the guest finished the body (all of it is buffered or already read).
+    pub fn is_finished(&self) -> bool {
+        self.finished_len().is_some()
+    }
+
+    /// The bytes still unread, if the body is finished: its length is then known (so a server
+    /// can send a `content-length`).
+    pub fn finished_len(&self) -> Option<usize> {
+        self.handle.finished_len()
+    }
+
+    /// The trailers the guest finished the body with, once it has finished it.
+    pub fn trailers(&self) -> Option<Entries> {
+        self.handle.trailers()
+    }
+
+    /// How long a `read` may wait for the guest to write (or finish) before it fails with
+    /// `ErrorKind::TimedOut`; `None` (the default) waits for ever.
+    pub fn set_idle_timeout(&mut self, timeout: Option<Duration>) {
+        self.idle_timeout = timeout;
+    }
+}
+
+impl Read for ServedBody {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.handle.read(buf, self.idle_timeout)
+    }
 }
 
 /// An `incoming-request` resource. Its headers are immutable; the body can be consumed once.
@@ -242,6 +299,7 @@ pub(super) struct HttpIncomingRequest {
     pub(super) authority: Option<String>,
     pub(super) headers: HttpFields,
     pub(super) body: Option<Vec<u8>>,
+    pub(super) trailers: Option<Entries>,
 }
 
 impl HttpIncomingRequest {
@@ -253,6 +311,7 @@ impl HttpIncomingRequest {
             authority: parts.authority,
             headers: HttpFields::received(parts.headers),
             body: Some(parts.body),
+            trailers: parts.trailers,
         }
     }
 }
@@ -273,12 +332,19 @@ impl HttpOutgoingResponse {
         }
     }
 
-    /// The response as plain data. A body the guest never finished (it may still be writing it
-    /// after `handle` returned) cannot be completed any more, so the response fails.
+    /// The response as plain data. A body that failed already fails the response; an open one
+    /// is streamed (the guest may still write it after `handle` returned).
     pub(super) fn serve(self) -> Result<ServedResponse, ErrorCode> {
-        let body = match self.body {
-            Some(body) => body.take_finished()?,
-            None => Vec::new(),
+        let handle = match self.body {
+            Some(handle) => {
+                handle.check_not_failed()?;
+                handle
+            }
+            None => OutBodyHandle::finished_empty(),
+        };
+        let body = ServedBody {
+            handle,
+            idle_timeout: None,
         };
         Ok(ServedResponse {
             status: self.status,
@@ -487,6 +553,9 @@ impl HttpIncomingResponse {
     }
 }
 
+/// Header names and values, in order (what `Fields::entries` gives, for trailers).
+pub(super) type Entries = Vec<(String, Vec<u8>)>;
+
 /// How an `outgoing-body` stands.
 enum OutPhase {
     Open,
@@ -498,6 +567,8 @@ enum OutPhase {
 struct OutState {
     bytes: Vec<u8>,
     phase: OutPhase,
+    /// What the body was finished with (a response body only).
+    trailers: Option<Entries>,
 }
 
 impl OutState {
@@ -553,14 +624,8 @@ impl OutBodyHandle {
             return Err(code);
         }
         state.bytes.extend_from_slice(contents);
-        Ok(())
-    }
-
-    /// Closes the body for the request thread; a failed body stays failed.
-    pub(super) fn finish(&self) -> Result<(), ErrorCode> {
-        let state = lock(&self.0.state);
-        state.check_not_failed()?;
-        self.settle(state, OutPhase::Finished);
+        drop(state);
+        self.0.changed.notify_all();
         Ok(())
     }
 
@@ -579,16 +644,89 @@ impl OutBodyHandle {
         self.0.changed.notify_all();
     }
 
-    /// The bytes of a body that is finished already; a failed body's failure, and an error for
-    /// one that is still open.
-    pub(super) fn take_finished(&self) -> Result<Vec<u8>, ErrorCode> {
+    /// A finished, empty body: a response whose guest never asked for one.
+    fn finished_empty() -> Self {
+        OutBodyHandle(Arc::new(OutBodyShared {
+            state: Mutex::new(OutState {
+                bytes: Vec::new(),
+                phase: OutPhase::Finished,
+                trailers: None,
+            }),
+            changed: Condvar::new(),
+            limit: 0,
+            too_large: ErrorCode::HTTPResponseBodySize,
+        }))
+    }
+
+    pub(super) fn check_not_failed(&self) -> Result<(), ErrorCode> {
+        lock(&self.0.state).check_not_failed()
+    }
+
+    /// The unread length, once the body is finished.
+    fn finished_len(&self) -> Option<usize> {
+        let state = lock(&self.0.state);
+        matches!(state.phase, OutPhase::Finished).then_some(state.bytes.len())
+    }
+
+    fn trailers(&self) -> Option<Entries> {
+        let state = lock(&self.0.state);
+        match state.phase {
+            OutPhase::Finished => state.trailers.clone(),
+            OutPhase::Open | OutPhase::Failed(_) => None,
+        }
+    }
+
+    /// Closes the body with `trailers` (a response body's `finish`); a failed body stays failed.
+    pub(super) fn finish_with(&self, trailers: Option<Entries>) -> Result<(), ErrorCode> {
         let mut state = lock(&self.0.state);
-        match &state.phase {
-            OutPhase::Finished => Ok(std::mem::take(&mut state.bytes)),
-            OutPhase::Failed(code) => Err(code.clone()),
-            OutPhase::Open => Err(ErrorCode::InternalError(Some(
-                "the response body was not finished".into(),
-            ))),
+        state.check_not_failed()?;
+        state.trailers = trailers;
+        self.settle(state, OutPhase::Finished);
+        Ok(())
+    }
+
+    /// Takes the buffered bytes for `ServedBody::read`: waits while the body is open and
+    /// empty, `Ok(0)` at its end, an error for a failed body or after `idle` without news.
+    fn read(&self, buf: &mut [u8], idle: Option<Duration>) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let deadline = idle.map(|d| Instant::now() + d);
+        let mut state = lock(&self.0.state);
+        loop {
+            if !state.bytes.is_empty() {
+                let n = Read::read(&mut state.bytes.as_slice(), buf)?;
+                state.bytes.drain(..n);
+                return Ok(n);
+            }
+            match &state.phase {
+                OutPhase::Finished => return Ok(0),
+                OutPhase::Failed(code) => {
+                    return Err(std::io::Error::other(format!("{code:?}")));
+                }
+                OutPhase::Open => {}
+            }
+            state = match deadline {
+                None => self
+                    .0
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner),
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(std::io::Error::new(
+                            ErrorKind::TimedOut,
+                            "the response body was not written in time",
+                        ));
+                    }
+                    self.0
+                        .changed
+                        .wait_timeout(state, left)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+            };
         }
     }
 
@@ -615,21 +753,30 @@ impl OutBodyHandle {
 pub(super) struct HttpOutgoingBody {
     handle: OutBodyHandle,
     stream_taken: bool,
+    /// Whether `finish` may carry trailers: a response body can, a request body (the
+    /// `HttpClient` has no place for them) cannot.
+    trailers_ok: bool,
 }
 
 impl HttpOutgoingBody {
-    pub(super) fn new(limit: usize, too_large: fn(Option<u64>) -> ErrorCode) -> Self {
+    pub(super) fn new(
+        limit: usize,
+        too_large: fn(Option<u64>) -> ErrorCode,
+        trailers_ok: bool,
+    ) -> Self {
         HttpOutgoingBody {
             handle: OutBodyHandle(Arc::new(OutBodyShared {
                 state: Mutex::new(OutState {
                     bytes: Vec::new(),
                     phase: OutPhase::Open,
+                    trailers: None,
                 }),
                 changed: Condvar::new(),
                 limit,
                 too_large,
             })),
             stream_taken: false,
+            trailers_ok,
         }
     }
 
@@ -640,6 +787,10 @@ impl HttpOutgoingBody {
     /// `write` can be called once.
     pub(super) fn take_stream(&mut self) -> bool {
         !std::mem::replace(&mut self.stream_taken, true)
+    }
+
+    pub(super) fn trailers_ok(&self) -> bool {
+        self.trailers_ok
     }
 }
 
@@ -683,6 +834,8 @@ pub(super) enum BodyRead {
 pub(super) struct HttpIncomingBody {
     shared: Arc<BodyShared>,
     stream_taken: bool,
+    /// What `finish` hands to `future-trailers`.
+    pub(super) trailers: Option<Entries>,
 }
 
 impl HttpIncomingBody {
@@ -732,6 +885,7 @@ impl HttpIncomingBody {
         HttpIncomingBody {
             shared,
             stream_taken: false,
+            trailers: None,
         }
     }
 
