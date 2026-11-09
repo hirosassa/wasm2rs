@@ -330,7 +330,7 @@ impl HttpFuture {
     /// without running the client.
     pub(super) fn spawn(
         client: Arc<Mutex<Box<dyn HttpClient>>>,
-        mut request: HttpRequest,
+        request: HttpRequest,
         body: Option<OutBodyHandle>,
     ) -> Self {
         let shared = Arc::new(FutureShared {
@@ -339,19 +339,7 @@ impl HttpFuture {
         });
         let slot = Arc::clone(&shared);
         std::thread::spawn(move || {
-            let ready = match body {
-                Some(body) => body.wait_finished().map(|bytes| request.body = bytes),
-                None => Ok(()),
-            };
-            let result = match ready {
-                Err(code) => Err(code),
-                // a client that panics must not leave the guest waiting for ever
-                Ok(()) => {
-                    std::panic::catch_unwind(AssertUnwindSafe(|| lock(&client).send(request)))
-                        .unwrap_or_else(|_| Err(HttpClientError::new("the http client panicked")))
-                        .map_err(|e| ErrorCode::InternalError(Some(e.to_string())))
-                }
-            };
+            let result = send_when_finished(&client, request, body);
             if !slot.cancelled.load(Ordering::SeqCst) {
                 *lock(&slot.result) = Some(result);
             }
@@ -384,6 +372,21 @@ impl HttpFuture {
     }
 }
 
+/// Waits for `body` to be finished, then sends `request` with it.
+fn send_when_finished(
+    client: &Mutex<Box<dyn HttpClient>>,
+    mut request: HttpRequest,
+    body: Option<OutBodyHandle>,
+) -> Result<HttpResponse, ErrorCode> {
+    if let Some(body) = body {
+        request.body = body.wait_finished()?;
+    }
+    // a client that panics must not leave the guest waiting for ever
+    std::panic::catch_unwind(AssertUnwindSafe(|| lock(client).send(request)))
+        .unwrap_or_else(|_| Err(HttpClientError::new("the http client panicked")))
+        .map_err(|e| ErrorCode::InternalError(Some(e.to_string())))
+}
+
 /// An `incoming-response`: its body is read once `consume` has been called.
 pub(super) struct HttpIncomingResponse {
     pub(super) status: u16,
@@ -414,6 +417,16 @@ struct OutState {
     phase: OutPhase,
 }
 
+impl OutState {
+    /// The failure of a failed body, which every later operation reports.
+    fn check_not_failed(&self) -> Result<(), ErrorCode> {
+        match &self.phase {
+            OutPhase::Failed(code) => Err(code.clone()),
+            OutPhase::Open | OutPhase::Finished => Ok(()),
+        }
+    }
+}
+
 struct OutBodyShared {
     state: Mutex<OutState>,
     changed: Condvar,
@@ -432,25 +445,26 @@ impl OutBodyHandle {
     /// What `check-write` answers: the room left under the limit, up to 4096.
     pub(super) fn permit(&self) -> Result<u64, ErrorCode> {
         let state = lock(&self.0.state);
-        if let OutPhase::Failed(code) = &state.phase {
-            return Err(code.clone());
-        }
+        state.check_not_failed()?;
         let room = self.0.limit.saturating_sub(state.bytes.len());
-        Ok(room.min(WRITE_PERMIT) as u64)
+        // A full body still permits a write: 0 would make a guest that waits on the stream
+        // and asks again spin for ever, while the write that passes the limit fails with
+        // `HTTP-request-body-size`.
+        Ok(if room == 0 {
+            WRITE_PERMIT
+        } else {
+            room.min(WRITE_PERMIT)
+        } as u64)
     }
 
     /// Appends `contents`; a body that would pass the limit fails for good instead.
     pub(super) fn push(&self, contents: &[u8]) -> Result<(), ErrorCode> {
         let mut state = lock(&self.0.state);
-        if let OutPhase::Failed(code) = &state.phase {
-            return Err(code.clone());
-        }
+        state.check_not_failed()?;
         let size = state.bytes.len().saturating_add(contents.len());
         if size > self.0.limit {
             let code = ErrorCode::HTTPRequestBodySize(Some(size as u64));
-            state.phase = OutPhase::Failed(code.clone());
-            drop(state);
-            self.0.changed.notify_all();
+            self.settle(state, OutPhase::Failed(code.clone()));
             return Err(code);
         }
         state.bytes.extend_from_slice(contents);
@@ -459,24 +473,25 @@ impl OutBodyHandle {
 
     /// Closes the body for the request thread; a failed body stays failed.
     pub(super) fn finish(&self) -> Result<(), ErrorCode> {
-        let mut state = lock(&self.0.state);
-        if let OutPhase::Failed(code) = &state.phase {
-            return Err(code.clone());
-        }
-        state.phase = OutPhase::Finished;
-        drop(state);
-        self.0.changed.notify_all();
+        let state = lock(&self.0.state);
+        state.check_not_failed()?;
+        self.settle(state, OutPhase::Finished);
         Ok(())
     }
 
     /// Fails an open body (`finish` with trailers, a drop): the request will not run.
     pub(super) fn fail(&self, code: ErrorCode) {
-        let mut state = lock(&self.0.state);
+        let state = lock(&self.0.state);
         if matches!(state.phase, OutPhase::Open) {
-            state.phase = OutPhase::Failed(code);
-            drop(state);
-            self.0.changed.notify_all();
+            self.settle(state, OutPhase::Failed(code));
         }
+    }
+
+    /// Moves the body to its final `phase` and wakes the request thread.
+    fn settle(&self, mut state: MutexGuard<'_, OutState>, phase: OutPhase) {
+        state.phase = phase;
+        drop(state);
+        self.0.changed.notify_all();
     }
 
     /// The bytes, once the guest finished the body; the failure if it never will.

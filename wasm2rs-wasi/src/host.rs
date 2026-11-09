@@ -1517,12 +1517,8 @@ impl WasiHost {
         slot: usize,
         contents: &[u8],
     ) -> Result<(), StreamError> {
-        let body = self
-            .http_out_bodies
-            .get(slot)
-            .ok_or(StreamError::Closed)?
-            .handle();
-        body.push(contents)
+        self.http_out_handle(slot)?
+            .push(contents)
             .map_err(|code| self.fail_http_out(stream, code))
     }
 
@@ -1531,13 +1527,17 @@ impl WasiHost {
         if self.failed_out.contains(&stream) {
             return Err(StreamError::Closed);
         }
-        let body = self
-            .http_out_bodies
-            .get(slot)
-            .ok_or(StreamError::Closed)?
-            .handle();
-        body.permit()
+        self.http_out_handle(slot)?
+            .permit()
             .map_err(|code| self.fail_http_out(stream, code))
+    }
+
+    /// The buffer behind an output stream; a body already finished or dropped is `closed`.
+    fn http_out_handle(&self, slot: usize) -> Result<http::OutBodyHandle, StreamError> {
+        self.http_out_bodies
+            .get(slot)
+            .map(http::HttpOutgoingBody::handle)
+            .ok_or(StreamError::Closed)
     }
 
     fn fail_http_out(&mut self, stream: u32, code: HttpErrorCode) -> StreamError {

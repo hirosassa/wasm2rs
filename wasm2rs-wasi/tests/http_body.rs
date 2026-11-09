@@ -362,3 +362,32 @@ fn the_shared_client_still_serves_a_second_request() {
     let bodies: Vec<_> = requests.try_iter().map(|r| r.body).collect();
     assert_eq!(bodies, vec![vec![0], vec![1]]);
 }
+
+#[test]
+fn a_full_body_still_permits_a_write_that_then_fails() {
+    let (seen, _requests) = mpsc::channel();
+    let client = Recording { seen, body: "" };
+    let mut h = builder()
+        .http_client(client)
+        .max_request_body(4)
+        .build()
+        .unwrap();
+    let r = post(&mut h);
+    let body = h.wasi_http_types_method_outgoing_request_body(r).unwrap();
+    let out = h.wasi_http_types_method_outgoing_body_write(body).unwrap();
+    h.wasi_io_streams_method_output_stream_write(out, vec![0; 4])
+        .unwrap();
+    // exactly the limit is fine, and the guest's check-write loop must not see 0 for ever
+    assert!(
+        h.wasi_io_streams_method_output_stream_check_write(out)
+            .unwrap()
+            > 0
+    );
+    let error = h
+        .wasi_io_streams_method_output_stream_write(out, vec![0])
+        .unwrap_err();
+    assert!(
+        matches!(error, StreamError::LastOperationFailed(_)),
+        "{error:?}"
+    );
+}

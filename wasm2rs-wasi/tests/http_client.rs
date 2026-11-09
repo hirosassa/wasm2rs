@@ -218,7 +218,7 @@ fn a_body_on_head_or_connect_is_refused_before_sending() {
         // nothing listens: a refusal must come before the connection is tried
         let mut req = request(method, "127.0.0.1:1", "/");
         req.body = b"x".to_vec();
-        let error = UreqClient::new().send(req).err().expect("refused");
+        let error = UreqClient::new().send(req).expect_err("refused");
         assert!(error.to_string().contains(method), "{error}");
     }
 }
