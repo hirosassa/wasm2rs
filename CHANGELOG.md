@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The generated doc comments of the `Host` trait escape `[` and `]` (no rustdoc link warnings).
 
 ### Fixed
+- `wit_exports`: an imported core module takes a slot in the module index space (as in
+  `transpile_component`), so the modules after it are no longer off by one.
 - `wasm2rs-wasi`: `pollable.drop` frees the pollable's slot for reuse (a subscribe/drop loop no
   longer grows the table), and the stdin thread ends after the host is dropped (once its pending
   read returns).
