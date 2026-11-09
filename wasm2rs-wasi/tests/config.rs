@@ -1,7 +1,9 @@
 //! The configuration surface of `WasiHost`: driven through the `Host` trait directly, so no
 //! guest program is compiled.
 
+use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use wasm2rs_wasi::wasi_clocks_wall_clock::Datetime;
 use wasm2rs_wasi::wasi_filesystem_types::{
     Descriptor, DescriptorFlags, ErrorCode as Fs, OpenFlags, PathFlags,
@@ -461,4 +463,173 @@ fn without_os_random_a_source_is_required() {
     let err = WasiHost::builder().build().err().unwrap();
     assert!(matches!(err, ConfigError::MissingRandomSource), "{err}");
     assert!(WasiHost::builder().random(Fixed(0)).build().is_ok());
+}
+
+/// A writer that keeps what it was given in `pending` until it is flushed into `done`.
+#[derive(Clone, Default)]
+struct Sink {
+    pending: Arc<Mutex<Vec<u8>>>,
+    done: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Write for Sink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.pending.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut pending = self.pending.lock().unwrap();
+        self.done.lock().unwrap().append(&mut pending);
+        Ok(())
+    }
+}
+
+impl Sink {
+    fn flushed(&self) -> Vec<u8> {
+        self.done.lock().unwrap().clone()
+    }
+    fn unflushed(&self) -> Vec<u8> {
+        self.pending.lock().unwrap().clone()
+    }
+}
+
+/// A reader that gives `data`, then fails with `error` if set, else ends.
+struct Script {
+    data: std::io::Cursor<Vec<u8>>,
+    error: bool,
+}
+
+impl Read for Script {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self.data.read(buf)? {
+            0 if self.error => Err(std::io::Error::other("the reader broke")),
+            n => Ok(n),
+        }
+    }
+}
+
+fn bytes(data: &[u8]) -> Script {
+    Script {
+        data: std::io::Cursor::new(data.to_vec()),
+        error: false,
+    }
+}
+
+#[test]
+fn stdout_and_stderr_go_to_the_given_writers() {
+    let (out, err) = (Sink::default(), Sink::default());
+    let mut host = builder()
+        .stdout(out.clone())
+        .stderr(err.clone())
+        .build()
+        .unwrap();
+    let o = host.wasi_cli_stdout_get_stdout();
+    let e = host.wasi_cli_stderr_get_stderr();
+    host.wasi_io_streams_method_output_stream_blocking_write_and_flush(o, b"to out".to_vec())
+        .unwrap();
+    host.wasi_io_streams_method_output_stream_blocking_write_and_flush(e, b"to err".to_vec())
+        .unwrap();
+    assert_eq!(out.flushed(), b"to out");
+    assert_eq!(err.flushed(), b"to err");
+}
+
+#[test]
+fn a_write_stays_buffered_until_the_guest_flushes() {
+    let out = Sink::default();
+    let mut host = builder().stdout(out.clone()).build().unwrap();
+    let o = host.wasi_cli_stdout_get_stdout();
+    host.wasi_io_streams_method_output_stream_write(o, b"abc".to_vec())
+        .unwrap();
+    assert_eq!(out.unflushed(), b"abc");
+    host.wasi_io_streams_method_output_stream_blocking_flush(o)
+        .unwrap();
+    assert_eq!(out.flushed(), b"abc");
+}
+
+#[test]
+fn dropping_the_host_flushes_stdout_and_stderr() {
+    let (out, err) = (Sink::default(), Sink::default());
+    let mut host = builder()
+        .stdout(out.clone())
+        .stderr(err.clone())
+        .build()
+        .unwrap();
+    let (o, e) = (
+        host.wasi_cli_stdout_get_stdout(),
+        host.wasi_cli_stderr_get_stderr(),
+    );
+    host.wasi_io_streams_method_output_stream_write(o, b"late out".to_vec())
+        .unwrap();
+    host.wasi_io_streams_method_output_stream_write(e, b"late err".to_vec())
+        .unwrap();
+    drop(host);
+    assert_eq!(out.flushed(), b"late out");
+    assert_eq!(err.flushed(), b"late err");
+}
+
+#[test]
+fn stdin_is_read_from_the_given_reader_and_ends_with_closed() {
+    use wasm2rs_wasi::wasi_io_streams::StreamError;
+    let mut host = builder().stdin(bytes(b"hello")).build().unwrap();
+    let i = host.wasi_cli_stdin_get_stdin();
+    let got = host
+        .wasi_io_streams_method_input_stream_blocking_read(i, 16)
+        .unwrap();
+    assert_eq!(got, b"hello");
+    let end = host.wasi_io_streams_method_input_stream_blocking_read(i, 16);
+    assert!(matches!(end, Err(StreamError::Closed)));
+}
+
+#[test]
+fn a_failing_stdin_reader_reports_the_error_after_its_bytes() {
+    use wasm2rs_wasi::wasi_io_streams::StreamError;
+    let reader = Script {
+        data: std::io::Cursor::new(b"ab".to_vec()),
+        error: true,
+    };
+    let mut host = builder().stdin(reader).build().unwrap();
+    let i = host.wasi_cli_stdin_get_stdin();
+    let got = host
+        .wasi_io_streams_method_input_stream_blocking_read(i, 16)
+        .unwrap();
+    assert_eq!(got, b"ab");
+    let failed = host.wasi_io_streams_method_input_stream_blocking_read(i, 16);
+    assert!(matches!(failed, Err(StreamError::LastOperationFailed(_))));
+}
+
+#[test]
+fn the_stdin_reader_starts_on_first_use() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Flag(Arc<AtomicBool>);
+    impl Read for Flag {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(0)
+        }
+    }
+    let touched = Arc::new(AtomicBool::new(false));
+    let mut host = builder().stdin(Flag(touched.clone())).build().unwrap();
+    let i = host.wasi_cli_stdin_get_stdin();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(!touched.load(Ordering::SeqCst), "read before first use");
+    let _ = host.wasi_io_streams_method_input_stream_blocking_read(i, 1);
+    assert!(touched.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_failing_stdout_writer_is_a_stream_error_not_a_panic() {
+    use wasm2rs_wasi::wasi_io_streams::StreamError;
+    struct Broken;
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("sink broke"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut host = builder().stdout(Broken).build().unwrap();
+    let o = host.wasi_cli_stdout_get_stdout();
+    let r = host.wasi_io_streams_method_output_stream_blocking_write_and_flush(o, b"x".to_vec());
+    assert!(matches!(r, Err(StreamError::LastOperationFailed(_))));
 }

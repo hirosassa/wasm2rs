@@ -93,6 +93,12 @@ pub struct WasiHost {
     clock: Box<dyn Clock>,
     /// Filled by the stdin thread, which `start_stdin` spawns on first use.
     stdin: SharedStdin,
+    /// What the stdin thread reads; `None` is the process's stdin. Taken when it starts.
+    stdin_reader: Option<Box<dyn std::io::Read + Send>>,
+    /// Where stdout goes; `None` is the process's stdout.
+    stdout: Option<Box<dyn Write + Send>>,
+    /// Where stderr goes; `None` is the process's stderr.
+    stderr: Option<Box<dyn Write + Send>>,
     /// The messages behind the live `error` handles (`last-operation-failed`); a dropped
     /// handle frees its slot.
     errors: Slab<ErrorEntry>,
@@ -147,6 +153,7 @@ pub struct WasiHost {
 
 impl Drop for WasiHost {
     fn drop(&mut self) {
+        self.flush_stdio();
         self.flush_all_connections();
     }
 }
@@ -158,6 +165,9 @@ impl WasiHost {
             env,
             clock: Box::new(SystemClock::new()),
             stdin: SharedStdin::default(),
+            stdin_reader: None,
+            stdout: None,
+            stderr: None,
             errors: Slab::new(),
             failed_in: std::collections::HashSet::new(),
             failed_out: std::collections::HashSet::new(),
@@ -449,10 +459,14 @@ impl WasiHost {
         }
         self.stdin_started = true;
         let shared = Arc::clone(&self.stdin);
+        let mut reader = self
+            .stdin_reader
+            .take()
+            .unwrap_or_else(|| Box::new(std::io::stdin()));
         std::thread::spawn(move || {
             let mut chunk = [0u8; 4096];
             loop {
-                let (n, error) = match std::io::stdin().read(&mut chunk) {
+                let (n, error) = match reader.read(&mut chunk) {
                     Ok(n) => (n, None),
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     // the failure ends the input: `read_stream` reports it after the bytes
@@ -1237,8 +1251,14 @@ impl WasiHost {
                     Some(file) => file.write_all(contents),
                     None => Err(std::io::ErrorKind::NotFound.into()),
                 },
-                (2, None) => std::io::stderr().write_all(contents),
-                (_, None) => std::io::stdout().write_all(contents),
+                (2, None) => match &mut self.stderr {
+                    Some(w) => w.write_all(contents),
+                    None => std::io::stderr().write_all(contents),
+                },
+                (_, None) => match &mut self.stdout {
+                    Some(w) => w.write_all(contents),
+                    None => std::io::stdout().write_all(contents),
+                },
             }
         };
         written.map_err(|e| match e.kind() {
@@ -1248,7 +1268,20 @@ impl WasiHost {
         })
     }
 
-    /// Flushes a stream; only stdout and a connection's send queue buffer anything. With `wait`
+    /// Flushes stdout and stderr (an exit and a drop end with it); a failure has nobody left to
+    /// tell, so it is dropped.
+    fn flush_stdio(&mut self) {
+        match &mut self.stdout {
+            Some(w) => w.flush().ok(),
+            None => std::io::stdout().flush().ok(),
+        };
+        match &mut self.stderr {
+            Some(w) => w.flush().ok(),
+            None => std::io::stderr().flush().ok(),
+        };
+    }
+
+    /// Flushes a stream; only stdout, stderr (when given) and a connection's send queue buffer anything. With `wait`
     /// (`blocking-flush`, and what a blocking write ends with) the queue is emptied; without
     /// it (`flush`) it is drained as far as the socket takes now and the flush stays pending.
     fn flush_stream(&mut self, stream: u32, wait: bool) -> Result<(), StreamError> {
@@ -1264,12 +1297,15 @@ impl WasiHost {
         if self.failed_out.contains(&stream) {
             return Err(StreamError::Closed); // a failure was reported: the stream is closed
         }
-        if stream != 1 {
-            return Ok(()); // a file and (unbuffered in `std`) stderr hold nothing
+        if file_index(stream).is_some() {
+            return Ok(()); // a file holds nothing
         }
-        std::io::stdout()
-            .flush()
-            .map_err(|e| self.fail_output(stream, &e))
+        let flushed = match (stream, &mut self.stdout, &mut self.stderr) {
+            (1, Some(w), _) | (2, _, Some(w)) => w.flush(),
+            (1, None, _) => std::io::stdout().flush(),
+            _ => Ok(()), // the process's stderr is unbuffered in `std`
+        };
+        flushed.map_err(|e| self.fail_output(stream, &e))
     }
 
     /// Lets the guest use addresses outside loopback (the default is 127.0.0.0/8 and ::1).
