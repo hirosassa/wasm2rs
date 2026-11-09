@@ -1,9 +1,7 @@
 use super::*;
 use crate::Host;
-use crate::wasi_http_types::{
-    Fields, HeaderError, Method, OutgoingRequest, RequestOptions, Scheme,
-};
-use http::{HttpFields, HttpOptions, HttpOutgoingRequest};
+use crate::wasi_http_types::{FutureTrailers, HeaderError, Method, Scheme};
+use http::{HttpFields, HttpIncomingBody, HttpIncomingResponse, HttpOptions, HttpOutgoingRequest};
 
 impl Host for WasiHost {
     fn wasi_cli_stdout_get_stdout(&mut self) -> OutputStream {
@@ -271,12 +269,120 @@ impl Host for WasiHost {
         self.http_requests.remove(handle.0 as usize);
     }
 
+    fn wasi_http_outgoing_handler_handle(
+        &mut self,
+        request: OutgoingRequest,
+        options: Option<RequestOptions>,
+    ) -> Result<FutureIncomingResponse, HttpErrorCode> {
+        self.http_handle(request, options)
+    }
+
+    fn wasi_http_types_method_future_incoming_response_subscribe(
+        &mut self,
+        self_: FutureIncomingResponse,
+    ) -> Pollable {
+        self.subscribe_wait(Wait::HttpResponse(self_.0 as usize))
+    }
+
+    /// `None` while the request runs; then the result once (`Some(Err(()))` afterwards). A
+    /// failure of the client is `internal-error` with its message.
+    fn wasi_http_types_method_future_incoming_response_get(
+        &mut self,
+        self_: FutureIncomingResponse,
+    ) -> Option<Result<Result<IncomingResponse, HttpErrorCode>, ()>> {
+        let result = self.http_future_mut(self_).take()?;
+        Some(result.map(|result| match result {
+            Ok(response) => {
+                let slot = self
+                    .http_responses
+                    .insert(HttpIncomingResponse::new(response));
+                Ok(IncomingResponse(slot as u32))
+            }
+            Err(e) => Err(HttpErrorCode::InternalError(Some(e.to_string()))),
+        }))
+    }
+
+    fn wasi_http_types_method_incoming_response_status(&mut self, self_: IncomingResponse) -> u16 {
+        self.http_response(self_).status
+    }
+
+    fn wasi_http_types_method_incoming_response_headers(
+        &mut self,
+        self_: IncomingResponse,
+    ) -> Fields {
+        let copy = self.http_response(self_).headers.copy(true);
+        Fields(self.http_fields.insert(copy) as u32)
+    }
+
+    /// Starts reading the body on a thread; it can be consumed once.
+    fn wasi_http_types_method_incoming_response_consume(
+        &mut self,
+        self_: IncomingResponse,
+    ) -> Result<IncomingBody, ()> {
+        let reader = self.http_response_mut(self_).body.take().ok_or(())?;
+        Ok(IncomingBody(
+            self.http_bodies.insert(HttpIncomingBody::spawn(reader)) as u32,
+        ))
+    }
+
+    /// The body's input stream (`HTTP_STREAM + slot`); it can be taken once.
+    fn wasi_http_types_method_incoming_body_stream(
+        &mut self,
+        self_: IncomingBody,
+    ) -> Result<InputStream, ()> {
+        if !self.http_body_mut(self_).take_stream() {
+            return Err(());
+        }
+        let handle = u32::try_from(HTTP_STREAM + self_.0 as usize).map_err(|_| ())?;
+        Ok(InputStream(handle))
+    }
+
+    /// Ends the body (its thread stops). There are no trailers yet (H3): the future only
+    /// exists so that the guest can drop it.
+    fn wasi_http_types_static_incoming_body_finish(
+        &mut self,
+        this: IncomingBody,
+    ) -> FutureTrailers {
+        self.http_bodies
+            .take(this.0 as usize)
+            .unwrap_or_else(|| http_missing("incoming-body"));
+        FutureTrailers(self.http_trailers.insert(()) as u32)
+    }
+
+    /// Only failures of a response body have an `error-code` (`None` for any other `error`).
+    fn wasi_http_types_http_error_code(&mut self, err: Error) -> Option<HttpErrorCode> {
+        self.errors.get(err.0 as usize)?.http.clone()
+    }
+
+    fn wasi_http_types_resource_drop_future_incoming_response(
+        &mut self,
+        handle: FutureIncomingResponse,
+    ) {
+        if let Some(future) = self.http_futures.take(handle.0 as usize) {
+            future.cancel();
+        }
+    }
+
+    fn wasi_http_types_resource_drop_incoming_response(&mut self, handle: IncomingResponse) {
+        self.http_responses.remove(handle.0 as usize);
+    }
+
+    fn wasi_http_types_resource_drop_incoming_body(&mut self, handle: IncomingBody) {
+        self.http_bodies.take(handle.0 as usize);
+    }
+
+    fn wasi_http_types_resource_drop_future_trailers(&mut self, handle: FutureTrailers) {
+        self.http_trailers.remove(handle.0 as usize);
+    }
+
     fn wasi_io_poll_resource_drop_pollable(&mut self, _handle: Pollable) {}
 
     fn wasi_io_streams_resource_drop_input_stream(&mut self, handle: InputStream) {
         self.failed_in.remove(&handle.0);
         if let Some(slot) = tcp_slot(handle.0) {
             self.tcp_in.remove(slot);
+        } else if http_slot(handle.0).is_some() {
+            // the body (and its thread) lives until the guest drops or finishes it
         } else if let Some(index) = file_index(handle.0) {
             self.files.remove(index);
         }
@@ -1198,6 +1304,9 @@ impl Host for WasiHost {
     fn wasi_io_streams_method_input_stream_subscribe(&mut self, self_: InputStream) -> Pollable {
         if let Some(slot) = tcp_slot(self_.0) {
             return self.subscribe_wait(Wait::TcpReadable(slot));
+        }
+        if let Some(slot) = http_slot(self_.0) {
+            return self.subscribe_wait(Wait::HttpReadable(slot));
         }
         if self_.0 != 0 {
             return self.subscribe(None);

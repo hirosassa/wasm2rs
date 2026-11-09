@@ -1,7 +1,16 @@
 //! The state and validation behind the `wasi:http/types` resources `fields`, `request-options`
-//! and `outgoing-request`.
+//! and `outgoing-request`, and the threads behind `future-incoming-response` and
+//! `incoming-body`.
 
-use crate::wasi_http_types::{HeaderError, Method, Scheme};
+use super::NetworkPolicy;
+use super::sources::{HttpClient, HttpClientError, HttpRequest, HttpResponse};
+use crate::wasi_http_types::{ErrorCode, HeaderError, Method, Scheme};
+use std::collections::VecDeque;
+use std::io::{ErrorKind, Read};
+use std::net::IpAddr;
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 /// Header names the host does not let a guest set (the same as wasmtime's).
 const FORBIDDEN: [&str; 10] = [
@@ -71,6 +80,24 @@ impl HttpFields {
             fields: self.fields.clone(),
             immutable,
         }
+    }
+
+    /// The fields of a received message, immutable. Nothing is validated: a peer may send
+    /// names and values a guest could not set (`transfer-encoding`, ...).
+    pub(super) fn received(entries: Vec<(String, Vec<u8>)>) -> Self {
+        let mut fields = HttpFields::default();
+        for (name, value) in entries {
+            let lower = name.to_ascii_lowercase();
+            match fields.fields.iter_mut().find(|f| f.lower == lower) {
+                Some(field) => field.values.push(value),
+                None => fields.fields.push(Field {
+                    lower,
+                    name,
+                    values: vec![value],
+                }),
+            }
+        }
+        fields.freeze()
     }
 
     pub(super) fn freeze(mut self) -> Self {
@@ -210,10 +237,293 @@ pub(super) fn valid_path_with_query(path: &str) -> bool {
             .all(|b| (0x21..=0x7e).contains(&b) && b != b'#')
 }
 
-/// Visible ASCII without the delimiters that end an authority.
+/// Visible ASCII without the delimiters that end an authority (a backslash ends it for
+/// clients that follow the WHATWG URL standard, so it would make the host and the client
+/// disagree about the destination).
 pub(super) fn valid_authority(authority: &str) -> bool {
     !authority.is_empty()
         && authority
             .bytes()
-            .all(|b| (0x21..=0x7e).contains(&b) && !matches!(b, b'/' | b'?' | b'#'))
+            .all(|b| (0x21..=0x7e).contains(&b) && !matches!(b, b'/' | b'?' | b'#' | b'\\'))
+}
+
+/// Locks `m`; a thread that panicked while holding it leaves data that is still usable here.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The host part of an authority (`userinfo@host:port`, a bracketed IPv6 address included).
+fn authority_host(authority: &str) -> &str {
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if let Some(rest) = host_port.strip_prefix('[') {
+        return rest.split_once(']').map_or(rest, |(ip, _)| ip);
+    }
+    host_port.rsplit_once(':').map_or(host_port, |(h, _)| h)
+}
+
+/// Whether `policy` lets a request go to `authority`. Only the guest's own URL is judged: a
+/// redirect the client follows is the client's business. Names other than `localhost` are not
+/// resolved here, so under `Loopback` they are refused.
+pub(super) fn destination_allowed(policy: NetworkPolicy, authority: &str) -> bool {
+    match policy {
+        NetworkPolicy::None => false,
+        NetworkPolicy::External => true,
+        NetworkPolicy::Loopback => {
+            if authority.contains('\\') {
+                return false; // clients disagree about where the authority ends
+            }
+            let host = authority_host(authority);
+            match host.parse::<IpAddr>() {
+                Ok(ip) => ip.is_loopback(),
+                Err(_) => host.trim_end_matches('.').eq_ignore_ascii_case("localhost"),
+            }
+        }
+    }
+}
+
+/// The method as the client sends it.
+pub(super) fn method_name(method: &Method) -> String {
+    match method {
+        Method::Get => "GET".into(),
+        Method::Head => "HEAD".into(),
+        Method::Post => "POST".into(),
+        Method::Put => "PUT".into(),
+        Method::Delete => "DELETE".into(),
+        Method::Connect => "CONNECT".into(),
+        Method::Options => "OPTIONS".into(),
+        Method::Trace => "TRACE".into(),
+        Method::Patch => "PATCH".into(),
+        Method::Other(m) => m.clone(),
+    }
+}
+
+pub(super) fn scheme_name(scheme: &Scheme) -> String {
+    match scheme {
+        Scheme::HTTP => "http".into(),
+        Scheme::HTTPS => "https".into(),
+        Scheme::Other(s) => s.clone(),
+    }
+}
+
+/// What the thread of a `future-incoming-response` fills.
+struct FutureShared {
+    result: Mutex<Option<Result<HttpResponse, HttpClientError>>>,
+    /// The guest dropped the future: a late response is dropped, not kept.
+    cancelled: AtomicBool,
+}
+
+/// A `future-incoming-response`: a thread runs the client's `send` and leaves the result in a
+/// shared slot, which `get` takes.
+pub(super) struct HttpFuture {
+    shared: Arc<FutureShared>,
+    taken: bool,
+}
+
+impl HttpFuture {
+    /// Starts `send` of `request` on a thread. The client is shared by all requests, so two
+    /// requests in flight take turns inside `send` (the body is read outside it).
+    pub(super) fn spawn(client: Arc<Mutex<Box<dyn HttpClient>>>, request: HttpRequest) -> Self {
+        let shared = Arc::new(FutureShared {
+            result: Mutex::new(None),
+            cancelled: AtomicBool::new(false),
+        });
+        let slot = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            // a client that panics must not leave the guest waiting for ever
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| lock(&client).send(request)))
+                .unwrap_or_else(|_| Err(HttpClientError::new("the http client panicked")));
+            if !slot.cancelled.load(Ordering::SeqCst) {
+                *lock(&slot.result) = Some(result);
+            }
+        });
+        HttpFuture {
+            shared,
+            taken: false,
+        }
+    }
+
+    /// Whether `get` has something to answer (also once the result was taken).
+    pub(super) fn is_ready(&self) -> bool {
+        self.taken || lock(&self.shared.result).is_some()
+    }
+
+    /// `get`: `None` while pending, the result once, then `Some(Err(()))`.
+    pub(super) fn take(&mut self) -> Option<Result<Result<HttpResponse, HttpClientError>, ()>> {
+        if self.taken {
+            return Some(Err(()));
+        }
+        let result = lock(&self.shared.result).take()?;
+        self.taken = true;
+        Some(Ok(result))
+    }
+
+    pub(super) fn cancel(&self) {
+        self.shared.cancelled.store(true, Ordering::SeqCst);
+        // a response that arrived before the guest gave up
+        drop(lock(&self.shared.result).take());
+    }
+}
+
+/// An `incoming-response`: its body is read once `consume` has been called.
+pub(super) struct HttpIncomingResponse {
+    pub(super) status: u16,
+    pub(super) headers: HttpFields,
+    pub(super) body: Option<Box<dyn Read + Send>>,
+}
+
+impl HttpIncomingResponse {
+    pub(super) fn new(response: HttpResponse) -> Self {
+        HttpIncomingResponse {
+            status: response.status,
+            headers: HttpFields::received(response.headers),
+            body: Some(response.body),
+        }
+    }
+}
+
+/// How many bytes of a body the reader thread buffers ahead of the guest.
+const BODY_BUFFER: usize = 1 << 20;
+
+#[derive(Default)]
+struct BodyBuf {
+    bytes: VecDeque<u8>,
+    eof: bool,
+    /// Why the body ended early; taken when reported.
+    error: Option<(ErrorKind, String)>,
+}
+
+struct BodyShared {
+    state: Mutex<BodyBuf>,
+    changed: Condvar,
+    /// The guest let go of the body: the thread ends between reads.
+    stop: AtomicBool,
+}
+
+/// What a read of a body found.
+pub(super) enum BodyRead {
+    /// Up to the length asked for, empty while nothing has arrived.
+    Data(Vec<u8>),
+    /// The body ended.
+    Closed,
+    /// The body failed (reported once; it is closed afterwards).
+    Failed(ErrorKind, String),
+}
+
+/// An `incoming-body`: a thread reads the response's body into a buffer.
+pub(super) struct HttpIncomingBody {
+    shared: Arc<BodyShared>,
+    stream_taken: bool,
+}
+
+impl HttpIncomingBody {
+    pub(super) fn spawn(mut reader: Box<dyn Read + Send>) -> Self {
+        let shared = Arc::new(BodyShared {
+            state: Mutex::new(BodyBuf::default()),
+            changed: Condvar::new(),
+            stop: AtomicBool::new(false),
+        });
+        let body = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            loop {
+                let mut state = lock(&body.state);
+                while state.bytes.len() >= BODY_BUFFER && !body.stop.load(Ordering::SeqCst) {
+                    state = body
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+                drop(state);
+                if body.stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                let read = reader.read(&mut chunk);
+                if body.stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                let mut state = lock(&body.state);
+                match read {
+                    Ok(0) => state.eof = true,
+                    Ok(n) => state.bytes.extend(chunk.iter().take(n)),
+                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        state.error = Some((e.kind(), e.to_string()));
+                        state.eof = true;
+                    }
+                }
+                let done = state.eof;
+                drop(state);
+                body.changed.notify_all();
+                if done {
+                    return;
+                }
+            }
+        });
+        HttpIncomingBody {
+            shared,
+            stream_taken: false,
+        }
+    }
+
+    /// `stream` can be called once.
+    pub(super) fn take_stream(&mut self) -> bool {
+        !std::mem::replace(&mut self.stream_taken, true)
+    }
+
+    pub(super) fn shared(&self) -> BodyHandle {
+        BodyHandle(Arc::clone(&self.shared))
+    }
+
+    /// Ends the reader thread (it notices between reads).
+    fn stop(&self) {
+        self.shared.stop.store(true, Ordering::SeqCst);
+        // taking the lock orders the flag before the thread's next wait
+        drop(lock(&self.shared.state));
+        self.shared.changed.notify_all();
+    }
+}
+
+/// Dropping a body (also with the host, for a guest that exits holding it) ends its thread.
+impl Drop for HttpIncomingBody {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// A reference to the buffer of a body, for reading it without borrowing the host.
+pub(super) struct BodyHandle(Arc<BodyShared>);
+
+impl BodyHandle {
+    /// Whether a read would not wait: bytes are buffered or the body ended.
+    pub(super) fn readable(&self) -> bool {
+        let state = lock(&self.0.state);
+        !state.bytes.is_empty() || state.eof
+    }
+
+    pub(super) fn read(&self, len: usize) -> BodyRead {
+        let mut state = lock(&self.0.state);
+        if state.bytes.is_empty() && state.eof {
+            return match state.error.take() {
+                Some((kind, why)) => BodyRead::Failed(kind, why),
+                None => BodyRead::Closed,
+            };
+        }
+        let n = len.min(state.bytes.len());
+        let data = state.bytes.drain(..n).collect();
+        drop(state);
+        self.0.changed.notify_all(); // room for the thread
+        BodyRead::Data(data)
+    }
+}
+
+/// The `error-code` of a body that failed with `kind`.
+pub(super) fn body_error_code(kind: ErrorKind, why: &str) -> ErrorCode {
+    match kind {
+        ErrorKind::TimedOut => ErrorCode::ConnectionReadTimeout,
+        ErrorKind::UnexpectedEof => ErrorCode::HTTPResponseIncomplete,
+        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => {
+            ErrorCode::ConnectionTerminated
+        }
+        _ => ErrorCode::InternalError(Some(why.to_string())),
+    }
 }

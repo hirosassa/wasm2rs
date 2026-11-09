@@ -51,7 +51,7 @@
 //! `not-supported`.
 //!
 //! The trait and its types are the library's own (`crate::Host`, `crate::wasi_filesystem_types`,
-//! ...); a method this host does not implement (all of `wasi:http`) keeps the trait's
+//! ...); a method this host does not implement (most of `wasi:http` still) keeps the trait's
 //! trapping default.
 
 use crate::wasi_cli_terminal_input::*;
@@ -59,7 +59,10 @@ use crate::wasi_cli_terminal_output::*;
 use crate::wasi_clocks_wall_clock::*;
 use crate::wasi_filesystem_types::ErrorCode as FsErrorCode;
 use crate::wasi_filesystem_types::*;
-use crate::wasi_http_types::{Fields, OutgoingRequest, RequestOptions};
+use crate::wasi_http_types::{
+    ErrorCode as HttpErrorCode, Fields, FutureIncomingResponse, IncomingBody, IncomingResponse,
+    OutgoingRequest, RequestOptions,
+};
 use crate::wasi_io_error::*;
 use crate::wasi_io_poll::*;
 use crate::wasi_io_streams::*;
@@ -154,12 +157,21 @@ pub struct WasiHost {
     udp_out: Slab<UdpEnd>,
     /// The addresses still to be read from `resolve-address-stream` handles.
     resolutions: Slab<VecDeque<IpAddr>>,
-    /// The client for `outgoing-handler.handle`; stored only until that is implemented.
+    /// The client for `outgoing-handler.handle`, as the builder set it. The first request moves
+    /// it into `http_shared`, which the request threads lock.
     http_client: Option<Box<dyn HttpClient>>,
+    http_shared: Option<Arc<Mutex<Box<dyn HttpClient>>>>,
     /// The `wasi:http` `fields` resources.
     http_fields: Slab<http::HttpFields>,
     http_options: Slab<http::HttpOptions>,
     http_requests: Slab<http::HttpOutgoingRequest>,
+    http_futures: Slab<http::HttpFuture>,
+    http_responses: Slab<http::HttpIncomingResponse>,
+    /// The bodies behind `incoming-body` handles; the input stream of slot `i` is
+    /// `HTTP_STREAM + i`.
+    http_bodies: Slab<http::HttpIncomingBody>,
+    /// The `future-trailers` handed out by `incoming-body.finish` (trailers come with H3).
+    http_trailers: Slab<()>,
 }
 
 impl Drop for WasiHost {
@@ -212,6 +224,97 @@ impl WasiHost {
             .unwrap_or_else(|| http_missing("outgoing-request"))
     }
 
+    fn http_future_mut(&mut self, h: FutureIncomingResponse) -> &mut http::HttpFuture {
+        self.http_futures
+            .get_mut(h.0 as usize)
+            .unwrap_or_else(|| http_missing("future-incoming-response"))
+    }
+
+    fn http_response(&self, h: IncomingResponse) -> &http::HttpIncomingResponse {
+        self.http_responses
+            .get(h.0 as usize)
+            .unwrap_or_else(|| http_missing("incoming-response"))
+    }
+
+    fn http_response_mut(&mut self, h: IncomingResponse) -> &mut http::HttpIncomingResponse {
+        self.http_responses
+            .get_mut(h.0 as usize)
+            .unwrap_or_else(|| http_missing("incoming-response"))
+    }
+
+    fn http_body_mut(&mut self, h: IncomingBody) -> &mut http::HttpIncomingBody {
+        self.http_bodies
+            .get_mut(h.0 as usize)
+            .unwrap_or_else(|| http_missing("incoming-body"))
+    }
+
+    /// Whether `get` of the future in `http_futures` at `slot` has an answer (a dropped one
+    /// has: nothing is left to wait for).
+    fn http_future_ready(&self, slot: usize) -> bool {
+        self.http_futures
+            .get(slot)
+            .is_none_or(http::HttpFuture::is_ready)
+    }
+
+    /// Whether the body in `http_bodies` at `slot` has bytes or its end to read.
+    fn http_body_readable(&self, slot: usize) -> bool {
+        self.http_bodies
+            .get(slot)
+            .is_none_or(|body| body.shared().readable())
+    }
+
+    /// `outgoing-handler.handle`: checks the request, then runs the client on a thread. The
+    /// request and the options are the guest's to give away, so they are consumed even when
+    /// the call fails.
+    fn http_handle(
+        &mut self,
+        handle: OutgoingRequest,
+        options: Option<RequestOptions>,
+    ) -> Result<FutureIncomingResponse, HttpErrorCode> {
+        let request = self
+            .http_requests
+            .take(handle.0 as usize)
+            .unwrap_or_else(|| http_missing("outgoing-request"));
+        let options = options.map(|o| {
+            self.http_options
+                .take(o.0 as usize)
+                .unwrap_or_else(|| http_missing("request-options"))
+        });
+        let authority = request
+            .authority
+            .as_deref()
+            .ok_or(HttpErrorCode::HTTPRequestURIInvalid)?;
+        if !http::destination_allowed(self.network, authority) {
+            return Err(HttpErrorCode::HTTPRequestDenied);
+        }
+        if let Some(client) = self.http_client.take() {
+            self.http_shared = Some(Arc::new(Mutex::new(client)));
+        }
+        let client = self.http_shared.clone().ok_or_else(|| {
+            HttpErrorCode::InternalError(Some("no http client is configured".into()))
+        })?;
+        let scheme = request
+            .scheme
+            .as_ref()
+            .map_or_else(|| "https".to_string(), http::scheme_name);
+        let path = request.path_with_query.as_deref().unwrap_or("/");
+        let separator = if path.starts_with('/') { "" } else { "/" };
+        let options = options.unwrap_or_default();
+        let request = HttpRequest {
+            method: http::method_name(&request.method),
+            url: format!("{scheme}://{authority}{separator}{path}"),
+            headers: request.headers.entries(),
+            body: Vec::new(),
+            connect_timeout: options.connect,
+            first_byte_timeout: options.first_byte,
+            between_bytes_timeout: options.between_bytes,
+        };
+        let future = http::HttpFuture::spawn(client, request);
+        Ok(FutureIncomingResponse(
+            self.http_futures.insert(future) as u32
+        ))
+    }
+
     pub fn new(env: Vec<(String, String)>) -> Self {
         WasiHost {
             args: Vec::new(),
@@ -246,9 +349,14 @@ impl WasiHost {
             udp_out: Slab::new(),
             resolutions: Slab::new(),
             http_client: None,
+            http_shared: None,
             http_fields: Slab::new(),
             http_options: Slab::new(),
             http_requests: Slab::new(),
+            http_futures: Slab::new(),
+            http_responses: Slab::new(),
+            http_bodies: Slab::new(),
+            http_trailers: Slab::new(),
         }
     }
 
@@ -667,6 +775,8 @@ impl FileStream {
 struct ErrorEntry {
     message: String,
     fs: Option<Fs>,
+    /// The `wasi:http` `error-code` when the failure came from a body.
+    http: Option<HttpErrorCode>,
 }
 
 /// A table of live handles: a handle is a slot's index, and the slot of a dropped handle
@@ -706,11 +816,16 @@ impl<T> Slab<T> {
         self.slots.get_mut(slot)?.as_mut()
     }
 
+    /// Frees a slot and hands back its value; `None` for an unknown or already free one.
+    fn take(&mut self, slot: usize) -> Option<T> {
+        let value = self.slots.get_mut(slot)?.take()?;
+        self.free.push(slot);
+        Some(value)
+    }
+
     /// Frees a slot; an unknown or already free one is ignored.
     fn remove(&mut self, slot: usize) {
-        if self.slots.get_mut(slot).and_then(Option::take).is_some() {
-            self.free.push(slot);
-        }
+        drop(self.take(slot));
     }
 }
 
@@ -805,6 +920,10 @@ enum Wait {
     TcpWritable(usize),
     /// Ready when the stream in `udp_in` at the slot has a datagram it would return (or failed).
     UdpReadable(usize),
+    /// Ready when the future in `http_futures` at the slot has its result.
+    HttpResponse(usize),
+    /// Ready when the body in `http_bodies` at the slot has bytes or its end to read.
+    HttpReadable(usize),
 }
 
 impl Wait {
@@ -817,6 +936,8 @@ impl Wait {
             Wait::TcpReadable(slot) => host.readable(slot),
             Wait::TcpWritable(slot) => host.tcp_writable(slot),
             Wait::UdpReadable(slot) => host.udp_readable(slot),
+            Wait::HttpResponse(slot) => host.http_future_ready(slot),
+            Wait::HttpReadable(slot) => host.http_body_readable(slot),
         }
     }
 
@@ -824,7 +945,12 @@ impl Wait {
     fn polls_socket(self) -> bool {
         matches!(
             self,
-            Wait::TcpAccept(_) | Wait::TcpReadable(_) | Wait::TcpWritable(_) | Wait::UdpReadable(_)
+            Wait::TcpAccept(_)
+                | Wait::TcpReadable(_)
+                | Wait::TcpWritable(_)
+                | Wait::UdpReadable(_)
+                | Wait::HttpResponse(_)
+                | Wait::HttpReadable(_)
         )
     }
 
@@ -839,6 +965,16 @@ impl Wait {
 /// The first handle of the streams of TCP connections: the slot in `tcp_in` or `tcp_out`
 /// is added to it (file stream handles stay far below).
 const TCP_STREAM: usize = 1 << 30;
+
+/// The first handle of the streams of incoming bodies (`wasi:http`): the slot in `http_bodies`
+/// is added to it. The range lies between the file streams and `TCP_STREAM`.
+const HTTP_STREAM: usize = 1 << 29;
+
+/// The slot in `http_bodies` of a stream handle, `None` for any other stream.
+fn http_slot(stream: u32) -> Option<usize> {
+    let slot = (stream as usize).checked_sub(HTTP_STREAM)?;
+    (slot < TCP_STREAM - HTTP_STREAM).then_some(slot)
+}
 
 /// The slot in `tcp_in` or `tcp_out` of a stream handle, `None` for any other stream.
 fn tcp_slot(stream: u32) -> Option<usize> {
@@ -1079,18 +1215,20 @@ impl WasiHost {
     /// `error` handle (one per call, live until the guest drops it) that carries `message`.
     /// The caller reports it once: the stream is `closed` from then on.
     fn last_operation_failed(&mut self, message: impl std::fmt::Display) -> StreamError {
-        self.last_operation_failed_with(message, None)
+        self.last_operation_failed_with(message, None, None)
     }
 
-    /// `last_operation_failed`, remembering the filesystem `error-code` behind the failure.
+    /// `last_operation_failed`, remembering the filesystem or HTTP `error-code` behind the failure.
     fn last_operation_failed_with(
         &mut self,
         message: impl std::fmt::Display,
         fs: Option<Fs>,
+        http: Option<HttpErrorCode>,
     ) -> StreamError {
         let entry = ErrorEntry {
             message: message.to_string(),
             fs,
+            http,
         };
         StreamError::LastOperationFailed(Error(self.errors.insert(entry) as u32))
     }
@@ -1098,9 +1236,11 @@ impl WasiHost {
     /// `last_operation_failed` for an I/O failure of `stream`: only a file stream's carries a
     /// filesystem `error-code`; a connection's is not a filesystem error.
     fn stream_failed(&mut self, stream: u32, e: &std::io::Error) -> StreamError {
-        let is_file = tcp_slot(stream).is_none() && file_index(stream).is_some();
+        let is_file = tcp_slot(stream).is_none()
+            && http_slot(stream).is_none()
+            && file_index(stream).is_some();
         let fs = is_file.then(|| io_error_code(std::io::Error::from(e.kind())));
-        self.last_operation_failed_with(e, fs)
+        self.last_operation_failed_with(e, fs, None)
     }
 
     /// The first read failure of the input stream `stream` is `last-operation-failed`; the
@@ -1160,6 +1300,22 @@ impl WasiHost {
         if self.failed_in.contains(&stream) {
             // a failure was reported: the stream is closed, a zero-length read included
             return Err(StreamError::Closed);
+        }
+        if let Some(slot) = http_slot(stream) {
+            let body = self
+                .http_bodies
+                .get(slot)
+                .expect("read from an unknown or dropped stream")
+                .shared();
+            return match body.read(buf.len()) {
+                http::BodyRead::Data(data) => Ok(data),
+                http::BodyRead::Closed => Err(StreamError::Closed),
+                http::BodyRead::Failed(kind, why) => {
+                    self.failed_in.insert(stream);
+                    let code = http::body_error_code(kind, &why);
+                    Err(self.last_operation_failed_with(why, None, Some(code)))
+                }
+            };
         }
         if let Some(slot) = tcp_slot(stream) {
             // never blocks: an empty list means "nothing yet"
@@ -1225,10 +1381,11 @@ impl WasiHost {
             if !data.is_empty() {
                 return Ok(data);
             }
-            let wait = match tcp_slot(stream) {
-                Some(slot) => Wait::TcpReadable(slot),
-                None if stream == 0 => Wait::Stdin,
-                None => return Ok(data),
+            let wait = match (tcp_slot(stream), http_slot(stream)) {
+                (Some(slot), _) => Wait::TcpReadable(slot),
+                (None, Some(slot)) => Wait::HttpReadable(slot),
+                (None, None) if stream == 0 => Wait::Stdin,
+                (None, None) => return Ok(data),
             };
             self.wait_any(&[wait]);
             if len == 0 {
