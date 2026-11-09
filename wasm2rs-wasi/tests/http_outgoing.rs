@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wasm2rs_wasi::wasi_http_types::{
-    ErrorCode, FutureIncomingResponse, Method, OutgoingRequest, Scheme,
+    ErrorCode, FutureIncomingResponse, IncomingResponse, Method, OutgoingRequest, Scheme,
 };
 use wasm2rs_wasi::wasi_io_streams::{InputStream, StreamError};
 use wasm2rs_wasi::{
@@ -65,6 +65,15 @@ fn response(status: u16, headers: &[(&str, &str)], body: &'static str) -> HttpRe
     }
 }
 
+/// A `200` response with no headers whose body is `body`.
+fn streamed(body: impl Read + Send + 'static) -> HttpResponse {
+    HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: Box::new(body),
+    }
+}
+
 fn host_with(client: impl HttpClient + 'static) -> WasiHost {
     builder().http_client(client).build().unwrap()
 }
@@ -95,7 +104,7 @@ fn get_request(h: &mut WasiHost, authority: &str) -> OutgoingRequest {
 fn finished(
     h: &mut WasiHost,
     future: FutureIncomingResponse,
-) -> Result<wasm2rs_wasi::wasi_http_types::IncomingResponse, ErrorCode> {
+) -> Result<IncomingResponse, ErrorCode> {
     let pollable = h.wasi_http_types_method_future_incoming_response_subscribe(future);
     h.wasi_io_poll_method_pollable_block(pollable);
     h.wasi_http_types_method_future_incoming_response_get(future)
@@ -425,11 +434,7 @@ fn read_waits_for_a_slow_body_and_poll_reports_it() {
             }
         }
         let rx = source.lock().unwrap().take().unwrap();
-        Ok(HttpResponse {
-            status: 200,
-            headers: vec![],
-            body: Box::new(Chunks(rx, Vec::new())),
-        })
+        Ok(streamed(Chunks(rx, Vec::new())))
     }));
     let r = get_request(&mut h, "localhost");
     let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
@@ -478,13 +483,7 @@ impl Read for Failing {
 
 #[test]
 fn a_body_failure_is_reported_once_with_an_http_error_code() {
-    let mut h = host_with(FnClient(|_| {
-        Ok(HttpResponse {
-            status: 200,
-            headers: vec![],
-            body: Box::new(Failing(false)),
-        })
-    }));
+    let mut h = host_with(FnClient(|_| Ok(streamed(Failing(false)))));
     let r = get_request(&mut h, "localhost");
     let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
     let resp = finished(&mut h, future).unwrap();
@@ -543,7 +542,18 @@ impl Drop for Endless {
     }
 }
 
-fn endless_response(h: &mut WasiHost) -> wasm2rs_wasi::wasi_http_types::IncomingResponse {
+/// A host whose client answers once with an `Endless` body, and the flag that body sets.
+fn endless_host() -> (WasiHost, Arc<AtomicBool>) {
+    let stopped = Arc::new(AtomicBool::new(false));
+    let slot = Mutex::new(Some(Arc::clone(&stopped)));
+    let h = host_with(FnClient(move |_| {
+        let flag = slot.lock().unwrap().take().unwrap();
+        Ok(streamed(Endless(flag)))
+    }));
+    (h, stopped)
+}
+
+fn endless_response(h: &mut WasiHost) -> IncomingResponse {
     let r = get_request(h, "localhost");
     let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
     finished(h, future).unwrap()
@@ -562,17 +572,7 @@ fn wait_until(flag: &AtomicBool) {
 
 #[test]
 fn dropping_the_body_stops_its_reader_thread() {
-    let stopped = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&stopped);
-    let slot = Mutex::new(Some(flag));
-    let mut h = host_with(FnClient(move |_| {
-        let flag = slot.lock().unwrap().take().unwrap();
-        Ok(HttpResponse {
-            status: 200,
-            headers: vec![],
-            body: Box::new(Endless(flag)),
-        })
-    }));
+    let (mut h, stopped) = endless_host();
     let resp = endless_response(&mut h);
     let body = h
         .wasi_http_types_method_incoming_response_consume(resp)
@@ -590,17 +590,7 @@ fn dropping_the_body_stops_its_reader_thread() {
 
 #[test]
 fn finishing_the_body_stops_its_reader_thread() {
-    let stopped = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&stopped);
-    let slot = Mutex::new(Some(flag));
-    let mut h = host_with(FnClient(move |_| {
-        let flag = slot.lock().unwrap().take().unwrap();
-        Ok(HttpResponse {
-            status: 200,
-            headers: vec![],
-            body: Box::new(Endless(flag)),
-        })
-    }));
+    let (mut h, stopped) = endless_host();
     let resp = endless_response(&mut h);
     let body = h
         .wasi_http_types_method_incoming_response_consume(resp)
@@ -616,17 +606,7 @@ fn finishing_the_body_stops_its_reader_thread() {
 
 #[test]
 fn dropping_an_unread_response_drops_its_body() {
-    let stopped = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&stopped);
-    let slot = Mutex::new(Some(flag));
-    let mut h = host_with(FnClient(move |_| {
-        let flag = slot.lock().unwrap().take().unwrap();
-        Ok(HttpResponse {
-            status: 200,
-            headers: vec![],
-            body: Box::new(Endless(flag)),
-        })
-    }));
+    let (mut h, stopped) = endless_host();
     let resp = endless_response(&mut h);
     h.wasi_http_types_resource_drop_incoming_response(resp);
     wait_until(&stopped);
@@ -642,16 +622,41 @@ fn dropping_the_future_discards_a_late_response() {
     let mut h = host_with(FnClient(move |_| {
         wait.lock().unwrap().recv().unwrap();
         let flag = slot.lock().unwrap().take().unwrap();
-        Ok(HttpResponse {
-            status: 200,
-            headers: vec![],
-            body: Box::new(Endless(flag)),
-        })
+        Ok(streamed(Endless(flag)))
     }));
     let r = get_request(&mut h, "localhost");
     let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
     h.wasi_http_types_resource_drop_future_incoming_response(future);
     release.send(()).unwrap();
     // the response arrives after the guest gave up: it is dropped, not kept
+    wait_until(&stopped);
+}
+
+#[test]
+fn an_authority_with_a_backslash_is_refused() {
+    let mut h = host_with(FnClient(|_| Ok(response(200, &[], ""))));
+    let r = get_request(&mut h, "localhost");
+    // clients that follow the WHATWG URL standard read this as host `evil.com`
+    assert!(
+        h.wasi_http_types_method_outgoing_request_set_authority(
+            r,
+            Some("evil.com\\@127.0.0.1".into())
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn dropping_the_host_stops_the_reader_threads() {
+    let (h, stopped) = endless_host();
+    let mut h = h;
+    let resp = endless_response(&mut h);
+    let body = h
+        .wasi_http_types_method_incoming_response_consume(resp)
+        .unwrap();
+    let stream = h.wasi_http_types_method_incoming_body_stream(body).unwrap();
+    h.wasi_io_streams_method_input_stream_blocking_read(stream, 16)
+        .unwrap();
+    drop(h);
     wait_until(&stopped);
 }

@@ -236,6 +236,12 @@ impl WasiHost {
             .unwrap_or_else(|| http_missing("incoming-response"))
     }
 
+    fn http_response_mut(&mut self, h: IncomingResponse) -> &mut http::HttpIncomingResponse {
+        self.http_responses
+            .get_mut(h.0 as usize)
+            .unwrap_or_else(|| http_missing("incoming-response"))
+    }
+
     fn http_body_mut(&mut self, h: IncomingBody) -> &mut http::HttpIncomingBody {
         self.http_bodies
             .get_mut(h.0 as usize)
@@ -265,12 +271,14 @@ impl WasiHost {
         handle: OutgoingRequest,
         options: Option<RequestOptions>,
     ) -> Result<FutureIncomingResponse, HttpErrorCode> {
-        let request = self.http_request(handle).clone();
-        self.http_requests.remove(handle.0 as usize);
+        let request = self
+            .http_requests
+            .take(handle.0 as usize)
+            .unwrap_or_else(|| http_missing("outgoing-request"));
         let options = options.map(|o| {
-            let options = *self.http_option(o);
-            self.http_options.remove(o.0 as usize);
-            options
+            self.http_options
+                .take(o.0 as usize)
+                .unwrap_or_else(|| http_missing("request-options"))
         });
         let authority = request
             .authority
@@ -808,11 +816,16 @@ impl<T> Slab<T> {
         self.slots.get_mut(slot)?.as_mut()
     }
 
+    /// Frees a slot and hands back its value; `None` for an unknown or already free one.
+    fn take(&mut self, slot: usize) -> Option<T> {
+        let value = self.slots.get_mut(slot)?.take()?;
+        self.free.push(slot);
+        Some(value)
+    }
+
     /// Frees a slot; an unknown or already free one is ignored.
     fn remove(&mut self, slot: usize) {
-        if self.slots.get_mut(slot).and_then(Option::take).is_some() {
-            self.free.push(slot);
-        }
+        drop(self.take(slot));
     }
 }
 

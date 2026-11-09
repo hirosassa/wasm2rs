@@ -319,13 +319,7 @@ impl Host for WasiHost {
         &mut self,
         self_: IncomingResponse,
     ) -> Result<IncomingBody, ()> {
-        let reader = self
-            .http_responses
-            .get_mut(self_.0 as usize)
-            .unwrap_or_else(|| http_missing("incoming-response"))
-            .body
-            .take()
-            .ok_or(())?;
+        let reader = self.http_response_mut(self_).body.take().ok_or(())?;
         Ok(IncomingBody(
             self.http_bodies.insert(HttpIncomingBody::spawn(reader)) as u32,
         ))
@@ -349,8 +343,9 @@ impl Host for WasiHost {
         &mut self,
         this: IncomingBody,
     ) -> FutureTrailers {
-        self.http_body_mut(this).stop();
-        self.http_bodies.remove(this.0 as usize);
+        self.http_bodies
+            .take(this.0 as usize)
+            .unwrap_or_else(|| http_missing("incoming-body"));
         FutureTrailers(self.http_trailers.insert(()) as u32)
     }
 
@@ -363,10 +358,9 @@ impl Host for WasiHost {
         &mut self,
         handle: FutureIncomingResponse,
     ) {
-        if let Some(future) = self.http_futures.get(handle.0 as usize) {
+        if let Some(future) = self.http_futures.take(handle.0 as usize) {
             future.cancel();
         }
-        self.http_futures.remove(handle.0 as usize);
     }
 
     fn wasi_http_types_resource_drop_incoming_response(&mut self, handle: IncomingResponse) {
@@ -374,10 +368,7 @@ impl Host for WasiHost {
     }
 
     fn wasi_http_types_resource_drop_incoming_body(&mut self, handle: IncomingBody) {
-        if let Some(body) = self.http_bodies.get(handle.0 as usize) {
-            body.stop();
-        }
-        self.http_bodies.remove(handle.0 as usize);
+        self.http_bodies.take(handle.0 as usize);
     }
 
     fn wasi_http_types_resource_drop_future_trailers(&mut self, handle: FutureTrailers) {

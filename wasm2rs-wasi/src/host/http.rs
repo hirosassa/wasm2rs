@@ -3,7 +3,7 @@
 //! `incoming-body`.
 
 use super::NetworkPolicy;
-use super::sources::{HttpClient, HttpClientError, HttpResponse};
+use super::sources::{HttpClient, HttpClientError, HttpRequest, HttpResponse};
 use crate::wasi_http_types::{ErrorCode, HeaderError, Method, Scheme};
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read};
@@ -237,12 +237,14 @@ pub(super) fn valid_path_with_query(path: &str) -> bool {
             .all(|b| (0x21..=0x7e).contains(&b) && b != b'#')
 }
 
-/// Visible ASCII without the delimiters that end an authority.
+/// Visible ASCII without the delimiters that end an authority (a backslash ends it for
+/// clients that follow the WHATWG URL standard, so it would make the host and the client
+/// disagree about the destination).
 pub(super) fn valid_authority(authority: &str) -> bool {
     !authority.is_empty()
         && authority
             .bytes()
-            .all(|b| (0x21..=0x7e).contains(&b) && !matches!(b, b'/' | b'?' | b'#'))
+            .all(|b| (0x21..=0x7e).contains(&b) && !matches!(b, b'/' | b'?' | b'#' | b'\\'))
 }
 
 /// Locks `m`; a thread that panicked while holding it leaves data that is still usable here.
@@ -267,6 +269,9 @@ pub(super) fn destination_allowed(policy: NetworkPolicy, authority: &str) -> boo
         NetworkPolicy::None => false,
         NetworkPolicy::External => true,
         NetworkPolicy::Loopback => {
+            if authority.contains('\\') {
+                return false; // clients disagree about where the authority ends
+            }
             let host = authority_host(authority);
             match host.parse::<IpAddr>() {
                 Ok(ip) => ip.is_loopback(),
@@ -317,10 +322,7 @@ pub(super) struct HttpFuture {
 impl HttpFuture {
     /// Starts `send` of `request` on a thread. The client is shared by all requests, so two
     /// requests in flight take turns inside `send` (the body is read outside it).
-    pub(super) fn spawn(
-        client: Arc<Mutex<Box<dyn HttpClient>>>,
-        request: super::sources::HttpRequest,
-    ) -> Self {
+    pub(super) fn spawn(client: Arc<Mutex<Box<dyn HttpClient>>>, request: HttpRequest) -> Self {
         let shared = Arc::new(FutureShared {
             result: Mutex::new(None),
             cancelled: AtomicBool::new(false),
@@ -473,11 +475,18 @@ impl HttpIncomingBody {
     }
 
     /// Ends the reader thread (it notices between reads).
-    pub(super) fn stop(&self) {
+    fn stop(&self) {
         self.shared.stop.store(true, Ordering::SeqCst);
         // taking the lock orders the flag before the thread's next wait
         drop(lock(&self.shared.state));
         self.shared.changed.notify_all();
+    }
+}
+
+/// Dropping a body (also with the host, for a guest that exits holding it) ends its thread.
+impl Drop for HttpIncomingBody {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -493,14 +502,14 @@ impl BodyHandle {
 
     pub(super) fn read(&self, len: usize) -> BodyRead {
         let mut state = lock(&self.0.state);
-        let n = len.min(state.bytes.len());
-        let data: Vec<u8> = state.bytes.drain(..n).collect();
-        if data.is_empty() && state.bytes.is_empty() && state.eof {
+        if state.bytes.is_empty() && state.eof {
             return match state.error.take() {
                 Some((kind, why)) => BodyRead::Failed(kind, why),
                 None => BodyRead::Closed,
             };
         }
+        let n = len.min(state.bytes.len());
+        let data = state.bytes.drain(..n).collect();
         drop(state);
         self.0.changed.notify_all(); // room for the thread
         BodyRead::Data(data)
