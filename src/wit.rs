@@ -28,7 +28,10 @@ use wasmparser::{
 use crate::TranspileError;
 use crate::codegen::{assign_import_names, interface_ident, plain_ident};
 
+mod exports;
 mod glue;
+
+pub use exports::{WitExport, wit_exports};
 
 /// A WIT value type that a host function can take or return.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -671,20 +674,28 @@ fn push_alias(stack: &mut [Scope], slot: AliasSlot) -> Result<(), TranspileError
     }
 }
 
-/// Every function of every imported interface instance of `component`, in import order.
-///
-/// An unsupported type used by a function (see the module docs) is an
-/// [`Unsupported`](TranspileError::Unsupported) error naming the type and the function.
-/// A core module, which has no interfaces, is an error too.
-pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
+/// What `read_component` found in the component body.
+struct Read {
+    imports: Vec<(String, Arc<Instance>)>,
+    /// The resources whose `canon resource.drop` the component body lowers.
+    dropped: Vec<u32>,
+    /// Whether the component has a core module at the top level.
+    has_core: bool,
+    /// Whether some drop could not be tied to a resource (or a nested component lowers some).
+    unmapped_drop: bool,
+}
+
+/// Walks the payloads of `component`, building its type and instance index spaces and
+/// collecting its imports. `exports`, if any, sees every payload first.
+fn read_component(
+    component: &[u8],
+    mut exports: Option<&mut exports::Reader>,
+) -> Result<Read, TranspileError> {
     // A binary that does not validate has no meaningful index spaces to read.
     Validator::new_with_features(WasmFeatures::all()).validate_all(component)?;
     let mut stack = vec![Scope::default()];
     let mut imports: Vec<(String, Arc<Instance>)> = Vec::new();
     let mut first = true;
-    // The resources whose `canon resource.drop` the component body lowers, whether it has
-    // a core module at the top level, and whether some drop could not be tied to a resource
-    // (or a nested component lowers some drop).
     let mut dropped: Vec<u32> = Vec::new();
     let mut has_core = false;
     let mut unmapped_drop = false;
@@ -693,6 +704,9 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
     let mut depth = 0usize;
     for payload in Parser::new(0).parse_all(component) {
         let payload = payload?;
+        if let Some(exports) = exports.as_deref_mut() {
+            exports.feed(&payload, &stack)?;
+        }
         if depth > 0 {
             match payload {
                 // A nested component's own `canon resource.drop`s are not mapped to
@@ -831,7 +845,26 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
     if first {
         return Err(unsupported("the input is not a component"));
     }
+    Ok(Read {
+        imports,
+        dropped,
+        has_core,
+        unmapped_drop,
+    })
+}
 
+/// Every function of every imported interface instance of `component`, in import order.
+///
+/// An unsupported type used by a function (see the module docs) is an
+/// [`Unsupported`](TranspileError::Unsupported) error naming the type and the function.
+/// A core module, which has no interfaces, is an error too.
+pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
+    let Read {
+        imports,
+        dropped,
+        has_core,
+        unmapped_drop,
+    } = read_component(component, None)?;
     let mut funcs = Vec::new();
     for (interface, inst) in &imports {
         for (name, sig) in &inst.funcs {
