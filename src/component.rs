@@ -72,7 +72,7 @@ pub fn transpile_component(
 ///
 /// The exports are the [`wit_exports`](crate::wit_exports) result the transpilation needs
 /// anyway, so a caller that wants to inspect them (to check the component exports what it is
-/// about to call, say) does not parse the component a second time.
+/// about to call, say) does not need its own [`wit_exports`](crate::wit_exports) pass.
 ///
 /// # Errors
 ///
