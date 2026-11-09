@@ -282,7 +282,7 @@ impl Host for WasiHost {
         });
         *self
             .http_outparams
-            .get_mut(param.0 as usize)
+            .get_mut(&param.0)
             .unwrap_or_else(|| http_missing("response-outparam")) = Some(answer);
     }
 
@@ -462,7 +462,9 @@ impl Host for WasiHost {
         &mut self,
         self_: FutureIncomingResponse,
     ) -> Pollable {
-        self.subscribe_wait(Wait::HttpResponse(self_.0 as usize))
+        self.subscribe_wait(Wait::HttpResponse(
+            self.http_futures.slot_ref(self_.0 as usize),
+        ))
     }
 
     /// `None` while the request runs; then the result once (`Some(Err(()))` afterwards). A
@@ -825,7 +827,7 @@ impl Host for WasiHost {
     /// Ready at once, except for a connection: it is ready while its send queue has room.
     fn wasi_io_streams_method_output_stream_subscribe(&mut self, self_: OutputStream) -> Pollable {
         match tcp_slot(self_.0) {
-            Some(slot) => self.subscribe_wait(Wait::TcpWritable(slot)),
+            Some(slot) => self.subscribe_wait(Wait::TcpWritable(self.tcp_out.slot_ref(slot))),
             None => self.subscribe(None),
         }
     }
@@ -1539,17 +1541,17 @@ impl Host for WasiHost {
 
     /// Ready when `accept` would not block (a socket that is not listening is always ready).
     fn wasi_sockets_tcp_method_tcp_socket_subscribe(&mut self, self_: TcpSocket) -> Pollable {
-        self.subscribe_wait(Wait::TcpAccept(self_.0 as usize))
+        self.subscribe_wait(Wait::TcpAccept(self.sockets.slot_ref(self_.0 as usize)))
     }
 
     /// Ready when stdin has data or is at its end, or a connection's stream has data or is
     /// at its end; a file is always ready.
     fn wasi_io_streams_method_input_stream_subscribe(&mut self, self_: InputStream) -> Pollable {
         if let Some(slot) = tcp_slot(self_.0) {
-            return self.subscribe_wait(Wait::TcpReadable(slot));
+            return self.subscribe_wait(Wait::TcpReadable(self.tcp_in.slot_ref(slot)));
         }
         if let Some(slot) = http_slot(self_.0) {
-            return self.subscribe_wait(Wait::HttpReadable(slot));
+            return self.subscribe_wait(Wait::HttpReadable(self.http_bodies.slot_ref(slot)));
         }
         if self_.0 != 0 {
             return self.subscribe(None);
@@ -1892,7 +1894,7 @@ impl Host for WasiHost {
         &mut self,
         self_: IncomingDatagramStream,
     ) -> Pollable {
-        self.subscribe_wait(Wait::UdpReadable(self_.0 as usize))
+        self.subscribe_wait(Wait::UdpReadable(self.udp_in.slot_ref(self_.0 as usize)))
     }
 
     fn wasi_sockets_udp_method_outgoing_datagram_stream_check_send(
