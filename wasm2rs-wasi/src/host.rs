@@ -882,11 +882,15 @@ impl<T> Slab<T> {
         match self.free.pop() {
             Some(slot) => {
                 self.slots[slot] = Some(value);
+                // a new occupant: a ref made while the slot was free must not match it
+                if let Some(epoch) = self.epochs.get_mut(slot) {
+                    *epoch = epoch.wrapping_add(1);
+                }
                 slot
             }
             None => {
                 self.slots.push(Some(value));
-                self.epochs.push(0);
+                self.epochs.push(1);
                 self.slots.len() - 1
             }
         }
@@ -900,8 +904,8 @@ impl<T> Slab<T> {
         self.slots.get_mut(slot)?.as_mut()
     }
 
-    /// A reference to what the slot holds now. Only pass a live slot: the reference of a free
-    /// one matches whatever is inserted there next.
+    /// A reference to what the slot holds now. One made for a free or unknown slot (epoch 0
+    /// never occurs) matches nothing, not even what is inserted there later.
     fn slot_ref(&self, slot: usize) -> SlotRef {
         SlotRef {
             slot,
