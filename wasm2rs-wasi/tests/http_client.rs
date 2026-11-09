@@ -46,6 +46,7 @@ fn request(method: &str, addr: &str, path: &str) -> HttpRequest {
         url: format!("http://{addr}{path}"),
         headers: Vec::new(),
         body: Vec::new(),
+        trailers: Vec::new(),
         connect_timeout: None,
         first_byte_timeout: None,
         between_bytes_timeout: None,
@@ -234,4 +235,24 @@ fn an_empty_body_on_head_is_fine() {
     let response = UreqClient::new().send(request("HEAD", &addr, "/")).unwrap();
     assert_eq!(response.status, 200);
     assert!(server.join().unwrap().starts_with("HEAD / HTTP/1.1"));
+}
+
+#[test]
+fn request_trailers_are_refused_not_dropped() {
+    let mut req = request("POST", "127.0.0.1:1", "/");
+    req.trailers.push(("x-end".into(), b"done".to_vec()));
+    let error = UreqClient::new().send(req).unwrap_err();
+    assert!(error.to_string().contains("trailers"), "{error}");
+}
+
+#[test]
+fn a_response_has_no_trailers_reader() {
+    let (addr, server) = serve(|mut s| {
+        read_request(&mut s);
+        s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+            .unwrap();
+    });
+    let response = UreqClient::new().send(request("GET", &addr, "/")).unwrap();
+    assert!(response.trailers.is_none());
+    server.join().unwrap();
 }

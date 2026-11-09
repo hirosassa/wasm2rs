@@ -168,7 +168,8 @@ impl RandomSource for OsRandom {
 /// A request an [`HttpClient`] executes for `wasi:http/outgoing-handler.handle`.
 ///
 /// The body is buffered: the host executes the request once the guest has finished writing it
-/// (`outgoing-body.finish`). There is no field for trailers: the host refuses `finish` with them.
+/// (`outgoing-body.finish`). The trailers the guest finished the body with are in `trailers`
+/// (empty for none); a client that cannot send them must refuse the request, not drop them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     /// The method, as the guest wrote it (`GET`, `POST`, or an extension method).
@@ -178,6 +179,8 @@ pub struct HttpRequest {
     /// Every header value on its own entry, in the guest's order.
     pub headers: Vec<(String, Vec<u8>)>,
     pub body: Vec<u8>,
+    /// Every trailer value on its own entry, in the guest's order; empty when the guest sent none.
+    pub trailers: Vec<(String, Vec<u8>)>,
     /// The `request-options` timeouts, in nanoseconds (`None`: the client's default).
     pub connect_timeout: Option<u64>,
     pub first_byte_timeout: Option<u64>,
@@ -190,13 +193,21 @@ pub struct HttpResponse {
     pub status: u16,
     pub headers: Vec<(String, Vec<u8>)>,
     pub body: Box<dyn std::io::Read + Send>,
+    /// Reads the trailers once `body` has been read to its end (`None`: the response has none).
+    /// The host calls it at most once, on the thread that reads the body (which reads ahead of
+    /// the guest), after the body ended without error. An empty result means no trailers.
+    pub trailers: Option<ResponseTrailers>,
 }
+
+/// See [`HttpResponse::trailers`].
+pub type ResponseTrailers = Box<dyn FnOnce() -> Vec<(String, Vec<u8>)> + Send>;
 
 impl fmt::Debug for HttpResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpResponse")
             .field("status", &self.status)
             .field("headers", &self.headers)
+            .field("trailers", &self.trailers.is_some())
             .finish_non_exhaustive()
     }
 }

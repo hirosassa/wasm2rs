@@ -15,6 +15,10 @@ use std::time::Duration;
 /// A `HEAD` or `CONNECT` request with a body is refused (a client error, so the guest sees
 /// `internal-error`); `ureq` itself would send the body.
 ///
+/// Trailers are not supported: a request with trailers is refused (a client error, so the guest
+/// sees `internal-error`) rather than sent without them, and a response never has any (`ureq`
+/// does not expose them).
+///
 /// `ureq` adds a `user-agent` and an `accept` header the guest did not set, and reads a proxy
 /// from the `*_PROXY` environment variables.
 ///
@@ -65,6 +69,11 @@ impl HttpClient for UreqClient {
                 request.method
             )));
         }
+        if !request.trailers.is_empty() {
+            return Err(HttpClientError::new(
+                "request trailers are not supported by UreqClient",
+            ));
+        }
         let mut builder = ureq::http::Request::builder()
             .method(request.method.as_str())
             .uri(request.url.as_str());
@@ -90,6 +99,7 @@ impl HttpClient for UreqClient {
             status,
             headers,
             body: Box::new(response.into_body().into_reader()),
+            trailers: None,
         })
     }
 }

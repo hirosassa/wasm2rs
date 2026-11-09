@@ -55,7 +55,7 @@ needs).
 |---|---|
 | H1 ✅ | `fields`, `request-options`, `outgoing-request` (not its `body`, H3), drops; the `HttpClient` trait and builder method (no real client yet; the trait's shape may still change in H2). |
 | H2 ✅ | `outgoing-handler.handle`, `future-incoming-response` (thread, `Wait`), `incoming-response`, `incoming-body` (receive side), `http-error-code`. The `HttpClient` signature is unchanged; the host shares the client between request threads behind a mutex (`send` runs one at a time, bodies are read outside it). A client error is `internal-error` with its message; a policy refusal is `HTTP-request-denied`. `incoming-body.finish` returns a `future-trailers` that can only be dropped (H3 adds its methods). |
-| H3 ✅ | `outgoing-request.body`, `outgoing-body.write` / `finish`, `future-trailers.subscribe` / `get`. The body is a buffer behind an output stream (`HTTP_OUT_STREAM`, range above the input streams): `check-write` is the room left under the limit (`max_request_body`, 1 MiB) up to 4096, a write past the limit fails the stream (`last-operation-failed` carrying `HTTP-request-body-size`, then `closed`) and `finish` / the future report the same code. `handle` may come before or after the body is written: its thread waits for `finish` and only then calls the client; a body dropped without `finish` (or finished with trailers) fails the future with `internal-error` and the client never runs. **Trailers are not supported**: `HttpRequest` has no field for them and the `HttpClient` trait stays as it is (`ureq` cannot send them either), so `finish` with trailers is `internal-error("request trailers are not supported")`. A received message has no trailers either (`HttpResponse` carries none; `ureq` exposes none), so `future-trailers.get` answers `some(ok(ok(none)))` once, then `some(err)`; both are for H5/a richer client to lift. `UreqClient` refuses a non-empty body on `HEAD`/`CONNECT` (`ureq`'s `run` would send it); like every client error it reaches the guest as `internal-error`. |
+| H3 ✅ | `outgoing-request.body`, `outgoing-body.write` / `finish`, `future-trailers.subscribe` / `get`. The body is a buffer behind an output stream (`HTTP_OUT_STREAM`, range above the input streams): `check-write` is the room left under the limit (`max_request_body`, 1 MiB) up to 4096, a write past the limit fails the stream (`last-operation-failed` carrying `HTTP-request-body-size`, then `closed`) and `finish` / the future report the same code. `handle` may come before or after the body is written: its thread waits for `finish` and only then calls the client; a body dropped without `finish` (or finished with trailers) fails the future with `internal-error` and the client never runs. Trailers were not supported in H3 (refused at `finish`; `future-trailers.get` was always `none`); T6 added them to the trait, see "Client-side trailers". `UreqClient` refuses a non-empty body on `HEAD`/`CONNECT` (`ureq`'s `run` would send it); like every client error it reaches the guest as `internal-error`. |
 | H4 ✅ | `ureq` client behind feature `http-client`; end-to-end tests against a loopback server. |
 | H5 ✅ | incoming: `incoming-request` (method, path-with-query, scheme, authority, headers, `consume`), `outgoing-response` (status `100..=999` (wasmtime's range), default `200`; headers immutable once built; `body` once), `response-outparam.set`, and their drops. The embedder mints `new_incoming_request(IncomingRequestParts)` and `new_response_outparam()`, calls `Exports::export_wasi_http_incoming_handler_0_2_0_handle` (no change to the glue or `src/wit` was needed: `own<..>` resource parameters of an export already work) and then `take_response(outparam)`, which returns `None` when the guest never set one, else `Some(Result<ServedResponse, ErrorCode>)`: `ServedResponse` is plain data (status, headers, body), not a handle. The response body reuses the `outgoing-body` buffer of H3 (`HTTP_OUT_STREAM`) with the same limit (`max_request_body`); a body over it reports `HTTP-response-body-size`. The outparam belongs to the embedder: a guest dropping it leaves it for `take_response` to free. Outparam ids are never reused while the host lives, so an outparam kept after `take_response` traps on `set` (unknown handle) instead of writing into another call's answer. A body that already failed (dropped before `finish`, over the limit) fails the answer; an open one is streamed (T5b, below). Tests: `wasm2rs-wasi/tests/http_incoming.rs` (host) and `tests/it/wasip2_typed_http_incoming.rs` (a component with `import types` / `export incoming-handler`). |
 
@@ -73,13 +73,29 @@ needs).
   after `handle` returns, so an open body there is a guest that forgot to finish: use the idle timeout.
 - **The limit counts unread bytes** (`max_request_body`): a body larger than it passes through a
   reader that keeps up; one written faster than read still fails with `HTTP-response-body-size`.
-- **Trailers, the incoming side only.** `IncomingRequestParts.trailers` (breaking: new field) is handed
+- **Trailers, the incoming side.** `IncomingRequestParts.trailers` (breaking: new field) is handed
   to `future-trailers.get` of the request's `incoming-body` (immutable fields; `none` when `None`).
   A response body may `finish` with trailers: `ServedBody::trailers()` returns them once finished.
-  The `HttpClient` trait is **unchanged**, so the client side stays as in H3: `finish` of a *request*
-  body with trailers is `internal-error("request trailers are not supported")`, and a received
-  response has no trailers (`future-trailers.get` is `none`). Lifting that means adding trailers to
-  `HttpRequest`/`HttpResponse` (a `ureq` limitation too): tracked in its own issue.
+
+## Client-side trailers (T6, #209)
+
+The `HttpClient` trait carries trailers both ways (breaking: new fields, no default but empty/`None`).
+
+- **Sending.** `HttpRequest.trailers` (`Vec<(String, Vec<u8>)>`, empty for none) holds what the guest
+  finished the request body with. `outgoing-body.finish` checks them as a header the guest sets is
+  (forbidden names, token syntax): a `fields.clone` of a received message is mutable and may hold names
+  a guest could not `append`, so the check is repeated at `finish`. A refused set fails the request
+  with `internal-error` and the client never runs. A client that cannot send trailers must refuse the
+  request, not drop them.
+- **Receiving.** `HttpResponse.trailers` is an `Option<ResponseTrailers>`, a `FnOnce() -> Vec<(String,
+  Vec<u8>)>` the body-reader thread calls once, after the body ended without error (so a client can
+  read the chunked trailer section from the connection it streamed the body from). The result is kept
+  with the body; `incoming-body.finish` hands it to `future-trailers`, whose `get` answers
+  `some(ok(some(fields)))` (immutable fields), or `none` for no reader, an empty result, or a body that
+  failed or was finished before it ended. A panicking reader fails the body read like a client error.
+- **`UreqClient`** supports neither: a request with trailers is refused with an `HttpClientError`
+  (`internal-error` for the guest) and a response never has a trailers reader (`ureq` exposes none). A
+  client that really sends and receives trailers (hyper-based, ...) is future work.
 
 ## Serving over TCP: `examples/wasip2_serve.rs`
 
@@ -113,7 +129,7 @@ becomes it (`exec` on unix, so killing the example kills the server).
 - **Tests.** `tests/it/wasip2_serve_example.rs` runs the example as a process and talks real TCP
   (echo of status/headers/body, 400, 413, 501, 500 after a trap and the next request, 500/502).
 
-Of #195 this covers "listening/accept" (#196), the outparam stale-handle guard, the status range and the pollable epoch (T5a), and streaming responses and the incoming-side trailers (T5b). Client-side trailers remain.
+Of #195 this covers "listening/accept" (#196), the outparam stale-handle guard, the status range and the pollable epoch (T5a), and streaming responses and the incoming-side trailers (T5b). Client-side trailers are T6 (#209), above.
 
 `wasip2_wit_regression.rs` now requires every method to be overridden.
 

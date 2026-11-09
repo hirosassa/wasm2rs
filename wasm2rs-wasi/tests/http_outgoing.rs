@@ -62,6 +62,7 @@ fn response(status: u16, headers: &[(&str, &str)], body: &'static str) -> HttpRe
             .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
             .collect(),
         body: Box::new(Cursor::new(body.as_bytes())),
+        trailers: None,
     }
 }
 
@@ -71,6 +72,7 @@ fn streamed(body: impl Read + Send + 'static) -> HttpResponse {
         status: 200,
         headers: vec![],
         body: Box::new(body),
+        trailers: None,
     }
 }
 

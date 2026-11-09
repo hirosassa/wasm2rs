@@ -197,8 +197,8 @@ pub struct WasiHost {
     /// The most a request or response body may hold.
     http_max_body: usize,
     /// The `future-trailers` handed out by `incoming-body.finish`: the trailers of a request the
-    /// embedder minted with some; a received response has none (an `HttpResponse` carries
-    /// none), so those answer `none`. `None` once `get` answered.
+    /// embedder minted with some, or those the client read after a response body (`none` for
+    /// no trailers). `None` once `get` answered.
     http_trailers: Slab<Option<Option<http::Entries>>>,
 }
 
@@ -244,9 +244,8 @@ impl WasiHost {
     fn http_new_out_body(
         &mut self,
         too_large: fn(Option<u64>) -> HttpErrorCode,
-        trailers_ok: bool,
     ) -> (http::OutBodyHandle, OutgoingBody) {
-        let body = http::HttpOutgoingBody::new(self.http_max_body, too_large, trailers_ok);
+        let body = http::HttpOutgoingBody::new(self.http_max_body, too_large);
         let handle = body.handle();
         let slot = self.http_out_bodies.insert(body);
         (handle, OutgoingBody(slot as u32))
@@ -382,6 +381,7 @@ impl WasiHost {
             url: format!("{scheme}://{authority}{separator}{path}"),
             headers: request.headers.entries(),
             body: Vec::new(),
+            trailers: Vec::new(),
             connect_timeout: options.connect,
             first_byte_timeout: options.first_byte,
             between_bytes_timeout: options.between_bytes,
