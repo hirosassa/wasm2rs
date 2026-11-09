@@ -13,11 +13,17 @@
 //!     include!(concat!(env!("OUT_DIR"), "/foo.rs"));
 //! }
 //! ```
+//!
+//! A WebAssembly *component* goes through [`transpile_component_to_out_dir`], which names the
+//! output after the input (`assets/run.wasm` becomes `$OUT_DIR/run.rs`), and the
+//! `wasm2rs_macros::include_component!("run")` macro includes it.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::{TranspileError, TranspileOptions, transpile_with_options};
+use crate::{
+    ComponentOptions, TranspileError, TranspileOptions, transpile_component, transpile_with_options,
+};
 
 /// An error from the build helpers.
 #[derive(Debug)]
@@ -109,6 +115,50 @@ pub fn transpile_to_dir_with_options(
     })?;
     let code = transpile_with_options(&wasm, opts)?;
     let out = dir.as_ref().join(out_name);
+    std::fs::write(&out, code).map_err(|source| BuildError::Io {
+        path: out.clone(),
+        source,
+    })?;
+    Ok(out)
+}
+
+/// Transpile the component at `component_path` into `$OUT_DIR/{stem}.rs`, where `{stem}` is the
+/// file name without its extension, and return that path. See [`transpile_component`] for what
+/// is generated.
+///
+/// Also prints `cargo:rerun-if-changed` for the input. Call this from `build.rs`, and include the
+/// result with `wasm2rs_macros::include_component!("{stem}")`.
+pub fn transpile_component_to_out_dir(
+    component_path: impl AsRef<Path>,
+    options: &ComponentOptions,
+) -> Result<PathBuf, BuildError> {
+    let out_dir = std::env::var_os("OUT_DIR").ok_or(BuildError::MissingOutDir)?;
+    println!(
+        "cargo:rerun-if-changed={}",
+        component_path.as_ref().display()
+    );
+    transpile_component_to_dir(out_dir, component_path, options)
+}
+
+/// [`transpile_component_to_out_dir`] with the output directory given explicitly, and without
+/// the Cargo output.
+pub fn transpile_component_to_dir(
+    dir: impl AsRef<Path>,
+    component_path: impl AsRef<Path>,
+    options: &ComponentOptions,
+) -> Result<PathBuf, BuildError> {
+    let component_path = component_path.as_ref();
+    let component = std::fs::read(component_path).map_err(|source| BuildError::Io {
+        path: component_path.to_path_buf(),
+        source,
+    })?;
+    let code = transpile_component(&component, options)?;
+    let stem = component_path
+        .file_stem()
+        .unwrap_or(component_path.as_os_str());
+    let mut name = stem.to_os_string();
+    name.push(".rs");
+    let out = dir.as_ref().join(name);
     std::fs::write(&out, code).map_err(|source| BuildError::Io {
         path: out.clone(),
         source,

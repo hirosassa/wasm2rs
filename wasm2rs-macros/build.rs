@@ -13,5 +13,11 @@ fn main() {
     ];
     let out = std::env::var_os("OUT_DIR").expect("OUT_DIR");
     std::fs::write(std::path::Path::new(&out).join("add.wasm"), wasm).expect("write add.wasm");
+    // A stand-in for the `{name}.rs` that `wasm2rs::build::transpile_component_to_out_dir` writes.
+    std::fs::write(
+        std::path::Path::new(&out).join("answer.rs"),
+        "pub fn answer() -> u32 { 42 }\n",
+    )
+    .expect("write answer.rs");
     println!("cargo:rerun-if-changed=build.rs");
 }

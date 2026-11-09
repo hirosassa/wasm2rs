@@ -13,6 +13,9 @@
 //! `wasm2rs::TranspileOptions`). The invocation expands to
 //! the generated items, so wrap it in a `mod` to scope them.
 //!
+//! `include_component!("name")` includes the `$OUT_DIR/name.rs` that a build script wrote with
+//! `wasm2rs::build::transpile_component_to_out_dir("assets/name.wasm", &options)`.
+//!
 //! The generated source is parsed into a token stream, which costs time and
 //! memory on a very large module; for those prefer a build script
 //! (`wasm2rs::build`) and `include!`.
@@ -21,6 +24,39 @@ use proc_macro::{TokenStream, TokenTree};
 use std::path::{Path, PathBuf};
 
 use wasm2rs::{TranspileOptions, transpile_with_options};
+
+/// Include the Rust that `wasm2rs::build::transpile_component_to_out_dir` wrote for a component.
+///
+/// `include_component!("run")` expands to `include!` of `$OUT_DIR/run.rs`: the name is the input
+/// file's name without its extension.
+#[proc_macro]
+pub fn include_component(input: TokenStream) -> TokenStream {
+    match component_file_name(input) {
+        Ok(file) => format!("include!(concat!(env!(\"OUT_DIR\"), \"/\", {file:?}));")
+            .parse()
+            .unwrap_or_default(),
+        Err(msg) => compile_error(&msg),
+    }
+}
+
+/// The `{name}.rs` file of an `include_component!("name")` call.
+fn component_file_name(input: TokenStream) -> Result<String, String> {
+    let usage = "expected `include_component!(\"name\")`";
+    let mut tokens = input.into_iter();
+    let Some(TokenTree::Literal(lit)) = tokens.next() else {
+        return Err(usage.into());
+    };
+    if tokens.next().is_some() {
+        return Err(usage.into());
+    }
+    let name = string_literal(&lit.to_string()).ok_or(usage)?;
+    if name.is_empty() || name.contains(['/', '\\']) {
+        return Err(format!(
+            "`{name}` is not a file name; pass the component's name without directory or extension"
+        ));
+    }
+    Ok(format!("{name}.rs"))
+}
 
 /// Transpile a `.wasm` file at compile time and expand to the generated Rust.
 #[proc_macro]
