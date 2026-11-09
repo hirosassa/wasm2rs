@@ -18,8 +18,9 @@ use crate::wasi_generated::generate;
 const IMPL_HOST: &str = include_str!("../../wasm2rs-wasi/src/host/impl_host.rs");
 
 /// The `wasi:http` methods implemented so far (H1: fields, request-options, the parts of
-/// outgoing-request; H2: `handle` and the receive side; the body of a request is H3).
-const IMPLEMENTED_HTTP: [&str; 42] = [
+/// outgoing-request; H2: `handle` and the receive side; H3: the send side of bodies and
+/// `future-trailers`).
+const IMPLEMENTED_HTTP: [&str; 48] = [
     "wasi_http_types_constructor_fields",
     "wasi_http_types_static_fields_from_list",
     "wasi_http_types_method_fields_get",
@@ -46,6 +47,12 @@ const IMPLEMENTED_HTTP: [&str; 42] = [
     "wasi_http_types_method_outgoing_request_authority",
     "wasi_http_types_method_outgoing_request_set_authority",
     "wasi_http_types_method_outgoing_request_headers",
+    "wasi_http_types_method_outgoing_request_body",
+    "wasi_http_types_method_outgoing_body_write",
+    "wasi_http_types_static_outgoing_body_finish",
+    "wasi_http_types_method_future_trailers_subscribe",
+    "wasi_http_types_method_future_trailers_get",
+    "wasi_http_types_resource_drop_outgoing_body",
     "wasi_http_types_resource_drop_fields",
     "wasi_http_types_resource_drop_outgoing_request",
     "wasi_http_types_resource_drop_request_options",

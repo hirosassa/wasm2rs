@@ -167,7 +167,8 @@ impl RandomSource for OsRandom {
 
 /// A request an [`HttpClient`] executes for `wasi:http/outgoing-handler.handle`.
 ///
-/// The body is buffered: the host executes the request once the guest has finished writing it.
+/// The body is buffered: the host executes the request once the guest has finished writing it
+/// (`outgoing-body.finish`). There is no field for trailers: the host refuses `finish` with them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     /// The method, as the guest wrote it (`GET`, `POST`, or an extension method).

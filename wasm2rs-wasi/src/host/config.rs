@@ -85,6 +85,7 @@ pub struct WasiHostBuilder {
     clock: Option<Box<dyn Clock>>,
     random: Option<Box<dyn RandomSource>>,
     http_client: Option<Box<dyn HttpClient>>,
+    max_request_body: Option<usize>,
     stdin: Option<Box<dyn Read + Send>>,
     stdout: Option<Box<dyn Write + Send>>,
     stderr: Option<Box<dyn Write + Send>>,
@@ -151,6 +152,14 @@ impl WasiHostBuilder {
         self
     }
 
+    /// The most a request body may hold (1 MiB by default): the body is buffered until the
+    /// guest finishes it. `check-write` of its stream shrinks to the room left, and a write
+    /// past the limit fails the stream and the request with `HTTP-request-body-size`.
+    pub fn max_request_body(mut self, bytes: usize) -> Self {
+        self.max_request_body = Some(bytes);
+        self
+    }
+
     /// What the guest reads as stdin (the process's by default). `reader` is read on a thread
     /// that starts when the guest first uses stdin, and its end or failure reaches the guest
     /// as the stream's.
@@ -188,6 +197,9 @@ impl WasiHostBuilder {
             host.random = Some(random);
         }
         host.http_client = self.http_client;
+        if let Some(limit) = self.max_request_body {
+            host.http_max_body = limit;
+        }
         if host.random.is_none() {
             return Err(ConfigError::MissingRandomSource);
         }

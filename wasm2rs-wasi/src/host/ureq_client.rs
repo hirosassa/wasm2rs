@@ -12,6 +12,9 @@ use std::time::Duration;
 /// otherwise rewritten. `https` works through `ureq`'s default TLS (rustls with the bundled
 /// webpki roots).
 ///
+/// A `HEAD` or `CONNECT` request with a body is refused (a client error, so the guest sees
+/// `internal-error`); `ureq` itself would send the body.
+///
 /// `ureq` adds a `user-agent` and an `accept` header the guest did not set, and reads a proxy
 /// from the `*_PROXY` environment variables.
 ///
@@ -55,6 +58,13 @@ fn client_error(error: impl std::fmt::Display) -> HttpClientError {
 
 impl HttpClient for UreqClient {
     fn send(&mut self, request: HttpRequest) -> Result<HttpResponse, HttpClientError> {
+        // `ureq` sends whatever body it is given, so a body no server may expect is refused here
+        if !request.body.is_empty() && matches!(request.method.as_str(), "HEAD" | "CONNECT") {
+            return Err(HttpClientError::new(format!(
+                "a {} request cannot have a body",
+                request.method
+            )));
+        }
         let mut builder = ureq::http::Request::builder()
             .method(request.method.as_str())
             .uri(request.url.as_str());

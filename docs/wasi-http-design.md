@@ -1,9 +1,9 @@
 # `wasi:http` host (0.2.0)
 
-Status: H1 and H2 are implemented (42 of the 63 `wasi_http_*` methods in
+Status: H1, H2 and H3 are implemented (48 of the 63 `wasi_http_*` methods in
 `wasm2rs-wasi/src/generated.rs`: fields, request-options, the parts of outgoing-request,
 `outgoing-handler.handle`, future-incoming-response, incoming-response, incoming-body (receive
-side), `http-error-code`, their drops); the others keep the default trap.
+side), `http-error-code`, outgoing-body (send side), future-trailers, their drops); the others keep the default trap.
 Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library),
 [component-exports-design.md](component-exports-design.md) (the export side that `incoming-handler`
 needs).
@@ -56,7 +56,7 @@ needs).
 |---|---|
 | H1 ✅ | `fields`, `request-options`, `outgoing-request` (not its `body`, H3), drops; the `HttpClient` trait and builder method (no real client yet; the trait's shape may still change in H2). |
 | H2 ✅ | `outgoing-handler.handle`, `future-incoming-response` (thread, `Wait`), `incoming-response`, `incoming-body` (receive side), `http-error-code`. The `HttpClient` signature is unchanged; the host shares the client between request threads behind a mutex (`send` runs one at a time, bodies are read outside it). A client error is `internal-error` with its message; a policy refusal is `HTTP-request-denied`. `incoming-body.finish` returns a `future-trailers` that can only be dropped (H3 adds its methods). |
-| H3 | `outgoing-body` (send side), `future-trailers`, trailers. |
+| H3 ✅ | `outgoing-request.body`, `outgoing-body.write` / `finish`, `future-trailers.subscribe` / `get`. The body is a buffer behind an output stream (`HTTP_OUT_STREAM`, range above the input streams): `check-write` is the room left under the limit (`max_request_body`, 1 MiB) up to 4096, a write past the limit fails the stream (`last-operation-failed` carrying `HTTP-request-body-size`, then `closed`) and `finish` / the future report the same code. `handle` may come before or after the body is written: its thread waits for `finish` and only then calls the client; a body dropped without `finish` (or finished with trailers) fails the future with `internal-error` and the client never runs. **Trailers are not supported**: `HttpRequest` has no field for them and the `HttpClient` trait stays as it is (`ureq` cannot send them either), so `finish` with trailers is `internal-error("request trailers are not supported")`. A received message has no trailers either (`HttpResponse` carries none; `ureq` exposes none), so `future-trailers.get` answers `some(ok(ok(none)))` once, then `some(err)`; both are for H5/a richer client to lift. `UreqClient` refuses a non-empty body on `HEAD`/`CONNECT` (`ureq`'s `run` would send it); like every client error it reaches the guest as `internal-error`. |
 | H4 ✅ | `ureq` client behind feature `http-client`; end-to-end tests against a loopback server. |
 | H5 | incoming: mint API, `outgoing-response`, `response-outparam`, `incoming-handler#handle` through `Exports`; tests with a `proxy`-world component. |
 
