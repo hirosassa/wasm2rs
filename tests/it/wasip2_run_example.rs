@@ -40,7 +40,7 @@ interface run {
 }
 "#;
 
-const WORLD: &str = r#"
+pub(crate) const WORLD: &str = r#"
 package test:t;
 world w {
   import wasi:cli/environment@0.2.0;
@@ -51,7 +51,7 @@ world w {
 
 /// `run` writes its second argument to stdout (nothing without one) and returns the
 /// error result when it got a third.
-const CORE: &str = r#"
+pub(crate) const CORE: &str = r#"
 (module
   (import "wasi:io/error@0.2.0" "[resource-drop]error" (func (param i32)))
   (import "wasi:io/streams@0.2.0" "[resource-drop]output-stream" (func $drop_out (param i32)))
@@ -80,13 +80,13 @@ const CORE: &str = r#"
     (i32.gt_u (local.get $argc) (i32.const 2))))
 "#;
 
-fn component() -> Vec<u8> {
+pub(crate) fn component() -> Vec<u8> {
     component_of(WORLD, CORE)
 }
 
 /// A component of `world` (in the package `world_wit`, after `IO` and the `cli` package)
 /// around the core module `core`.
-fn component_of(world_wit: &str, core: &str) -> Vec<u8> {
+pub(crate) fn component_of(world_wit: &str, core: &str) -> Vec<u8> {
     let mut resolve = Resolve::default();
     resolve.push_str("io.wit", IO).unwrap();
     resolve.push_str("cli.wit", CLI).unwrap();
