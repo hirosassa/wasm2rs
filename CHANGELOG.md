@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `wasm2rs-wasi` (new crate, version 0.1.0): the typed WASI 0.2.0 host as a library. `Host`
+  declares all 199 methods of the official 0.2.0 WIT, each defaulting to a trap, with the types in
+  one module per interface; `WasiHost` is the former `examples/wasip2_host/typed.rs` (`TypedHost`),
+  behaviour unchanged. A component's glue is generated with `--wit-host --glue
+  --external-types=wasm2rs_wasi` and linked against the library; no host source is spliced and
+  compiled per program any more.
+- `WitOptions::default_trap`: every method of the generated `Host` trait gets a default body that
+  panics naming the method.
+
+### Changed
+- `examples/wasip2_run.rs` links the `wasm2rs-wasi` rlib instead of embedding the host source; a
+  component importing a function the host lacks (`wasi:http`) now builds and traps at the call
+  instead of failing with E0046.
+- The generated doc comments of the `Host` trait escape `[` and `]` (no rustdoc link warnings).
+
+### Removed
+- `examples/wasip2_host/typed.rs` and `filter.rs` (`keep_declared_methods`, `type_aliases`, the
+  `// optional:` markers) and the allowlist of `tests/it/wasip2_wit_regression.rs`.
+
 ## [0.3.1] - 2026-11-08
 
 Only `wasm2rs-macros` is released as 0.3.1; `wasm2rs` stays at 0.3.0.

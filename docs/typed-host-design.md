@@ -1,42 +1,39 @@
 # The typed WASI preview2 host: design note
 
-This note describes `examples/wasip2_host/typed.rs` as it is now: a WASI preview2 host written
-against the typed `Host` trait that `wasm2rs --wit-host --glue` generates. It is an example, not
-library API. For how the component was analysed and how the host came about, see
-[component-model-poc.md](component-model-poc.md); for the `--wit-host` / `--glue` flags, see the
+This note describes the typed WASI preview2 host of the `wasm2rs-wasi` crate as it is now:
+`WasiHost`, written against the `Host` trait that the crate owns. It is library API. For how the
+component was analysed and how the host came about, see
+[component-model-poc.md](component-model-poc.md); for the library's design and plan, see
+[wasm2rs-wasi-design.md](wasm2rs-wasi-design.md); for the `--wit-host` / `--glue` flags, see the
 README. Each section names the code or test that backs it.
 
 ## Structure
 
-- `examples/wasip2_host/typed.rs` is **source text**, not a compiled module. It has no
-  `mod`/`use` header of its own: it is appended to the generated code (the transpiled core
-  module, then the `Host` trait and `Glue` from `wit_host_glue`, then the `type_aliases`, then
-  this file, then a `main`). `TypedHost` implements the generated `Host` trait; the glue does
-  all canonical-ABI work.
-- `examples/wasip2_host/filter.rs` holds the pure string helpers that shape that source:
-  - `keep_declared_methods(host, generated)` drops every `// optional: <method>` ...
-    `// end optional` block unless the generated trait declares `fn <method>(`. A marker
-    `// optional: a | b` keeps its block if any listed method is declared (used for helpers and
-    types shared by several methods).
-  - `type_aliases` emits `type FsErrorCode = ..;` and `type NetErrorCode = ..;`, using
-    `error_type_of` to find the type name the generator chose.
-    A component importing both filesystem and sockets gets two `error-code` enums that the
-    generator spells `ErrorCode` and `ErrorCode2` in import order; the host only uses the aliases.
-    `NetErrorCode` is found from tcp, udp or ip-name-lookup.
-- **Trimmed builds.** A component that imports only `println!` things gets a host without
-  filesystem, socket, UDP or lookup code, because the generated trait lacks those methods. A
-  component that imports a function `typed.rs` has no block for fails to build with rustc's
-  E0046 (missing trait items).
-- **Consumers.** `examples/wasip2_run.rs` embeds the host with
-  `include_str!("wasip2_host/typed.rs")` and `include!("wasip2_host/filter.rs")`. The tests do
-  the same: `tests/it/wasip2_typed_host.rs` has `const HOST: &str = include_str!(..)` plus
-  `build_program` (glue + aliases + trimmed host + a `main` that makes
-  `Instance::new(Glue(host))`), and each `tests/it/wasip2_typed_*.rs` builds a component from WIT
-  and a core module from WAT. `tests/it/wasip2_typed_filter.rs` tests `filter.rs` directly.
-- Configuration is by builder methods on `TypedHost`: `with_arguments`, `with_preopen` (read-only
+- `wasm2rs-wasi/src/generated.rs` holds the `Host` trait (all 199 methods of the official WASI
+  0.2.0 WIT, each defaulting to a trap) and its types, one module per defining interface
+  (`wasi_filesystem_types::ErrorCode`, `wasi_sockets_network::ErrorCode`, ...). It is generated
+  (`WitNaming::Qualified` + `default_trap`) and checked in; `tests/it/wasi_generated.rs`
+  regenerates it and fails on any difference.
+- `wasm2rs-wasi/src/host.rs` is `WasiHost` and the pure logic around it (slabs, streams, send
+  queue, path resolution, socket helpers); `host/impl_host.rs` is `impl Host for WasiHost`
+  (136 methods, no canonical-ABI code: the glue does all of that). The `wasi:http` methods keep
+  the trapping default; `tests/it/wasip2_wit_regression.rs` pins that this is the only gap.
+- **Per-component glue.** The glue still depends on the component, so it is generated per
+  component, in the external-types mode (`--wit-host --glue --external-types=wasm2rs_wasi`, or
+  `WitOptions::external_types`): only `Glue<H: wasm2rs_wasi::Host>`, naming the library's types by
+  path. The program is the transpiled core module, the glue and a `main`, linked against the
+  library; nothing of the host is compiled again, and a component importing a method the host
+  lacks builds and traps at the call.
+- **Consumers.** `examples/wasip2_run.rs` builds the program with `rustc --extern
+  wasm2rs_wasi=<rlib>`. The tests do the same: `tests/it/wasip2_typed_host.rs` has `build_program`
+  (glue + a `main` that makes `Instance::new(Glue(host))`, linked through
+  `common::build_with_wasi`, which builds the rlib once per run), and each
+  `tests/it/wasip2_typed_*.rs` builds a component from WIT and a core module from WAT.
+- Configuration is by builder methods on `WasiHost`: `with_arguments`, `with_preopen` (read-only
   directory shown to the guest as `/`), `with_writable_preopen`, `with_external_network` (lifts
   the loopback-only rule). `wasip2_run` maps `$WASIP2_PREOPEN` and `$WASIP2_PREOPEN_WRITABLE=1`
-  to the first two; it never calls `with_external_network`.
+  to the first two; it never calls `with_external_network`. A fuller configuration surface is
+  planned (P2 of the library design).
 - The host runs one guest call at a time and is single-threaded except for the stdin thread.
 
 ## Handles and tables
@@ -107,7 +104,7 @@ README. Each section names the code or test that backs it.
   flush the queue first without a deadline. `shutdown` finds the queue through the slot and
   unique `id` kept in `NetState::Connected { out: (slot, id) }`, so a slot reused by another
   connection is not flushed by mistake.
-- `exit` and `Drop for TypedHost` (`flush_all_connections`) flush every connection's queue,
+- `exit` and `Drop for WasiHost` (`flush_all_connections`) flush every connection's queue,
   waiting up to **5 seconds in all** (one shared deadline). `wasip2_run` drops the instance
   before a normal exit; after a trap (exit code 134) it does not.
 - The socket options keep-alive (enabled, idle time, interval, count), hop limit and receive/send
@@ -170,4 +167,4 @@ README. Each section names the code or test that backs it.
 | send queue, flush, shutdown, failed peer | `wasip2_typed_send_queue.rs`, `wasip2_typed_io_error.rs` |
 | files and symlinks | `wasip2_typed_fs.rs`, `wasip2_typed_fs_write.rs`, `wasip2_typed_fs_edges.rs`, `wasip2_typed_fs_identity.rs`, `wasip2_typed_fs_symlink.rs` |
 | sockets, options, UDP, lookup | `wasip2_typed_sockets.rs`, `wasip2_typed_tcp_options.rs`, `wasip2_typed_udp.rs`, `wasip2_typed_name_lookup.rs` |
-| filter helpers, both interfaces | `wasip2_typed_filter.rs`, `wasip2_typed_both.rs` |
+| both filesystem and sockets (two `ErrorCode` enums) | `wasip2_typed_both.rs` |

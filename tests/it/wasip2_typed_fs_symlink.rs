@@ -161,7 +161,7 @@ fn run_with(root: &Path, preopen: &str, body: &str) -> std::process::Output {
         &component_from_wit(&[CLOCKS, IO, FILESYSTEM], WORLD, "w"),
         CORE,
         &format!(
-            "TypedHost::new(Vec::new()).{preopen}(std::path::PathBuf::from({:?}))",
+            "WasiHost::new(Vec::new()).{preopen}(std::path::PathBuf::from({:?}))",
             root.to_str().unwrap()
         ),
         body,

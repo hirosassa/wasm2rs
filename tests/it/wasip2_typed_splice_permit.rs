@@ -48,7 +48,7 @@ fn run(body: &str) -> std::process::Output {
     run_program(
         &component_from_wit(&[&io(), SOCKETS], WORLD, "w"),
         &core(),
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         &format!("{HELPERS}\n{QUEUE_HELPERS}\n{PATTERN}\nwatchdog();\n{body}"),
     )
 }

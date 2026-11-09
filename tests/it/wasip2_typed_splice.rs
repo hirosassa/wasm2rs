@@ -248,7 +248,7 @@ const CORE: &str = r#"
 
 /// Guest-side helpers for the test bodies.
 const HELPERS: &str = r#"
-type Guest = Instance<Glue<TypedHost>>;
+type Guest = Instance<Glue<WasiHost>>;
 /// Opens `src.txt` for reading and `dst.txt` (created, truncated) for writing; the two streams.
 #[allow(dead_code)]
 fn open_pair(inst: &mut Guest) -> (i32, i32) {
@@ -303,7 +303,7 @@ fn run(label: &str, src: &[u8], body: &str) -> std::process::Output {
         &component_from_wit(&[IO, FILESYSTEM, SOCKETS, CLI], WORLD, "w"),
         CORE,
         &format!(
-            "TypedHost::new(Vec::new()).with_writable_preopen(std::path::PathBuf::from({:?}))",
+            "WasiHost::new(Vec::new()).with_writable_preopen(std::path::PathBuf::from({:?}))",
             root.to_str().unwrap()
         ),
         &format!("{HELPERS}\n{body}"),
@@ -475,7 +475,7 @@ fn blocking_splice_moves_stdin_to_stdout_once_data_arrives_and_ends_with_closed(
         &component_from_wit(&[IO, FILESYSTEM, SOCKETS, CLI], WORLD, "w"),
         CORE,
         &format!(
-            "TypedHost::new(Vec::new()).with_writable_preopen(std::path::PathBuf::from({:?}))",
+            "WasiHost::new(Vec::new()).with_writable_preopen(std::path::PathBuf::from({:?}))",
             root.to_str().unwrap()
         ),
         &r#"let (i, o) = (inst.stdin_handle(), inst.stdout_handle());
@@ -559,7 +559,7 @@ world w {
     let bin = build_program(
         &component_from_wit(&[IO_MIN, CLI], WORLD_MIN, "w"),
         CORE_MIN,
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         "let mut moved = 0;
          loop {
              let n = inst.move_stdin(4096);

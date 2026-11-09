@@ -241,6 +241,7 @@ name = "wasm2rs"
 version = "0.3.0"
 dependencies = [
  "mimalloc",
+ "wasm2rs-wasi",
  "wasmparser",
  "wast",
  "wat",

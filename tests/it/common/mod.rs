@@ -63,9 +63,10 @@ fn rustc_version() -> &'static str {
 /// flags, toolchain)` triples map to one key, distinct ones (almost surely) to
 /// distinct keys. `DefaultHasher` uses fixed keys, so the digest is stable
 /// across processes and runs — a persistent on-disk cache relies on that.
-fn cache_key(program: &str) -> String {
+fn cache_key(program: &str, wasi: Option<&WasiLib>) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     program.hash(&mut h);
+    wasi.map(|lib| lib.digest).hash(&mut h);
     RUSTC_FLAGS.hash(&mut h);
     rustc_version().hash(&mut h);
     format!("gen-{:016x}", h.finish())
@@ -159,10 +160,85 @@ pub fn compile_run_split(
 /// invocation. `name` only labels the per-build working directory for
 /// readability; it does not affect the cache key.
 pub fn build(name: &str, program: &str) -> std::path::PathBuf {
+    build_with(name, program, None)
+}
+
+/// Like [`build`], with the `wasm2rs-wasi` library linked as `wasm2rs_wasi`.
+pub fn build_with_wasi(name: &str, program: &str) -> std::path::PathBuf {
+    build_with(name, program, Some(wasi_lib()))
+}
+
+/// The `wasm2rs-wasi` rlib, compiled with the same `rustc` and flags as the generated
+/// programs (not through a nested `cargo build`: the rlib then always matches the compiler
+/// that links it, whatever flags or metadata layout cargo would use, and coverage
+/// instrumentation cannot leak in). The crate has no dependencies, so one `rustc` call does.
+struct WasiLib {
+    rlib: std::path::PathBuf,
+    /// Hash of the library's sources and the compile flags: part of the cache key of every
+    /// program linked against it, so a change to the host invalidates cached binaries.
+    digest: u64,
+}
+
+fn wasi_lib() -> &'static WasiLib {
+    static LIB: OnceLock<WasiLib> = OnceLock::new();
+    LIB.get_or_init(|| {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("wasm2rs-wasi/src");
+        let mut sources = Vec::new();
+        let mut dirs = vec![root.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read wasm2rs-wasi/src") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    sources.push(path);
+                }
+            }
+        }
+        sources.sort();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for path in &sources {
+            path.strip_prefix(&root).unwrap().hash(&mut h);
+            std::fs::read(path).expect("read source").hash(&mut h);
+        }
+        RUSTC_FLAGS.hash(&mut h);
+        rustc_version().hash(&mut h);
+        let digest = h.finish();
+
+        let cache_dir = std::env::temp_dir().join("wasm2rs-testcache");
+        std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+        let rlib = cache_dir.join(format!("libwasm2rs_wasi-{digest:016x}.rlib"));
+        if !rlib.exists() {
+            // Compile beside the cache and rename into place, like `build_with`: concurrent
+            // test processes never see a partial file.
+            let staged = cache_dir.join(format!(
+                "libwasm2rs_wasi-{digest:016x}-{}.rlib.tmp",
+                std::process::id()
+            ));
+            let out = Command::new("rustc")
+                .args(RUSTC_FLAGS)
+                .args(["--crate-type", "rlib", "--crate-name", "wasm2rs_wasi"])
+                .arg(root.join("lib.rs"))
+                .arg("-o")
+                .arg(&staged)
+                .output()
+                .expect("run rustc");
+            assert!(
+                out.status.success(),
+                "wasm2rs-wasi failed to compile:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            std::fs::rename(&staged, &rlib).expect("publish rlib into cache");
+        }
+        WasiLib { rlib, digest }
+    })
+}
+
+fn build_with(name: &str, program: &str, wasi: Option<&WasiLib>) -> std::path::PathBuf {
     let cache_dir = std::env::temp_dir().join("wasm2rs-testcache");
     std::fs::create_dir_all(&cache_dir).expect("create cache dir");
     let exe = if cfg!(windows) { ".exe" } else { "" };
-    let bin = cache_dir.join(format!("{}{exe}", cache_key(program)));
+    let bin = cache_dir.join(format!("{}{exe}", cache_key(program, wasi)));
     if bin.exists() {
         return bin;
     }
@@ -182,6 +258,11 @@ pub fn build(name: &str, program: &str) -> std::path::PathBuf {
     let mut cmd = Command::new("rustc");
     cmd.current_dir(&work).arg(&src);
     cmd.args(RUSTC_FLAGS);
+    if let Some(lib) = wasi {
+        let mut extern_arg = std::ffi::OsString::from("wasm2rs_wasi=");
+        extern_arg.push(&lib.rlib);
+        cmd.arg("--extern").arg(extern_arg);
+    }
     cmd.arg("-o").arg(&staged);
     let out = cmd.output().expect("run rustc");
     assert!(
