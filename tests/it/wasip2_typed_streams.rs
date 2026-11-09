@@ -92,7 +92,7 @@ fn run(body: &str) -> std::process::Output {
     run_program(
         &component_from_wit(&[IO, CLI], WORLD, "w"),
         CORE,
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         body,
     )
 }

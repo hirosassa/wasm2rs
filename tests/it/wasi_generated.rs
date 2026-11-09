@@ -49,7 +49,7 @@ pub fn wasi_p2_component() -> Vec<u8> {
 }
 
 /// The library's trait and types: qualified names, every method trapping by default.
-fn generate() -> String {
+pub fn generate() -> String {
     let options = WitOptions {
         naming: WitNaming::Qualified,
         default_trap: true,

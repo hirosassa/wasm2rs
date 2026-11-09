@@ -152,7 +152,7 @@ const CORE: &str = r#"
 "#;
 
 fn run(body: &str) -> std::process::Output {
-    run_with("TypedHost::new(Vec::new())", body)
+    run_with("WasiHost::new(Vec::new())", body)
 }
 
 /// Runs `body` with `HELPERS` in scope.
@@ -173,7 +173,7 @@ fn resolve(k: usize) -> String {
 /// Guest-side helper: every address a stream yields, up to its end (`none`).
 const HELPERS: &str = r#"
 #[allow(dead_code)]
-fn addresses(inst: &mut Instance<Glue<TypedHost>>, s: i32) -> Vec<i64> {
+fn addresses(inst: &mut Instance<Glue<WasiHost>>, s: i32) -> Vec<i64> {
     let mut all = Vec::new();
     loop {
         let next = inst.next(s);
@@ -250,7 +250,7 @@ fn another_name_is_refused_unless_the_host_allows_the_network() {
 #[test]
 fn a_host_with_the_network_still_resolves_localhost_without_a_resolver() {
     assert_succeeded(&run_with(
-        "TypedHost::new(Vec::new()).with_external_network()",
+        "WasiHost::new(Vec::new()).with_external_network()",
         &format!(
             "let s = {};
              assert_eq!(addresses(&mut inst, s), [{V4_LOOPBACK}, {V6_LOOPBACK}]);

@@ -200,7 +200,7 @@ fn run(root: &std::path::Path, writable: bool, body: &str) -> std::process::Outp
         &component_from_wit(&[CLOCKS, IO, FILESYSTEM], WORLD, "w"),
         CORE,
         &format!(
-            "TypedHost::new(Vec::new()).{preopen}(std::path::PathBuf::from({:?}))",
+            "WasiHost::new(Vec::new()).{preopen}(std::path::PathBuf::from({:?}))",
             root.to_str().unwrap()
         ),
         body,
@@ -230,7 +230,7 @@ fn read_returns_the_bytes_at_an_offset_and_whether_the_end_was_reached() {
     std::fs::write(root.join("f.txt"), "0123456789").unwrap();
     std::fs::create_dir(root.join("d")).unwrap();
     let body = format!(
-        "let bytes = |inst: &mut Instance<Glue<TypedHost>>, n: i32| -> Vec<u8> {{
+        "let bytes = |inst: &mut Instance<Glue<WasiHost>>, n: i32| -> Vec<u8> {{
              (0..n).map(|i| inst.rd_byte(i) as u8).collect()
          }};
          assert_eq!(inst.fs_open(0, {F}, 0, 1), 0);

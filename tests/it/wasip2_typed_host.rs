@@ -1,6 +1,6 @@
-//! The typed WASI preview2 host in `examples/wasip2_host/typed.rs`: it implements the
-//! generated `Host` trait (no canonical-ABI code of its own) for the interfaces a
-//! `println!` program uses. The component declares those imports; a core module imports
+//! The typed WASI preview2 host of the `wasm2rs-wasi` crate: it implements the library's
+//! `Host` trait (no canonical-ABI code of its own) for the interfaces a `println!` program
+//! uses. The component declares those imports; a core module imports
 //! the same lowered functions, is transpiled with `named_imports` + `reentrant_imports` +
 //! `named_exports`, and runs with the generated glue and the typed host.
 
@@ -9,11 +9,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::common;
-use wasm2rs::{TranspileOptions, transpile_with_options, wit_host_glue};
-
-const HOST: &str = include_str!("../../examples/wasip2_host/typed.rs");
-
-include!("../../examples/wasip2_host/filter.rs");
+use wasm2rs::{TranspileOptions, WitOptions, transpile_with_options, wit_host_glue_with_options};
 
 /// A component importing what the WIT `world` of `wit` imports, after the packages in
 /// `deps` (each a complete WIT file, pushed in order). The world's imports are encoded
@@ -37,17 +33,20 @@ pub(crate) fn component_from_wit(deps: &[&str], wit: &str, world: &str) -> Vec<u
         .unwrap()
 }
 
-/// Builds the program for `component` and the core module `core_wat`: the glue, the typed
-/// host reduced to the methods the component declares (after the `type_aliases` that name its
-/// `error-code` enums), and a `main` that makes the
-/// instance (around the `host` expression) and runs `body`.
+/// Builds the program for `component` and the core module `core_wat`: the glue (in the
+/// external-types mode, naming the `wasm2rs_wasi` library that is linked), and a `main` that
+/// makes the instance (around the `host` expression) and runs `body`.
 pub(crate) fn build_program(
     component: &[u8],
     core_wat: &str,
     host: &str,
     body: &str,
 ) -> std::path::PathBuf {
-    let glue = wit_host_glue(component).unwrap();
+    let options = WitOptions {
+        external_types: Some("wasm2rs_wasi".to_string()),
+        ..WitOptions::default()
+    };
+    let glue = wit_host_glue_with_options(component, &options).unwrap();
     let opts = TranspileOptions {
         named_imports: true,
         reentrant_imports: true,
@@ -55,12 +54,10 @@ pub(crate) fn build_program(
         ..TranspileOptions::default()
     };
     let generated = transpile_with_options(&wat::parse_str(core_wat).unwrap(), &opts).unwrap();
-    let host_source = keep_declared_methods(HOST, &glue);
-    let aliases = type_aliases(&glue);
     let main = format!("fn main() {{ let mut inst = Instance::new(Glue({host})); {body} }}");
-    common::build(
+    common::build_with_wasi(
         "wasip2_typed_host",
-        &format!("{generated}\n{glue}\n{aliases}\n{host_source}\n{main}\n"),
+        &format!("use wasm2rs_wasi::WasiHost;\n{generated}\n{glue}\n{main}\n"),
     )
 }
 
@@ -248,7 +245,7 @@ const CORE: &str = r#"
 "#;
 
 fn run(env: &str, body: &str) -> Output {
-    let host = format!("TypedHost::new({env})");
+    let host = format!("WasiHost::new({env})");
     run_program(&wat::parse_str(COMPONENT).unwrap(), CORE, &host, body)
 }
 
@@ -296,7 +293,7 @@ fn a_guest_that_blocks_forever_fails_the_run_instead_of_hanging() {
     run_program_within(
         &wat::parse_str(COMPONENT).unwrap(),
         CORE,
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         "let _ = &mut inst; loop { std::thread::park(); }",
         std::time::Duration::from_secs(3),
     );

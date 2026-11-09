@@ -331,7 +331,7 @@ pub(crate) const CORE: &str = r#"
 "#;
 
 fn run(body: &str) -> std::process::Output {
-    run_with("TypedHost::new(Vec::new())", body)
+    run_with("WasiHost::new(Vec::new())", body)
 }
 
 /// Runs `body` with `HELPERS` in scope.
@@ -387,7 +387,7 @@ fn an_address_outside_loopback_is_refused_unless_the_host_allows_the_network() {
     };
     assert_succeeded(&run(&body(101)));
     assert_succeeded(&run_with(
-        "TypedHost::new(Vec::new()).with_external_network()",
+        "WasiHost::new(Vec::new()).with_external_network()",
         &body(0),
     ));
 }
@@ -424,7 +424,7 @@ fn a_dropped_socket_frees_its_handle_for_the_next_one() {
 /// and returns its port; `read_all` polls `read` until `n` bytes arrived.
 pub(crate) const HELPERS: &str = r#"
 #[allow(dead_code)]
-fn serve(inst: &mut Instance<Glue<TypedHost>>) -> (i32, u16) {
+fn serve(inst: &mut Instance<Glue<WasiHost>>) -> (i32, u16) {
     let s = inst.create(0);
     assert_eq!(inst.bind(s, 0, 127, 0, 0, 1), 0);
     assert_eq!(inst.finish_bind(s), 0);
@@ -433,7 +433,7 @@ fn serve(inst: &mut Instance<Glue<TypedHost>>) -> (i32, u16) {
     (s, (inst.local(s) & 0xffff) as u16)
 }
 #[allow(dead_code)]
-fn accept(inst: &mut Instance<Glue<TypedHost>>, s: i32) {
+fn accept(inst: &mut Instance<Glue<WasiHost>>, s: i32) {
     for _ in 0..2000 {
         match inst.accept(s) {
             0 => return,
@@ -444,7 +444,7 @@ fn accept(inst: &mut Instance<Glue<TypedHost>>, s: i32) {
     panic!("accept: nothing arrived");
 }
 #[allow(dead_code)]
-fn read_all(inst: &mut Instance<Glue<TypedHost>>, h: i32, n: usize) -> Vec<u8> {
+fn read_all(inst: &mut Instance<Glue<WasiHost>>, h: i32, n: usize) -> Vec<u8> {
     let mut got = Vec::new();
     for _ in 0..2000 {
         let len = inst.read(h, 4096);

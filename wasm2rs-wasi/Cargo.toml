@@ -14,3 +14,7 @@ categories = ["wasm"]
 [lints.rust]
 warnings = "deny"
 unsafe_code = "deny"
+
+[lints.clippy]
+# Suppression hygiene: every `#[allow]`/`#[expect]` must carry a `reason`.
+allow_attributes_without_reason = "deny"

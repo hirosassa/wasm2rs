@@ -329,7 +329,7 @@ const CORE: &str = r#"
 "#;
 
 fn run(body: &str) -> std::process::Output {
-    run_with("TypedHost::new(Vec::new())", body)
+    run_with("WasiHost::new(Vec::new())", body)
 }
 
 /// Runs `body` with `HELPERS` in scope.
@@ -346,7 +346,7 @@ fn run_with(host: &str, body: &str) -> std::process::Output {
 /// returns it with its address as `local` packs it (the port is the low 16 bits).
 const HELPERS: &str = r#"
 #[allow(dead_code)]
-fn udp(inst: &mut Instance<Glue<TypedHost>>) -> (i32, i64) {
+fn udp(inst: &mut Instance<Glue<WasiHost>>) -> (i32, i64) {
     let s = inst.create(0);
     assert!(s >= 0, "create: {s}");
     assert_eq!(inst.bind(s, 0, 127, 0, 0, 1), 0);
@@ -360,18 +360,18 @@ fn port(address: i64) -> i32 {
 /// Makes the two streams of `s` (no remote address): the handles of the incoming and the
 /// outgoing one.
 #[allow(dead_code)]
-fn streams(inst: &mut Instance<Glue<TypedHost>>, s: i32) -> (i32, i32) {
+fn streams(inst: &mut Instance<Glue<WasiHost>>, s: i32) -> (i32, i32) {
     assert_eq!(inst.stream(s, 0, 0, 0, 0, 0, 0), 0);
     (inst.d_in(), inst.d_out())
 }
 /// The bytes of the i-th datagram of the last `receive`.
 #[allow(dead_code)]
-fn received(inst: &mut Instance<Glue<TypedHost>>, i: i32) -> Vec<u8> {
+fn received(inst: &mut Instance<Glue<WasiHost>>, i: i32) -> Vec<u8> {
     (0..inst.rlen(i)).map(|j| inst.rbyte(i, j) as u8).collect()
 }
 /// Waits for the stream's pollable, then receives at most `max` datagrams.
 #[allow(dead_code)]
-fn receive_waiting(inst: &mut Instance<Glue<TypedHost>>, d_in: i32, max: i64) -> i32 {
+fn receive_waiting(inst: &mut Instance<Glue<WasiHost>>, d_in: i32, max: i64) -> i32 {
     let p = inst.sub_in(d_in);
     inst.block(p);
     inst.drop_pollable(p);
@@ -407,7 +407,7 @@ fn an_address_outside_loopback_is_refused_unless_the_host_allows_the_network() {
     };
     assert_succeeded(&run(&body(101)));
     assert_succeeded(&run_with(
-        "TypedHost::new(Vec::new()).with_external_network()",
+        "WasiHost::new(Vec::new()).with_external_network()",
         &body(0),
     ));
 }
@@ -604,8 +604,8 @@ fn a_bad_datagram_after_a_good_one_ends_the_batch_without_an_error() {
 fn an_unspecified_or_port_zero_remote_is_invalid_argument_with_or_without_the_network() {
     // as -1 - 3 for send, 103 for stream; the family of the address is checked first
     for host in [
-        "TypedHost::new(Vec::new())",
-        "TypedHost::new(Vec::new()).with_external_network()",
+        "WasiHost::new(Vec::new())",
+        "WasiHost::new(Vec::new()).with_external_network()",
     ] {
         assert_succeeded(&run_with(
             host,

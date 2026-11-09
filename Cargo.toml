@@ -42,6 +42,8 @@ wat = "1.263.0"
 wast = "263.0.0"
 wit-component = { version = "0.263", features = ["dummy-module"] }
 wit-parser = "0.263"
+# The typed WASI host that the tests and `examples/wasip2_run.rs` link into generated programs.
+wasm2rs-wasi = { path = "wasm2rs-wasi" }
 
 # Hardening gates (rust-hardening skill). This crate is a code generator, so a
 # chunk of the restriction lints below fire on *intentional* index/offset

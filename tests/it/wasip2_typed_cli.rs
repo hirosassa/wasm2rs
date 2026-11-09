@@ -104,15 +104,15 @@ fn run(host: &str, body: &str) -> std::process::Output {
 /// Reads the `i`-th string of a list the guest exposes through `len` and `byte`.
 const READERS: &str = r#"
 #[allow(unused_variables)]
-let arg = |inst: &mut Instance<Glue<TypedHost>>, i: i32| -> String {
+let arg = |inst: &mut Instance<Glue<WasiHost>>, i: i32| -> String {
     (0..inst.arg_len(i)).map(|j| inst.arg_byte(i, j) as u8 as char).collect()
 };
 #[allow(unused_variables)]
-let key = |inst: &mut Instance<Glue<TypedHost>>, i: i32| -> String {
+let key = |inst: &mut Instance<Glue<WasiHost>>, i: i32| -> String {
     (0..inst.key_len(i)).map(|j| inst.key_byte(i, j) as u8 as char).collect()
 };
 #[allow(unused_variables)]
-let val = |inst: &mut Instance<Glue<TypedHost>>, i: i32| -> String {
+let val = |inst: &mut Instance<Glue<WasiHost>>, i: i32| -> String {
     (0..inst.val_len(i)).map(|j| inst.val_byte(i, j) as u8 as char).collect()
 };
 "#;
@@ -120,7 +120,7 @@ let val = |inst: &mut Instance<Glue<TypedHost>>, i: i32| -> String {
 #[test]
 fn the_guest_sees_the_arguments_the_host_was_given() {
     let out = run(
-        r#"TypedHost::new(Vec::new()).with_arguments(vec!["prog".to_string(), "x".to_string()])"#,
+        r#"WasiHost::new(Vec::new()).with_arguments(vec!["prog".to_string(), "x".to_string()])"#,
         &format!(
             "{READERS} assert_eq!(inst.argc(), 2); \
              assert_eq!(arg(&mut inst, 0), \"prog\"); assert_eq!(arg(&mut inst, 1), \"x\");"
@@ -132,7 +132,7 @@ fn the_guest_sees_the_arguments_the_host_was_given() {
 #[test]
 fn a_host_without_arguments_gives_an_empty_list() {
     assert_succeeded(&run(
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         "assert_eq!(inst.argc(), 0);",
     ));
 }
@@ -140,7 +140,7 @@ fn a_host_without_arguments_gives_an_empty_list() {
 #[test]
 fn the_guest_sees_the_environment_the_host_was_given() {
     let out = run(
-        r#"TypedHost::new(vec![("K".to_string(), "VX".to_string())])"#,
+        r#"WasiHost::new(vec![("K".to_string(), "VX".to_string())])"#,
         &format!(
             "{READERS} assert_eq!(inst.envc(), 1); \
              assert_eq!(key(&mut inst, 0), \"K\"); assert_eq!(val(&mut inst, 0), \"VX\");"
@@ -152,7 +152,7 @@ fn the_guest_sees_the_environment_the_host_was_given() {
 #[test]
 fn poll_returns_the_indices_of_all_ready_pollables() {
     assert_succeeded(&run(
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         "assert_eq!(inst.poll_two(), 2); assert_eq!(inst.poll_index(0), 0); \
          assert_eq!(inst.poll_index(1), 1);",
     ));
@@ -161,7 +161,7 @@ fn poll_returns_the_indices_of_all_ready_pollables() {
 #[test]
 fn a_host_without_a_preopen_has_no_initial_cwd() {
     assert_succeeded(&run(
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         "assert_eq!(inst.cwd_some(), 0);",
     ));
 }
@@ -172,7 +172,7 @@ fn the_initial_cwd_is_the_root_of_the_preopen() {
     let dir = std::env::temp_dir();
     let out = run(
         &format!(
-            "TypedHost::new(Vec::new()).with_preopen(std::path::PathBuf::from({:?}))",
+            "WasiHost::new(Vec::new()).with_preopen(std::path::PathBuf::from({:?}))",
             dir
         ),
         "assert_eq!(inst.cwd_some(), 1); assert_eq!(inst.cwd_len(), 1); \

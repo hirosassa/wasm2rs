@@ -12,3 +12,7 @@
 mod generated;
 
 pub use generated::*;
+
+mod host;
+
+pub use host::WasiHost;

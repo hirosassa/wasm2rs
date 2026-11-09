@@ -226,7 +226,7 @@ const CORE: &str = r#"
 "#;
 
 fn run(body: &str) -> std::process::Output {
-    run_program(&component(), CORE, "TypedHost::new(Vec::new())", body)
+    run_program(&component(), CORE, "WasiHost::new(Vec::new())", body)
 }
 
 const INVALID_ARGUMENT: i32 = 103;

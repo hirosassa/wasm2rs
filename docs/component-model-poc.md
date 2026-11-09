@@ -76,7 +76,7 @@ or hand-written bridge.
 Not exercised by this program, and harder: `wasi:sockets`, `wasi:http`, the rest of
 `filesystem` (readdir, rename, ...), async/streams in WASI 0.3.
 
-The current design of the typed host (`typed.rs`) is in [typed-host-design.md](typed-host-design.md); the Results below are the investigation history.
+The current design of the typed host (`wasm2rs-wasi`) is in [typed-host-design.md](typed-host-design.md); the Results below are the investigation history.
 
 ## Result 3: a minimal preview2 host runs hello world natively
 
@@ -92,7 +92,7 @@ With it, a hand-written host (`examples/wasip2_host/host.rs`, since retired in f
 fixed write budget, an empty environment and argument list, `exit`, no-op resource
 drops) and `examples/wasip2_run.rs` built and ran a core module with it (that is how
 the programs below ran). The example now takes the component itself and runs it through
-the typed host (`typed.rs`, with the generated glue); this is a
+the typed host (`wasm2rs-wasi`, with the generated glue); this is a
 breaking change of its input (it no longer accepts an extracted core module):
 
 ```
@@ -101,8 +101,7 @@ cargo run --release --example wasip2_run -- hello.component.wasm
 ```
 
 The example extracts the component's core modules itself and runs the largest (the
-program); a component that imports a function `typed.rs` does not implement fails to
-build with rustc's E0046 errors and a hint, and the example exits with 2.
+program); a function the host does not implement (`wasi:http`) traps when the guest calls it.
 
 Two programs ran: `println!("hello")` (21 imports) and one using `eprintln!`,
 `print!`, `flush` and `std::env::args` (22; the extra one is `get-arguments`). A small

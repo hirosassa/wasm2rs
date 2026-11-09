@@ -12,7 +12,7 @@ use crate::wasip2_typed_sockets::run_with_main;
 /// `closed` (the reset may take a moment to show).
 const FIRST_ERROR: &str = r#"
 #[allow(dead_code)]
-fn first_error(inst: &mut Instance<Glue<TypedHost>>, h: i32) -> i32 {
+fn first_error(inst: &mut Instance<Glue<WasiHost>>, h: i32) -> i32 {
     for _ in 0..2000 {
         let got = inst.read(h, 4096);
         if got < 0 {
@@ -113,7 +113,7 @@ world w {
     let program = build_program(
         &component_from_wit(&[STDOUT_IO, CLI], WORLD_OUT, "w"),
         CORE_OUT,
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         "let out = inst.stdout_handle();
          // `/dev/full` takes no byte: ENOSPC (the line ends with a newline, so `std` writes it)
          assert_eq!(inst.write(out), 100);",

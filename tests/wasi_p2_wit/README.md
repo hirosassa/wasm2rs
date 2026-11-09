@@ -2,7 +2,7 @@
 
 Verbatim copies of the `wit/` directories of the WASI preview2 proposals, tag `v0.2.0`
 (each without its vendored `deps/`, `deps.toml` and `deps.lock`; the packages are pushed
-together by `tests/it/wasip2_wit_regression.rs`):
+together by `tests/it/wasi_generated.rs`):
 
 | directory     | source                                               |
 |---------------|------------------------------------------------------|
@@ -16,5 +16,5 @@ together by `tests/it/wasip2_wit_regression.rs`):
 
 Do not edit these files; refresh them from the tags above.
 
-`allowlist.txt` lists the known differences between the `Host` trait generated from these
-WIT files and `examples/wasip2_host/typed.rs`. See the test's module docs.
+`wasm2rs-wasi/src/generated.rs` is generated from these files; see `tests/it/wasi_generated.rs`
+and `tests/it/wasip2_wit_regression.rs`.

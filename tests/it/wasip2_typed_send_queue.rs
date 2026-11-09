@@ -28,13 +28,13 @@ fn chunks(n: usize) -> Vec<u8> {
     one.repeat(n)
 }
 #[allow(dead_code)]
-fn top_off(inst: &mut Instance<Glue<TypedHost>>, out: i32) {
+fn top_off(inst: &mut Instance<Glue<WasiHost>>, out: i32) {
     while inst.check_write(out) > 0 {
         assert_eq!(inst.write(out, 400, 1), 0);
     }
 }
 #[allow(dead_code)]
-fn fill(inst: &mut Instance<Glue<TypedHost>>, out: i32) -> (usize, bool) {
+fn fill(inst: &mut Instance<Glue<WasiHost>>, out: i32) -> (usize, bool) {
     let mut n = 0;
     for _ in 0..2_000_000 {
         let permit = inst.check_write(out);
@@ -57,7 +57,7 @@ fn run(body: &str) -> std::process::Output {
     run_program(
         &component_from_wit(&[IO, SOCKETS], WORLD, "w"),
         CORE,
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         &format!("{HELPERS}\n{QUEUE_HELPERS}\nwatchdog();\n{body}"),
     )
 }
@@ -270,7 +270,7 @@ world w {
     let out = run_program(
         &component_from_wit(&[IO_MIN, CLI_MIN], WORLD_MIN, "w"),
         CORE_MIN,
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         "let out = inst.stdout_handle();
          // stdout is not a connection: it keeps permitting 4096 bytes
          assert_eq!(inst.check_write(out), 4096);
@@ -293,7 +293,7 @@ fn run_ext(body: &str) -> std::process::Output {
     run_program(
         &ext_component(),
         &ext_core(),
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         &format!("{HELPERS}\n{QUEUE_HELPERS}\nwatchdog();\n{body}"),
     )
 }
@@ -410,7 +410,7 @@ fn exit_flushes_the_queued_bytes_of_a_connection_the_guest_never_dropped() {
     let bin = crate::wasip2_typed_host::build_program(
         &ext_component(),
         &ext_core(),
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         &body,
     );
     let mut child = std::process::Command::new(bin)

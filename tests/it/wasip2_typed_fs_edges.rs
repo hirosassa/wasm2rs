@@ -227,7 +227,7 @@ fn run(root: &Path, body: &str) -> std::process::Output {
         &component_from_wit(&[CLOCKS, IO, FILESYSTEM], WORLD, "w"),
         CORE,
         &format!(
-            "TypedHost::new(Vec::new()).with_preopen(std::path::PathBuf::from({:?}))",
+            "WasiHost::new(Vec::new()).with_preopen(std::path::PathBuf::from({:?}))",
             root.to_str().unwrap()
         ),
         body,
@@ -244,7 +244,7 @@ fn a_failing_file_read_is_last_operation_failed_once_then_closed() {
         &component_from_wit(&[CLOCKS, IO, FILESYSTEM], WORLD, "w"),
         CORE,
         &format!(
-            "TypedHost::new(Vec::new()).with_writable_preopen(std::path::PathBuf::from({:?}))",
+            "WasiHost::new(Vec::new()).with_writable_preopen(std::path::PathBuf::from({:?}))",
             root.to_str().unwrap()
         ),
         &format!(
@@ -285,7 +285,7 @@ fn read_via_stream_needs_a_descriptor_opened_for_reading() {
         &component_from_wit(&[CLOCKS, IO, FILESYSTEM], WORLD, "w"),
         CORE,
         &format!(
-            "TypedHost::new(Vec::new()).with_writable_preopen(std::path::PathBuf::from({:?}))",
+            "WasiHost::new(Vec::new()).with_writable_preopen(std::path::PathBuf::from({:?}))",
             root.to_str().unwrap()
         ),
         &format!(

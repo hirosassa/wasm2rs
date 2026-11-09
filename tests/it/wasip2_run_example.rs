@@ -139,7 +139,7 @@ fn an_error_result_from_run_is_a_nonzero_exit_code() {
 }
 
 #[test]
-fn an_import_the_typed_host_lacks_fails_with_a_hint() {
+fn an_import_outside_the_wasi_surface_fails_with_a_hint() {
     let world = r#"
 package test:t;
 interface unknown {
@@ -160,8 +160,11 @@ world w {
     let out = run_example(&component_of(world, core), "unknown", &[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("E0046"), "{stderr}");
-    assert!(stderr.contains("does not implement"), "{stderr}");
+    assert!(stderr.contains("E0407"), "{stderr}");
+    assert!(
+        stderr.contains("outside the WASI 0.2.0 surface"),
+        "{stderr}"
+    );
 }
 
 /// `run` writes its first argument (argv[0]) to stdout.

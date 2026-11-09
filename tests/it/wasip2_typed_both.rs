@@ -134,7 +134,7 @@ fn run(label: &str, deps: &[&str], world: &str) -> std::process::Output {
         &component_from_wit(deps, world, "w"),
         CORE,
         &format!(
-            "TypedHost::new(Vec::new()).with_preopen(std::path::PathBuf::from({:?}))",
+            "WasiHost::new(Vec::new()).with_preopen(std::path::PathBuf::from({:?}))",
             root.to_str().unwrap()
         ),
         "// filesystem: success, then no-entry 20

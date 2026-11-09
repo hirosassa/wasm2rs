@@ -260,7 +260,7 @@ fn run(root: Option<&Path>, body: &str) -> std::process::Output {
     run_program(
         &component_from_wit(&[CLOCKS, IO, FILESYSTEM], WORLD, "w"),
         CORE,
-        &format!("TypedHost::new(Vec::new()){preopen}"),
+        &format!("WasiHost::new(Vec::new()){preopen}"),
         body,
     )
 }

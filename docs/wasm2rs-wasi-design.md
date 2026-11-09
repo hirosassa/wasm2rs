@@ -1,6 +1,7 @@
 # `wasm2rs-wasi`: promoting the typed WASI 0.2 host to a library
 
-Status: design (A1 of the WASI 0.2 coverage work). Nothing here is implemented yet.
+Status: P0 and P1 are implemented (the crate exists, with the trait and the host logic); P2 (the
+configuration surface) and later are design. The "Problem" section describes the state before P1.
 Background: [typed-host-design.md](typed-host-design.md) describes the host as it is today
 (`examples/wasip2_host/typed.rs`, an example); [component-model-poc.md](component-model-poc.md)
 describes how the component analysis came about.

@@ -273,7 +273,7 @@ fn spawn_with_stdin(body: &str, stdin: Stdio) -> Child {
     let bin = build_program(
         &component_from_wit(&[IO, CLI, CLOCKS], WORLD, "w"),
         CORE,
-        "TypedHost::new(Vec::new())",
+        "WasiHost::new(Vec::new())",
         body,
     );
     Command::new(bin)

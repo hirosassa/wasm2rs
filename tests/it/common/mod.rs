@@ -63,9 +63,10 @@ fn rustc_version() -> &'static str {
 /// flags, toolchain)` triples map to one key, distinct ones (almost surely) to
 /// distinct keys. `DefaultHasher` uses fixed keys, so the digest is stable
 /// across processes and runs — a persistent on-disk cache relies on that.
-fn cache_key(program: &str) -> String {
+fn cache_key(program: &str, wasi: Option<&WasiLib>) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     program.hash(&mut h);
+    wasi.map(|lib| lib.digest).hash(&mut h);
     RUSTC_FLAGS.hash(&mut h);
     rustc_version().hash(&mut h);
     format!("gen-{:016x}", h.finish())
@@ -159,10 +160,72 @@ pub fn compile_run_split(
 /// invocation. `name` only labels the per-build working directory for
 /// readability; it does not affect the cache key.
 pub fn build(name: &str, program: &str) -> std::path::PathBuf {
+    build_with(name, program, None)
+}
+
+/// Like [`build`], with the `wasm2rs-wasi` library linked as `wasm2rs_wasi`.
+pub fn build_with_wasi(name: &str, program: &str) -> std::path::PathBuf {
+    build_with(name, program, Some(wasi_lib()))
+}
+
+/// The `wasm2rs-wasi` rlib and what `rustc` needs to link it: built once per process by
+/// `cargo build -p wasm2rs-wasi` (a no-op when it is up to date), so every generated program
+/// links the library instead of compiling the host again.
+struct WasiLib {
+    rlib: std::path::PathBuf,
+    deps: std::path::PathBuf,
+    /// Hash of the rlib's bytes: a change of the library invalidates cached binaries.
+    digest: u64,
+}
+
+fn wasi_lib() -> &'static WasiLib {
+    static LIB: OnceLock<WasiLib> = OnceLock::new();
+    LIB.get_or_init(|| {
+        // Not the test run's own flags: with coverage instrumentation the rlib would need a
+        // profiler runtime that the plain `rustc` below does not link.
+        let out = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["build", "-p", "wasm2rs-wasi", "--message-format=json"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("RUSTC_WRAPPER")
+            .output()
+            .expect("run cargo build -p wasm2rs-wasi");
+        assert!(
+            out.status.success(),
+            "cargo build -p wasm2rs-wasi failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let rlib = stdout
+            .lines()
+            .filter(|l| l.contains("\"reason\":\"compiler-artifact\""))
+            .filter(|l| l.contains("wasm2rs-wasi"))
+            .filter_map(|l| {
+                let at = l.find("\"filenames\":[")? + "\"filenames\":[".len();
+                l[at..]
+                    .split('"')
+                    .find(|piece| piece.ends_with(".rlib"))
+                    .map(std::path::PathBuf::from)
+            })
+            .next_back()
+            .expect("cargo reports the wasm2rs-wasi rlib");
+        let deps = rlib.parent().expect("rlib directory").to_path_buf();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::fs::read(&rlib).expect("read rlib").hash(&mut h);
+        WasiLib {
+            rlib,
+            deps,
+            digest: h.finish(),
+        }
+    })
+}
+
+fn build_with(name: &str, program: &str, wasi: Option<&WasiLib>) -> std::path::PathBuf {
     let cache_dir = std::env::temp_dir().join("wasm2rs-testcache");
     std::fs::create_dir_all(&cache_dir).expect("create cache dir");
     let exe = if cfg!(windows) { ".exe" } else { "" };
-    let bin = cache_dir.join(format!("{}{exe}", cache_key(program)));
+    let bin = cache_dir.join(format!("{}{exe}", cache_key(program, wasi)));
     if bin.exists() {
         return bin;
     }
@@ -182,6 +245,14 @@ pub fn build(name: &str, program: &str) -> std::path::PathBuf {
     let mut cmd = Command::new("rustc");
     cmd.current_dir(&work).arg(&src);
     cmd.args(RUSTC_FLAGS);
+    if let Some(lib) = wasi {
+        let mut extern_arg = std::ffi::OsString::from("wasm2rs_wasi=");
+        extern_arg.push(&lib.rlib);
+        cmd.arg("--extern").arg(extern_arg);
+        let mut deps = std::ffi::OsString::from("dependency=");
+        deps.push(&lib.deps);
+        cmd.arg("-L").arg(deps);
+    }
     cmd.arg("-o").arg(&staged);
     let out = cmd.output().expect("run rustc");
     assert!(

@@ -1,15 +1,14 @@
-//! Runs a `wasm32-wasip2` component natively through the typed preview2 host in
-//! `examples/wasip2_host/typed.rs`.
+//! Runs a `wasm32-wasip2` component natively through the typed preview2 host of the
+//! `wasm2rs-wasi` crate.
 //!
 //! Usage: `cargo run --release --example wasip2_run -- <component.wasm> [args...]`
 //!
 //! The program is the component's largest core module (`wasm2rs::extract_core_modules`).
 //! It is transpiled with `named_imports`, `named_exports` and `reentrant_imports`; the
-//! glue from `wasm2rs::wit_host_glue(component)` (the typed `Host` trait and the `Glue`
-//! that lowers it to the module's imports), the `type_aliases` of that glue, the typed
-//! host (reduced to the methods the component declares) and a `main` calling the
-//! `wasi:cli/run` export are appended, and the result is built with
-//! `rustc -C opt-level=1` and run with `args` as the program's arguments and this
+//! glue from `wasm2rs::wit_host_glue_with_options` (the `Glue` that lowers the library's
+//! `Host` trait to the module's imports) and a `main` calling the `wasi:cli/run` export are
+//! appended, and the result is built with `rustc -C opt-level=1`, linked against the
+//! `wasm2rs-wasi` rlib (built by `cargo build -p wasm2rs-wasi`), and run with `args` as the program's arguments and this
 //! process's environment. The guest's `argv[0]` is `<component.wasm>` as given on the command
 //! line (like a real process's), followed by `args`.
 //!
@@ -19,8 +18,8 @@
 //! `wasip2_run: the program trapped`); panics outside the call (host setup) stay 101. The build goes in
 //! `$WASIP2_WORK_DIR` (default: a temporary directory). The program sees the
 //! directory `$WASIP2_PREOPEN`, if set, as its `/`: read-only, or also writable if
-//! `$WASIP2_PREOPEN_WRITABLE=1`. A component that imports a function `typed.rs` does
-//! not implement does not build: rustc's errors are shown (E0046, missing trait items)
+//! `$WASIP2_PREOPEN_WRITABLE=1`. A function the host does not implement (`wasi:http`) traps
+//! when the guest calls it; an import outside the WASI 0.2.0 surface does not build (E0407)
 //! and this program exits with 2. The program is dropped before a normal exit, which sends
 //! what the connections' send queues still hold (up to 5 seconds); after a trap (134) it is
 //! not. Addresses outside loopback stay `access-denied` (`with_external_network` is not
@@ -28,13 +27,44 @@
 
 use std::process::Command;
 
-use wasm2rs::{TranspileOptions, extract_core_modules, transpile_with_options, wit_host_glue};
+use wasm2rs::{
+    TranspileOptions, WitOptions, extract_core_modules, transpile_with_options,
+    wit_host_glue_with_options,
+};
 use wasmparser::{ExternalKind, Parser, Payload};
 
-const HOST: &str = include_str!("wasip2_host/typed.rs");
 const RUN_EXPORT: &str = "wasi:cli/run@0.2.0#run";
 
-include!("wasip2_host/filter.rs");
+/// The path of the `wasm2rs-wasi` rlib, built (or found up to date) by cargo, in the same
+/// profile this example was built in.
+fn wasi_rlib() -> std::path::PathBuf {
+    let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    cargo.args(["build", "-p", "wasm2rs-wasi", "--message-format=json"]);
+    if !cfg!(debug_assertions) {
+        cargo.arg("--release");
+    }
+    let out = cargo
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run cargo build -p wasm2rs-wasi");
+    assert!(
+        out.status.success(),
+        "cargo build -p wasm2rs-wasi failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains("\"reason\":\"compiler-artifact\"") && l.contains("wasm2rs-wasi"))
+        .filter_map(|l| {
+            let at = l.find("\"filenames\":[")? + "\"filenames\":[".len();
+            l[at..]
+                .split('"')
+                .find(|p| p.ends_with(".rlib"))
+                .map(Into::into)
+        })
+        .next_back()
+        .expect("cargo reports the wasm2rs-wasi rlib")
+}
 
 /// The index of the core module's `wasi:cli/run` export.
 fn run_export(wasm: &[u8]) -> u32 {
@@ -72,7 +102,11 @@ fn main() {
         .max_by_key(Vec::len)
         .expect("the component has no core module");
     let run = run_export(&wasm);
-    let glue = wit_host_glue(&component).expect("generate the host glue");
+    let options = WitOptions {
+        external_types: Some("wasm2rs_wasi".to_string()),
+        ..WitOptions::default()
+    };
+    let glue = wit_host_glue_with_options(&component, &options).expect("generate the host glue");
     let opts = TranspileOptions {
         named_imports: true,
         named_exports: true,
@@ -86,7 +120,7 @@ fn main() {
         "fn main() {{\n    \
          let args = std::iter::once({argv0:?}.to_string()).chain(std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned())).collect();\n    \
          let env = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();\n    \
-         let mut host = TypedHost::new(env).with_arguments(args);\n    \
+         let mut host = wasm2rs_wasi::WasiHost::new(env).with_arguments(args);\n    \
          if let Some(dir) = std::env::var_os(\"WASIP2_PREOPEN\") {{\n        \
          let writable = std::env::var_os(\"WASIP2_PREOPEN_WRITABLE\").is_some_and(|v| v == \"1\");\n        \
          host = if writable {{ host.with_writable_preopen(dir.into()) }} else {{ host.with_preopen(dir.into()) }};\n    }}\n    \
@@ -100,17 +134,14 @@ fn main() {
          std::process::exit(status);\n    \
          }}"
     );
-    let aliases = type_aliases(&glue);
-    let host = keep_declared_methods(HOST, &glue);
     let src = dir.join("program.rs");
     let bin = dir.join("program");
-    std::fs::write(
-        &src,
-        format!("{generated}\n{glue}\n{aliases}\n{host}\n{main}\n"),
-    )
-    .expect("write source");
+    std::fs::write(&src, format!("{generated}\n{glue}\n{main}\n")).expect("write source");
+    let rlib = wasi_rlib();
     let status = Command::new("rustc")
         .args(["--edition", "2024", "-C", "opt-level=1", "-A", "warnings"])
+        .arg("--extern")
+        .arg(format!("wasm2rs_wasi={}", rlib.display()))
         .arg(&src)
         .arg("-o")
         .arg(&bin)
@@ -118,8 +149,9 @@ fn main() {
         .expect("run rustc");
     if !status.success() {
         eprintln!(
-            "wasip2_run: rustc failed. If the errors above are E0046 (missing trait items), the \
-             component imports functions that examples/wasip2_host/typed.rs does not implement."
+            "wasip2_run: rustc failed. If the errors above are E0407 (not a member of trait \
+             `Host`), the component imports functions outside the WASI 0.2.0 surface that \
+             wasm2rs-wasi implements."
         );
         std::process::exit(2);
     }
