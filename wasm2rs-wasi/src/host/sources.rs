@@ -195,7 +195,7 @@ pub struct HttpResponse {
     pub body: Box<dyn std::io::Read + Send>,
     /// Reads the trailers once `body` has been read to its end (`None`: the response has none).
     /// The host calls it at most once, on the thread that reads the body (which reads ahead of
-    /// the guest), after the body ended without error. An empty result means no trailers.
+    /// the guest), after the body ended without error. An empty result means no trailers. The guest sees the end of the body only after it returns, so it must not block for ever.
     pub trailers: Option<ResponseTrailers>,
 }
 

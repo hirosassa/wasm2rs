@@ -540,7 +540,7 @@ fn send_when_finished(
 pub(super) struct HttpIncomingResponse {
     pub(super) status: u16,
     pub(super) headers: HttpFields,
-    pub(super) body: Option<Box<dyn Read + Send>>,
+    body: Option<Box<dyn Read + Send>>,
     trailers: Option<ResponseTrailers>,
 }
 
@@ -637,7 +637,7 @@ impl OutBodyHandle {
         Ok(())
     }
 
-    /// Fails an open body (`finish` with trailers, a drop): the request will not run.
+    /// Fails an open body (`finish` with invalid trailers, a drop): the request will not run.
     pub(super) fn fail(&self, code: ErrorCode) {
         let state = lock(&self.0.state);
         if matches!(state.phase, OutPhase::Open) {
@@ -869,10 +869,11 @@ impl HttpIncomingBody {
                     return;
                 }
                 // read outside the lock: a client may block here, and may panic
-                let ended = matches!(read, Ok(0))
-                    .then(|| trailers.take())
-                    .flatten()
-                    .map(|read| std::panic::catch_unwind(AssertUnwindSafe(read)));
+                let ended = match read {
+                    Ok(0) => trailers.take(),
+                    _ => None,
+                }
+                .map(|read_trailers| std::panic::catch_unwind(AssertUnwindSafe(read_trailers)));
                 let mut state = lock(&body.state);
                 match ended {
                     Some(Ok(entries)) => state.trailers = Some(entries).filter(|e| !e.is_empty()),
