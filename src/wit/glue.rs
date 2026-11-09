@@ -25,8 +25,8 @@
 use std::fmt::Write as _;
 
 use super::{
-    Records, WitExport, WitFunc, WitType, case_idents, doc_text, flags_int, unique_idents,
-    unsupported,
+    Records, WitExport, WitFunc, WitType, case_idents, doc_text, flags_int, typed_signature,
+    unique_idents, unsupported,
 };
 use crate::TranspileError;
 use crate::codegen::assign_export_names;
@@ -862,6 +862,11 @@ pub(super) fn write(
 /// The core module's `realloc` export the glue's allocation helper calls.
 const REALLOC: &str = "cabi_realloc";
 
+/// The `named_exports` method of `Instance` calling the core export `core_export`.
+fn export_method(core_export: &str) -> Option<String> {
+    assign_export_names([(core_export, 0)]).into_iter().next()
+}
+
 /// Appends `pub trait Exports` (one method per export, named `export_names[i]`) and
 /// `impl<H: Host> Exports for Instance<Glue<H>>`: the import direction mirrored. Each method
 /// lowers its parameters (`lower`, or `store` into a record when they do not fit the flat
@@ -887,14 +892,7 @@ fn write_exports(
         let f = &e.func;
         let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
         let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
-        let mut sig = format!("    fn {name}(&mut self");
-        for (ident, (_, ty)) in idents.iter().zip(&f.params) {
-            let _ = write!(sig, ", {ident}: {}", gen_.records.rust(ty)?);
-        }
-        sig.push(')');
-        if let Some(ty) = &f.result {
-            let _ = write!(sig, " -> {}", gen_.records.rust(ty)?);
-        }
+        let sig = typed_signature(gen_.records, name, f, &idents)?;
         let _ = writeln!(out, "{sig};");
     }
     out.push_str(
@@ -931,14 +929,7 @@ fn write_export(
     let tys: Vec<&WitType> = f.params.iter().map(|(_, t)| t).collect();
     let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
 
-    let mut head = format!("    fn {name}(&mut self");
-    for (ident, ty) in idents.iter().zip(&tys) {
-        let _ = write!(head, ", {ident}: {}", gen_.records.rust(ty)?);
-    }
-    head.push(')');
-    if let Some(ty) = &f.result {
-        let _ = write!(head, " -> {}", gen_.records.rust(ty)?);
-    }
+    let head = typed_signature(gen_.records, name, f, &idents)?;
     let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
     let _ = writeln!(out, "{head} {{");
     let _ = writeln!(out, "        let g = self;");
@@ -982,26 +973,17 @@ fn write_export(
     };
     let allocates = std::mem::replace(&mut gen_.allocates, allocated_before);
     gen_.allocates |= allocates;
-    if allocates {
-        match e.realloc.as_deref().map(|r| assign_export_names([(r, 0)])) {
-            Some(idents) if idents.first().is_some_and(|i| i == REALLOC) => {}
-            other => {
-                return Err(unsupported(format!(
-                    "export `{}`: allocating guest memory needs the lift's realloc to be \
-                     `{REALLOC}` (the lift names {})",
-                    e.core_export,
-                    other
-                        .and_then(|i| i.into_iter().next())
-                        .map_or_else(|| "none".to_string(), |i| format!("`{i}`")),
-                )));
-            }
-        }
+    let realloc = e.realloc.as_deref().and_then(export_method);
+    if allocates && realloc.as_deref() != Some(REALLOC) {
+        return Err(unsupported(format!(
+            "export `{}`: allocating guest memory needs the lift's realloc to be \
+             `{REALLOC}` (the lift names {})",
+            e.core_export,
+            realloc.map_or_else(|| "none".to_string(), |i| format!("`{i}`")),
+        )));
     }
 
-    let post = e
-        .post_return
-        .as_deref()
-        .and_then(|p| assign_export_names([(p, 0)]).into_iter().next());
+    let post = e.post_return.as_deref().and_then(export_method);
     let call = format!("g.{name}({})", args.join(", "));
     let post_call = |arg: &str| {
         post.as_ref()

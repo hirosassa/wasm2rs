@@ -1526,14 +1526,7 @@ fn write_declarations(
     for (f, name) in funcs.iter().zip(names) {
         let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
         let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
-        let mut sig = format!("    fn {name}(&mut self");
-        for (ident, (_, ty)) in idents.iter().zip(&f.params) {
-            let _ = write!(sig, ", {ident}: {}", records.rust(ty)?);
-        }
-        sig.push(')');
-        if let Some(ty) = &f.result {
-            let _ = write!(sig, " -> {}", records.rust(ty)?);
-        }
+        let sig = typed_signature(records, name, f, &idents)?;
         if default_trap {
             // Binding the parameters keeps `-D warnings` quiet about the unused ones.
             let mut bound = idents.join(", ");
@@ -1550,6 +1543,25 @@ fn write_declarations(
     }
     out.push_str("}\n");
     Ok(out)
+}
+
+/// `    fn {name}(&mut self, {ident}: {type}, ..) -> {result}`: the typed method of `f`, its
+/// params named `idents` (the `Host` and `Exports` methods share it).
+fn typed_signature(
+    records: &Records,
+    name: &str,
+    f: &WitFunc,
+    idents: &[String],
+) -> Result<String, TranspileError> {
+    let mut sig = format!("    fn {name}(&mut self");
+    for (ident, (_, ty)) in idents.iter().zip(&f.params) {
+        let _ = write!(sig, ", {ident}: {}", records.rust(ty)?);
+    }
+    sig.push(')');
+    if let Some(ty) = &f.result {
+        let _ = write!(sig, " -> {}", records.rust(ty)?);
+    }
+    Ok(sig)
 }
 
 /// The doc comment text naming a function. Debug-escaped: an interface or function name may
