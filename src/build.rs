@@ -85,8 +85,7 @@ pub fn transpile_to_out_dir_with_options(
     out_name: &str,
     opts: &TranspileOptions,
 ) -> Result<PathBuf, BuildError> {
-    let out_dir = std::env::var_os("OUT_DIR").ok_or(BuildError::MissingOutDir)?;
-    println!("cargo:rerun-if-changed={}", wasm_path.as_ref().display());
+    let out_dir = cargo_out_dir(wasm_path.as_ref())?;
     transpile_to_dir_with_options(out_dir, wasm_path, out_name, opts)
 }
 
@@ -108,18 +107,9 @@ pub fn transpile_to_dir_with_options(
     out_name: &str,
     opts: &TranspileOptions,
 ) -> Result<PathBuf, BuildError> {
-    let wasm_path = wasm_path.as_ref();
-    let wasm = std::fs::read(wasm_path).map_err(|source| BuildError::Io {
-        path: wasm_path.to_path_buf(),
-        source,
-    })?;
-    let code = transpile_with_options(&wasm, opts)?;
-    let out = dir.as_ref().join(out_name);
-    std::fs::write(&out, code).map_err(|source| BuildError::Io {
-        path: out.clone(),
-        source,
-    })?;
-    Ok(out)
+    transpile_file(dir.as_ref().join(out_name), wasm_path.as_ref(), |wasm| {
+        transpile_with_options(wasm, opts)
+    })
 }
 
 /// Transpile the component at `component_path` into `$OUT_DIR/{stem}.rs`, where `{stem}` is the
@@ -132,11 +122,7 @@ pub fn transpile_component_to_out_dir(
     component_path: impl AsRef<Path>,
     options: &ComponentOptions,
 ) -> Result<PathBuf, BuildError> {
-    let out_dir = std::env::var_os("OUT_DIR").ok_or(BuildError::MissingOutDir)?;
-    println!(
-        "cargo:rerun-if-changed={}",
-        component_path.as_ref().display()
-    );
+    let out_dir = cargo_out_dir(component_path.as_ref())?;
     transpile_component_to_dir(out_dir, component_path, options)
 }
 
@@ -148,17 +134,35 @@ pub fn transpile_component_to_dir(
     options: &ComponentOptions,
 ) -> Result<PathBuf, BuildError> {
     let component_path = component_path.as_ref();
-    let component = std::fs::read(component_path).map_err(|source| BuildError::Io {
-        path: component_path.to_path_buf(),
-        source,
-    })?;
-    let code = transpile_component(&component, options)?;
     let stem = component_path
         .file_stem()
         .unwrap_or(component_path.as_os_str());
     let mut name = stem.to_os_string();
     name.push(".rs");
-    let out = dir.as_ref().join(name);
+    transpile_file(dir.as_ref().join(name), component_path, |component| {
+        transpile_component(component, options)
+    })
+}
+
+/// `$OUT_DIR`, after telling Cargo to rerun the build script when `input` changes.
+fn cargo_out_dir(input: &Path) -> Result<std::ffi::OsString, BuildError> {
+    let out_dir = std::env::var_os("OUT_DIR").ok_or(BuildError::MissingOutDir)?;
+    println!("cargo:rerun-if-changed={}", input.display());
+    Ok(out_dir)
+}
+
+/// Read `input`, transpile it with `transpile` and write the result to `out`, which is returned.
+/// Nothing is written when reading or transpiling fails.
+fn transpile_file(
+    out: PathBuf,
+    input: &Path,
+    transpile: impl FnOnce(&[u8]) -> Result<String, TranspileError>,
+) -> Result<PathBuf, BuildError> {
+    let bytes = std::fs::read(input).map_err(|source| BuildError::Io {
+        path: input.to_path_buf(),
+        source,
+    })?;
+    let code = transpile(&bytes)?;
     std::fs::write(&out, code).map_err(|source| BuildError::Io {
         path: out.clone(),
         source,

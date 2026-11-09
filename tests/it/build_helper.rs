@@ -108,12 +108,10 @@ fn an_unwritable_output_is_an_io_error() {
 // --- components ---
 
 mod component {
-    use std::process::Command;
-
     use wasm2rs::build::{BuildError, transpile_component_to_dir, transpile_component_to_out_dir};
     use wasm2rs::{ComponentOptions, transpile_component};
 
-    use crate::common;
+    use crate::component_input::build_and_run;
     use crate::wasip2_run_example::{CORE, WORLD, component_of};
 
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -145,16 +143,7 @@ mod component {
         std::fs::write(&path, component_of(WORLD, CORE)).unwrap();
         let out = transpile_component_to_dir(&dir, &path, &ComponentOptions::default()).unwrap();
         let code = std::fs::read_to_string(out).unwrap();
-        let program = format!(
-            "{code}\nfn main() {{\n    \
-             let host = wasm2rs_wasi::WasiHost::new(Vec::new()).with_arguments(vec![\"p\".to_string(), \"hi\".to_string()]);\n    \
-             let mut inst = Instance::new(Glue(host));\n    \
-             let result = Exports::export_wasi_cli_run_0_2_0_run(&mut inst);\n    \
-             drop(inst);\n    \
-             std::process::exit(if result.is_ok() {{ 0 }} else {{ 1 }});\n}}\n"
-        );
-        let bin = common::build_with_wasi("build_helper_component_run", &program);
-        let out = Command::new(bin).output().unwrap();
+        let out = build_and_run(&code, "build_helper_component_run", "hi");
         assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
         assert!(out.status.success());
     }
