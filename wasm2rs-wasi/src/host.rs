@@ -77,6 +77,8 @@ use crate::wasi_sockets_network::ErrorCode as NetErrorCode;
 use crate::wasi_sockets_network::*;
 use crate::wasi_sockets_tcp::*;
 use crate::wasi_sockets_udp::*;
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, MetadataExt as _};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::net::{
@@ -143,7 +145,7 @@ pub struct WasiHost {
     outputs: Slab<FileStream>,
     /// Directory listings behind `directory-entry-stream` handles: the entries (type, name)
     /// still to be read.
-    listings: Slab<std::vec::IntoIter<(std::fs::FileType, String)>>,
+    listings: Slab<std::vec::IntoIter<(DescriptorType, String)>>,
     // sockets
     /// Which addresses the guest may use.
     network: NetworkPolicy,
@@ -489,22 +491,6 @@ impl WasiHost {
         }
     }
 
-    /// Like `resolve`, for a file that `open-at` may create: if `path` does not exist, it
-    /// is named in its parent directory (see `resolve_entry`). A symlink that leads nowhere
-    /// (or out of the preopen) is `not-permitted`, not a place to create a file.
-    fn resolve_to_create(&self, dir: u32, path: &str) -> Result<PathBuf, Fs> {
-        match self.resolve(dir, path) {
-            Err(Fs::NoEntry) => {}
-            found => return found,
-        }
-        let full = self.resolve_entry(dir, path)?;
-        if full.symlink_metadata().is_ok() {
-            Err(Fs::NotPermitted)
-        } else {
-            Ok(full)
-        }
-    }
-
     /// The open file behind a descriptor opened for `write`: `read-only` unless the preopen
     /// is writable, `is-directory` for a directory, `bad-descriptor` if it was not opened
     /// for `write`.
@@ -538,16 +524,17 @@ impl WasiHost {
         Ok(FIRST_FILE_STREAM + self.outputs.insert(stream) as u32)
     }
 
-    /// Runs `op` on the open file behind a descriptor, or on a directory's (opened from its
-    /// path, resolved again).
+    /// Runs `op` on the open file behind a descriptor, or on the directory's own open handle.
     fn with_descriptor_file<T>(
         &self,
         descriptor: u32,
         op: impl FnOnce(&std::fs::File) -> std::io::Result<T>,
     ) -> Result<T, Fs> {
-        let done = match &self.open_descriptor(descriptor)?.file {
-            Some(file) => op(file),
-            None => op(&std::fs::File::open(self.directory(descriptor)?).map_err(io_error_code)?),
+        let d = self.open_descriptor(descriptor)?;
+        let done = match (&d.file, &d.dir) {
+            (Some(file), _) => op(file),
+            (None, Some(dir)) => op(&dir.open(".").map_err(sandbox_error)?.into_std()),
+            (None, None) => return Err(Fs::BadDescriptor),
         };
         done.map_err(io_error_code)
     }
@@ -581,108 +568,75 @@ impl WasiHost {
             .ok_or(Fs::BadDescriptor)
     }
 
-    /// The path behind a directory descriptor, or `bad-descriptor` (`not-directory` for a
-    /// file: a file descriptor stays on its file, not on its path). The directories above
-    /// it can be moved since it was opened, so the path is resolved again and must still be
-    /// under the preopen: `not-permitted` if not.
-    fn directory(&self, descriptor: u32) -> Result<PathBuf, Fs> {
-        let OpenDescriptor { path, file, .. } = self.open_descriptor(descriptor)?;
-        if file.is_some() {
-            return Err(Fs::NotDirectory);
-        }
-        self.confined(descriptor, path.canonicalize().map_err(io_error_code)?)
+    /// The open directory behind a descriptor, or `bad-descriptor` (`not-directory` for a
+    /// file). A directory descriptor holds the directory itself, not its path, so renaming
+    /// the directory or swapping a symlink into one of its ancestors cannot redirect it.
+    fn directory(&self, descriptor: u32) -> Result<&Dir, Fs> {
+        self.open_descriptor(descriptor)?
+            .dir
+            .as_ref()
+            .ok_or(Fs::NotDirectory)
     }
 
-    /// `real` if it lies under the preopen that `descriptor` descends from,
-    /// `not-permitted` otherwise.
-    fn confined(&self, descriptor: u32, real: PathBuf) -> Result<PathBuf, Fs> {
-        let preopen = self
-            .preopens
-            .get(self.open_descriptor(descriptor)?.preopen)
-            .ok_or(Fs::NotPermitted)?;
-        if real.starts_with(&preopen.root) {
-            Ok(real)
-        } else {
-            Err(Fs::NotPermitted)
+    /// The metadata of a descriptor: of its open file or directory.
+    fn descriptor_metadata(&self, descriptor: u32) -> Result<Stat, Fs> {
+        let d = self.open_descriptor(descriptor)?;
+        match (&d.file, &d.dir) {
+            (Some(file), _) => file.metadata().map(Stat::from),
+            (None, Some(dir)) => dir.dir_metadata().map(Stat::from),
+            (None, None) => return Err(Fs::BadDescriptor),
         }
-    }
-
-    /// The path `path` names under the directory behind descriptor `dir`: `not-permitted`
-    /// outside the preopen.
-    fn resolve(&self, dir: u32, path: &str) -> Result<PathBuf, Fs> {
-        let base = self.directory(dir)?;
-        let relative = Path::new(path);
-        if !stays_below(relative) {
-            return Err(Fs::NotPermitted);
-        }
-        self.confined(
-            dir,
-            base.join(relative).canonicalize().map_err(io_error_code)?,
-        )
-    }
-
-    /// The entry `path` names under the directory behind `dir`, without following it if it
-    /// is a symlink: its parent directory must resolve under the preopen. A name ending in
-    /// `/` or `/.` names a directory, which `file_name` would silently drop: `invalid`.
-    fn resolve_entry(&self, dir: u32, path: &str) -> Result<PathBuf, Fs> {
-        let base = self.directory(dir)?;
-        let relative = Path::new(path);
-        if !stays_below(relative) {
-            return Err(Fs::NotPermitted);
-        }
-        if path.ends_with('/') || path.ends_with("/.") {
-            return Err(Fs::Invalid);
-        }
-        let name = relative.file_name().ok_or(Fs::Invalid)?;
-        let parent = relative.parent().unwrap_or(Path::new(""));
-        let parent = base.join(parent).canonicalize().map_err(io_error_code)?;
-        Ok(self.confined(dir, parent)?.join(name))
-    }
-
-    /// The target of the symlink at `path`, if it is relative and stays under the preopen.
-    fn read_link_target(&self, dir: u32, path: &str) -> Result<String, Fs> {
-        let entry = self.resolve_entry(dir, path)?;
-        if !entry
-            .symlink_metadata()
-            .map_err(io_error_code)?
-            .is_symlink()
-        {
-            return Err(Fs::Invalid);
-        }
-        let target = std::fs::read_link(entry).map_err(io_error_code)?;
-        if !stays_below(&target) {
-            return Err(Fs::NotPermitted);
-        }
-        target.into_os_string().into_string().map_err(|_| Fs::Io)
-    }
-
-    /// The metadata of a descriptor: of its open file, or of its directory, resolved again.
-    fn descriptor_metadata(&self, descriptor: u32) -> Result<std::fs::Metadata, Fs> {
-        match &self.open_descriptor(descriptor)?.file {
-            Some(file) => file.metadata().map_err(io_error_code),
-            None => std::fs::metadata(self.directory(descriptor)?).map_err(io_error_code),
-        }
+        .map_err(sandbox_error)
     }
 
     /// The listing of a directory descriptor: a snapshot of the entries (without `.` and
     /// `..`), in the OS's order.
-    fn list_directory(&self, descriptor: u32) -> Result<Vec<(std::fs::FileType, String)>, Fs> {
-        let path = self.directory(descriptor)?;
-        if !path.is_dir() {
-            return Err(Fs::NotDirectory);
-        }
-        std::fs::read_dir(path)
+    fn list_directory(&self, descriptor: u32) -> Result<Vec<(DescriptorType, String)>, Fs> {
+        self.directory(descriptor)?
+            .entries()
             .and_then(|dir| {
                 dir.map(|entry| {
                     let entry = entry?;
                     Ok((
-                        entry.file_type()?,
+                        descriptor_type(&entry.file_type()?),
                         entry.file_name().to_string_lossy().into_owned(),
                     ))
                 })
                 .collect()
             })
-            .map_err(io_error_code)
+            .map_err(sandbox_error)
+    }
+
+    /// The metadata of what `path` names below a directory descriptor: with `symlink-follow`
+    /// (or for a path that names a directory itself) what a symlink leads to, else the
+    /// entry itself.
+    fn path_metadata(&self, dir: u32, flags: PathFlags, path: &str) -> Result<Stat, Fs> {
+        let dir = self.directory(dir)?;
+        if flags.contains(PathFlags::SYMLINK_FOLLOW) || !names_an_entry(path) {
+            dir.metadata(below(path)?)
+        } else {
+            dir.symlink_metadata(entry_path(path)?)
+        }
+        .map(Stat::from)
+        .map_err(sandbox_error)
+    }
+
+    /// The target of the symlink at `path`, if it is relative and stays under the preopen.
+    fn read_link_target(&self, dir: u32, path: &str) -> Result<String, Fs> {
+        let dir = self.directory(dir)?;
+        let entry = entry_path(path)?;
+        if !dir
+            .symlink_metadata(entry)
+            .map_err(sandbox_error)?
+            .is_symlink()
+        {
+            return Err(Fs::Invalid);
+        }
+        let target = dir.read_link_contents(entry).map_err(sandbox_error)?;
+        if !stays_below(&target) {
+            return Err(Fs::NotPermitted);
+        }
+        target.into_os_string().into_string().map_err(|_| Fs::Io)
     }
 
     fn random_source(&mut self) -> &mut dyn RandomSource {
@@ -814,15 +768,16 @@ impl WasiHost {
 struct Preopen {
     /// The name the guest sees.
     guest_name: String,
-    /// The canonicalized host directory.
-    root: PathBuf,
     /// Whether the guest may change anything under it.
     writable: bool,
 }
 
-/// An open descriptor: the preopen and other directories hold their path (resolved again
-/// on each use), a file its open `File`.
+/// An open descriptor: a directory (the preopens included) holds the open directory, a file
+/// its open `File`. Every path under a directory is resolved below that handle, never from
+/// a host path, so what a check saw is what is used.
 struct OpenDescriptor {
+    /// Where the descriptor was opened from, as a label only: it names the object where the
+    /// platform has no device and inode numbers.
     path: PathBuf,
     /// The index in `preopens` of the preopen this descriptor lies under.
     preopen: usize,
@@ -831,6 +786,7 @@ struct OpenDescriptor {
     /// Whether a file was opened for reading.
     read: bool,
     file: Option<std::fs::File>,
+    dir: Option<Dir>,
 }
 
 /// A stream over a duplicate of a descriptor's `File`. Duplicates share one file offset,
@@ -962,16 +918,6 @@ enum Fs {
 }
 
 /// A symlink at `link` holding `target`; hosts without symlinks answer `unsupported`.
-fn make_symlink(target: &str, link: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    return std::os::unix::fs::symlink(target, link);
-    #[cfg(not(unix))]
-    {
-        let _ = (target, link);
-        Err(std::io::ErrorKind::Unsupported.into())
-    }
-}
-
 fn io_error_code(e: std::io::Error) -> Fs {
     use std::io::ErrorKind::*;
     match e.kind() {
@@ -984,6 +930,54 @@ fn io_error_code(e: std::io::Error) -> Fs {
         Unsupported => Fs::Unsupported,
         _ => Fs::Io,
     }
+}
+
+/// A symlink named `link` below `dir` that holds `target`.
+fn make_symlink(dir: &Dir, target: &str, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    return dir.symlink(target, link);
+    #[cfg(not(unix))]
+    {
+        let _ = (dir, target, link);
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// An error of an operation below a directory handle. The sandbox reports a path that leads
+/// out (a symlink or `..` above the handle) as a permission error without an OS error number;
+/// that is `not-permitted`, whereas a real `EACCES` stays `access`.
+fn sandbox_error(e: std::io::Error) -> Fs {
+    if e.kind() == std::io::ErrorKind::PermissionDenied && e.raw_os_error().is_none() {
+        Fs::NotPermitted
+    } else {
+        io_error_code(e)
+    }
+}
+
+/// `path` as a path below a directory handle: `not-permitted` if it is absolute or has `..`
+/// (such a path could not stay below the descriptor), and the empty path is the directory.
+fn below(path: &str) -> Result<&Path, Fs> {
+    let relative = Path::new(if path.is_empty() { "." } else { path });
+    if stays_below(relative) {
+        Ok(relative)
+    } else {
+        Err(Fs::NotPermitted)
+    }
+}
+
+/// The entry `path` names, which is not followed if it is a symlink: its parent is resolved
+/// below the directory handle. A name ending in `/` or `/.` names a directory, which
+/// `file_name` would silently drop: `invalid`.
+fn entry_path(path: &str) -> Result<&Path, Fs> {
+    let relative = Path::new(path);
+    if !stays_below(relative) {
+        return Err(Fs::NotPermitted);
+    }
+    if path.ends_with('/') || path.ends_with("/.") {
+        return Err(Fs::Invalid);
+    }
+    relative.file_name().ok_or(Fs::Invalid)?;
+    Ok(relative)
 }
 
 /// Whether `path` is relative and has no `..`, so it stays under the directory it is
@@ -1983,7 +1977,7 @@ fn names_an_entry(path: &str) -> bool {
 
 /// Directory 3, regular file 6, symlink 5 (seen only for a directory entry or a
 /// `symlink_metadata` lookup), otherwise unknown.
-fn descriptor_type(t: std::fs::FileType) -> DescriptorType {
+fn descriptor_type(t: &impl FileKind) -> DescriptorType {
     if t.is_dir() {
         DescriptorType::Directory
     } else if t.is_file() {
@@ -1992,6 +1986,82 @@ fn descriptor_type(t: std::fs::FileType) -> DescriptorType {
         DescriptorType::SymbolicLink
     } else {
         DescriptorType::Unknown
+    }
+}
+
+/// `std`'s and the sandbox's file types, which have the same three questions.
+trait FileKind {
+    fn is_dir(&self) -> bool;
+    fn is_file(&self) -> bool;
+    fn is_symlink(&self) -> bool;
+}
+
+impl FileKind for std::fs::FileType {
+    fn is_dir(&self) -> bool {
+        std::fs::FileType::is_dir(self)
+    }
+    fn is_file(&self) -> bool {
+        std::fs::FileType::is_file(self)
+    }
+    fn is_symlink(&self) -> bool {
+        std::fs::FileType::is_symlink(self)
+    }
+}
+
+impl FileKind for cap_std::fs::FileType {
+    fn is_dir(&self) -> bool {
+        cap_std::fs::FileType::is_dir(self)
+    }
+    fn is_file(&self) -> bool {
+        cap_std::fs::FileType::is_file(self)
+    }
+    fn is_symlink(&self) -> bool {
+        cap_std::fs::FileType::is_symlink(self)
+    }
+}
+
+/// What the host says about a file: from `std` for an open file, from the sandbox for what a
+/// path names.
+struct Stat {
+    kind: DescriptorType,
+    size: u64,
+    link_count: u64,
+    accessed: Option<Datetime>,
+    modified: Option<Datetime>,
+    /// Device and inode, which name the file within one run (zero where there are none).
+    id: (u64, u64),
+}
+
+impl From<std::fs::Metadata> for Stat {
+    fn from(meta: std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let (link_count, id) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.nlink(), (meta.dev(), meta.ino()))
+        };
+        #[cfg(not(unix))]
+        let (link_count, id) = (1u64, (0u64, 0u64));
+        Stat {
+            kind: descriptor_type(&meta.file_type()),
+            size: meta.len(),
+            link_count,
+            accessed: datetime(meta.accessed()),
+            modified: datetime(meta.modified()),
+            id,
+        }
+    }
+}
+
+impl From<cap_std::fs::Metadata> for Stat {
+    fn from(meta: cap_std::fs::Metadata) -> Self {
+        Stat {
+            kind: descriptor_type(&meta.file_type()),
+            size: meta.len(),
+            link_count: meta.nlink(),
+            accessed: datetime(meta.accessed().map(cap_std::time::SystemTime::into_std)),
+            modified: datetime(meta.modified().map(cap_std::time::SystemTime::into_std)),
+            id: (meta.dev(), meta.ino()),
+        }
     }
 }
 
@@ -2004,17 +2074,13 @@ fn datetime(time: std::io::Result<std::time::SystemTime>) -> Option<Datetime> {
 }
 
 /// The status-change time is not reported.
-fn descriptor_stat(meta: std::fs::Metadata) -> DescriptorStat {
-    #[cfg(unix)]
-    let link_count = std::os::unix::fs::MetadataExt::nlink(&meta);
-    #[cfg(not(unix))]
-    let link_count = 1u64;
+fn descriptor_stat(meta: Stat) -> DescriptorStat {
     DescriptorStat {
-        type_: descriptor_type(meta.file_type()),
-        link_count,
-        size: meta.len(),
-        data_access_timestamp: datetime(meta.accessed()),
-        data_modification_timestamp: datetime(meta.modified()),
+        type_: meta.kind,
+        link_count: meta.link_count,
+        size: meta.size,
+        data_access_timestamp: meta.accessed,
+        data_modification_timestamp: meta.modified,
         status_change_timestamp: None,
     }
 }
@@ -2036,12 +2102,11 @@ fn deadline_after(base: Instant, when: u64) -> Instant {
 }
 
 /// What names a file within one run: its device and inode (its path where there are none).
-fn file_identity(meta: &std::fs::Metadata, path: &Path) -> (u64, u64, String) {
+fn file_identity(meta: &Stat, path: &Path) -> (u64, u64, String) {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         let _ = path;
-        (meta.dev(), meta.ino(), String::new())
+        (meta.id.0, meta.id.1, String::new())
     }
     #[cfg(not(unix))]
     {
@@ -2052,7 +2117,7 @@ fn file_identity(meta: &std::fs::Metadata, path: &Path) -> (u64, u64, String) {
 
 /// A hash of the file's identity (see `file_identity`), so the same file gives the same
 /// value within one run and two files never do.
-fn metadata_hash(meta: &std::fs::Metadata, path: &Path) -> MetadataHashValue {
+fn metadata_hash(meta: &Stat, path: &Path) -> MetadataHashValue {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let identity = file_identity(meta, path);
     let hash = |salt: u8| {

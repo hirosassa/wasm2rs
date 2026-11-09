@@ -239,17 +239,23 @@ impl WasiHost {
         if !root.is_dir() {
             return Err(ConfigError::NotADirectory(host_path));
         }
+        let dir = cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority()).map_err(
+            |source| ConfigError::Preopen {
+                host_path: host_path.clone(),
+                source,
+            },
+        )?;
         let slot = self.descriptors.insert(OpenDescriptor {
-            path: root.clone(),
+            path: root,
             preopen: self.preopens.len(),
             write: false,
             read: true,
             file: None,
+            dir: Some(dir),
         });
         debug_assert_eq!(slot, self.preopens.len(), "preopens are the first slots");
         self.preopens.push(Preopen {
             guest_name,
-            root,
             writable: access == Access::ReadWrite,
         });
         Ok(())

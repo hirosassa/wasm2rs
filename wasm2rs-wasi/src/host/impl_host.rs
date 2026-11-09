@@ -903,9 +903,15 @@ impl Host for WasiHost {
             return Err(Fs::Invalid.into());
         }
         let follows = path_flags.contains(PathFlags::SYMLINK_FOLLOW);
-        if (exclusive_create || !follows) && names_an_entry(&path) {
-            let entry = self.resolve_entry(self_.0, &path)?;
-            if entry.symlink_metadata().is_ok_and(|meta| meta.is_symlink()) {
+        let target = below(&path)?;
+        let entry = names_an_entry(&path);
+        let dir = self.directory(self_.0)?;
+        if (exclusive_create || !follows) && entry {
+            let name = entry_path(&path)?;
+            if dir
+                .symlink_metadata(name)
+                .is_ok_and(|meta| meta.is_symlink())
+            {
                 // `create` + `exclusive` never follows: the name exists (before `loop`),
                 // dangling or not
                 return Err(if exclusive_create {
@@ -916,47 +922,74 @@ impl Host for WasiHost {
                 .into());
             }
         }
-        let full = if create {
-            self.resolve_to_create(self_.0, &path)?
-        } else {
-            self.resolve(self_.0, &path)?
+        let found = match dir.metadata(target) {
+            Ok(meta) => Some(meta),
+            Err(e) if create && e.kind() == std::io::ErrorKind::NotFound => {
+                // a symlink that leads nowhere is not a place to create a file
+                if entry && dir.symlink_metadata(entry_path(&path)?).is_ok() {
+                    return Err(Fs::NotPermitted.into());
+                }
+                None
+            }
+            Err(e) => return Err(sandbox_error(e).into()),
         };
-        let is_dir = full.is_dir();
+        let is_dir = found.as_ref().is_some_and(|meta| meta.is_dir());
         if wants_directory && !is_dir {
             return Err(Fs::NotDirectory.into());
         }
         if is_dir && writes {
             return Err(Fs::IsDirectory.into());
         }
-        if exclusive_create && full.exists() {
+        if exclusive_create && found.is_some() {
             return Err(Fs::Exist.into());
         }
-        if create || truncate {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(create)
-                .truncate(truncate)
-                .open(&full)
-                .map_err(io_error_code)?;
+        if is_dir && (create || truncate) {
+            return Err(Fs::IsDirectory.into());
         }
         // a file that only writes need not be readable (and one with no flags reads)
         let reads = flags.contains(DescriptorFlags::READ) || !writes;
-        let file = if is_dir {
-            None
+        let (file, opened_dir) = if is_dir {
+            (None, Some(dir.open_dir(target).map_err(sandbox_error)?))
         } else {
-            let opened = std::fs::OpenOptions::new()
+            // `create`, `exclusive` and `truncate` act in this one open, so nothing can be
+            // swapped between a check and the creation or truncation
+            let mut options = cap_std::fs::OpenOptions::new();
+            options
                 .read(reads)
-                .write(writes)
-                .open(&full);
-            Some(opened.map_err(io_error_code)?)
+                .write(writes || create || truncate)
+                .create(create && !exclusive_create)
+                .create_new(exclusive_create)
+                .truncate(truncate);
+            if !follows && entry {
+                options.follow(FollowSymlinks::No);
+            }
+            let file = dir.open_with(target, &options).map_err(|e| {
+                let swapped_in = !follows
+                    && entry
+                    && entry_path(&path)
+                        .and_then(|name| dir.symlink_metadata(name).map_err(sandbox_error))
+                        .is_ok_and(|meta| meta.is_symlink());
+                if swapped_in {
+                    Fs::Loop
+                } else {
+                    sandbox_error(e)
+                }
+            })?;
+            (Some(file.into_std()), None)
         };
-        let preopen = self.open_descriptor(self_.0)?.preopen;
+        let OpenDescriptor {
+            path: base,
+            preopen,
+            ..
+        } = self.open_descriptor(self_.0)?;
+        let (label, preopen) = (base.join(target), *preopen);
         let slot = self.descriptors.insert(OpenDescriptor {
-            path: full,
+            path: label,
             preopen,
             write: writes,
             read: reads,
             file,
+            dir: opened_dir,
         });
         Ok(Descriptor(slot as u32))
     }
@@ -1004,20 +1037,20 @@ impl Host for WasiHost {
     ) -> Result<(), FsErrorCode> {
         self.require_writable(self_.0)?;
         self.require_writable(new_descriptor.0)?;
-        let old = self.resolve_entry(self_.0, &old_path)?;
-        let new = self.resolve_entry(new_descriptor.0, &new_path)?;
-        // Not a symlink: moving one over the path of an open descriptor would lead it out of
-        // the preopen. (A directory that holds a symlink can still be moved there;
-        // `directory` resolves the path again on every use.)
-        if old
-            .symlink_metadata()
-            .map_err(io_error_code)?
-            .file_type()
+        let old = entry_path(&old_path)?;
+        let new = entry_path(&new_path)?;
+        let old_dir = self.directory(self_.0)?;
+        // Not a symlink: a link is not moved between directories (it could name something
+        // that only made sense where it was).
+        if old_dir
+            .symlink_metadata(old)
+            .map_err(sandbox_error)?
             .is_symlink()
         {
             return Err(Fs::NotPermitted.into());
         }
-        Ok(std::fs::rename(old, new).map_err(io_error_code)?)
+        let new_dir = self.directory(new_descriptor.0)?;
+        Ok(old_dir.rename(old, new_dir, new).map_err(sandbox_error)?)
     }
 
     /// A symlink named `new-path` (under this directory) holding `old-path`. The target must
@@ -1037,8 +1070,8 @@ impl Host for WasiHost {
         if !stays_below(Path::new(&old_path)) {
             return Err(Fs::NotPermitted.into());
         }
-        let link = self.resolve_entry(self_.0, &new_path)?;
-        Ok(make_symlink(&old_path, &link).map_err(io_error_code)?)
+        let link = entry_path(&new_path)?;
+        Ok(make_symlink(self.directory(self_.0)?, &old_path, link).map_err(sandbox_error)?)
     }
 
     /// A hard link. With `symlink-follow` a symlink `old-path` is followed; without it a
@@ -1055,24 +1088,32 @@ impl Host for WasiHost {
     ) -> Result<(), FsErrorCode> {
         self.require_writable(self_.0)?;
         self.require_writable(new_descriptor.0)?;
+        let old_dir = self.directory(self_.0)?;
         let old = if old_path_flags.contains(PathFlags::SYMLINK_FOLLOW) {
-            self.resolve(self_.0, &old_path)?
+            // the target below the directory; linking it is resolved below the directory
+            // again, so a swap in between can only pick another file inside
+            old_dir
+                .canonicalize(below(&old_path)?)
+                .map_err(sandbox_error)?
         } else {
-            let entry = self.resolve_entry(self_.0, &old_path)?;
-            if entry
-                .symlink_metadata()
-                .map_err(io_error_code)?
+            let entry = entry_path(&old_path)?;
+            if old_dir
+                .symlink_metadata(entry)
+                .map_err(sandbox_error)?
                 .is_symlink()
             {
                 return Err(Fs::Unsupported.into());
             }
-            entry
+            entry.to_path_buf()
         };
-        if old.metadata().map_err(io_error_code)?.is_dir() {
+        if old_dir.metadata(&old).map_err(sandbox_error)?.is_dir() {
             return Err(Fs::NotPermitted.into());
         }
-        let new = self.resolve_entry(new_descriptor.0, &new_path)?;
-        Ok(std::fs::hard_link(old, new).map_err(io_error_code)?)
+        let new = entry_path(&new_path)?;
+        let new_dir = self.directory(new_descriptor.0)?;
+        Ok(old_dir
+            .hard_link(old, new_dir, new)
+            .map_err(sandbox_error)?)
     }
 
     /// Needs a writable preopen; a file must have been opened for `write` (a directory needs
@@ -1105,21 +1146,24 @@ impl Host for WasiHost {
     ) -> Result<(), FsErrorCode> {
         self.require_writable(self_.0)?;
         let times = file_times(data_access_timestamp, data_modification_timestamp)?;
-        let full = if path_flags.contains(PathFlags::SYMLINK_FOLLOW) {
-            self.resolve(self_.0, &path)?
+        let dir = self.directory(self_.0)?;
+        let file = if path_flags.contains(PathFlags::SYMLINK_FOLLOW) {
+            dir.open(below(&path)?)
         } else {
-            let entry = self.resolve_entry(self_.0, &path)?;
-            if entry
-                .symlink_metadata()
-                .map_err(io_error_code)?
+            let entry = entry_path(&path)?;
+            if dir
+                .symlink_metadata(entry)
+                .map_err(sandbox_error)?
                 .is_symlink()
             {
                 return Err(Fs::Unsupported.into());
             }
-            entry
-        };
-        let file = std::fs::File::open(full).map_err(io_error_code)?;
-        Ok(file.set_times(times).map_err(io_error_code)?)
+            let mut options = cap_std::fs::OpenOptions::new();
+            options.read(true).follow(FollowSymlinks::No);
+            dir.open_with(entry, &options)
+        }
+        .map_err(sandbox_error)?;
+        Ok(file.into_std().set_times(times).map_err(io_error_code)?)
     }
 
     /// Truncates or zero-extends the file. Like writing, it needs a writable preopen and a
@@ -1159,8 +1203,11 @@ impl Host for WasiHost {
         path: String,
     ) -> Result<(), FsErrorCode> {
         self.require_writable(self_.0)?;
-        let entry = self.resolve_entry(self_.0, &path)?;
-        Ok(std::fs::create_dir(entry).map_err(io_error_code)?)
+        let entry = entry_path(&path)?;
+        Ok(self
+            .directory(self_.0)?
+            .create_dir(entry)
+            .map_err(sandbox_error)?)
     }
 
     /// Removes a file or a symlink (the link, not its target); a directory is
@@ -1171,11 +1218,12 @@ impl Host for WasiHost {
         path: String,
     ) -> Result<(), FsErrorCode> {
         self.require_writable(self_.0)?;
-        let entry = self.resolve_entry(self_.0, &path)?;
-        if entry.symlink_metadata().map_err(io_error_code)?.is_dir() {
+        let entry = entry_path(&path)?;
+        let dir = self.directory(self_.0)?;
+        if dir.symlink_metadata(entry).map_err(sandbox_error)?.is_dir() {
             return Err(Fs::IsDirectory.into());
         }
-        Ok(std::fs::remove_file(entry).map_err(io_error_code)?)
+        Ok(dir.remove_file(entry).map_err(sandbox_error)?)
     }
 
     /// An empty directory only (`not-empty`); anything else, a symlink to a directory
@@ -1186,11 +1234,12 @@ impl Host for WasiHost {
         path: String,
     ) -> Result<(), FsErrorCode> {
         self.require_writable(self_.0)?;
-        let entry = self.resolve_entry(self_.0, &path)?;
-        if !entry.symlink_metadata().map_err(io_error_code)?.is_dir() {
+        let entry = entry_path(&path)?;
+        let dir = self.directory(self_.0)?;
+        if !dir.symlink_metadata(entry).map_err(sandbox_error)?.is_dir() {
             return Err(Fs::NotDirectory.into());
         }
-        Ok(std::fs::remove_dir(entry).map_err(io_error_code)?)
+        Ok(dir.remove_dir(entry).map_err(sandbox_error)?)
     }
 
     /// The target of a symlink, if it is relative and stays under the preopen.
@@ -1208,9 +1257,7 @@ impl Host for WasiHost {
         &mut self,
         self_: Descriptor,
     ) -> Result<DescriptorType, FsErrorCode> {
-        Ok(descriptor_type(
-            self.descriptor_metadata(self_.0)?.file_type(),
-        ))
+        Ok(self.descriptor_metadata(self_.0)?.kind)
     }
 
     /// Up to `length` bytes of the file from `offset`, without a stream or a position, and
@@ -1316,12 +1363,8 @@ impl Host for WasiHost {
         path_flags: PathFlags,
         path: String,
     ) -> Result<DescriptorStat, FsErrorCode> {
-        let meta = if path_flags.contains(PathFlags::SYMLINK_FOLLOW) || !names_an_entry(&path) {
-            std::fs::metadata(self.resolve(self_.0, &path)?)
-        } else {
-            std::fs::symlink_metadata(self.resolve_entry(self_.0, &path)?)
-        };
-        Ok(descriptor_stat(meta.map_err(io_error_code)?))
+        let meta = self.path_metadata(self_.0, path_flags, &path)?;
+        Ok(descriptor_stat(meta))
     }
 
     fn wasi_filesystem_types_method_descriptor_metadata_hash(
@@ -1342,17 +1385,9 @@ impl Host for WasiHost {
         path_flags: PathFlags,
         path: String,
     ) -> Result<MetadataHashValue, FsErrorCode> {
-        let (full, meta) =
-            if path_flags.contains(PathFlags::SYMLINK_FOLLOW) || !names_an_entry(&path) {
-                let full = self.resolve(self_.0, &path)?;
-                let meta = std::fs::metadata(&full);
-                (full, meta)
-            } else {
-                let full = self.resolve_entry(self_.0, &path)?;
-                let meta = std::fs::symlink_metadata(&full);
-                (full, meta)
-            };
-        Ok(metadata_hash(&meta.map_err(io_error_code)?, &full))
+        let meta = self.path_metadata(self_.0, path_flags, &path)?;
+        let label = self.open_descriptor(self_.0)?.path.join(below(&path)?);
+        Ok(metadata_hash(&meta, &label))
     }
 
     /// The next entry, `None` once the listing is exhausted.
@@ -1364,10 +1399,9 @@ impl Host for WasiHost {
             .listings
             .get_mut(self_.0 as usize)
             .ok_or(Fs::BadDescriptor)?;
-        Ok(listing.next().map(|(kind, name)| DirectoryEntry {
-            type_: descriptor_type(kind),
-            name,
-        }))
+        Ok(listing
+            .next()
+            .map(|(kind, name)| DirectoryEntry { type_: kind, name }))
     }
 
     /// Reads at most 4096 bytes of a file, connection or stdin stream at once (a

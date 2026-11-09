@@ -142,9 +142,17 @@ README. Each section names the code or test that backs it.
   the open `File`, so a FIFO or character device with nothing to read blocks the host; a
   zero-length read decides "end" from the file's metadata length (0 for such files).
   Read directly from the code; there is no test.
-- Directory descriptors are resolved from their path on every use; the check and the use are
-  separate steps, so a guest racing a host-side swap of a directory for a symlink can escape the
-  preopen. Preopen only a directory you trust the program with.
+- Preopen confinement is done with `cap-std`: a directory descriptor holds the open directory
+  and every path is resolved below it in one step (`openat` with `O_NOFOLLOW` per component), so
+  a symlink swapped in after a check cannot lead out of a preopen, and a descriptor stays on the
+  directory it opened when that directory is renamed or one of its ancestors becomes a symlink.
+  What remains: (1) a symlink whose target is absolute is refused even when it points inside
+  the preopen (the sandbox cannot tell); (2) `link-at` with `symlink-follow` and `rename-at` /
+  `symlink-at` pre-checks (is the entry a symlink, is the target a directory) are separate steps
+  from the operation, so a racing swap can change which in-preopen entry is affected or the
+  error code, never leave the preopen; (3) a hard link made by the guest or any other process
+  inside the preopen to a file outside stays a link to that file (no host can prevent it); (4)
+  the confinement is for Unix (`openat`); other platforms are not tested.
 - The TCP socket options are not applied to the OS socket. UDP socket options are
   `not-supported`. Only `std::net` is used (no `rustix`), so nothing finer is possible.
 - `wasip2_run` never allows addresses outside loopback and does not flush the send queues after

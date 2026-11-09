@@ -238,7 +238,8 @@ fn run(root: &std::path::Path, body: &str) -> std::process::Output {
 
 #[cfg(unix)]
 #[test]
-fn a_directory_descriptor_whose_path_was_moved_out_of_the_preopen_is_refused() {
+fn a_directory_descriptor_whose_path_now_leads_outside_the_preopen_still_acts_on_its_own_directory()
+{
     let root = fresh_root("identity_moved");
     let outside = root.parent().unwrap().join("outside");
     std::fs::create_dir(&outside).unwrap();
@@ -247,7 +248,8 @@ fn a_directory_descriptor_whose_path_was_moved_out_of_the_preopen_is_refused() {
     let before = std::fs::metadata(&outside).unwrap().modified().unwrap();
     let body = format!(
         "// open the directory d/sub, then make `d` the directory `e`, so the path the
-         // descriptor holds leads through a symlink to outside the root
+         // descriptor was opened from leads through a symlink to outside the root; the
+         // descriptor holds the directory itself, so it never acts on what that path leads to
          assert_eq!(inst.fs_mkdir(0, {D}), 0);
          assert_eq!(inst.fs_mkdir(0, {DSUB}), 0);
          assert_eq!(inst.fs_open(0, {DSUB}, 2, 1), 0);
@@ -255,8 +257,8 @@ fn a_directory_descriptor_whose_path_was_moved_out_of_the_preopen_is_refused() {
          assert_eq!(inst.fs_rmdir(0, {DSUB}), 0);
          assert_eq!(inst.fs_rmdir(0, {D}), 0);
          assert_eq!(inst.fs_rename(0, {E}, 0, {D}), 0);
-         assert_eq!(inst.fs_sync(sub), 100 + 31);
-         assert_eq!(inst.fs_set_times(sub), 100 + 31);"
+         assert_ne!(inst.fs_sync(sub), 100 + 31);
+         assert_ne!(inst.fs_set_times(sub), 100 + 31);"
     );
     assert_succeeded(&run(&root, &body));
     let after = std::fs::metadata(&outside).unwrap().modified().unwrap();
