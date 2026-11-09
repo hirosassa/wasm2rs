@@ -56,7 +56,7 @@ needs).
 | H1 ✅ | `fields`, `request-options`, `outgoing-request` (not its `body`, H3), drops; the `HttpClient` trait and builder method (no real client yet; the trait's shape may still change in H2). |
 | H2 | `outgoing-handler.handle`, `future-incoming-response` (thread, `Wait`), `incoming-response`, `incoming-body` (receive side), `http-error-code`. |
 | H3 | `outgoing-body` (send side), `future-trailers`, trailers. |
-| H4 | `ureq` client behind feature `http-client`; end-to-end tests against a loopback server. |
+| H4 ✅ | `ureq` client behind feature `http-client`; end-to-end tests against a loopback server. |
 | H5 | incoming: mint API, `outgoing-response`, `response-outparam`, `incoming-handler#handle` through `Exports`; tests with a `proxy`-world component. |
 
 Each phase updates the exemption in `wasip2_wit_regression.rs` and the README.

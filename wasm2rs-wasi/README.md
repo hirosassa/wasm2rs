@@ -32,3 +32,20 @@ Unset stdin, stdout and stderr are the process's. A given reader is read on a th
 starts when the guest first uses stdin; a given writer is flushed when the guest flushes, at
 `wasi:cli/exit` and when the host is dropped. Without the `os-random` feature (on by default)
 there is no default for `wasi:random/random`, so `random` is required.
+
+## HTTP client (feature `http-client`)
+
+`wasi:http` requests go through an `HttpClient` given with `.http_client(..)`. The feature
+`http-client` (off by default, so no extra dependency) adds `UreqClient`, one over
+[`ureq`](https://crates.io/crates/ureq); no `ureq` type is in the public API.
+
+```rust,ignore
+let host = WasiHost::builder().http_client(UreqClient::new()).build()?;
+```
+
+- Redirects are not followed: a 3xx reaches the guest. 4xx and 5xx are responses, not errors;
+  only a request without a response (connection, lookup, timeout) is an `HttpClientError`.
+- TLS follows `ureq`'s default: `https` uses rustls with the bundled webpki root certificates.
+  Bodies are not decompressed (`ureq`'s `gzip` feature is off).
+- `connect-timeout` and `first-byte-timeout` are applied as given. `ureq` cannot time out each
+  read, so `between-bytes-timeout` bounds the whole body instead, which is stricter.

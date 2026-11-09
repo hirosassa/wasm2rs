@@ -44,6 +44,10 @@ jobs:
       - name: Test wasm2rs-wasi without default features
         run: cargo test -p wasm2rs-wasi --no-default-features
 
+      # `UreqClient` (feature `http-client`, off by default) against a loopback server.
+      - name: Test wasm2rs-wasi with the http-client feature
+        run: cargo test -p wasm2rs-wasi --features http-client --test http_client
+
       # The Rust wasi-threads E2E test must run here, not skip (see
       # docs/wasi-threads-e2e.md). The wasi-sdk tests skip here; the
       # e2e-wasi-sdk job runs them.

@@ -14,9 +14,14 @@ default = ["os-random"]
 # The OS's CSPRNG (through `getrandom`) as the default source of `wasi:random/random`.
 # Without it a `RandomSource` must be given to the builder.
 os-random = ["dep:getrandom"]
+# `UreqClient`, an `HttpClient` over `ureq` (TLS through rustls, as `ureq` enables it by default).
+http-client = ["dep:ureq"]
 
 [dependencies]
 getrandom = { version = "0.4", optional = true }
+# 3.4.3 was published on 2026-10-21, more than two weeks before this was added. `gzip` is left
+# out: the guest must see the body as it came (with its `content-encoding`), not decoded.
+ureq = { version = "3.4.3", optional = true, default-features = false, features = ["rustls"] }
 
 # The root `[lints]` tables are not inherited by workspace members; the hardening
 # lints that this crate's host logic must satisfy are set here once it holds any.
