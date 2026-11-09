@@ -29,9 +29,14 @@ fn main() {
 }
 "#;
 
-/// Lays out a project whose `src/main.rs` includes `include_name`, and builds it. One target
-/// directory is shared by all projects so the dependencies compile once; the package name
-/// carries `tag` because cargo's artifact hash would otherwise be the same for both projects.
+/// Shared by all projects so the dependencies compile once.
+fn target_dir() -> PathBuf {
+    std::env::temp_dir().join("wasm2rs-include-target")
+}
+
+/// Lays out a project whose `src/main.rs` includes `include_name`, and builds it. The package
+/// name carries `tag` because cargo's artifact hash would otherwise be the same for both
+/// projects in the shared [`target_dir`].
 fn build_project(tag: &str, include_name: &str) -> (PathBuf, Output) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let dir = std::env::temp_dir().join(format!("wasm2rs-include-{}-{tag}", std::process::id()));
@@ -59,6 +64,8 @@ wasm2rs = {{ path = {root:?}, default-features = false }}
         root = root,
     );
     std::fs::write(dir.join("Cargo.toml"), manifest).unwrap();
+    // The workspace's lockfile covers every dependency here: the versions stay the pinned ones.
+    std::fs::copy(root.join("Cargo.lock"), dir.join("Cargo.lock")).unwrap();
     std::fs::write(dir.join("build.rs"), BUILD_RS).unwrap();
     std::fs::write(dir.join("assets/run.wasm"), component()).unwrap();
     std::fs::write(
@@ -68,11 +75,8 @@ wasm2rs = {{ path = {root:?}, default-features = false }}
     .unwrap();
     let out = Command::new(env!("CARGO"))
         .current_dir(&dir)
-        .args(["build", "--quiet"])
-        .env(
-            "CARGO_TARGET_DIR",
-            std::env::temp_dir().join("wasm2rs-include-target"),
-        )
+        .args(["build", "--quiet", "--offline"])
+        .env("CARGO_TARGET_DIR", target_dir())
         .output()
         .unwrap();
     (dir, out)
@@ -86,7 +90,7 @@ fn a_build_script_project_includes_and_runs_a_component() {
         "{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let bin = std::env::temp_dir().join("wasm2rs-include-target/debug/project-ok");
+    let bin = target_dir().join("debug/project-ok");
     let out = Command::new(bin).args(["hello"]).output().unwrap();
     // argv[0] is the binary, so `run` (which prints argv[1]) prints `hello`
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
