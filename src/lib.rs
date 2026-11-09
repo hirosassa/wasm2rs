@@ -6,15 +6,18 @@
 //! atomics and shared memory, multi-memory, tail calls, exception handling,
 //! GC, stack-switching continuations, and native WASI preview1 /
 //! wasi-threads. Entry points: [`transpile`], [`transpile_with_options`],
-//! [`transpile_split`] and [`transpile_split_with_options`].
+//! [`transpile_split`] and [`transpile_split_with_options`]; a component goes in through
+//! [`transpile_component`].
 
 pub mod build;
 mod codegen;
+mod component;
 mod dump;
 mod extract;
 mod wit;
 mod wit_abi;
 
+pub use component::{ComponentOptions, transpile_component};
 pub use dump::{ModuleSummary, dump};
 pub use extract::extract_core_modules;
 pub use wit::{
