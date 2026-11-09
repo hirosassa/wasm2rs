@@ -127,6 +127,15 @@ enum Exported {
     Instance { name: String, index: u32 },
 }
 
+/// A core module defined in the body of the component.
+#[derive(Clone)]
+struct TopModule {
+    /// Its index among the top-level core modules (not in the module index space, which an
+    /// export or an alias of a module also grows).
+    ordinal: usize,
+    exports: Vec<(String, ExternalKind)>,
+}
+
 /// The module or component being skipped through, with its nesting depth.
 struct Inner {
     depth: usize,
@@ -146,8 +155,11 @@ pub(super) struct Reader {
     core_memories: Vec<(u32, String)>,
     core_instances: Vec<CoreInstance>,
     instances: Vec<Instance>,
-    /// The exports of each top-level core module.
-    modules: Vec<Vec<(String, ExternalKind)>>,
+    /// The core module index space; `None` for a module that is not one of the top-level
+    /// core modules (an alias of an instance's export).
+    modules: Vec<Option<TopModule>>,
+    /// How many top-level core modules have been read.
+    top_modules: usize,
     components: Vec<Shim>,
     exported: Vec<Exported>,
     inner: Option<Inner>,
@@ -284,6 +296,11 @@ impl Reader {
                     .funcs
                     .push(Func::Other("an alias of an export of an instance")),
                 ComponentExternalKind::Instance => self.instances.push(Instance::Other),
+                ComponentExternalKind::Module => self.modules.push(None),
+                ComponentExternalKind::Component => self.components.push(Shim {
+                    opaque: true,
+                    ..Shim::default()
+                }),
                 _ => {}
             },
             ComponentAlias::CoreInstanceExport {
@@ -353,7 +370,13 @@ impl Reader {
                 inner.depth = inner.depth.saturating_sub(1);
                 if inner.depth == 0 {
                     match self.inner.take().map(|i| i.kind) {
-                        Some(InnerKind::Module(exports)) => self.modules.push(exports),
+                        Some(InnerKind::Module(exports)) => {
+                            self.modules.push(Some(TopModule {
+                                ordinal: self.top_modules,
+                                exports,
+                            }));
+                            self.top_modules = self.top_modules.saturating_add(1);
+                        }
                         Some(InnerKind::Component(b)) => self.components.push(b.shim),
                         None => {}
                     }
@@ -431,8 +454,11 @@ impl Reader {
         match index(at).and_then(|i| self.instances.get(i)) {
             Some(Instance::Exports(funcs)) => Ok(funcs.clone()),
             Some(Instance::Instantiated { component, args }) => {
-                let shim = self.components.get(*component);
-                let shim = shim.filter(|s| !s.opaque).ok_or_else(|| {
+                let shim = self
+                    .components
+                    .get(*component)
+                    .filter(|s| !s.opaque)
+                    .ok_or_else(|| {
                     unsupported(format!(
                         "export `{name}` is an instance of a nested component that does more than \
                          re-export its imports (nested component exports are not traced)"
@@ -487,7 +513,9 @@ impl Reader {
             .clone()
             .map_err(|what| unsupported(format!("{what} in function `{name}` of `{interface}`")))?;
 
-        let (module, core_export) = self.core_export(&label, lift.core_func, "function")?;
+        let ((module, instance), core_export) =
+            self.core_export(&label, lift.core_func, "function")?;
+        let core_module = self.top_module(&label, module)?.ordinal;
         let mut export = WitExport {
             func: WitFunc {
                 interface: interface.to_string(),
@@ -495,14 +523,13 @@ impl Reader {
                 params,
                 result,
             },
-            core_module: module.0,
+            core_module,
             core_export,
             memory: None,
             realloc: None,
             post_return: None,
             utf8: true,
         };
-        let instance = module.1;
         for option in &lift.options {
             match option {
                 CanonicalOption::UTF8 => {}
@@ -513,36 +540,21 @@ impl Reader {
                 }
                 CanonicalOption::Memory(i) => {
                     let found = index(*i).and_then(|i| self.core_memories.get(i));
-                    let name = match found {
-                        Some((from, name)) if *from == instance => name.clone(),
-                        _ => {
-                            return Err(unsupported(format!(
-                                "export `{label}`: its memory is not an export of the same core \
-                                 instance as the function"
-                            )));
-                        }
-                    };
-                    self.check_exists(&label, module.0, &name, ExternalKind::Memory)?;
-                    export.memory = Some(name);
-                }
-                CanonicalOption::Realloc(i) | CanonicalOption::PostReturn(i) => {
-                    let what = if matches!(option, CanonicalOption::Realloc(_)) {
-                        "realloc"
-                    } else {
-                        "post-return"
-                    };
-                    let (found, name) = self.core_export(&label, *i, what)?;
-                    if found.1 != instance {
+                    let Some((_, name)) = found.filter(|(from, _)| *from == instance) else {
                         return Err(unsupported(format!(
-                            "export `{label}`: its {what} is not an export of the same core \
+                            "export `{label}`: its memory is not an export of the same core \
                              instance as the function"
                         )));
-                    }
-                    if what == "realloc" {
-                        export.realloc = Some(name);
-                    } else {
-                        export.post_return = Some(name);
-                    }
+                    };
+                    self.check_exists(&label, module, name, ExternalKind::Memory)?;
+                    export.memory = Some(name.clone());
+                }
+                CanonicalOption::Realloc(i) => {
+                    export.realloc = Some(self.option_export(&label, *i, "realloc", instance)?);
+                }
+                CanonicalOption::PostReturn(i) => {
+                    export.post_return =
+                        Some(self.option_export(&label, *i, "post-return", instance)?);
                 }
                 CanonicalOption::Async
                 | CanonicalOption::Callback(_)
@@ -556,6 +568,25 @@ impl Reader {
             }
         }
         Ok(export)
+    }
+
+    /// The export name of the `what` option's core function `at`, which must come from
+    /// the same core instance as the lifted function.
+    fn option_export(
+        &self,
+        label: &str,
+        at: u32,
+        what: &str,
+        instance: u32,
+    ) -> Result<String, TranspileError> {
+        let ((_, from), name) = self.core_export(label, at, what)?;
+        if from != instance {
+            return Err(unsupported(format!(
+                "export `{label}`: its {what} is not an export of the same core instance as \
+                 the function"
+            )));
+        }
+        Ok(name)
     }
 
     /// The top-level module `(index, core instance)` and export name of core function `at`,
@@ -580,17 +611,29 @@ impl Reader {
                 )));
             }
         };
-        let module = match index(instance).and_then(|i| self.core_instances.get(i)) {
-            Some(CoreInstance::Module(m)) => *m,
-            _ => {
-                return Err(unsupported(format!(
-                    "export `{label}`: its {what} comes from a core instance made from exports \
-                     (a shim or adapter), not from instantiating a core module"
-                )));
-            }
+        let Some(&CoreInstance::Module(module)) =
+            index(instance).and_then(|i| self.core_instances.get(i))
+        else {
+            return Err(unsupported(format!(
+                "export `{label}`: its {what} comes from a core instance made from exports \
+                 (a shim or adapter), not from instantiating a core module"
+            )));
         };
         self.check_exists(label, module, name, ExternalKind::Func)?;
         Ok(((module, instance), name.clone()))
+    }
+
+    /// The top-level core module at `module` of the module index space.
+    fn top_module(&self, label: &str, module: usize) -> Result<&TopModule, TranspileError> {
+        self.modules
+            .get(module)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                unsupported(format!(
+                    "export `{label}`: its core instance is not an instantiation of a core \
+                     module defined in this component"
+                ))
+            })
     }
 
     /// The core module `module` must really export `name` as a `kind`.
@@ -602,9 +645,10 @@ impl Reader {
         kind: ExternalKind,
     ) -> Result<(), TranspileError> {
         let found = self
-            .modules
-            .get(module)
-            .is_some_and(|m| m.iter().any(|(n, k)| n == name && *k == kind));
+            .top_module(label, module)?
+            .exports
+            .iter()
+            .any(|(n, k)| n == name && *k == kind);
         if found {
             Ok(())
         } else {

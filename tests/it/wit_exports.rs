@@ -292,3 +292,40 @@ fn malformed_input_is_an_error_and_never_a_panic() {
         }
     }
 }
+
+#[test]
+fn core_module_counts_only_the_top_level_modules() {
+    // Re-exporting a module grows the module index space but is not a new core module.
+    let exports = exports_of(
+        r#"(component
+  (core module $a (func (export "f")))
+  (export "m" (core module $a))
+  (core module $b (func (export "f")))
+  (core instance $ib (instantiate 2))
+  (alias core export $ib "f" (core func $f))
+  (type $t (func))
+  (func $lf (type $t) (canon lift (core func $f)))
+  (export "go" (func $lf)))"#,
+    )
+    .unwrap();
+    assert_eq!(exports[0].core_module, 1);
+}
+
+#[test]
+fn a_module_aliased_from_an_instance_is_not_taken_for_a_top_level_module() {
+    let err = rejection(
+        r#"(component
+  (import "x" (instance $x (export "m" (core module (export "f" (func))))))
+  (alias export $x "m" (core module $im))
+  (core module $a (func (export "f")))
+  (core instance $i (instantiate $im))
+  (alias core export $i "f" (core func $f))
+  (type $t (func))
+  (func $lf (type $t) (canon lift (core func $f)))
+  (export "top" (func $lf)))"#,
+    );
+    assert!(
+        err.contains("`top`") && err.contains("core module"),
+        "{err}"
+    );
+}

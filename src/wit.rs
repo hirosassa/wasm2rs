@@ -696,9 +696,6 @@ fn read_component(
     let mut stack = vec![Scope::default()];
     let mut imports: Vec<(String, Arc<Instance>)> = Vec::new();
     let mut first = true;
-    // The resources whose `canon resource.drop` the component body lowers, whether it has
-    // a core module at the top level, and whether some drop could not be tied to a resource
-    // (or a nested component lowers some drop).
     let mut dropped: Vec<u32> = Vec::new();
     let mut has_core = false;
     let mut unmapped_drop = false;
