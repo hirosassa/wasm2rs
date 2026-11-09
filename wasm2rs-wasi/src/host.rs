@@ -221,6 +221,29 @@ impl WasiHost {
             .unwrap_or_else(|| http_missing("fields"))
     }
 
+    fn http_new_fields(&mut self, fields: http::HttpFields) -> Fields {
+        Fields(self.http_fields.insert(fields) as u32)
+    }
+
+    /// Takes over the `fields` handle's contents, for a constructor the guest gave it to.
+    fn http_take_fields(&mut self, h: Fields) -> http::HttpFields {
+        self.http_fields
+            .take(h.0 as usize)
+            .unwrap_or_else(|| http_missing("fields"))
+    }
+
+    /// A new `outgoing-body` and the handle its owner keeps; `too_large` is the `error-code`
+    /// of a body over `http_max_body`.
+    fn http_new_out_body(
+        &mut self,
+        too_large: fn(Option<u64>) -> HttpErrorCode,
+    ) -> (http::OutBodyHandle, OutgoingBody) {
+        let body = http::HttpOutgoingBody::new(self.http_max_body, too_large);
+        let handle = body.handle();
+        let slot = self.http_out_bodies.insert(body);
+        (handle, OutgoingBody(slot as u32))
+    }
+
     fn http_option(&self, h: RequestOptions) -> &http::HttpOptions {
         self.http_options
             .get(h.0 as usize)

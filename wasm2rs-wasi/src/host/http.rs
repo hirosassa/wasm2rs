@@ -513,8 +513,8 @@ struct OutBodyShared {
     state: Mutex<OutState>,
     changed: Condvar,
     limit: usize,
-    /// The body of a response (not a request): which `error-code` a body over the limit gets.
-    response: bool,
+    /// The `error-code` of a body over the limit: request or response body size.
+    too_large: fn(Option<u64>) -> ErrorCode,
 }
 
 /// The most a stream's `check-write` allows at once.
@@ -547,12 +547,7 @@ impl OutBodyHandle {
         state.check_not_failed()?;
         let size = state.bytes.len().saturating_add(contents.len());
         if size > self.0.limit {
-            let size = Some(size as u64);
-            let code = if self.0.response {
-                ErrorCode::HTTPResponseBodySize(size)
-            } else {
-                ErrorCode::HTTPRequestBodySize(size)
-            };
+            let code = (self.0.too_large)(Some(size as u64));
             self.settle(state, OutPhase::Failed(code.clone()));
             return Err(code);
         }
@@ -622,7 +617,7 @@ pub(super) struct HttpOutgoingBody {
 }
 
 impl HttpOutgoingBody {
-    pub(super) fn new(limit: usize, response: bool) -> Self {
+    pub(super) fn new(limit: usize, too_large: fn(Option<u64>) -> ErrorCode) -> Self {
         HttpOutgoingBody {
             handle: OutBodyHandle(Arc::new(OutBodyShared {
                 state: Mutex::new(OutState {
@@ -631,7 +626,7 @@ impl HttpOutgoingBody {
                 }),
                 changed: Condvar::new(),
                 limit,
-                response,
+                too_large,
             })),
             stream_taken: false,
         }

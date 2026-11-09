@@ -191,15 +191,22 @@ const PRELUDE: &str = r#"
   (data (i32.const 530) "accept")
 "#;
 
-/// The echo guest: the status is `200 + method case + 10 * scheme case`, the headers
-/// `x-path`, `x-auth` and `x-accept` carry the request's path-with-query, authority and first
-/// `accept`, and the body is the request's body.
-fn echo_guest() -> String {
+/// A guest module whose `handle` export has the body `handle`.
+fn guest(handle: &str) -> String {
     format!(
         r#"(module
   {PRELUDE}
   (func (export "wasi:http/incoming-handler@0.2.0#handle") (param $req i32) (param $out i32)
-    (local $mtag i32) (local $stag i32) (local $rh i32) (local $h i32) (local $resp i32)
+    {handle}))"#
+    )
+}
+
+/// The echo guest: the status is `200 + method case + 10 * scheme case`, the headers
+/// `x-path`, `x-auth` and `x-accept` carry the request's path-with-query, authority and first
+/// `accept`, and the body is the request's body.
+fn echo_guest() -> String {
+    guest(
+        r#"(local $mtag i32) (local $stag i32) (local $rh i32) (local $h i32) (local $resp i32)
     (local $body i32) (local $ostream i32) (local $inbody i32) (local $istream i32)
     (call $method (local.get $req) (i32.const 100))
     (local.set $mtag (i32.load8_u (i32.const 100)))
@@ -240,43 +247,44 @@ fn echo_guest() -> String {
     (call $drop_fields (local.get $rh))
     (call $drop_req (local.get $req))
     (call $set (local.get $out) (i32.const 0) (local.get $resp)
-      (i32.const 0) (i64.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))))"#
+      (i32.const 0) (i64.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))"#,
     )
 }
 
 /// A guest that gives the request and the outparam back without answering.
 fn silent_guest() -> String {
-    format!(
-        r#"(module
-  {PRELUDE}
-  (func (export "wasi:http/incoming-handler@0.2.0#handle") (param $req i32) (param $out i32)
-    (call $drop_req (local.get $req))
-    (call $drop_out (local.get $out))))"#
+    guest(
+        r#"(call $drop_req (local.get $req))
+    (call $drop_out (local.get $out))"#,
     )
 }
 
 /// A guest that answers with `error-code::connection-refused` (case 6).
 fn refusing_guest() -> String {
-    format!(
-        r#"(module
-  {PRELUDE}
-  (func (export "wasi:http/incoming-handler@0.2.0#handle") (param $req i32) (param $out i32)
-    (call $drop_req (local.get $req))
+    guest(
+        r#"(call $drop_req (local.get $req))
     (call $set (local.get $out) (i32.const 1) (i32.const 6)
-      (i32.const 0) (i64.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))))"#
+      (i32.const 0) (i64.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))"#,
     )
 }
 
-fn run(core: &str, body: &str) -> std::process::Output {
+/// Runs `core`'s `handle` on the request of `MINT_POST`, then `checks` (Rust with `host!()`
+/// and `out` in scope).
+fn run_handle(core: &str, checks: &str) -> std::process::Output {
+    let body = format!(
+        "{MINT_POST}
+    Exports::export_wasi_http_incoming_handler_0_2_0_handle(&mut inst, req, out);
+{checks}"
+    );
     run_exporting_program(
         &proxy_component(core),
         core,
         "WasiHost::new(Vec::new())",
-        body,
+        &body,
     )
 }
 
-/// The Rust that makes the request of the echo test.
+/// The Rust that makes the request every test hands to `handle`.
 const MINT_POST: &str = r#"
     macro_rules! host { () => { inst.imports.as_mut().unwrap().0 }; }
     use wasm2rs_wasi::wasi_http_types::{Method, Scheme};
@@ -294,43 +302,33 @@ const MINT_POST: &str = r#"
 
 #[test]
 fn the_guest_sees_the_request_and_its_response_comes_back() {
-    let body = format!(
-        r#"{MINT_POST}
-    Exports::export_wasi_http_incoming_handler_0_2_0_handle(&mut inst, req, out);
+    let checks = r#"
     let served = host!().take_response(out).unwrap().unwrap();
     // 200 + post (2) + https (1) * 10
     assert_eq!(served.status, 212);
-    let header = |name: &str| {{
+    let header = |name: &str| {
         served.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone())
-    }};
+    };
     assert_eq!(header("x-path"), Some(b"/items?id=7".to_vec()));
     assert_eq!(header("x-auth"), Some(b"example.com:8080".to_vec()));
     assert_eq!(header("x-accept"), Some(b"text/plain".to_vec()));
-    assert_eq!(served.body, b"hello".to_vec());"#
-    );
-    assert_succeeded(&run(&echo_guest(), &body));
+    assert_eq!(served.body, b"hello".to_vec());"#;
+    assert_succeeded(&run_handle(&echo_guest(), checks));
 }
 
 #[test]
 fn a_guest_that_does_not_answer_leaves_no_response() {
-    let body = format!(
-        r#"{MINT_POST}
-    Exports::export_wasi_http_incoming_handler_0_2_0_handle(&mut inst, req, out);
-    assert!(host!().take_response(out).is_none());"#
-    );
-    assert_succeeded(&run(&silent_guest(), &body));
+    let checks = "assert!(host!().take_response(out).is_none());";
+    assert_succeeded(&run_handle(&silent_guest(), checks));
 }
 
 #[test]
 fn an_error_the_guest_sets_is_returned() {
-    let body = format!(
-        r#"{MINT_POST}
-    Exports::export_wasi_http_incoming_handler_0_2_0_handle(&mut inst, req, out);
+    let checks = r#"
     let answer = host!().take_response(out).unwrap();
     assert_eq!(
         answer.unwrap_err(),
         wasm2rs_wasi::wasi_http_types::ErrorCode::ConnectionRefused
-    );"#
-    );
-    assert_succeeded(&run(&refusing_guest(), &body));
+    );"#;
+    assert_succeeded(&run_handle(&refusing_guest(), checks));
 }

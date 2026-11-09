@@ -58,7 +58,7 @@ impl Host for WasiHost {
     }
 
     fn wasi_http_types_constructor_fields(&mut self) -> Fields {
-        Fields(self.http_fields.insert(HttpFields::default()) as u32)
+        self.http_new_fields(HttpFields::default())
     }
 
     fn wasi_http_types_static_fields_from_list(
@@ -66,7 +66,7 @@ impl Host for WasiHost {
         entries: Vec<(String, Vec<u8>)>,
     ) -> Result<Fields, HeaderError> {
         let fields = HttpFields::from_list(entries)?;
-        Ok(Fields(self.http_fields.insert(fields) as u32))
+        Ok(self.http_new_fields(fields))
     }
 
     fn wasi_http_types_method_fields_get(&mut self, self_: Fields, name: String) -> Vec<Vec<u8>> {
@@ -110,13 +110,12 @@ impl Host for WasiHost {
     /// A clone is always mutable, even of the immutable fields of a request.
     fn wasi_http_types_method_fields_clone(&mut self, self_: Fields) -> Fields {
         let copy = self.http_fields(self_).copy(false);
-        Fields(self.http_fields.insert(copy) as u32)
+        self.http_new_fields(copy)
     }
 
     /// Takes over the `headers` handle's contents: the guest gave the resource away.
     fn wasi_http_types_constructor_outgoing_request(&mut self, headers: Fields) -> OutgoingRequest {
-        let fields = self.http_fields(headers).clone();
-        self.http_fields.remove(headers.0 as usize);
+        let fields = self.http_take_fields(headers);
         OutgoingRequest(self.http_requests.insert(HttpOutgoingRequest::new(fields)) as u32)
     }
 
@@ -128,11 +127,9 @@ impl Host for WasiHost {
         if self.http_request(self_).body.is_some() {
             return Err(());
         }
-        let body = http::HttpOutgoingBody::new(self.http_max_body, false);
-        let handle = body.handle();
-        let slot = self.http_out_bodies.insert(body);
+        let (handle, body) = self.http_new_out_body(HttpErrorCode::HTTPRequestBodySize);
         self.http_request_mut(self_).body = Some(handle);
-        Ok(OutgoingBody(slot as u32))
+        Ok(body)
     }
 
     /// The body's output stream (`HTTP_OUT_STREAM + slot`); it can be taken once.
@@ -198,7 +195,7 @@ impl Host for WasiHost {
         self_: IncomingRequest,
     ) -> Fields {
         let view = self.http_in_request(self_).headers.copy(true);
-        Fields(self.http_fields.insert(view) as u32)
+        self.http_new_fields(view)
     }
 
     /// The request's body, which can be taken once.
@@ -224,8 +221,7 @@ impl Host for WasiHost {
         &mut self,
         headers: Fields,
     ) -> OutgoingResponse {
-        let fields = self.http_fields(headers).clone();
-        self.http_fields.remove(headers.0 as usize);
+        let fields = self.http_take_fields(headers);
         OutgoingResponse(
             self.http_out_responses
                 .insert(HttpOutgoingResponse::new(fields)) as u32,
@@ -257,7 +253,7 @@ impl Host for WasiHost {
         self_: OutgoingResponse,
     ) -> Fields {
         let view = self.http_out_response(self_).headers.copy(true);
-        Fields(self.http_fields.insert(view) as u32)
+        self.http_new_fields(view)
     }
 
     /// The response's body, buffered until `take_response`; it can be asked for once.
@@ -268,11 +264,9 @@ impl Host for WasiHost {
         if self.http_out_response(self_).body.is_some() {
             return Err(());
         }
-        let body = http::HttpOutgoingBody::new(self.http_max_body, true);
-        let handle = body.handle();
-        let slot = self.http_out_bodies.insert(body);
+        let (handle, body) = self.http_new_out_body(HttpErrorCode::HTTPResponseBodySize);
         self.http_out_response_mut(self_).body = Some(handle);
-        Ok(OutgoingBody(slot as u32))
+        Ok(body)
     }
 
     /// Keeps the answer for `take_response`; the guest gave the response away.
@@ -389,7 +383,7 @@ impl Host for WasiHost {
         self_: OutgoingRequest,
     ) -> Fields {
         let view = self.http_request(self_).headers.copy(true);
-        Fields(self.http_fields.insert(view) as u32)
+        self.http_new_fields(view)
     }
 
     fn wasi_http_types_constructor_request_options(&mut self) -> RequestOptions {
@@ -498,7 +492,7 @@ impl Host for WasiHost {
         self_: IncomingResponse,
     ) -> Fields {
         let copy = self.http_response(self_).headers.copy(true);
-        Fields(self.http_fields.insert(copy) as u32)
+        self.http_new_fields(copy)
     }
 
     /// Starts reading the body on a thread; it can be consumed once.
