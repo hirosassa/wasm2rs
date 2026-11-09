@@ -39,6 +39,11 @@ jobs:
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The `os-random` feature (default) pulls in getrandom; without it a random source
+      # is required, which `tests/config.rs` checks.
+      - name: Test wasm2rs-wasi without default features
+        run: cargo test -p wasm2rs-wasi --no-default-features
+
       # The Rust wasi-threads E2E test must run here, not skip (see
       # docs/wasi-threads-e2e.md). The wasi-sdk tests skip here; the
       # e2e-wasi-sdk job runs them.

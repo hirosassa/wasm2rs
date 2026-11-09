@@ -2,13 +2,27 @@
 //! guest program is compiled.
 
 use std::path::PathBuf;
+use wasm2rs_wasi::wasi_clocks_wall_clock::Datetime;
 use wasm2rs_wasi::wasi_filesystem_types::{
     Descriptor, DescriptorFlags, ErrorCode as Fs, OpenFlags, PathFlags,
 };
 use wasm2rs_wasi::wasi_sockets_network::{
     ErrorCode as Net, IpSocketAddress, Ipv4SocketAddress, Network,
 };
-use wasm2rs_wasi::{Access, ConfigError, Host, NetworkPolicy, WasiHost};
+use wasm2rs_wasi::{
+    Access, Clock, ConfigError, Host, InsecureRandom, NetworkPolicy, RandomError, RandomSource,
+    WasiHost, WasiHostBuilder,
+};
+
+/// The builder, with a random source when the feature that provides a default is off.
+fn builder() -> WasiHostBuilder {
+    let builder = WasiHost::builder();
+    if cfg!(feature = "os-random") {
+        builder
+    } else {
+        builder.random(Fixed(0))
+    }
+}
 
 fn scratch(name: &str) -> PathBuf {
     let dir =
@@ -20,7 +34,7 @@ fn scratch(name: &str) -> PathBuf {
 
 #[test]
 fn arguments_environment_and_cwd_are_set_by_the_builder() {
-    let mut host = WasiHost::builder()
+    let mut host = builder()
         .arguments(vec!["prog".into(), "-v".into()])
         .environment(vec![("K".into(), "V".into())])
         .initial_cwd(Some("/work".into()))
@@ -39,7 +53,7 @@ fn arguments_environment_and_cwd_are_set_by_the_builder() {
 
 #[test]
 fn defaults_have_no_preopen_and_no_cwd() {
-    let mut host = WasiHost::builder().build().unwrap();
+    let mut host = builder().build().unwrap();
     assert!(host.wasi_filesystem_preopens_get_directories().is_empty());
     assert_eq!(host.wasi_cli_environment_initial_cwd(), None);
 }
@@ -47,7 +61,7 @@ fn defaults_have_no_preopen_and_no_cwd() {
 #[test]
 fn the_default_cwd_is_the_preopen_named_slash() {
     let dir = scratch("cwd");
-    let mut host = WasiHost::builder()
+    let mut host = builder()
         .preopen("/", &dir, Access::ReadOnly)
         .build()
         .unwrap();
@@ -55,12 +69,12 @@ fn the_default_cwd_is_the_preopen_named_slash() {
         host.wasi_cli_environment_initial_cwd().as_deref(),
         Some("/")
     );
-    let mut host = WasiHost::builder()
+    let mut host = builder()
         .preopen("data", &dir, Access::ReadOnly)
         .build()
         .unwrap();
     assert_eq!(host.wasi_cli_environment_initial_cwd(), None);
-    let mut host = WasiHost::builder()
+    let mut host = builder()
         .preopen("/", &dir, Access::ReadOnly)
         .initial_cwd(None)
         .build()
@@ -71,7 +85,7 @@ fn the_default_cwd_is_the_preopen_named_slash() {
 #[test]
 fn a_missing_preopen_directory_is_an_error_not_a_panic() {
     let missing = scratch("missing").join("nope");
-    let err = WasiHost::builder()
+    let err = builder()
         .preopen("/", &missing, Access::ReadOnly)
         .build()
         .err()
@@ -83,7 +97,7 @@ fn a_missing_preopen_directory_is_an_error_not_a_panic() {
 fn a_file_is_not_a_preopen_directory() {
     let dir = scratch("file");
     std::fs::write(dir.join("f"), b"x").unwrap();
-    let err = WasiHost::builder()
+    let err = builder()
         .preopen("/", dir.join("f"), Access::ReadOnly)
         .build()
         .err()
@@ -94,7 +108,7 @@ fn a_file_is_not_a_preopen_directory() {
 #[test]
 fn duplicate_and_empty_guest_names_are_errors() {
     let dir = scratch("dup");
-    let err = WasiHost::builder()
+    let err = builder()
         .preopen("a", &dir, Access::ReadOnly)
         .preopen("a", &dir, Access::ReadWrite)
         .build()
@@ -104,7 +118,7 @@ fn duplicate_and_empty_guest_names_are_errors() {
         matches!(err, ConfigError::DuplicatePreopen(ref n) if n == "a"),
         "{err}"
     );
-    let err = WasiHost::builder()
+    let err = builder()
         .preopen("", &dir, Access::ReadOnly)
         .build()
         .err()
@@ -117,7 +131,7 @@ fn several_preopens_have_their_own_name_root_and_access() {
     let ro = scratch("ro");
     let rw = scratch("rw");
     std::fs::write(ro.join("only-in-ro"), b"r").unwrap();
-    let mut host = WasiHost::builder()
+    let mut host = builder()
         .preopen("ro", &ro, Access::ReadOnly)
         .preopen("rw", &rw, Access::ReadWrite)
         .build()
@@ -184,7 +198,7 @@ fn rename_across_preopens_needs_both_writable() {
     let ro = scratch("xro");
     let rw = scratch("xrw");
     std::fs::write(rw.join("f"), b"x").unwrap();
-    let mut host = WasiHost::builder()
+    let mut host = builder()
         .preopen("ro", &ro, Access::ReadOnly)
         .preopen("rw", &rw, Access::ReadWrite)
         .build()
@@ -225,36 +239,27 @@ fn bind(host: &mut WasiHost, addr: IpSocketAddress) -> Result<(), Net> {
 
 #[test]
 fn network_policy_decides_which_addresses_are_allowed() {
-    let mut none = WasiHost::builder()
-        .network(NetworkPolicy::None)
-        .build()
-        .unwrap();
+    let mut none = builder().network(NetworkPolicy::None).build().unwrap();
     assert_eq!(bind(&mut none, loopback(0)), Err(Net::AccessDenied));
     assert_eq!(bind(&mut none, outside(0)), Err(Net::AccessDenied));
 
-    let mut lo = WasiHost::builder()
-        .network(NetworkPolicy::Loopback)
-        .build()
-        .unwrap();
+    let mut lo = builder().network(NetworkPolicy::Loopback).build().unwrap();
     assert_eq!(bind(&mut lo, loopback(0)), Ok(()));
     assert_eq!(bind(&mut lo, outside(0)), Err(Net::AccessDenied));
 
     // the default is loopback only
-    let mut default = WasiHost::builder().build().unwrap();
+    let mut default = builder().build().unwrap();
     assert_eq!(bind(&mut default, outside(0)), Err(Net::AccessDenied));
 
     // external passes the policy check; 192.0.2.1 is not ours, so the OS refuses later
-    let mut ext = WasiHost::builder()
-        .network(NetworkPolicy::External)
-        .build()
-        .unwrap();
+    let mut ext = builder().network(NetworkPolicy::External).build().unwrap();
     assert_ne!(bind(&mut ext, outside(0)), Err(Net::AccessDenied));
 }
 
 #[test]
 fn name_lookup_outside_localhost_needs_external() {
     for policy in [NetworkPolicy::None, NetworkPolicy::Loopback] {
-        let mut host = WasiHost::builder().network(policy).build().unwrap();
+        let mut host = builder().network(policy).build().unwrap();
         assert_eq!(
             host.wasi_sockets_ip_name_lookup_resolve_addresses(
                 Network(0),
@@ -294,4 +299,166 @@ fn the_legacy_constructors_are_the_builder() {
 fn the_legacy_with_preopen_still_panics_on_a_missing_directory() {
     let missing = scratch("legacy-missing").join("nope");
     let _ = WasiHost::new(Vec::new()).with_preopen(missing);
+}
+
+/// A clock that never moves.
+struct FrozenClock;
+
+impl Clock for FrozenClock {
+    fn monotonic_now(&self) -> u64 {
+        5_000
+    }
+    fn monotonic_resolution(&self) -> u64 {
+        7
+    }
+    fn wall_now(&self) -> Datetime {
+        Datetime {
+            seconds: 1_000,
+            nanoseconds: 2,
+        }
+    }
+    fn wall_resolution(&self) -> Datetime {
+        Datetime {
+            seconds: 0,
+            nanoseconds: 3,
+        }
+    }
+}
+
+#[test]
+fn an_injected_clock_gives_now_and_resolution() {
+    let mut host = builder()
+        .clock(FrozenClock)
+        .random(Fixed(0))
+        .build()
+        .unwrap();
+    assert_eq!(host.wasi_clocks_monotonic_clock_now(), 5_000);
+    assert_eq!(host.wasi_clocks_monotonic_clock_resolution(), 7);
+    assert_eq!(
+        host.wasi_clocks_wall_clock_now(),
+        Datetime {
+            seconds: 1_000,
+            nanoseconds: 2
+        }
+    );
+    assert_eq!(
+        host.wasi_clocks_wall_clock_resolution(),
+        Datetime {
+            seconds: 0,
+            nanoseconds: 3
+        }
+    );
+}
+
+#[test]
+fn waits_stay_in_real_time_whatever_the_clock_says() {
+    let mut host = builder()
+        .clock(FrozenClock)
+        .random(Fixed(0))
+        .build()
+        .unwrap();
+    // an instant at or before the clock's now is ready at once
+    let past = host.wasi_clocks_monotonic_clock_subscribe_instant(5_000);
+    assert!(host.wasi_io_poll_method_pollable_ready(past));
+    // the frozen clock never reaches this one, and the wait is not shortened by it
+    let later = host.wasi_clocks_monotonic_clock_subscribe_instant(5_000 + 3_600_000_000_000);
+    assert!(!host.wasi_io_poll_method_pollable_ready(later));
+}
+
+#[test]
+fn the_default_clock_is_the_system_one() {
+    let mut host = builder().random(Fixed(0)).build().unwrap();
+    let a = host.wasi_clocks_monotonic_clock_now();
+    let b = host.wasi_clocks_monotonic_clock_now();
+    assert!(b >= a);
+    assert!(host.wasi_clocks_wall_clock_now().seconds > 1_600_000_000);
+    assert_eq!(host.wasi_clocks_monotonic_clock_resolution(), 1);
+}
+
+/// Every secure byte is the same value; the insecure generator is a constant.
+struct Fixed(u8);
+
+impl RandomSource for Fixed {
+    fn fill_random(&mut self, buf: &mut [u8]) -> Result<(), RandomError> {
+        buf.fill(self.0);
+        Ok(())
+    }
+    fn insecure_u64(&mut self) -> u64 {
+        42
+    }
+    fn insecure_seed(&mut self) -> (u64, u64) {
+        (1, 2)
+    }
+}
+
+#[test]
+fn an_injected_random_source_is_what_the_guest_sees() {
+    let mut host = builder().random(Fixed(0xAB)).build().unwrap();
+    assert_eq!(host.wasi_random_random_get_random_bytes(3), [0xAB; 3]);
+    assert_eq!(
+        host.wasi_random_random_get_random_u64(),
+        0xABAB_ABAB_ABAB_ABAB
+    );
+    assert_eq!(host.wasi_random_insecure_get_insecure_random_u64(), 42);
+    assert_eq!(host.wasi_random_insecure_seed_insecure_seed(), (1, 2));
+    assert_eq!(
+        host.wasi_random_insecure_get_insecure_random_bytes(10),
+        [42u64.to_le_bytes().as_slice(), &[42, 0]].concat()
+    );
+}
+
+#[test]
+#[should_panic(expected = "random bytes: length over 64 MiB")]
+fn the_random_length_limit_still_traps() {
+    let mut host = builder().random(Fixed(0)).build().unwrap();
+    host.wasi_random_random_get_random_bytes((64 << 20) + 1);
+}
+
+struct Failing;
+
+impl RandomSource for Failing {
+    fn fill_random(&mut self, _: &mut [u8]) -> Result<(), RandomError> {
+        Err(RandomError::new("entropy pool unavailable"))
+    }
+    fn insecure_u64(&mut self) -> u64 {
+        0
+    }
+    fn insecure_seed(&mut self) -> (u64, u64) {
+        (0, 0)
+    }
+}
+
+#[test]
+#[should_panic(expected = "the random source failed: entropy pool unavailable")]
+fn a_failing_secure_source_traps_instead_of_returning_weak_bytes() {
+    let mut host = builder().random(Failing).build().unwrap();
+    host.wasi_random_random_get_random_u64();
+}
+
+#[test]
+fn the_insecure_generator_is_deterministic_per_seed() {
+    let mut a = InsecureRandom::new(7);
+    let mut b = InsecureRandom::new(7);
+    assert_eq!(a.next_u64(), b.next_u64());
+    assert_ne!(a.next_u64(), InsecureRandom::new(8).next_u64());
+}
+
+#[cfg(feature = "os-random")]
+#[test]
+fn the_default_random_source_is_the_os_one() {
+    let mut host = builder().build().unwrap();
+    let a = host.wasi_random_random_get_random_bytes(32);
+    let b = host.wasi_random_random_get_random_bytes(32);
+    assert_eq!((a.len(), b.len()), (32, 32));
+    assert_ne!(a, b);
+    assert_ne!(a, [0; 32]);
+    assert!(host.wasi_random_random_get_random_bytes(0).is_empty());
+}
+
+#[cfg(not(feature = "os-random"))]
+#[test]
+fn without_os_random_a_source_is_required() {
+    let err = WasiHost::builder().build().err().unwrap();
+    assert!(matches!(err, ConfigError::MissingRandomSource), "{err}");
+    assert!(WasiHost::builder().random(Fixed(0)).build().is_ok());
 }

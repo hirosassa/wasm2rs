@@ -9,6 +9,15 @@ readme = "README.md"
 keywords = ["webassembly", "wasm", "wasi"]
 categories = ["wasm"]
 
+[features]
+default = ["os-random"]
+# The OS's CSPRNG (through `getrandom`) as the default source of `wasi:random/random`.
+# Without it a `RandomSource` must be given to the builder.
+os-random = ["dep:getrandom"]
+
+[dependencies]
+getrandom = { version = "0.4", optional = true }
+
 # The root `[lints]` tables are not inherited by workspace members; the hardening
 # lints that this crate's host logic must satisfy are set here once it holds any.
 [lints.rust]

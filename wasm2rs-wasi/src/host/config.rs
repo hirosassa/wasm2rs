@@ -1,6 +1,6 @@
 //! Configuration of a [`WasiHost`]: [`WasiHostBuilder`] and the types it takes.
 
-use super::{OpenDescriptor, Preopen, WasiHost};
+use super::{Clock, OpenDescriptor, Preopen, RandomSource, WasiHost};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -40,6 +40,8 @@ pub enum ConfigError {
     DuplicatePreopen(String),
     /// A preopen's guest name is empty.
     EmptyPreopenName,
+    /// No [`RandomSource`] was given and the `os-random` feature (the default one) is off.
+    MissingRandomSource,
 }
 
 impl fmt::Display for ConfigError {
@@ -55,6 +57,9 @@ impl fmt::Display for ConfigError {
                 write!(f, "two preopens are named {name:?}")
             }
             ConfigError::EmptyPreopenName => f.write_str("a preopen has an empty guest name"),
+            ConfigError::MissingRandomSource => f.write_str(
+                "no random source: give one to the builder or enable the `os-random` feature",
+            ),
         }
     }
 }
@@ -69,13 +74,15 @@ impl std::error::Error for ConfigError {
 }
 
 /// Builds a [`WasiHost`]; see [`WasiHost::builder`].
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct WasiHostBuilder {
     args: Vec<String>,
     env: Vec<(String, String)>,
     cwd: Option<Option<String>>,
     preopens: Vec<(String, PathBuf, Access)>,
     network: NetworkPolicy,
+    clock: Option<Box<dyn Clock>>,
+    random: Option<Box<dyn RandomSource>>,
 }
 
 impl WasiHostBuilder {
@@ -119,11 +126,33 @@ impl WasiHostBuilder {
         self
     }
 
+    /// The time source (the system's by default). See [`Clock`] for what it does not affect.
+    pub fn clock(mut self, clock: impl Clock + 'static) -> Self {
+        self.clock = Some(Box::new(clock));
+        self
+    }
+
+    /// The source of `wasi:random`. Without this call the OS's is used if the `os-random`
+    /// feature is on; with the feature off, `build` fails.
+    pub fn random(mut self, random: impl RandomSource + 'static) -> Self {
+        self.random = Some(Box::new(random));
+        self
+    }
+
     /// The host, or why the configuration is not valid.
     pub fn build(self) -> Result<WasiHost, ConfigError> {
         let mut host = WasiHost::new(self.env).with_arguments(self.args);
         host.cwd = self.cwd;
         host.network = self.network;
+        if let Some(clock) = self.clock {
+            host.clock = clock;
+        }
+        if let Some(random) = self.random {
+            host.random = Some(random);
+        }
+        if host.random.is_none() {
+            return Err(ConfigError::MissingRandomSource);
+        }
         for (guest_name, host_path, access) in self.preopens {
             host.add_preopen(guest_name, host_path, access)?;
         }
