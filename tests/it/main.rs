@@ -142,6 +142,7 @@ mod wasip2_typed_udp;
 mod wasip2_wit_regression;
 mod wit_exports;
 mod wit_glue;
+mod wit_glue_exports;
 mod wit_glue_memory;
 mod wit_host;
 mod wit_qualified;

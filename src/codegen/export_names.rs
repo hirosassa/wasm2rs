@@ -126,7 +126,7 @@ pub(super) fn is_reserved(name: &str) -> bool {
 /// identifier, in order. A keyword or generated-member clash appends `_` (or, for
 /// a reserved prefix, prepends `export_`); a name already handed out appends
 /// `_{function index}`.
-pub(super) fn assign<'a>(exports: impl IntoIterator<Item = (&'a str, u32)>) -> Vec<String> {
+pub(crate) fn assign<'a>(exports: impl IntoIterator<Item = (&'a str, u32)>) -> Vec<String> {
     assign_with(
         exports.into_iter().map(|(n, i)| (sanitize(n), i)),
         is_reserved,

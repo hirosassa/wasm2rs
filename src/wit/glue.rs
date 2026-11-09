@@ -24,8 +24,12 @@
 
 use std::fmt::Write as _;
 
-use super::{Records, WitFunc, WitType, case_idents, flags_int, unique_idents, unsupported};
+use super::{
+    Records, WitExport, WitFunc, WitType, case_idents, doc_text, flags_int, typed_signature,
+    unique_idents, unsupported,
+};
 use crate::TranspileError;
+use crate::codegen::assign_export_names;
 use crate::wit_abi::{
     Budget, Flat, core_signature, field_offsets, flatten, needs_memory, record_layout, size_align,
     variant_layout,
@@ -514,8 +518,7 @@ impl Gen<'_> {
 
     /// Statements storing the flat form of the Rust expression `value` of type `ty` into
     /// `out[base..]` (which starts zeroed, so the slots a variant case leaves unused stay 0).
-    /// Only for types without a `string` or `list`: a result that holds one is returned
-    /// through memory.
+    /// A `string` or `list` is allocated in the guest, so `g` must be in scope.
     fn lower(&mut self, ty: &WitType, value: &str, base: usize) -> Result<String, TranspileError> {
         self.budget.spend()?;
         if matches!(ty, WitType::Enum(_)) {
@@ -579,11 +582,38 @@ impl Gen<'_> {
                 }
                 format!("{{ let v = {value}; {body}}}")
             }
-            // `check` never lets these reach the flat lower.
-            WitType::String | WitType::List(_) => {
-                return Err(unsupported(
-                    "glue: a string or list reached the flat lower".to_string(),
-                ));
+            // Only a lowered parameter of an export gets here: an import's result that holds a
+            // `string` or `list` is returned through memory (`store`).
+            WitType::String => {
+                self.allocates = true;
+                self.writes_memory = true;
+                let next = base.saturating_add(1);
+                format!(
+                    "{{ let v = {value}; let b = v.as_bytes(); \
+                     let p = glue_alloc::alloc(g, 1, b.len() as u64, 1); glue_mem::st(g, p, b); \
+                     out[{base}] = p; out[{next}] = b.len() as u64; }}"
+                )
+            }
+            WitType::List(t) => {
+                self.allocates = true;
+                self.writes_memory = true;
+                let next = base.saturating_add(1);
+                if matches!(**t, WitType::U8) {
+                    return Ok(format!(
+                        "{{ let v = {value}; let p = glue_alloc::alloc(g, 1, v.len() as u64, 1); \
+                         glue_mem::st(g, p, &v); out[{base}] = p; out[{next}] = v.len() as u64; }}"
+                    ));
+                }
+                let (size, align) = self.layout(t)?;
+                let id = self.fresh();
+                let elem_at = format!("(p{id} + (i{id} as u64) * {size})");
+                let elem = self.store(t, &format!("x{id}"), &elem_at)?;
+                format!(
+                    "{{ let v{id} = {value}; let n{id} = v{id}.len() as u64; \
+                     let p{id} = glue_alloc::alloc(g, {align}, n{id}, {size}); \
+                     for (i{id}, x{id}) in v{id}.into_iter().enumerate() {{ {elem} }} \
+                     out[{base}] = p{id}; out[{next}] = n{id}; }}"
+                )
             }
             _ => String::new(),
         })
@@ -703,7 +733,8 @@ fn offset_expr(at: &str, offset: u64) -> String {
 }
 
 /// Appends the glue to `out`: the helpers, `Glue` and its `Imports` impl, one method per
-/// function of `funcs` (named `names[i]`, like the `Host` method).
+/// function of `funcs` (named `names[i]`, like the `Host` method), and with `exports` the
+/// `Exports` trait and its impl (see [`write_exports`]).
 ///
 /// # Errors
 ///
@@ -713,6 +744,7 @@ pub(super) fn write(
     funcs: &[WitFunc],
     names: &[String],
     records: &Records,
+    exports: Option<(&[WitExport], &[String])>,
 ) -> Result<(), TranspileError> {
     let mut sig_budget = Budget::new();
     let mut gen_ = Gen {
@@ -815,11 +847,204 @@ pub(super) fn write(
         out.push_str("    }\n");
     }
     out.push_str("}\n");
+    if let Some((exports, export_names)) = exports {
+        write_exports(out, &mut gen_, exports, export_names)?;
+    }
     if gen_.writes_memory {
         out.push_str(MEM_HELPERS);
     }
     if gen_.allocates {
         out.push_str(ALLOC_HELPERS);
     }
+    Ok(())
+}
+
+/// The core module's `realloc` export the glue's allocation helper calls.
+const REALLOC: &str = "cabi_realloc";
+
+/// The `named_exports` method of `Instance` calling the core export `core_export`.
+fn export_method(core_export: &str) -> Option<String> {
+    assign_export_names([(core_export, 0)]).into_iter().next()
+}
+
+/// Appends `pub trait Exports` (one method per export, named `export_names[i]`) and
+/// `impl<H: Host> Exports for Instance<Glue<H>>`: the import direction mirrored. Each method
+/// lowers its parameters (`lower`, or `store` into a record when they do not fit the flat
+/// limit), calls the core export, lifts the result (`lift`) and then calls the lift's
+/// `post-return`.
+///
+/// # Errors
+///
+/// A type that expands past the node budget, or a function that allocates in the guest
+/// through a `realloc` other than `cabi_realloc` (the allocation helper's).
+fn write_exports(
+    out: &mut String,
+    gen_: &mut Gen<'_>,
+    exports: &[WitExport],
+    export_names: &[String],
+) -> Result<(), TranspileError> {
+    out.push_str(
+        "\n/// Typed calls of the functions the component exports: the host lowers the arguments\n\
+         /// and lifts the result (canonical ABI). A guest trap is a panic.\n\
+         pub trait Exports {\n",
+    );
+    for (e, name) in exports.iter().zip(export_names) {
+        let f = &e.func;
+        let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
+        let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
+        let sig = typed_signature(gen_.records, name, f, &idents)?;
+        let _ = writeln!(out, "{sig};");
+    }
+    out.push_str(
+        "}\n\n#[allow(unused_variables, unused_parens, unused_mut)]\n\
+         impl<H: Host> Exports for Instance<Glue<H>> {\n",
+    );
+    let mut forwarders = String::new();
+    for (e, name) in exports.iter().zip(export_names) {
+        write_export(out, &mut forwarders, gen_, e, name)?;
+    }
+    out.push_str("}\n");
+    // `Exports` is not in scope here, so a core export the transpiled `Instance` lacks under
+    // this name is a compile error, not a call of the trait method itself.
+    let _ = write!(
+        out,
+        "\nmod glue_core {{\n    use super::{{Glue, Host, Instance}};\n{forwarders}}}\n"
+    );
+    Ok(())
+}
+
+/// One method of the `Exports` impl, and its forwarder to the core export of the same name
+/// (the `named_exports` method of `Instance`) in `forwarders`.
+fn write_export(
+    out: &mut String,
+    forwarders: &mut String,
+    gen_: &mut Gen<'_>,
+    e: &WitExport,
+    name: &str,
+) -> Result<(), TranspileError> {
+    let f = &e.func;
+    let mut sig_budget = Budget::new();
+    let sig = core_signature(f, &mut sig_budget)?;
+    // Lifting differs from lowering for the result: it is the pointer the core function
+    // returns, not an extra parameter.
+    let mut core_params = sig.params.clone();
+    let result_flat = if sig.result_in_memory {
+        core_params.pop();
+        Some(Flat::I32)
+    } else {
+        sig.results.first().copied()
+    };
+    let tys: Vec<&WitType> = f.params.iter().map(|(_, t)| t).collect();
+    let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
+
+    let head = typed_signature(gen_.records, name, f, &idents)?;
+    let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
+    let _ = writeln!(out, "{head} {{");
+    let _ = writeln!(out, "        let g = self;");
+
+    let allocated_before = std::mem::replace(&mut gen_.allocates, false);
+    let args = if sig.params_in_memory {
+        let mut fields = Vec::new();
+        for t in &tys {
+            fields.push(gen_.layout(t)?);
+        }
+        let (size, align) = record_layout(&fields);
+        gen_.allocates = true;
+        gen_.writes_memory = true;
+        let _ = writeln!(
+            out,
+            "        let at = glue_alloc::alloc(g, {align}, 1, {size});"
+        );
+        let offsets = field_offsets(&tys, &mut gen_.budget)?;
+        for ((ty, ident), off) in tys.iter().zip(&idents).zip(offsets) {
+            let _ = writeln!(
+                out,
+                "        {}",
+                gen_.store(ty, ident, &offset_expr("at", off))?
+            );
+        }
+        vec!["at as u32 as i32".to_string()]
+    } else {
+        if !core_params.is_empty() {
+            let _ = writeln!(out, "        let mut out = [0u64; {}];", core_params.len());
+        }
+        let mut base = 0usize;
+        for (ty, ident) in tys.iter().zip(&idents) {
+            let _ = writeln!(out, "        {}", gen_.lower(ty, ident, base)?);
+            base = base.saturating_add(gen_.flat_len(ty)?);
+        }
+        core_params
+            .iter()
+            .enumerate()
+            .map(|(i, flat)| from_slot(*flat, &format!("out[{i}]")))
+            .collect()
+    };
+    let allocates = std::mem::replace(&mut gen_.allocates, allocated_before);
+    gen_.allocates |= allocates;
+    let realloc = e.realloc.as_deref().and_then(export_method);
+    if allocates && realloc.as_deref() != Some(REALLOC) {
+        return Err(unsupported(format!(
+            "export `{}`: allocating guest memory needs the lift's realloc to be \
+             `{REALLOC}` (the lift names {})",
+            e.core_export,
+            realloc.map_or_else(|| "none".to_string(), |i| format!("`{i}`")),
+        )));
+    }
+
+    let post = e.post_return.as_deref().and_then(export_method);
+    let mut forwarder = format!("    pub fn {name}<H: Host>(g: &mut Instance<Glue<H>>");
+    let mut forwarded = Vec::new();
+    for (i, flat) in core_params.iter().enumerate() {
+        let _ = write!(forwarder, ", p{i}: {}", core_rust(*flat));
+        forwarded.push(format!("p{i}"));
+    }
+    forwarder.push(')');
+    if let Some(flat) = result_flat {
+        let _ = write!(forwarder, " -> {}", core_rust(flat));
+    }
+    let _ = writeln!(forwarder, " {{ g.{name}({}) }}", forwarded.join(", "));
+    forwarders.push_str(&forwarder);
+    let call = format!("glue_core::{name}(g, {})", args.join(", "));
+    let post_call = |arg: &str| {
+        post.as_ref()
+            .map(|p| format!("        g.{p}({arg});\n"))
+            .unwrap_or_default()
+    };
+    match (&f.result, result_flat) {
+        (None, _) => {
+            let _ = writeln!(out, "        {call};");
+            out.push_str(&post_call(""));
+        }
+        (Some(ty), Some(flat)) => {
+            let _ = writeln!(out, "        let r = {call};");
+            if sig.result_in_memory {
+                let (size, align) = gen_.layout(ty)?;
+                let _ = writeln!(out, "        let at = u64::from(r as u32);");
+                let _ = writeln!(out, "        let m: &[u8] = g.memory();");
+                let _ = writeln!(
+                    out,
+                    "        glue_abi::check(m.len(), at, {size}, {align});"
+                );
+                let _ = writeln!(out, "        let lb = glue_abi::Budget::new(m.len());");
+                let lifted = gen_.lift(ty, &Src::Mem("at".to_string()))?;
+                let _ = writeln!(out, "        let v = {lifted};");
+            } else {
+                let _ = writeln!(out, "        let s = [{}];", to_slot(flat, "r"));
+                let lifted = gen_.lift(ty, &Src::Flat(0))?;
+                let _ = writeln!(out, "        let v = {lifted};");
+            }
+            out.push_str(&post_call("r"));
+            out.push_str("        v\n");
+        }
+        // A result with no core value (an empty record or flags): nothing to read.
+        (Some(ty), None) => {
+            let _ = writeln!(out, "        {call};");
+            let lifted = gen_.lift(ty, &Src::Flat(0))?;
+            let _ = writeln!(out, "        let v = {lifted};");
+            out.push_str(&post_call(""));
+            out.push_str("        v\n");
+        }
+    }
+    out.push_str("    }\n");
     Ok(())
 }
