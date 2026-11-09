@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `wasm2rs-wasi`: `wasi:http/types` `fields`, `request-options` and the parts of `outgoing-request`
   (method, path-with-query, scheme, authority, headers), and the `HttpClient` trait with
   `WasiHostBuilder::http_client` (stored only; `outgoing-handler.handle` and bodies are still to come).
+- `wasm2rs-wasi`: the incoming side of `wasi:http` (a guest exporting `incoming-handler#handle`):
+  `incoming-request`, `outgoing-response` and `response-outparam`, with `WasiHost::new_incoming_request`,
+  `new_response_outparam` and `take_response` (the answer as `ServedResponse`, read once `handle`
+  returns; no streaming, no trailers). `WasiHost` now overrides every method of the WASI 0.2.0 surface.
 
 ### Changed
 - `examples/wasip2_run.rs` links the `wasm2rs-wasi` rlib instead of embedding the host source; a

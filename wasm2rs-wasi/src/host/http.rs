@@ -1,6 +1,6 @@
-//! The state and validation behind the `wasi:http/types` resources `fields`, `request-options`
-//! and `outgoing-request`, and the threads behind `future-incoming-response` and
-//! `incoming-body`, and the buffer behind `outgoing-body`.
+//! The state and validation behind the `wasi:http/types` resources `fields`, `request-options`,
+//! `outgoing-request`, `incoming-request` and `outgoing-response`, and the threads behind
+//! `future-incoming-response` and `incoming-body`, and the buffer behind `outgoing-body`.
 
 use super::NetworkPolicy;
 use super::sources::{HttpClient, HttpClientError, HttpRequest, HttpResponse};
@@ -209,6 +209,88 @@ impl HttpOutgoingRequest {
             body: None,
         }
     }
+}
+
+/// What an embedder gives `WasiHost::new_incoming_request`: the parts of a request it received,
+/// for the guest's `incoming-handler#handle`.
+#[derive(Debug, Clone)]
+pub struct IncomingRequestParts {
+    pub method: Method,
+    pub path_with_query: Option<String>,
+    pub scheme: Option<Scheme>,
+    pub authority: Option<String>,
+    /// Header names and values, in order; a name may repeat.
+    pub headers: Vec<(String, Vec<u8>)>,
+    pub body: Vec<u8>,
+}
+
+/// The response a guest set with `response-outparam.set`, as `WasiHost::take_response` returns
+/// it: the guest's handles are gone, so this is plain data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedResponse {
+    pub status: u16,
+    /// Header names and values, in order; a name may repeat.
+    pub headers: Vec<(String, Vec<u8>)>,
+    pub body: Vec<u8>,
+}
+
+/// An `incoming-request` resource. Its headers are immutable; the body can be consumed once.
+pub(super) struct HttpIncomingRequest {
+    pub(super) method: Method,
+    pub(super) path_with_query: Option<String>,
+    pub(super) scheme: Option<Scheme>,
+    pub(super) authority: Option<String>,
+    pub(super) headers: HttpFields,
+    pub(super) body: Option<Vec<u8>>,
+}
+
+impl HttpIncomingRequest {
+    pub(super) fn new(parts: IncomingRequestParts) -> Self {
+        HttpIncomingRequest {
+            method: parts.method,
+            path_with_query: parts.path_with_query,
+            scheme: parts.scheme,
+            authority: parts.authority,
+            headers: HttpFields::received(parts.headers),
+            body: Some(parts.body),
+        }
+    }
+}
+
+/// An `outgoing-response` resource. `body` is set once the guest asked for it.
+pub(super) struct HttpOutgoingResponse {
+    pub(super) status: u16,
+    pub(super) headers: HttpFields,
+    pub(super) body: Option<OutBodyHandle>,
+}
+
+impl HttpOutgoingResponse {
+    pub(super) fn new(headers: HttpFields) -> Self {
+        HttpOutgoingResponse {
+            status: 200,
+            headers: headers.freeze(),
+            body: None,
+        }
+    }
+
+    /// The response as plain data. A body the guest never finished (it may still be writing it
+    /// after `handle` returned) cannot be completed any more, so the response fails.
+    pub(super) fn serve(self) -> Result<ServedResponse, ErrorCode> {
+        let body = match self.body {
+            Some(body) => body.take_finished()?,
+            None => Vec::new(),
+        };
+        Ok(ServedResponse {
+            status: self.status,
+            headers: self.headers.entries(),
+            body,
+        })
+    }
+}
+
+/// Whether `status` is an HTTP status code (`100..=599`).
+pub(super) fn valid_status(status: u16) -> bool {
+    (100..=599).contains(&status)
 }
 
 /// Whether `method` is a token (the named methods always are).
@@ -431,6 +513,8 @@ struct OutBodyShared {
     state: Mutex<OutState>,
     changed: Condvar,
     limit: usize,
+    /// The body of a response (not a request): which `error-code` a body over the limit gets.
+    response: bool,
 }
 
 /// The most a stream's `check-write` allows at once.
@@ -463,7 +547,12 @@ impl OutBodyHandle {
         state.check_not_failed()?;
         let size = state.bytes.len().saturating_add(contents.len());
         if size > self.0.limit {
-            let code = ErrorCode::HTTPRequestBodySize(Some(size as u64));
+            let size = Some(size as u64);
+            let code = if self.0.response {
+                ErrorCode::HTTPResponseBodySize(size)
+            } else {
+                ErrorCode::HTTPRequestBodySize(size)
+            };
             self.settle(state, OutPhase::Failed(code.clone()));
             return Err(code);
         }
@@ -494,6 +583,19 @@ impl OutBodyHandle {
         self.0.changed.notify_all();
     }
 
+    /// The bytes of a body that is finished already; a failed body's failure, and an error for
+    /// one that is still open.
+    pub(super) fn take_finished(&self) -> Result<Vec<u8>, ErrorCode> {
+        let mut state = lock(&self.0.state);
+        match &state.phase {
+            OutPhase::Finished => Ok(std::mem::take(&mut state.bytes)),
+            OutPhase::Failed(code) => Err(code.clone()),
+            OutPhase::Open => Err(ErrorCode::InternalError(Some(
+                "the response body was not finished".into(),
+            ))),
+        }
+    }
+
     /// The bytes, once the guest finished the body; the failure if it never will.
     fn wait_finished(&self) -> Result<Vec<u8>, ErrorCode> {
         let mut state = lock(&self.0.state);
@@ -513,14 +615,14 @@ impl OutBodyHandle {
     }
 }
 
-/// An `outgoing-body`. Dropping it before `finish` fails the request.
+/// An `outgoing-body`. Dropping it before `finish` fails the request or the response.
 pub(super) struct HttpOutgoingBody {
     handle: OutBodyHandle,
     stream_taken: bool,
 }
 
 impl HttpOutgoingBody {
-    pub(super) fn new(limit: usize) -> Self {
+    pub(super) fn new(limit: usize, response: bool) -> Self {
         HttpOutgoingBody {
             handle: OutBodyHandle(Arc::new(OutBodyShared {
                 state: Mutex::new(OutState {
@@ -529,6 +631,7 @@ impl HttpOutgoingBody {
                 }),
                 changed: Condvar::new(),
                 limit,
+                response,
             })),
             stream_taken: false,
         }
@@ -547,7 +650,7 @@ impl HttpOutgoingBody {
 impl Drop for HttpOutgoingBody {
     fn drop(&mut self) {
         self.handle.fail(ErrorCode::InternalError(Some(
-            "the request body was dropped before finish".into(),
+            "the body was dropped before finish".into(),
         )));
     }
 }
