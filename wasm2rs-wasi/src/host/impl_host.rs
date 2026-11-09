@@ -1,6 +1,8 @@
 use super::*;
 use crate::Host;
-use crate::wasi_http_types::{HeaderError, Method, Scheme};
+use crate::wasi_http_types::{
+    Fields, HeaderError, Method, OutgoingRequest, RequestOptions, Scheme,
+};
 use http::{HttpFields, HttpOptions, HttpOutgoingRequest};
 
 impl Host for WasiHost {
@@ -54,39 +56,29 @@ impl Host for WasiHost {
         self.errors.remove(handle.0 as usize);
     }
 
-    fn wasi_http_types_constructor_fields(&mut self) -> crate::wasi_http_types::Fields {
-        crate::wasi_http_types::Fields(self.http_fields.insert(HttpFields::default()) as u32)
+    fn wasi_http_types_constructor_fields(&mut self) -> Fields {
+        Fields(self.http_fields.insert(HttpFields::default()) as u32)
     }
 
     fn wasi_http_types_static_fields_from_list(
         &mut self,
         entries: Vec<(String, Vec<u8>)>,
-    ) -> Result<crate::wasi_http_types::Fields, HeaderError> {
+    ) -> Result<Fields, HeaderError> {
         let fields = HttpFields::from_list(entries)?;
-        Ok(crate::wasi_http_types::Fields(
-            self.http_fields.insert(fields) as u32,
-        ))
+        Ok(Fields(self.http_fields.insert(fields) as u32))
     }
 
-    fn wasi_http_types_method_fields_get(
-        &mut self,
-        self_: crate::wasi_http_types::Fields,
-        name: String,
-    ) -> Vec<Vec<u8>> {
+    fn wasi_http_types_method_fields_get(&mut self, self_: Fields, name: String) -> Vec<Vec<u8>> {
         self.http_fields(self_).get(&name)
     }
 
-    fn wasi_http_types_method_fields_has(
-        &mut self,
-        self_: crate::wasi_http_types::Fields,
-        name: String,
-    ) -> bool {
+    fn wasi_http_types_method_fields_has(&mut self, self_: Fields, name: String) -> bool {
         self.http_fields(self_).has(&name)
     }
 
     fn wasi_http_types_method_fields_set(
         &mut self,
-        self_: crate::wasi_http_types::Fields,
+        self_: Fields,
         name: String,
         value: Vec<Vec<u8>>,
     ) -> Result<(), HeaderError> {
@@ -95,7 +87,7 @@ impl Host for WasiHost {
 
     fn wasi_http_types_method_fields_delete(
         &mut self,
-        self_: crate::wasi_http_types::Fields,
+        self_: Fields,
         name: String,
     ) -> Result<(), HeaderError> {
         self.http_fields_mut(self_).delete(&name)
@@ -103,51 +95,37 @@ impl Host for WasiHost {
 
     fn wasi_http_types_method_fields_append(
         &mut self,
-        self_: crate::wasi_http_types::Fields,
+        self_: Fields,
         name: String,
         value: Vec<u8>,
     ) -> Result<(), HeaderError> {
         self.http_fields_mut(self_).append(name, value)
     }
 
-    fn wasi_http_types_method_fields_entries(
-        &mut self,
-        self_: crate::wasi_http_types::Fields,
-    ) -> Vec<(String, Vec<u8>)> {
+    fn wasi_http_types_method_fields_entries(&mut self, self_: Fields) -> Vec<(String, Vec<u8>)> {
         self.http_fields(self_).entries()
     }
 
     /// A clone is always mutable, even of the immutable fields of a request.
-    fn wasi_http_types_method_fields_clone(
-        &mut self,
-        self_: crate::wasi_http_types::Fields,
-    ) -> crate::wasi_http_types::Fields {
+    fn wasi_http_types_method_fields_clone(&mut self, self_: Fields) -> Fields {
         let copy = self.http_fields(self_).copy(false);
-        crate::wasi_http_types::Fields(self.http_fields.insert(copy) as u32)
+        Fields(self.http_fields.insert(copy) as u32)
     }
 
     /// Takes over the `headers` handle's contents: the guest gave the resource away.
-    fn wasi_http_types_constructor_outgoing_request(
-        &mut self,
-        headers: crate::wasi_http_types::Fields,
-    ) -> crate::wasi_http_types::OutgoingRequest {
-        let fields = self.http_fields(headers).copy(true);
+    fn wasi_http_types_constructor_outgoing_request(&mut self, headers: Fields) -> OutgoingRequest {
+        let fields = self.http_fields(headers).clone();
         self.http_fields.remove(headers.0 as usize);
-        crate::wasi_http_types::OutgoingRequest(
-            self.http_requests.insert(HttpOutgoingRequest::new(fields)) as u32,
-        )
+        OutgoingRequest(self.http_requests.insert(HttpOutgoingRequest::new(fields)) as u32)
     }
 
-    fn wasi_http_types_method_outgoing_request_method(
-        &mut self,
-        self_: crate::wasi_http_types::OutgoingRequest,
-    ) -> Method {
+    fn wasi_http_types_method_outgoing_request_method(&mut self, self_: OutgoingRequest) -> Method {
         self.http_request(self_).method.clone()
     }
 
     fn wasi_http_types_method_outgoing_request_set_method(
         &mut self,
-        self_: crate::wasi_http_types::OutgoingRequest,
+        self_: OutgoingRequest,
         method: Method,
     ) -> Result<(), ()> {
         if !http::valid_method(&method) {
@@ -159,14 +137,14 @@ impl Host for WasiHost {
 
     fn wasi_http_types_method_outgoing_request_path_with_query(
         &mut self,
-        self_: crate::wasi_http_types::OutgoingRequest,
+        self_: OutgoingRequest,
     ) -> Option<String> {
         self.http_request(self_).path_with_query.clone()
     }
 
     fn wasi_http_types_method_outgoing_request_set_path_with_query(
         &mut self,
-        self_: crate::wasi_http_types::OutgoingRequest,
+        self_: OutgoingRequest,
         path_with_query: Option<String>,
     ) -> Result<(), ()> {
         if path_with_query
@@ -181,14 +159,14 @@ impl Host for WasiHost {
 
     fn wasi_http_types_method_outgoing_request_scheme(
         &mut self,
-        self_: crate::wasi_http_types::OutgoingRequest,
+        self_: OutgoingRequest,
     ) -> Option<Scheme> {
         self.http_request(self_).scheme.clone()
     }
 
     fn wasi_http_types_method_outgoing_request_set_scheme(
         &mut self,
-        self_: crate::wasi_http_types::OutgoingRequest,
+        self_: OutgoingRequest,
         scheme: Option<Scheme>,
     ) -> Result<(), ()> {
         if scheme.as_ref().is_some_and(|s| !http::valid_scheme(s)) {
@@ -200,14 +178,14 @@ impl Host for WasiHost {
 
     fn wasi_http_types_method_outgoing_request_authority(
         &mut self,
-        self_: crate::wasi_http_types::OutgoingRequest,
+        self_: OutgoingRequest,
     ) -> Option<String> {
         self.http_request(self_).authority.clone()
     }
 
     fn wasi_http_types_method_outgoing_request_set_authority(
         &mut self,
-        self_: crate::wasi_http_types::OutgoingRequest,
+        self_: OutgoingRequest,
         authority: Option<String>,
     ) -> Result<(), ()> {
         if authority
@@ -223,30 +201,26 @@ impl Host for WasiHost {
     /// A snapshot: the request's headers never change, so it equals a live view. Immutable.
     fn wasi_http_types_method_outgoing_request_headers(
         &mut self,
-        self_: crate::wasi_http_types::OutgoingRequest,
-    ) -> crate::wasi_http_types::Fields {
+        self_: OutgoingRequest,
+    ) -> Fields {
         let view = self.http_request(self_).headers.copy(true);
-        crate::wasi_http_types::Fields(self.http_fields.insert(view) as u32)
+        Fields(self.http_fields.insert(view) as u32)
     }
 
-    fn wasi_http_types_constructor_request_options(
-        &mut self,
-    ) -> crate::wasi_http_types::RequestOptions {
-        crate::wasi_http_types::RequestOptions(
-            self.http_options.insert(HttpOptions::default()) as u32
-        )
+    fn wasi_http_types_constructor_request_options(&mut self) -> RequestOptions {
+        RequestOptions(self.http_options.insert(HttpOptions::default()) as u32)
     }
 
     fn wasi_http_types_method_request_options_connect_timeout(
         &mut self,
-        self_: crate::wasi_http_types::RequestOptions,
+        self_: RequestOptions,
     ) -> Option<u64> {
         self.http_option(self_).connect
     }
 
     fn wasi_http_types_method_request_options_set_connect_timeout(
         &mut self,
-        self_: crate::wasi_http_types::RequestOptions,
+        self_: RequestOptions,
         duration: Option<u64>,
     ) -> Result<(), ()> {
         self.http_option_mut(self_).connect = duration;
@@ -255,14 +229,14 @@ impl Host for WasiHost {
 
     fn wasi_http_types_method_request_options_first_byte_timeout(
         &mut self,
-        self_: crate::wasi_http_types::RequestOptions,
+        self_: RequestOptions,
     ) -> Option<u64> {
         self.http_option(self_).first_byte
     }
 
     fn wasi_http_types_method_request_options_set_first_byte_timeout(
         &mut self,
-        self_: crate::wasi_http_types::RequestOptions,
+        self_: RequestOptions,
         duration: Option<u64>,
     ) -> Result<(), ()> {
         self.http_option_mut(self_).first_byte = duration;
@@ -271,35 +245,29 @@ impl Host for WasiHost {
 
     fn wasi_http_types_method_request_options_between_bytes_timeout(
         &mut self,
-        self_: crate::wasi_http_types::RequestOptions,
+        self_: RequestOptions,
     ) -> Option<u64> {
         self.http_option(self_).between_bytes
     }
 
     fn wasi_http_types_method_request_options_set_between_bytes_timeout(
         &mut self,
-        self_: crate::wasi_http_types::RequestOptions,
+        self_: RequestOptions,
         duration: Option<u64>,
     ) -> Result<(), ()> {
         self.http_option_mut(self_).between_bytes = duration;
         Ok(())
     }
 
-    fn wasi_http_types_resource_drop_fields(&mut self, handle: crate::wasi_http_types::Fields) {
+    fn wasi_http_types_resource_drop_fields(&mut self, handle: Fields) {
         self.http_fields.remove(handle.0 as usize);
     }
 
-    fn wasi_http_types_resource_drop_request_options(
-        &mut self,
-        handle: crate::wasi_http_types::RequestOptions,
-    ) {
+    fn wasi_http_types_resource_drop_request_options(&mut self, handle: RequestOptions) {
         self.http_options.remove(handle.0 as usize);
     }
 
-    fn wasi_http_types_resource_drop_outgoing_request(
-        &mut self,
-        handle: crate::wasi_http_types::OutgoingRequest,
-    ) {
+    fn wasi_http_types_resource_drop_outgoing_request(&mut self, handle: OutgoingRequest) {
         self.http_requests.remove(handle.0 as usize);
     }
 

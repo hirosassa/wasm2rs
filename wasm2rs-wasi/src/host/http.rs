@@ -65,7 +65,7 @@ impl HttpFields {
         Ok(fields)
     }
 
-    /// A mutable copy; `immutable` marks the view of a request's headers.
+    /// A copy; `immutable` marks the view of a request's headers.
     pub(super) fn copy(&self, immutable: bool) -> Self {
         HttpFields {
             fields: self.fields.clone(),

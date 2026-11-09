@@ -59,6 +59,7 @@ use crate::wasi_cli_terminal_output::*;
 use crate::wasi_clocks_wall_clock::*;
 use crate::wasi_filesystem_types::ErrorCode as FsErrorCode;
 use crate::wasi_filesystem_types::*;
+use crate::wasi_http_types::{Fields, OutgoingRequest, RequestOptions};
 use crate::wasi_io_error::*;
 use crate::wasi_io_poll::*;
 use crate::wasi_io_streams::*;
@@ -175,46 +176,37 @@ fn http_missing(kind: &str) -> ! {
 }
 
 impl WasiHost {
-    fn http_fields(&self, h: crate::wasi_http_types::Fields) -> &http::HttpFields {
+    fn http_fields(&self, h: Fields) -> &http::HttpFields {
         self.http_fields
             .get(h.0 as usize)
             .unwrap_or_else(|| http_missing("fields"))
     }
 
-    fn http_fields_mut(&mut self, h: crate::wasi_http_types::Fields) -> &mut http::HttpFields {
+    fn http_fields_mut(&mut self, h: Fields) -> &mut http::HttpFields {
         self.http_fields
             .get_mut(h.0 as usize)
             .unwrap_or_else(|| http_missing("fields"))
     }
 
-    fn http_option(&self, h: crate::wasi_http_types::RequestOptions) -> &http::HttpOptions {
+    fn http_option(&self, h: RequestOptions) -> &http::HttpOptions {
         self.http_options
             .get(h.0 as usize)
             .unwrap_or_else(|| http_missing("request-options"))
     }
 
-    fn http_option_mut(
-        &mut self,
-        h: crate::wasi_http_types::RequestOptions,
-    ) -> &mut http::HttpOptions {
+    fn http_option_mut(&mut self, h: RequestOptions) -> &mut http::HttpOptions {
         self.http_options
             .get_mut(h.0 as usize)
             .unwrap_or_else(|| http_missing("request-options"))
     }
 
-    fn http_request(
-        &self,
-        h: crate::wasi_http_types::OutgoingRequest,
-    ) -> &http::HttpOutgoingRequest {
+    fn http_request(&self, h: OutgoingRequest) -> &http::HttpOutgoingRequest {
         self.http_requests
             .get(h.0 as usize)
             .unwrap_or_else(|| http_missing("outgoing-request"))
     }
 
-    fn http_request_mut(
-        &mut self,
-        h: crate::wasi_http_types::OutgoingRequest,
-    ) -> &mut http::HttpOutgoingRequest {
+    fn http_request_mut(&mut self, h: OutgoingRequest) -> &mut http::HttpOutgoingRequest {
         self.http_requests
             .get_mut(h.0 as usize)
             .unwrap_or_else(|| http_missing("outgoing-request"))
