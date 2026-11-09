@@ -130,7 +130,7 @@ world p {
 
 /// The component of `world p` around the core module `core`: an exported function's core
 /// name comes from the module, so the dummy module of the imports-only tests cannot do.
-fn proxy_component(core: &str) -> Vec<u8> {
+pub(crate) fn proxy_component(core: &str) -> Vec<u8> {
     use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
     use wit_parser::Resolve;
     let mut resolve = Resolve::default();
@@ -192,7 +192,7 @@ const PRELUDE: &str = r#"
 "#;
 
 /// A guest module whose `handle` export has the body `handle`.
-fn guest(handle: &str) -> String {
+pub(crate) fn guest(handle: &str) -> String {
     format!(
         r#"(module
   {PRELUDE}
@@ -205,9 +205,16 @@ fn guest(handle: &str) -> String {
 /// `x-path`, `x-auth` and `x-accept` carry the request's path-with-query, authority and first
 /// `accept`, and the body is the request's body.
 fn echo_guest() -> String {
-    guest(
+    guest(&echo_handle(""))
+}
+
+/// The body of the echo guest's `handle`, with the WAT instructions `pre` after its
+/// locals and before anything else.
+pub(crate) fn echo_handle(pre: &str) -> String {
+    format!(
         r#"(local $mtag i32) (local $stag i32) (local $rh i32) (local $h i32) (local $resp i32)
     (local $body i32) (local $ostream i32) (local $inbody i32) (local $istream i32)
+    {pre}
     (call $method (local.get $req) (i32.const 100))
     (local.set $mtag (i32.load8_u (i32.const 100)))
     (call $scheme (local.get $req) (i32.const 112))
@@ -247,12 +254,12 @@ fn echo_guest() -> String {
     (call $drop_fields (local.get $rh))
     (call $drop_req (local.get $req))
     (call $set (local.get $out) (i32.const 0) (local.get $resp)
-      (i32.const 0) (i64.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))"#,
+      (i32.const 0) (i64.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))"#
     )
 }
 
 /// A guest that gives the request and the outparam back without answering.
-fn silent_guest() -> String {
+pub(crate) fn silent_guest() -> String {
     guest(
         r#"(call $drop_req (local.get $req))
     (call $drop_out (local.get $out))"#,
@@ -260,7 +267,7 @@ fn silent_guest() -> String {
 }
 
 /// A guest that answers with `error-code::connection-refused` (case 6).
-fn refusing_guest() -> String {
+pub(crate) fn refusing_guest() -> String {
     guest(
         r#"(call $drop_req (local.get $req))
     (call $set (local.get $out) (i32.const 1) (i32.const 6)
