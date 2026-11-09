@@ -65,6 +65,22 @@ pub fn transpile_component(
     component: &[u8],
     options: &ComponentOptions,
 ) -> Result<String, TranspileError> {
+    transpile_component_with_exports(component, options).map(|(code, _)| code)
+}
+
+/// [`transpile_component`], also returning the component's lifted exports.
+///
+/// The exports are the [`wit_exports`](crate::wit_exports) result the transpilation needs
+/// anyway, so a caller that wants to inspect them (to check the component exports what it is
+/// about to call, say) does not need its own [`wit_exports`](crate::wit_exports) pass.
+///
+/// # Errors
+///
+/// As [`transpile_component`].
+pub fn transpile_component_with_exports(
+    component: &[u8],
+    options: &ComponentOptions,
+) -> Result<(String, Vec<WitExport>), TranspileError> {
     let layout = scan(component)?;
     let exports = wit_exports(component)?;
     let module = select_module(&layout, &exports)?;
@@ -82,7 +98,7 @@ pub fn transpile_component(
     let mut out = transpile_with_options(module, &transpile)?;
     out.push('\n');
     out.push_str(&wit_host_glue_with_options(component, &wit)?);
-    Ok(out)
+    Ok((out, exports))
 }
 
 fn select_module<'a>(

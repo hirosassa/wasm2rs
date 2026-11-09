@@ -3,17 +3,18 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use wasm2rs::{ComponentOptions, transpile_component, wit_exports};
+use wasm2rs::{ComponentOptions, transpile_component_with_exports};
 
-/// Transpiles `component` with [`transpile_component`] after checking that it lifts
+/// Transpiles `component` with [`transpile_component_with_exports`] and checks that it lifts
 /// `{interface}#{func}` directly (a missing export, or an adapter in between, is reported here,
-/// before the build). The error is the message to print.
+/// before the build; a transpile error takes precedence over a missing export). The error is the message to print.
 pub fn transpile_exporting(
     component: &[u8],
     interface: &str,
     func: &str,
 ) -> Result<String, String> {
-    let exports = wit_exports(component).map_err(|e| e.to_string())?;
+    let (code, exports) = transpile_component_with_exports(component, &ComponentOptions::default())
+        .map_err(|e| e.to_string())?;
     if !exports
         .iter()
         .any(|e| e.func.interface == interface && e.func.name == func)
@@ -22,7 +23,7 @@ pub fn transpile_exporting(
             "the component does not export `{interface}#{func}`"
         ));
     }
-    transpile_component(component, &ComponentOptions::default()).map_err(|e| e.to_string())
+    Ok(code)
 }
 
 /// Builds the `wasm2rs-wasi` library with `cargo` into `dir` (it depends on `getrandom`, which a

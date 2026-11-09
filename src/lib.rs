@@ -17,7 +17,7 @@ mod extract;
 mod wit;
 mod wit_abi;
 
-pub use component::{ComponentOptions, transpile_component};
+pub use component::{ComponentOptions, transpile_component, transpile_component_with_exports};
 pub use dump::{ModuleSummary, dump};
 pub use extract::extract_core_modules;
 pub use wit::{

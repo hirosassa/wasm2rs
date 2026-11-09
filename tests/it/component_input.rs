@@ -5,6 +5,7 @@ use std::process::Command;
 
 use wasm2rs::{
     ComponentOptions, TranspileError, TranspileOptions, dump, transpile, transpile_component,
+    transpile_component_with_exports, wit_exports,
 };
 
 use crate::common;
@@ -66,6 +67,25 @@ fn a_run_component_yields_the_module_the_glue_and_the_exports() {
     assert!(code.contains("pub struct Glue"), "glue missing");
     assert!(code.contains("pub trait Exports"), "exports missing");
     assert!(code.contains("use wasm2rs_wasi::Host;"), "external types");
+}
+
+#[test]
+fn with_exports_matches_transpile_component_and_wit_exports() {
+    let opts = ComponentOptions::default();
+    let component = component_of(WORLD, CORE);
+    let (code, exports) = transpile_component_with_exports(&component, &opts).unwrap();
+    assert_eq!(code, transpile_component(&component, &opts).unwrap());
+    assert_eq!(exports, wit_exports(&component).unwrap());
+    assert!(!exports.is_empty(), "the run component has an export");
+}
+
+#[test]
+fn with_exports_of_a_component_without_exports_is_empty() {
+    let opts = ComponentOptions::default();
+    let component = wat::parse_str("(component (core module (func)))").unwrap();
+    let (code, exports) = transpile_component_with_exports(&component, &opts).unwrap();
+    assert_eq!(code, transpile_component(&component, &opts).unwrap());
+    assert!(exports.is_empty());
 }
 
 #[test]
