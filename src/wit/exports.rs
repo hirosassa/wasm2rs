@@ -156,7 +156,7 @@ pub(super) struct Reader {
     core_instances: Vec<CoreInstance>,
     instances: Vec<Instance>,
     /// The core module index space; `None` for a module that is not one of the top-level
-    /// core modules (an alias of an instance's export).
+    /// core modules (an import, or an alias of an instance's export).
     modules: Vec<Option<TopModule>>,
     /// How many top-level core modules have been read.
     top_modules: usize,
@@ -251,7 +251,7 @@ impl Reader {
                     match import?.ty {
                         ComponentTypeRef::Func(_) => self.funcs.push(Func::Other("an import")),
                         ComponentTypeRef::Instance(_) => self.instances.push(Instance::Other),
-                        // Not a top-level module, but it takes an index like `transpile_component`.
+                        // Counted as in `transpile_component`.
                         ComponentTypeRef::Module(_) => self.modules.push(None),
                         _ => {}
                     }
