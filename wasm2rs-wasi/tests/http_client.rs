@@ -54,7 +54,8 @@ fn request(method: &str, addr: &str, path: &str) -> HttpRequest {
 
 fn read_body(response: wasm2rs_wasi::HttpResponse) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
-    { response.body }.read_to_end(&mut out)?;
+    let mut body = response.body;
+    body.read_to_end(&mut out)?;
     Ok(out)
 }
 
@@ -195,4 +196,18 @@ fn connect_timeout_is_applied() {
     let started = Instant::now();
     assert!(UreqClient::new().send(req).is_err());
     assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn extension_methods_are_sent() {
+    let (addr, server) = serve(|mut s| {
+        let (head, _) = read_request(&mut s);
+        s.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap();
+        head
+    });
+    let response = UreqClient::new()
+        .send(request("PURGE", &addr, "/x"))
+        .unwrap();
+    assert_eq!(response.status, 204);
+    assert!(server.join().unwrap().starts_with("PURGE /x HTTP/1.1"));
 }

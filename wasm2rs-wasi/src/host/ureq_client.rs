@@ -12,6 +12,9 @@ use std::time::Duration;
 /// otherwise rewritten. `https` works through `ureq`'s default TLS (rustls with the bundled
 /// webpki roots).
 ///
+/// `ureq` adds a `user-agent` and an `accept` header the guest did not set, and reads a proxy
+/// from the `*_PROXY` environment variables.
+///
 /// `request-options`: `connect-timeout` bounds the connection and `first-byte-timeout` the wait
 /// for the response head. `ureq` has no timeout per read, so `between-bytes-timeout` is applied
 /// as a limit on the whole body (from the head to its end), which is stricter than the WIT's.
@@ -21,11 +24,14 @@ pub struct UreqClient {
 }
 
 impl UreqClient {
+    /// A client with `ureq`'s defaults, but no redirects and no error for a 4xx/5xx status.
     pub fn new() -> Self {
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
             .max_redirects_will_error(false)
+            // The host accepts any token as a method, so the client must send it.
+            .allow_non_standard_methods(true)
             .build();
         UreqClient {
             agent: ureq::Agent::new_with_config(config),
@@ -53,8 +59,7 @@ impl HttpClient for UreqClient {
             .method(request.method.as_str())
             .uri(request.url.as_str());
         for (name, value) in &request.headers {
-            let value = ureq::http::HeaderValue::from_bytes(value).map_err(client_error)?;
-            builder = builder.header(name.as_str(), value);
+            builder = builder.header(name.as_str(), value.as_slice());
         }
         let http_request = builder.body(request.body).map_err(client_error)?;
         let http_request = self

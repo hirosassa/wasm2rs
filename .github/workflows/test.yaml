@@ -39,6 +39,9 @@ jobs:
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Run cargo clippy with the http-client feature
+        run: cargo clippy -p wasm2rs-wasi --all-targets --features http-client -- -D warnings
+
       # The `os-random` feature (default) pulls in getrandom; without it a random source
       # is required, which `tests/config.rs` checks.
       - name: Test wasm2rs-wasi without default features
