@@ -24,11 +24,6 @@
 //! calls are not implemented by this program's host (no `HttpClient`) and the network stays
 //! loopback-only, as in `wasip2_run`. See `docs/wasi-http-design.md`.
 
-use wasm2rs::{
-    TranspileOptions, WitOptions, extract_core_modules, transpile_with_options, wit_exports,
-    wit_host_glue_with_options,
-};
-
 mod common;
 
 const HANDLER_INTERFACE: &str = "wasi:http/incoming-handler@0.2.0";
@@ -51,36 +46,10 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("create work dir");
 
     let component = std::fs::read(&input).expect("read component");
-    let wasm = extract_core_modules(&component)
-        .expect("extract core modules")
-        .into_iter()
-        .max_by_key(Vec::len)
-        .unwrap_or_else(|| fail("the component has no core module"));
-    match wit_exports(&component) {
-        Ok(exports)
-            if exports
-                .iter()
-                .any(|e| e.func.interface == HANDLER_INTERFACE && e.func.name == "handle") => {}
-        Ok(_) => fail(format!(
-            "the component does not export `{HANDLER_INTERFACE}#handle`"
-        )),
-        Err(err) => fail(err),
-    }
-    let options = WitOptions {
-        external_types: Some("wasm2rs_wasi".to_string()),
-        exports: true,
-        ..WitOptions::default()
-    };
-    let glue = wit_host_glue_with_options(&component, &options).unwrap_or_else(|err| fail(err));
-    let opts = TranspileOptions {
-        named_imports: true,
-        named_exports: true,
-        reentrant_imports: true,
-        ..TranspileOptions::default()
-    };
-    let generated = transpile_with_options(&wasm, &opts).expect("transpile");
+    let generated = common::transpile_exporting(&component, HANDLER_INTERFACE, "handle")
+        .unwrap_or_else(|err| fail(err));
     let server = include_str!("wasip2_serve/server.rs");
-    let source = format!("{generated}\n{glue}\n{server}\n");
+    let source = format!("{generated}\n{server}\n");
     let Some(bin) = common::build_program(&dir, &source) else {
         fail(
             "rustc failed. If the errors above are E0407 (not a member of trait `Host`), the \

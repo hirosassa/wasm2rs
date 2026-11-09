@@ -3,6 +3,28 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use wasm2rs::{ComponentOptions, transpile_component, wit_exports};
+
+/// Transpiles `component` with [`transpile_component`] after checking that it lifts
+/// `{interface}#{func}` directly (a missing export, or an adapter in between, is reported here,
+/// before the build). The error is the message to print.
+pub fn transpile_exporting(
+    component: &[u8],
+    interface: &str,
+    func: &str,
+) -> Result<String, String> {
+    let exports = wit_exports(component).map_err(|e| e.to_string())?;
+    if !exports
+        .iter()
+        .any(|e| e.func.interface == interface && e.func.name == func)
+    {
+        return Err(format!(
+            "the component does not export `{interface}#{func}`"
+        ));
+    }
+    transpile_component(component, &ComponentOptions::default()).map_err(|e| e.to_string())
+}
+
 /// Builds the `wasm2rs-wasi` library with `cargo` into `dir` (it depends on `getrandom`, which a
 /// bare `rustc` call cannot resolve): the rlib and the directory of its dependencies' rlibs.
 fn build_wasi_rlib(dir: &Path) -> (PathBuf, Option<PathBuf>, Vec<PathBuf>) {
