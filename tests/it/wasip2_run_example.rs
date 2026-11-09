@@ -229,3 +229,51 @@ world w {
     );
     assert_eq!(stderr.matches("panicked").count(), 1, "{stderr}");
 }
+
+#[test]
+fn a_component_without_a_run_export_exits_2_with_a_message() {
+    let world = r#"
+package test:t;
+world w {
+  export wasi:cli/environment@0.2.0;
+}
+"#;
+    let core = r#"
+(module
+  (memory (export "memory") 1)
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 0))
+  (func (export "wasi:cli/environment@0.2.0#get-arguments") (result i32) (i32.const 0)))
+"#;
+    let out = run_example(&component_of(world, core), "no_run", &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("does not export `wasi:cli/run@0.2.0#run`"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+#[test]
+fn a_run_that_is_not_lifted_directly_exits_2_with_the_unsupported_message() {
+    // A component whose export is an instance of a nested component with its own core
+    // module is not the shape wit-component's shim produces.
+    let component = wat::parse_str(
+        r#"
+(component
+  (component $inner
+    (core module $m (func (export "f") (result i32) i32.const 0))
+    (core instance $i (instantiate $m))
+    (func (export "run") (result (result)) (canon lift (core func $i "f"))))
+  (instance $x (instantiate $inner))
+  (export "wasi:cli/run@0.2.0" (instance $x)))
+"#,
+    )
+    .unwrap();
+    let out = run_example(&component, "indirect", &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("unsupported"), "{stderr}");
+    assert!(!stderr.contains("does not export"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}

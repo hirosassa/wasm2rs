@@ -1,6 +1,6 @@
 # Component exports (`canon lift`): typed calls into a guest
 
-Status: A2-1 (the decoder) and A2-2 (the `Exports` trait) are implemented; A2-3 and A2-4 are design.
+Status: A2-1 (the decoder), A2-2 (the `Exports` trait) and A2-3 (`wasip2_run` calls the typed `run`) are implemented; A2-4 is design.
 Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library, A1, done),
 [component-model-poc.md](component-model-poc.md) (how the component analysis came about).
 
@@ -98,8 +98,23 @@ come from `wasm2rs_wasi::generated`.
 
 ### Example (A2-3)
 
-`wasip2_run` calls the typed `wasi:cli/run` instead of scanning export names, so the call is checked
-against the component.
+`wasip2_run` generates its glue with `WitOptions { exports: true, .. }` and `main` calls the
+generated `Exports::export_wasi_cli_run_0_2_0_run`; the `Result<(), ()>` gives the exit code (ok 0,
+err 1). The call is checked against the component, and the example no longer scans core export
+names (`run_export`, `wasmparser`).
+
+- **No `run`.** Before the build, `wit_exports` must contain `wasi:cli/run@0.2.0` `run`. If it does
+  not, the example says so (`the component does not export ...`) and exits 2, without a panic.
+  A shape `wit_exports` does not read (an adapter or a nested component that does more than
+  re-export) is `Unsupported`; its message is printed as is, and the exit code is 2. The same holds for a glue
+  error caused by another export (the glue has a method for every export, not only `run`), so
+  every function the component exports must be supported for the example to run it.
+- **Core module.** Still the largest one. `WitExport::core_module` indexes the *top-level* core
+  modules, while `extract_core_modules` also returns the modules of nested components, so the two
+  index spaces can differ and the field is not used yet. Selecting the module by `core_module`
+  (and checking that it exports `core_export`) is left to A3.
+- **Unchanged.** Trap = 134, `wasi:cli/exit` as before. A real `wasm32-wasip2` component lifts
+  `run` directly, so it takes this path.
 
 ### Cleanup (A2-4)
 
@@ -112,7 +127,7 @@ unsupported; the code (`glue_alloc`) implements them. Fix it while the file is o
 |---|---|
 | A2-1 | ✅ `wit_exports` and `WitExport` (`src/wit/exports.rs`): export section, `canon lift` options, core instance/alias resolution, `Unsupported` for non-direct shapes. |
 | A2-2 | ✅ `exports` option and the generated `Exports` trait and impl; mirrored lower/lift driver (`write_exports` in `src/wit/glue.rs`); `post-return`. Tests: `tests/it/wit_glue_exports.rs`. |
-| A2-3 | `wasip2_run` uses the typed `wasi:cli/run`. |
+| A2-3 | ✅ `wasip2_run` uses the typed `wasi:cli/run` (`exports: true`); no-`run` and non-direct shapes exit 2 with a message. Module selection by `core_module` is A3. Tests: `tests/it/wasip2_run_example.rs`. |
 | A2-4 | Doc fixes. |
 
 Each phase is its own PR, in this order. Tests extend `tests/it/wasip2_run_example.rs` (typed run:
