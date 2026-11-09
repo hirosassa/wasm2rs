@@ -1,6 +1,6 @@
 # `wasi:http` host (0.2.0)
 
-Status: H1, H2 and H3 are implemented (48 of the 63 `wasi_http_*` methods in
+Status: H1 to H5 and the T5 follow-ups (streaming, trailers on the incoming side) are implemented; H1, H2 and H3 are (48 of the 63 `wasi_http_*` methods in
 `wasm2rs-wasi/src/generated.rs`: fields, request-options, the parts of outgoing-request,
 `outgoing-handler.handle`, future-incoming-response, incoming-response, incoming-body (receive
 side), `http-error-code`, outgoing-body (send side), future-trailers, their drops); the others keep the default trap.
@@ -57,7 +57,29 @@ needs).
 | H2 ✅ | `outgoing-handler.handle`, `future-incoming-response` (thread, `Wait`), `incoming-response`, `incoming-body` (receive side), `http-error-code`. The `HttpClient` signature is unchanged; the host shares the client between request threads behind a mutex (`send` runs one at a time, bodies are read outside it). A client error is `internal-error` with its message; a policy refusal is `HTTP-request-denied`. `incoming-body.finish` returns a `future-trailers` that can only be dropped (H3 adds its methods). |
 | H3 ✅ | `outgoing-request.body`, `outgoing-body.write` / `finish`, `future-trailers.subscribe` / `get`. The body is a buffer behind an output stream (`HTTP_OUT_STREAM`, range above the input streams): `check-write` is the room left under the limit (`max_request_body`, 1 MiB) up to 4096, a write past the limit fails the stream (`last-operation-failed` carrying `HTTP-request-body-size`, then `closed`) and `finish` / the future report the same code. `handle` may come before or after the body is written: its thread waits for `finish` and only then calls the client; a body dropped without `finish` (or finished with trailers) fails the future with `internal-error` and the client never runs. **Trailers are not supported**: `HttpRequest` has no field for them and the `HttpClient` trait stays as it is (`ureq` cannot send them either), so `finish` with trailers is `internal-error("request trailers are not supported")`. A received message has no trailers either (`HttpResponse` carries none; `ureq` exposes none), so `future-trailers.get` answers `some(ok(ok(none)))` once, then `some(err)`; both are for H5/a richer client to lift. `UreqClient` refuses a non-empty body on `HEAD`/`CONNECT` (`ureq`'s `run` would send it); like every client error it reaches the guest as `internal-error`. |
 | H4 ✅ | `ureq` client behind feature `http-client`; end-to-end tests against a loopback server. |
-| H5 ✅ | incoming: `incoming-request` (method, path-with-query, scheme, authority, headers, `consume`), `outgoing-response` (status `100..=999` (wasmtime's range), default `200`; headers immutable once built; `body` once), `response-outparam.set`, and their drops. The embedder mints `new_incoming_request(IncomingRequestParts)` and `new_response_outparam()`, calls `Exports::export_wasi_http_incoming_handler_0_2_0_handle` (no change to the glue or `src/wit` was needed: `own<..>` resource parameters of an export already work) and then `take_response(outparam)`, which returns `None` when the guest never set one, else `Some(Result<ServedResponse, ErrorCode>)`: `ServedResponse` is plain data (status, headers, body), not a handle. The response body reuses the `outgoing-body` buffer of H3 (`HTTP_OUT_STREAM`) with the same limit (`max_request_body`); a body over it reports `HTTP-response-body-size`. The outparam belongs to the embedder: a guest dropping it leaves it for `take_response` to free. Outparam ids are never reused while the host lives, so an outparam kept after `take_response` traps on `set` (unknown handle) instead of writing into another call's answer. A body the guest left unfinished (or dropped) fails the answer with `internal-error`: the response is read once `handle` returns, so **streaming a response after `set` and trailers are not supported** (`finish` with trailers is `internal-error("trailers are not supported")`). Tests: `wasm2rs-wasi/tests/http_incoming.rs` (host) and `tests/it/wasip2_typed_http_incoming.rs` (a component with `import types` / `export incoming-handler`). |
+| H5 ✅ | incoming: `incoming-request` (method, path-with-query, scheme, authority, headers, `consume`), `outgoing-response` (status `100..=999` (wasmtime's range), default `200`; headers immutable once built; `body` once), `response-outparam.set`, and their drops. The embedder mints `new_incoming_request(IncomingRequestParts)` and `new_response_outparam()`, calls `Exports::export_wasi_http_incoming_handler_0_2_0_handle` (no change to the glue or `src/wit` was needed: `own<..>` resource parameters of an export already work) and then `take_response(outparam)`, which returns `None` when the guest never set one, else `Some(Result<ServedResponse, ErrorCode>)`: `ServedResponse` is plain data (status, headers, body), not a handle. The response body reuses the `outgoing-body` buffer of H3 (`HTTP_OUT_STREAM`) with the same limit (`max_request_body`); a body over it reports `HTTP-response-body-size`. The outparam belongs to the embedder: a guest dropping it leaves it for `take_response` to free. Outparam ids are never reused while the host lives, so an outparam kept after `take_response` traps on `set` (unknown handle) instead of writing into another call's answer. A body that already failed (dropped before `finish`, over the limit) fails the answer; an open one is streamed (T5b, below). Tests: `wasm2rs-wasi/tests/http_incoming.rs` (host) and `tests/it/wasip2_typed_http_incoming.rs` (a component with `import types` / `export incoming-handler`). |
+
+## Streaming and trailers (T5b, #195)
+
+- **`ServedResponse.body` is a `ServedBody`** (breaking: it was `Vec<u8>`): `io::Read + Send`, no borrow
+  of the host, over the same buffer as the guest's `outgoing-body`. `read` waits while the body is
+  open and empty, `Ok(0)` once the guest finished it, an error once it failed (dropped unfinished, over
+  the limit, or the host dropped: dropping the slab fails open bodies). `set_idle_timeout` bounds the
+  wait (`ErrorKind::TimedOut`). `finished_len()` tells a server the length when the body is already
+  finished, so it can send a `content-length`.
+- **`take_response` no longer fails on an open body**; only a body that failed already. What is new is
+  that the answer can be read *while the guest writes*: after `set` inside `handle`, or after `handle`
+  returned when another guest thread keeps writing. With a single-threaded guest nothing can write
+  after `handle` returns, so an open body there is a guest that forgot to finish: use the idle timeout.
+- **The limit counts unread bytes** (`max_request_body`): a body larger than it passes through a
+  reader that keeps up; one written faster than read still fails with `HTTP-response-body-size`.
+- **Trailers, the incoming side only.** `IncomingRequestParts.trailers` (breaking: new field) is handed
+  to `future-trailers.get` of the request's `incoming-body` (immutable fields; `none` when `None`).
+  A response body may `finish` with trailers: `ServedBody::trailers()` returns them once finished.
+  The `HttpClient` trait is **unchanged**, so the client side stays as in H3: `finish` of a *request*
+  body with trailers is `internal-error("request trailers are not supported")`, and a received
+  response has no trailers (`future-trailers.get` is `none`). Lifting that means adding trailers to
+  `HttpRequest`/`HttpResponse` (a `ureq` limitation too): tracked in its own issue.
 
 ## Serving over TCP: `examples/wasip2_serve.rs`
 
@@ -77,7 +99,10 @@ becomes it (`exec` on unix, so killing the example kills the server).
   `Content-Length`: 400. `Transfer-Encoding`: 501 (chunked is not read). Head over 64 KiB or
   body over 1 MiB: 413, decided from `Content-Length` before the body is read. A client that has not sent
   its whole request within 5 seconds (a deadline, not a per-read timeout): 408 (the server is serial, so one stalled client must not hold it forever).
-- **Answer.** Read after `handle` returned (`take_response`; streaming is #195). The guest's
+- **Answer.** `take_response` after `handle` returned. A body the guest finished (without trailers)
+  is sent with a `content-length`; otherwise it is sent chunked as the guest writes it, with the
+  trailers after the last chunk, and a body that fails or stalls for `--body-timeout SECS` (default 30)
+  is cut without the closing chunk, so the client sees it truncated. The guest's
   `content-length`, `connection` and `transfer-encoding` headers are replaced by the server's;
   `HEAD`, `1xx`, `204` and `304` get no body, and `1xx` and `204` no `content-length`. No response set: 500. `Err(error-code)`: 502 with
   the code's name in the body.
@@ -88,7 +113,7 @@ becomes it (`exec` on unix, so killing the example kills the server).
 - **Tests.** `tests/it/wasip2_serve_example.rs` runs the example as a process and talks real TCP
   (echo of status/headers/body, 400, 413, 501, 500 after a trap and the next request, 500/502).
 
-Of #195 this covers "listening/accept"; the outparam stale-handle guard, the status range and the pollable epoch are in T5a; streaming responses and trailers (T5b) remain.
+Of #195 this covers "listening/accept" (#196), the outparam stale-handle guard, the status range and the pollable epoch (T5a), and streaming responses and the incoming-side trailers (T5b). Client-side trailers remain.
 
 `wasip2_wit_regression.rs` now requires every method to be overridden.
 

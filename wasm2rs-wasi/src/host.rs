@@ -199,7 +199,7 @@ pub struct WasiHost {
     /// The `future-trailers` handed out by `incoming-body.finish`: the trailers of a request the
     /// embedder minted with some; a received response has none (an `HttpResponse` carries
     /// none), so those answer `none`. `None` once `get` answered.
-    http_trailers: Slab<Option<Option<Vec<(String, Vec<u8>)>>>>,
+    http_trailers: Slab<Option<Option<http::Entries>>>,
 }
 
 impl Drop for WasiHost {

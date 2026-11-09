@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::wasip2_typed_http_incoming::{
-    echo_handle, guest, proxy_component, refusing_guest, silent_guest,
+    echo_handle, guest, proxy_component, refusing_guest, silent_guest, streaming_guest,
 };
 
 /// The example, running; killed on drop.
@@ -26,11 +26,15 @@ impl Drop for Server {
 
 /// Starts `cargo run --example wasip2_serve` on `core`'s component (listening on a free
 /// loopback port) and waits for its `listening on` line: the build comes first.
+fn serve(core: &str, tag: &str) -> Server {
+    serve_with(core, tag, &[])
+}
+
 #[allow(
     clippy::panic,
     reason = "a test helper: a server that does not start fails the test"
 )]
-fn serve(core: &str, tag: &str) -> Server {
+fn serve_with(core: &str, tag: &str, extra: &[&str]) -> Server {
     let dir = std::env::temp_dir().join(format!(
         "wasm2rs-serve-example-{}-{tag}",
         std::process::id()
@@ -44,6 +48,7 @@ fn serve(core: &str, tag: &str) -> Server {
         .args(["run", "--quiet", "--example", "wasip2_serve", "--"])
         .arg(&wasm)
         .args(["--listen", "127.0.0.1:0"])
+        .args(extra)
         .env("WASIP2_WORK_DIR", dir.join("work"))
         .stdout(Stdio::piped())
         .spawn()
@@ -176,4 +181,26 @@ fn no_response_is_500_and_an_error_code_is_502() {
     let (status, _, body) = parse(&exchange(&refusing, post("/", "").as_bytes()));
     assert_eq!(status, 502);
     assert!(String::from_utf8_lossy(&body).contains("ConnectionRefused"));
+}
+
+#[test]
+fn a_body_with_trailers_is_chunked_and_the_trailers_follow_the_last_chunk() {
+    let server = serve(&streaming_guest(true), "trailers");
+    let answer = exchange(&server, post("/", "").as_bytes());
+    let (status, head, body) = parse(&answer);
+    assert_eq!(status, 200, "{head}");
+    assert!(head.contains("transfer-encoding: chunked"), "{head}");
+    assert!(!head.contains("content-length"), "{head}");
+    assert_eq!(body, b"6\r\naccept\r\n0\r\nx-path: accept\r\n\r\n");
+}
+
+#[test]
+fn a_body_the_guest_leaves_open_is_streamed_then_cut_without_the_last_chunk() {
+    let server = serve_with(&streaming_guest(false), "open", &["--body-timeout", "1"]);
+    let answer = exchange(&server, post("/", "").as_bytes());
+    let (status, head, body) = parse(&answer);
+    assert_eq!(status, 200, "{head}");
+    assert!(head.contains("transfer-encoding: chunked"), "{head}");
+    // what was written arrived, and the chunked body was never terminated
+    assert_eq!(body, b"6\r\naccept\r\n");
 }

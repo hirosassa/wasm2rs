@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `wasm2rs-wasi`: response streaming and incoming-side trailers. **Breaking:** `ServedResponse::body` is a `ServedBody` (`io::Read`, follows the guest's `outgoing-body`; an open body no longer fails `take_response`) and `IncomingRequestParts` has a `trailers` field (delivered by `future-trailers.get`); a response body may finish with trailers (`ServedBody::trailers`). `examples/wasip2_serve` sends such bodies chunked (`--body-timeout`). Request-side trailers remain refused.
 - `wasm2rs-wasi`: `response-outparam` handles are never reused, so a stale one can no longer write into another call's answer; pollables (`Wait::Tcp*`/`Http*`/`Udp*`) carry the slot's epoch and no longer follow a resource that took the slot of a dropped one; `outgoing-response.set-status-code` accepts `100..=999` (wasmtime's range).
 - `wasm2rs-wasi` (new crate, version 0.1.0): the typed WASI 0.2.0 host as a library. `Host`
   declares all 199 methods of the official 0.2.0 WIT, each defaulting to a trap, with the types in

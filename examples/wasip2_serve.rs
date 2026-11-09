@@ -1,7 +1,7 @@
 //! Serves a `wasm32-wasip2` component that exports `wasi:http/incoming-handler` (a `proxy`
 //! world) over TCP, through the typed preview2 host of the `wasm2rs-wasi` crate.
 //!
-//! Usage: `cargo run --release --example wasip2_serve -- <component.wasm> [--listen ADDR]`
+//! Usage: `cargo run --release --example wasip2_serve -- <component.wasm> [--listen ADDR] [--body-timeout SECS]`
 //!
 //! `ADDR` defaults to `127.0.0.1:8080` (loopback: bind elsewhere only on purpose). The program
 //! is built like `wasip2_run`'s (see there), with the server of `wasip2_serve/server.rs`
@@ -35,9 +35,9 @@ fn fail(message: impl std::fmt::Display) -> ! {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let input = args
-        .next()
-        .unwrap_or_else(|| fail("usage: wasip2_serve <component.wasm> [--listen ADDR]"));
+    let input = args.next().unwrap_or_else(|| {
+        fail("usage: wasip2_serve <component.wasm> [--listen ADDR] [--body-timeout SECS]")
+    });
     let server_args: Vec<String> = args.collect();
     let dir = std::env::var_os("WASIP2_WORK_DIR").map_or_else(
         || std::env::temp_dir().join(format!("wasm2rs-wasip2-serve-{}", std::process::id())),

@@ -258,6 +258,32 @@ pub(crate) fn echo_handle(pre: &str) -> String {
     )
 }
 
+/// A guest that answers 200 with the body `accept` written, finishing it with the trailer
+/// `x-path: accept` when `trailer` is set and leaving it open (after `set`) otherwise.
+pub(crate) fn streaming_guest(trailer: bool) -> String {
+    let end = if trailer {
+        r#"(local.set $h (call $fields_new))
+    (call $append (local.get $h) (i32.const 500) (i32.const 6) (i32.const 530) (i32.const 6) (i32.const 176))
+    (call $finish (local.get $body) (i32.const 1) (local.get $h) (i32.const 288))"#
+    } else {
+        ""
+    };
+    guest(&format!(
+        r#"(local $resp i32) (local $body i32) (local $ostream i32) (local $h i32)
+    (local.set $resp (call $resp_new (call $fields_new)))
+    (call $resp_body (local.get $resp) (i32.const 192))
+    (local.set $body (i32.load (i32.const 196)))
+    (call $body_write (local.get $body) (i32.const 208))
+    (local.set $ostream (i32.load (i32.const 212)))
+    (call $write (local.get $ostream) (i32.const 530) (i32.const 6) (i32.const 272))
+    (call $drop_ostream (local.get $ostream))
+    (call $drop_req (local.get $req))
+    {end}
+    (call $set (local.get $out) (i32.const 0) (local.get $resp)
+      (i32.const 0) (i64.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))"#
+    ))
+}
+
 /// A guest that gives the request and the outparam back without answering.
 pub(crate) fn silent_guest() -> String {
     guest(

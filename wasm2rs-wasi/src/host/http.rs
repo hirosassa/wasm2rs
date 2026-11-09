@@ -553,6 +553,9 @@ impl HttpIncomingResponse {
     }
 }
 
+/// Header names and values, in order (what `Fields::entries` gives, for trailers).
+pub(super) type Entries = Vec<(String, Vec<u8>)>;
+
 /// How an `outgoing-body` stands.
 enum OutPhase {
     Open,
@@ -643,7 +646,7 @@ impl OutBodyHandle {
 
     /// A finished, empty body: a response whose guest never asked for one.
     fn finished_empty() -> Self {
-        let handle = OutBodyHandle(Arc::new(OutBodyShared {
+        OutBodyHandle(Arc::new(OutBodyShared {
             state: Mutex::new(OutState {
                 bytes: Vec::new(),
                 phase: OutPhase::Finished,
@@ -652,8 +655,7 @@ impl OutBodyHandle {
             changed: Condvar::new(),
             limit: 0,
             too_large: ErrorCode::HTTPResponseBodySize,
-        }));
-        handle
+        }))
     }
 
     pub(super) fn check_not_failed(&self) -> Result<(), ErrorCode> {
