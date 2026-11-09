@@ -1,6 +1,6 @@
 # Component exports (`canon lift`): typed calls into a guest
 
-Status: A2-1 (the decoder), A2-2 (the `Exports` trait) and A2-3 (`wasip2_run` calls the typed `run`) are implemented; A2-4 is design.
+Status: A2-1 (the decoder), A2-2 (the `Exports` trait) A2-3 (`wasip2_run` calls the typed `run`) and A2-4 (cleanup) are implemented.
 Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library, A1, done),
 [component-model-poc.md](component-model-poc.md) (how the component analysis came about).
 
@@ -118,8 +118,9 @@ names (`run_export`, `wasmparser`).
 
 ### Cleanup (A2-4)
 
-The doc comment of `wit_host_glue` (`src/wit.rs`) still says that strings and lists are
-unsupported; the code (`glue_alloc`) implements them. Fix it while the file is open.
+The doc comment of `wit_host_glue` (`src/wit.rs`) claimed that strings and lists were
+unsupported although `glue_alloc` implements them; A2-2 rewrote it. A2-4 only fixed what was left:
+a broken sentence in the README's `--glue` row and the stale "example" wording below.
 
 ## Phases
 
@@ -128,7 +129,7 @@ unsupported; the code (`glue_alloc`) implements them. Fix it while the file is o
 | A2-1 | ✅ `wit_exports` and `WitExport` (`src/wit/exports.rs`): export section, `canon lift` options, core instance/alias resolution, `Unsupported` for non-direct shapes. |
 | A2-2 | ✅ `exports` option and the generated `Exports` trait and impl; mirrored lower/lift driver (`write_exports` in `src/wit/glue.rs`); `post-return`. Tests: `tests/it/wit_glue_exports.rs`. |
 | A2-3 | ✅ `wasip2_run` uses the typed `wasi:cli/run` (`exports: true`); no-`run` and non-direct shapes exit 2 with a message. Module selection by `core_module` is A3. Tests: `tests/it/wasip2_run_example.rs`. |
-| A2-4 | Doc fixes. |
+| A2-4 | ✅ Doc fixes (README `--glue` row, `wasm2rs-wasi-design.md` background). |
 
 Each phase is its own PR, in this order. Tests extend `tests/it/wasip2_run_example.rs` (typed run:
 ok, error result, trap), `named_exports.rs` (the mangled name) and the wit/glue round trips; new
