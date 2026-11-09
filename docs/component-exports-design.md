@@ -1,6 +1,6 @@
 # Component exports (`canon lift`): typed calls into a guest
 
-Status: A2-1 (the decoder) is implemented; A2-2 to A2-4 are design.
+Status: A2-1 (the decoder) and A2-2 (the `Exports` trait) are implemented; A2-3 and A2-4 are design.
 Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library, A1, done),
 [component-model-poc.md](component-model-poc.md) (how the component analysis came about).
 
@@ -69,7 +69,7 @@ right kind of the same core module, and all of them must come from one core inst
 
 ```rust
 pub trait Exports {
-    fn wasi_cli_run_0_2_0_run(&mut self) -> Result<(), ()>;
+    fn export_wasi_cli_run_0_2_0_run(&mut self) -> Result<(), ()>;
 }
 impl<H: Host> Exports for Instance<Glue<H>> { /* ... */ }
 ```
@@ -79,8 +79,9 @@ The method name is the core export name run through the `named_exports` rule
 mirrored:
 
 - **Params are lowered by the host.** Flat values go straight into the core call; params over the
-  flat limit are written to guest memory allocated with the lift's `realloc` (today's glue hard-codes
-  `cabi_realloc`; exports use the lift option).
+  flat limit are written to guest memory allocated with the lift's `realloc`. The allocation helper
+  is shared with the import glue and calls `cabi_realloc`, so a function that allocates with another
+  `realloc` name is `Unsupported` for now. The memory is `memory 0` of the instance.
 - **The result is lifted by the host**, from the flat result or from the return pointer, under the
   existing per-call `Budget`: the guest is the untrusted side. Then `post-return` is called with the
   flat results, if the lift names one. It is not called after a trap.
@@ -110,7 +111,7 @@ unsupported; the code (`glue_alloc`) implements them. Fix it while the file is o
 | Phase | Content |
 |---|---|
 | A2-1 | ✅ `wit_exports` and `WitExport` (`src/wit/exports.rs`): export section, `canon lift` options, core instance/alias resolution, `Unsupported` for non-direct shapes. |
-| A2-2 | `exports` option and the generated `Exports` trait and impl; mirrored lower/lift driver; `post-return`. |
+| A2-2 | ✅ `exports` option and the generated `Exports` trait and impl; mirrored lower/lift driver (`write_exports` in `src/wit/glue.rs`); `post-return`. Tests: `tests/it/wit_glue_exports.rs`. |
 | A2-3 | `wasip2_run` uses the typed `wasi:cli/run`. |
 | A2-4 | Doc fixes. |
 
