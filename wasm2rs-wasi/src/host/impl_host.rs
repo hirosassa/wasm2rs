@@ -16,7 +16,14 @@ impl Host for WasiHost {
 
     /// "/", the preopened directory, when there is one; `None` without a preopen.
     fn wasi_cli_environment_initial_cwd(&mut self) -> Option<String> {
-        self.root.as_ref().map(|_| "/".to_string())
+        match &self.cwd {
+            Some(cwd) => cwd.clone(),
+            None => self
+                .preopens
+                .iter()
+                .any(|p| p.guest_name == "/")
+                .then(|| "/".to_string()),
+        }
     }
 
     /// `exit(status: result)`: `ok` is 0, `error` is 1. The send queues of the connections are
@@ -313,8 +320,8 @@ impl Host for WasiHost {
     }
 
     fn wasi_filesystem_types_resource_drop_descriptor(&mut self, handle: Descriptor) {
-        if handle.0 != 0 {
-            // the preopen (slot 0) is never freed
+        if handle.0 as usize >= self.preopens.len() {
+            // the preopens (the first slots) are never freed
             self.descriptors.remove(handle.0 as usize);
         }
     }
@@ -328,9 +335,9 @@ impl Host for WasiHost {
 
     /// The preopen, named "/", if there is one.
     fn wasi_filesystem_preopens_get_directories(&mut self) -> Vec<(Descriptor, String)> {
-        self.root
-            .iter()
-            .map(|_| (Descriptor(0), "/".to_string()))
+        (0u32..)
+            .zip(&self.preopens)
+            .map(|(slot, p)| (Descriptor(slot), p.guest_name.clone()))
             .collect()
     }
 
@@ -355,10 +362,8 @@ impl Host for WasiHost {
         let truncate = open_flags.contains(OpenFlags::TRUNCATE);
         let writes = flags.contains(DescriptorFlags::WRITE);
         let changes = create || exclusive || truncate;
-        if !self.writable
-            && (changes || writes || flags.contains(DescriptorFlags::MUTATE_DIRECTORY))
-        {
-            return Err(Fs::ReadOnly.into());
+        if changes || writes || flags.contains(DescriptorFlags::MUTATE_DIRECTORY) {
+            self.require_writable(self_.0)?;
         }
         let wants_directory = open_flags.contains(OpenFlags::DIRECTORY);
         if wants_directory && (changes || writes) {
@@ -412,8 +417,10 @@ impl Host for WasiHost {
                 .open(&full);
             Some(opened.map_err(io_error_code)?)
         };
+        let preopen = self.open_descriptor(self_.0)?.preopen;
         let slot = self.descriptors.insert(OpenDescriptor {
             path: full,
+            preopen,
             write: writes,
             read: reads,
             file,
@@ -462,7 +469,8 @@ impl Host for WasiHost {
         new_descriptor: Descriptor,
         new_path: String,
     ) -> Result<(), FsErrorCode> {
-        self.require_writable()?;
+        self.require_writable(self_.0)?;
+        self.require_writable(new_descriptor.0)?;
         let old = self.resolve_entry(self_.0, &old_path)?;
         let new = self.resolve_entry(new_descriptor.0, &new_path)?;
         // Not a symlink: moving one over the path of an open descriptor would lead it out of
@@ -489,7 +497,7 @@ impl Host for WasiHost {
         old_path: String,
         new_path: String,
     ) -> Result<(), FsErrorCode> {
-        self.require_writable()?;
+        self.require_writable(self_.0)?;
         if old_path.is_empty() {
             return Err(Fs::NoEntry.into());
         }
@@ -512,7 +520,8 @@ impl Host for WasiHost {
         new_descriptor: Descriptor,
         new_path: String,
     ) -> Result<(), FsErrorCode> {
-        self.require_writable()?;
+        self.require_writable(self_.0)?;
+        self.require_writable(new_descriptor.0)?;
         let old = if old_path_flags.contains(PathFlags::SYMLINK_FOLLOW) {
             self.resolve(self_.0, &old_path)?
         } else {
@@ -541,7 +550,7 @@ impl Host for WasiHost {
         data_access_timestamp: NewTimestamp,
         data_modification_timestamp: NewTimestamp,
     ) -> Result<(), FsErrorCode> {
-        self.require_writable()?;
+        self.require_writable(self_.0)?;
         let d = self.open_descriptor(self_.0)?;
         if d.file.is_some() && !d.write {
             return Err(Fs::BadDescriptor.into());
@@ -561,7 +570,7 @@ impl Host for WasiHost {
         data_access_timestamp: NewTimestamp,
         data_modification_timestamp: NewTimestamp,
     ) -> Result<(), FsErrorCode> {
-        self.require_writable()?;
+        self.require_writable(self_.0)?;
         let times = file_times(data_access_timestamp, data_modification_timestamp)?;
         let full = if path_flags.contains(PathFlags::SYMLINK_FOLLOW) {
             self.resolve(self_.0, &path)?
@@ -616,7 +625,7 @@ impl Host for WasiHost {
         self_: Descriptor,
         path: String,
     ) -> Result<(), FsErrorCode> {
-        self.require_writable()?;
+        self.require_writable(self_.0)?;
         let entry = self.resolve_entry(self_.0, &path)?;
         Ok(std::fs::create_dir(entry).map_err(io_error_code)?)
     }
@@ -628,7 +637,7 @@ impl Host for WasiHost {
         self_: Descriptor,
         path: String,
     ) -> Result<(), FsErrorCode> {
-        self.require_writable()?;
+        self.require_writable(self_.0)?;
         let entry = self.resolve_entry(self_.0, &path)?;
         if entry.symlink_metadata().map_err(io_error_code)?.is_dir() {
             return Err(Fs::IsDirectory.into());
@@ -643,7 +652,7 @@ impl Host for WasiHost {
         self_: Descriptor,
         path: String,
     ) -> Result<(), FsErrorCode> {
-        self.require_writable()?;
+        self.require_writable(self_.0)?;
         let entry = self.resolve_entry(self_.0, &path)?;
         if !entry.symlink_metadata().map_err(io_error_code)?.is_dir() {
             return Err(Fs::NotDirectory.into());

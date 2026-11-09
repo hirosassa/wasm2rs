@@ -78,6 +78,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+mod config;
+pub use config::{Access, ConfigError, NetworkPolicy, WasiHostBuilder};
+
 fn os_seed() -> u64 {
     use std::hash::BuildHasher;
     std::collections::hash_map::RandomState::new().hash_one(0u8)
@@ -107,11 +110,11 @@ pub struct WasiHost {
     rng: u64,
     /// One entry per subscription: what it waits for. A dropped pollable keeps its slot.
     pollables: Vec<Wait>,
-    /// The canonicalized preopened directory (`with_preopen`), shown to the guest as "/".
-    root: Option<PathBuf>,
-    /// Whether the guest may write under `root`; set by `with_writable_preopen`.
-    writable: bool,
-    /// Open descriptors; slot 0 is the preopen.
+    /// The preopened directories; descriptor slot `i` is `preopens[i]`.
+    preopens: Vec<Preopen>,
+    /// The initial working directory if set; else "/" when a preopen is named "/".
+    cwd: Option<Option<String>>,
+    /// Open descriptors; slots `0..preopens.len()` are the preopens.
     descriptors: Slab<OpenDescriptor>,
     /// Streams behind the input-stream handles `FIRST_FILE_STREAM..`.
     files: Slab<FileStream>,
@@ -122,8 +125,8 @@ pub struct WasiHost {
     /// still to be read.
     listings: Slab<std::vec::IntoIter<(std::fs::FileType, String)>>,
     // sockets
-    /// Whether the guest may use addresses outside loopback; set by `with_external_network`.
-    external_network: bool,
+    /// Which addresses the guest may use.
+    network: NetworkPolicy,
     /// TCP sockets behind `tcp-socket` handles.
     sockets: Slab<NetSocket>,
     /// Input streams of connections, behind the input-stream handles `TCP_STREAM..`.
@@ -162,13 +165,13 @@ impl WasiHost {
             stdin_started: false,
             rng: os_seed(),
             pollables: Vec::new(),
-            root: None,
-            writable: false,
+            preopens: Vec::new(),
+            cwd: None,
             descriptors: Slab::new(),
             files: Slab::new(),
             outputs: Slab::new(),
             listings: Slab::new(),
-            external_network: false,
+            network: NetworkPolicy::default(),
             sockets: Slab::new(),
             tcp_in: Slab::new(),
             tcp_out: Slab::new(),
@@ -187,26 +190,24 @@ impl WasiHost {
     }
 
     /// Gives the guest the directory `root` (as its "/"), read-only; see
-    /// `with_writable_preopen`.
-    pub fn with_preopen(mut self, root: PathBuf) -> Self {
-        let root = root
-            .canonicalize()
-            .expect("preopen: directory does not exist");
-        self.descriptors.insert(OpenDescriptor {
-            path: root.clone(),
-            write: false,
-            read: true,
-            file: None,
-        }); // slot 0
-        self.root = Some(root);
-        self
+    /// `with_writable_preopen`. Panics if the directory cannot be used; the builder
+    /// returns the error instead.
+    pub fn with_preopen(self, root: PathBuf) -> Self {
+        self.legacy_preopen(root, Access::ReadOnly)
     }
 
     /// Like `with_preopen`, but the guest may create, write, append to and truncate
     /// files under `root`.
-    pub fn with_writable_preopen(mut self, root: PathBuf) -> Self {
-        self.writable = true;
-        self.with_preopen(root)
+    pub fn with_writable_preopen(self, root: PathBuf) -> Self {
+        self.legacy_preopen(root, Access::ReadWrite)
+    }
+
+    fn legacy_preopen(mut self, root: PathBuf, access: Access) -> Self {
+        match self.add_preopen("/".to_string(), root, access) {
+            Ok(()) => self,
+            Err(ConfigError::Preopen { .. }) => panic!("preopen: directory does not exist"),
+            Err(e) => panic!("preopen: {e}"),
+        }
     }
 
     /// Like `resolve`, for a file that `open-at` may create: if `path` does not exist, it
@@ -229,7 +230,7 @@ impl WasiHost {
     /// is writable, `is-directory` for a directory, `bad-descriptor` if it was not opened
     /// for `write`.
     fn writable_descriptor_file(&self, descriptor: u32) -> Result<&std::fs::File, Fs> {
-        self.require_writable()?;
+        self.require_writable(descriptor)?;
         let d = self.open_descriptor(descriptor)?;
         let file = d.file.as_ref().ok_or(Fs::IsDirectory)?;
         if d.write {
@@ -284,12 +285,13 @@ impl WasiHost {
         })
     }
 
-    /// `Ok` if the preopen is writable, else `read-only`.
-    fn require_writable(&self) -> Result<(), Fs> {
-        if self.writable {
-            Ok(())
-        } else {
-            Err(Fs::ReadOnly)
+    /// `Ok` if the preopen that `descriptor` descends from is writable, else `read-only`
+    /// (`bad-descriptor` for a handle that names no descriptor).
+    fn require_writable(&self, descriptor: u32) -> Result<(), Fs> {
+        let preopen = self.open_descriptor(descriptor)?.preopen;
+        match self.preopens.get(preopen) {
+            Some(p) if p.writable => Ok(()),
+            _ => Err(Fs::ReadOnly),
         }
     }
 
@@ -309,13 +311,17 @@ impl WasiHost {
         if file.is_some() {
             return Err(Fs::NotDirectory);
         }
-        self.confined(path.canonicalize().map_err(io_error_code)?)
+        self.confined(descriptor, path.canonicalize().map_err(io_error_code)?)
     }
 
-    /// `real` if it lies under the preopen, `not-permitted` otherwise.
-    fn confined(&self, real: PathBuf) -> Result<PathBuf, Fs> {
-        let root = self.root.as_ref().ok_or(Fs::NotPermitted)?;
-        if real.starts_with(root) {
+    /// `real` if it lies under the preopen that `descriptor` descends from,
+    /// `not-permitted` otherwise.
+    fn confined(&self, descriptor: u32, real: PathBuf) -> Result<PathBuf, Fs> {
+        let preopen = self
+            .preopens
+            .get(self.open_descriptor(descriptor)?.preopen)
+            .ok_or(Fs::NotPermitted)?;
+        if real.starts_with(&preopen.root) {
             Ok(real)
         } else {
             Err(Fs::NotPermitted)
@@ -330,7 +336,10 @@ impl WasiHost {
         if !stays_below(relative) {
             return Err(Fs::NotPermitted);
         }
-        self.confined(base.join(relative).canonicalize().map_err(io_error_code)?)
+        self.confined(
+            dir,
+            base.join(relative).canonicalize().map_err(io_error_code)?,
+        )
     }
 
     /// The entry `path` names under the directory behind `dir`, without following it if it
@@ -348,7 +357,7 @@ impl WasiHost {
         let name = relative.file_name().ok_or(Fs::Invalid)?;
         let parent = relative.parent().unwrap_or(Path::new(""));
         let parent = base.join(parent).canonicalize().map_err(io_error_code)?;
-        Ok(self.confined(parent)?.join(name))
+        Ok(self.confined(dir, parent)?.join(name))
     }
 
     /// The target of the symlink at `path`, if it is relative and stays under the preopen.
@@ -500,10 +509,22 @@ impl WasiHost {
     }
 }
 
+/// A preopened directory.
+struct Preopen {
+    /// The name the guest sees.
+    guest_name: String,
+    /// The canonicalized host directory.
+    root: PathBuf,
+    /// Whether the guest may change anything under it.
+    writable: bool,
+}
+
 /// An open descriptor: the preopen and other directories hold their path (resolved again
 /// on each use), a file its open `File`.
 struct OpenDescriptor {
     path: PathBuf,
+    /// The index in `preopens` of the preopen this descriptor lies under.
+    preopen: usize,
     /// Whether a file was opened for `write`.
     write: bool,
     /// Whether a file was opened for reading.
@@ -1236,7 +1257,7 @@ impl WasiHost {
 
     /// Lets the guest use addresses outside loopback (the default is 127.0.0.0/8 and ::1).
     pub fn with_external_network(mut self) -> Self {
-        self.external_network = true;
+        self.network = NetworkPolicy::External;
         self
     }
 
@@ -1322,7 +1343,12 @@ impl WasiHost {
         if addr.is_ipv6() != ipv6 || mapped || addr.ip().is_multicast() {
             return Err(Net::InvalidArgument);
         }
-        if self.external_network || addr.ip().is_loopback() {
+        let allowed = match self.network {
+            NetworkPolicy::None => false,
+            NetworkPolicy::Loopback => addr.ip().is_loopback(),
+            NetworkPolicy::External => true,
+        };
+        if allowed {
             Ok(())
         } else {
             Err(Net::AccessDenied)
@@ -1942,7 +1968,7 @@ impl WasiHost {
                 Ipv6Addr::LOCALHOST.into(),
             ]));
         }
-        if !self.external_network {
+        if self.network != NetworkPolicy::External {
             return Err(Net::PermanentResolverFailure);
         }
         let mut found = VecDeque::new();
