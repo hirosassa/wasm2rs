@@ -9,7 +9,7 @@ use wasmparser::{
 };
 
 use crate::{
-    TranspileError, TranspileOptions, WitOptions, transpile_with_options, wit_exports,
+    TranspileError, TranspileOptions, WitExport, WitOptions, transpile_with_options, wit_exports,
     wit_host_glue_with_options,
 };
 
@@ -67,10 +67,7 @@ pub fn transpile_component(
 ) -> Result<String, TranspileError> {
     let layout = scan(component)?;
     let exports = wit_exports(component)?;
-    let index = select_module(&layout, &exports)?;
-    let module = layout.modules.get(index).ok_or_else(|| {
-        TranspileError::Unsupported(format!("core module {index} is not in the component"))
-    })?;
+    let module = select_module(&layout, &exports)?;
     let transpile = TranspileOptions {
         named_imports: true,
         named_exports: true,
@@ -88,7 +85,17 @@ pub fn transpile_component(
     Ok(out)
 }
 
-fn select_module(layout: &Layout, exports: &[crate::WitExport]) -> Result<usize, TranspileError> {
+fn select_module<'a>(
+    layout: &'a Layout,
+    exports: &[WitExport],
+) -> Result<&'a [u8], TranspileError> {
+    let index = select_index(layout, exports)?;
+    layout.modules.get(index).map(Vec::as_slice).ok_or_else(|| {
+        TranspileError::Unsupported(format!("core module {index} is not in the component"))
+    })
+}
+
+fn select_index(layout: &Layout, exports: &[WitExport]) -> Result<usize, TranspileError> {
     if let Some(first) = exports.first() {
         if let Some(other) = exports.iter().find(|e| e.core_module != first.core_module) {
             return Err(TranspileError::Unsupported(format!(
@@ -104,12 +111,12 @@ fn select_module(layout: &Layout, exports: &[crate::WitExport]) -> Result<usize,
         )),
         1 => Ok(0),
         _ => {
-            let mut candidates = Vec::new();
-            for &i in &layout.receivers {
-                if layout.modules.get(i).is_some_and(|m| is_drivable(m)) {
-                    candidates.push(i);
-                }
-            }
+            let candidates: Vec<usize> = layout
+                .receivers
+                .iter()
+                .copied()
+                .filter(|&i| layout.modules.get(i).is_some_and(|m| is_drivable(m)))
+                .collect();
             match candidates.as_slice() {
                 [only] => Ok(*only),
                 [] => Err(TranspileError::Unsupported(
@@ -146,7 +153,6 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
     let mut module_space: Vec<Option<usize>> = Vec::new();
     // The core instance space: whether the instance exports a function.
     let mut instances: Vec<bool> = Vec::new();
-    let mut first = true;
     let mut depth = 0usize;
     for payload in Parser::new(0).parse_all(component) {
         let payload = payload?;
@@ -161,13 +167,14 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
             continue;
         }
         match payload {
-            Payload::Version { encoding, .. } if first => {
-                first = false;
-                if encoding == Encoding::Module {
-                    return Err(TranspileError::Unsupported(
-                        "the input is a core module, not a component: use `transpile`".into(),
-                    ));
-                }
+            // Nested versions arrive at depth > 0, so this is the input's own.
+            Payload::Version {
+                encoding: Encoding::Module,
+                ..
+            } => {
+                return Err(TranspileError::Unsupported(
+                    "the input is a core module, not a component: use `transpile`".into(),
+                ));
             }
             Payload::ModuleSection {
                 unchecked_range, ..
@@ -191,9 +198,27 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
                     }
                 }
             }
+            // An export or an outer alias of a module gives it a new index (the same entry).
+            Payload::ComponentExportSection(reader) => {
+                for export in reader {
+                    let export = export?;
+                    if export.kind == ComponentExternalKind::Module {
+                        let entry = at(&module_space, export.index).flatten();
+                        module_space.push(entry);
+                    }
+                }
+            }
             Payload::ComponentAliasSection(reader) => {
                 for alias in reader {
                     match alias? {
+                        ComponentAlias::Outer {
+                            kind: ComponentOuterAliasKind::CoreModule,
+                            count: 0,
+                            index,
+                        } => {
+                            let entry = at(&module_space, index).flatten();
+                            module_space.push(entry);
+                        }
                         ComponentAlias::Outer {
                             kind: ComponentOuterAliasKind::CoreModule,
                             ..
@@ -213,18 +238,10 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
                             instances.push(exports.iter().any(|e| e.kind == ExternalKind::Func));
                         }
                         Instance::Instantiate { module_index, args } => {
-                            let module = usize::try_from(module_index)
-                                .ok()
-                                .and_then(|i| module_space.get(i))
-                                .copied()
-                                .flatten();
+                            let module = at(&module_space, module_index).flatten();
                             let gets_functions = args.iter().any(|arg| {
                                 arg.kind == InstantiationArgKind::Instance
-                                    && usize::try_from(arg.index)
-                                        .ok()
-                                        .and_then(|i| instances.get(i))
-                                        .copied()
-                                        .unwrap_or(false)
+                                    && at(&instances, arg.index).unwrap_or(false)
                             });
                             if let (Some(module), true) = (module, gets_functions) {
                                 layout.receivers.insert(module);
@@ -238,6 +255,14 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
         }
     }
     Ok(layout)
+}
+
+/// The entry of an index space at `index`.
+fn at<T: Copy>(space: &[T], index: u32) -> Option<T> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| space.get(i))
+        .copied()
 }
 
 /// Whether the host can drive the module: it exports a function or has a start function.

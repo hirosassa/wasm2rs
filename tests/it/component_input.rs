@@ -51,8 +51,8 @@ fn the_cli_fails_on_a_component() {
 // --- `transpile_component` ---
 
 #[allow(clippy::panic, reason = "test code")]
-fn unsupported(result: Result<String, TranspileError>) -> String {
-    match result {
+fn unsupported(wasm: &[u8]) -> String {
+    match transpile_component(wasm, &ComponentOptions::default()) {
         Err(TranspileError::Unsupported(why)) => why,
         other => panic!("expected Unsupported, got {other:?}"),
     }
@@ -196,6 +196,27 @@ fn a_nested_components_module_does_not_shift_the_selection() {
     assert!(!code.contains("inner_marker"));
 }
 
+/// A core module exported before the program takes an index of its own: the instantiation of
+/// the program (index 2) must still be found.
+#[test]
+fn an_exported_module_shifts_the_index_space_like_the_spec_says() {
+    let component = wat_component(
+        r#"
+(component
+  (import "test:t/i" (instance $i (export "f" (func))))
+  (alias export $i "f" (func $f))
+  (core module $fixup (import "env" "f" (func)))
+  (export "m" (core module $fixup))
+  (core module $program (import "env" "f" (func)) (func (export "marker_program")))
+  (core func $l (canon lower (func $f)))
+  (core instance $env (export "f" (func $l)))
+  (core instance (instantiate $program (with "env" (instance $env)))))
+"#,
+    );
+    let code = transpile_component(&component, &ComponentOptions::default()).unwrap();
+    assert!(code.contains("fn marker_program"), "{code}");
+}
+
 #[test]
 fn an_undecidable_component_is_unsupported_with_the_reason() {
     let component = wat_component(
@@ -211,27 +232,21 @@ fn an_undecidable_component_is_unsupported_with_the_reason() {
   (core instance (instantiate $b (with "env" (instance $env)))))
 "#,
     );
-    let why = unsupported(transpile_component(
-        &component,
-        &ComponentOptions::default(),
-    ));
+    let why = unsupported(&component);
     assert!(why.contains("more than one core module"), "{why}");
 }
 
 #[test]
 fn a_component_without_a_core_module_is_unsupported() {
     let component = wat_component("(component)");
-    let why = unsupported(transpile_component(
-        &component,
-        &ComponentOptions::default(),
-    ));
+    let why = unsupported(&component);
     assert!(why.contains("no core module"), "{why}");
 }
 
 #[test]
 fn a_core_module_input_says_to_use_transpile() {
     let wasm = wat::parse_str("(module (func (export \"f\")))").unwrap();
-    let why = unsupported(transpile_component(&wasm, &ComponentOptions::default()));
+    let why = unsupported(&wasm);
     assert!(
         why.contains("core module") && why.contains("transpile"),
         "{why}"
