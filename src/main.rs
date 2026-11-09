@@ -194,8 +194,8 @@ fn run() -> Result<(), String> {
     };
 
     if component {
-        // `--component` switches the flags below on itself, and writes one source file, so
-        // the ones it would override or that have no meaning for it are refused by name.
+        // `--component` sets the naming/reentrancy/glue flags itself and writes one source,
+        // so a flag it would override or ignore is refused by name rather than dropped.
         let refused = [
             (dump, "--dump"),
             (extract_core, "--extract-core"),
@@ -215,18 +215,17 @@ fn run() -> Result<(), String> {
             return Err(format!("--component cannot be combined with {flag}"));
         }
         let wasm = std::fs::read(&input).map_err(|e| format!("cannot read {input}: {e}"))?;
-        let mut options = wasm2rs::ComponentOptions {
+        let defaults = wasm2rs::ComponentOptions::default();
+        let options = wasm2rs::ComponentOptions {
             transpile: TranspileOptions {
                 unsafe_memory,
                 split_dispatch,
                 jobs,
                 ..TranspileOptions::default()
             },
-            ..wasm2rs::ComponentOptions::default()
+            external_types: external_types.or(defaults.external_types),
+            ..defaults
         };
-        if external_types.is_some() {
-            options.external_types = external_types;
-        }
         let rust = wasm2rs::transpile_component(&wasm, &options).map_err(|e| e.to_string())?;
         return write_output(output, &rust);
     }

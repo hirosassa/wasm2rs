@@ -275,16 +275,21 @@ fn broken_input_is_an_error_not_a_panic() {
 
 // --- the CLI's `--component` ---
 
-/// Write the `run` component to a fresh directory and return `(dir, input)`.
-fn cli_component(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+/// Write `wasm` to `c.wasm` in a fresh directory and return `(dir, input)`.
+fn cli_input(name: &str, wasm: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!(
         "wasm2rs_cli_component_{name}_{}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("c.wasm");
-    std::fs::write(&input, component_of(WORLD, CORE)).unwrap();
+    std::fs::write(&input, wasm).unwrap();
     (dir, input)
+}
+
+/// [`cli_input`] with the `run` component.
+fn cli_component(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    cli_input(name, &component_of(WORLD, CORE))
 }
 
 fn cli(args: &[&std::ffi::OsStr]) -> std::process::Output {
@@ -294,20 +299,26 @@ fn cli(args: &[&std::ffi::OsStr]) -> std::process::Output {
         .unwrap()
 }
 
-#[test]
-fn the_cli_component_flag_writes_what_transpile_component_returns() {
-    let (dir, input) = cli_component("same");
-    let output = dir.join("out.rs");
-    let out = cli(&[
-        "--component".as_ref(),
-        input.as_os_str(),
-        output.as_os_str(),
-    ]);
+/// Run the CLI, assert it succeeded (showing its stderr otherwise) and return its stdout.
+fn cli_ok(args: &[&std::ffi::OsStr]) -> String {
+    let out = cli(args);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn the_cli_component_flag_writes_what_transpile_component_returns() {
+    let (dir, input) = cli_component("same");
+    let output = dir.join("out.rs");
+    cli_ok(&[
+        "--component".as_ref(),
+        input.as_os_str(),
+        output.as_os_str(),
+    ]);
     let expected =
         transpile_component(&component_of(WORLD, CORE), &ComponentOptions::default()).unwrap();
     assert_eq!(std::fs::read_to_string(output).unwrap(), expected);
@@ -316,13 +327,7 @@ fn the_cli_component_flag_writes_what_transpile_component_returns() {
 #[test]
 fn the_cli_component_flag_writes_to_stdout_without_an_output() {
     let (_dir, input) = cli_component("stdout");
-    let out = cli(&["--component".as_ref(), input.as_os_str()]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = cli_ok(&["--component".as_ref(), input.as_os_str()]);
     assert!(stdout.contains("pub struct Glue"), "glue missing");
     assert!(stdout.contains("pub trait Exports"), "exports missing");
 }
@@ -330,9 +335,7 @@ fn the_cli_component_flag_writes_to_stdout_without_an_output() {
 #[test]
 fn the_cli_component_output_builds_and_runs() {
     let (_dir, input) = cli_component("run");
-    let out = cli(&["--component".as_ref(), input.as_os_str()]);
-    assert!(out.status.success());
-    let code = String::from_utf8(out.stdout).unwrap();
+    let code = cli_ok(&["--component".as_ref(), input.as_os_str()]);
     let program = format!(
         "{code}\nfn main() {{\n    \
          let host = wasm2rs_wasi::WasiHost::new(Vec::new()).with_arguments(vec![\"p\".to_string(), \"hi\".to_string()]);\n    \
