@@ -3,14 +3,37 @@
 
 use wasm2rs_wasi::wasi_http_types::{HeaderError, Method, Scheme};
 use wasm2rs_wasi::{
-    Host, HttpClient, HttpClientError, HttpRequest, HttpResponse, WasiHost, WasiHostBuilder,
+    Host, HttpClient, HttpClientError, HttpRequest, HttpResponse, RandomError, RandomSource,
+    WasiHost, WasiHostBuilder,
 };
 
+/// A random source for the build without the `os-random` feature, which has no default one.
+struct Fixed;
+
+impl RandomSource for Fixed {
+    fn fill_random(&mut self, buf: &mut [u8]) -> Result<(), RandomError> {
+        buf.fill(0);
+        Ok(())
+    }
+    fn insecure_u64(&mut self) -> u64 {
+        42
+    }
+    fn insecure_seed(&mut self) -> (u64, u64) {
+        (1, 2)
+    }
+}
+
+fn builder() -> WasiHostBuilder {
+    let builder = WasiHost::builder();
+    if cfg!(feature = "os-random") {
+        builder
+    } else {
+        builder.random(Fixed)
+    }
+}
+
 fn host() -> WasiHost {
-    let builder: WasiHostBuilder = WasiHost::builder();
-    #[cfg(not(feature = "os-random"))]
-    let builder = builder.random(wasm2rs_wasi::InsecureRandom::new(0));
-    builder.build().unwrap()
+    builder().build().unwrap()
 }
 
 fn v(s: &str) -> Vec<u8> {
@@ -396,8 +419,5 @@ impl HttpClient for Refusing {
 
 #[test]
 fn the_builder_holds_an_http_client() {
-    let builder = WasiHost::builder().http_client(Refusing);
-    #[cfg(not(feature = "os-random"))]
-    let builder = builder.random(wasm2rs_wasi::InsecureRandom::new(0));
-    builder.build().unwrap();
+    builder().http_client(Refusing).build().unwrap();
 }
