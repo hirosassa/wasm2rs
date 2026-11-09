@@ -3,7 +3,7 @@
 //! `future-incoming-response` and `incoming-body`, and the buffer behind `outgoing-body`.
 
 use super::NetworkPolicy;
-use super::sources::{HttpClient, HttpClientError, HttpRequest, HttpResponse};
+use super::sources::{HttpClient, HttpClientError, HttpRequest, HttpResponse, ResponseTrailers};
 use crate::wasi_http_types::{ErrorCode, HeaderError, Method, Scheme};
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read};
@@ -528,7 +528,7 @@ fn send_when_finished(
     body: Option<OutBodyHandle>,
 ) -> Result<HttpResponse, ErrorCode> {
     if let Some(body) = body {
-        request.body = body.wait_finished()?;
+        (request.body, request.trailers) = body.wait_finished()?;
     }
     // a client that panics must not leave the guest waiting for ever
     std::panic::catch_unwind(AssertUnwindSafe(|| lock(client).send(request)))
@@ -540,7 +540,8 @@ fn send_when_finished(
 pub(super) struct HttpIncomingResponse {
     pub(super) status: u16,
     pub(super) headers: HttpFields,
-    pub(super) body: Option<Box<dyn Read + Send>>,
+    body: Option<Box<dyn Read + Send>>,
+    trailers: Option<ResponseTrailers>,
 }
 
 impl HttpIncomingResponse {
@@ -549,7 +550,14 @@ impl HttpIncomingResponse {
             status: response.status,
             headers: HttpFields::received(response.headers),
             body: Some(response.body),
+            trailers: response.trailers,
         }
+    }
+
+    /// The body to read and the trailers to take from it once it ended; `consume` can be called
+    /// once.
+    pub(super) fn take_body(&mut self) -> Option<(Box<dyn Read + Send>, Option<ResponseTrailers>)> {
+        Some((self.body.take()?, self.trailers.take()))
     }
 }
 
@@ -567,7 +575,7 @@ enum OutPhase {
 struct OutState {
     bytes: Vec<u8>,
     phase: OutPhase,
-    /// What the body was finished with (a response body only).
+    /// What the body was finished with.
     trailers: Option<Entries>,
 }
 
@@ -629,7 +637,7 @@ impl OutBodyHandle {
         Ok(())
     }
 
-    /// Fails an open body (`finish` with trailers, a drop): the request will not run.
+    /// Fails an open body (`finish` with invalid trailers, a drop): the request will not run.
     pub(super) fn fail(&self, code: ErrorCode) {
         let state = lock(&self.0.state);
         if matches!(state.phase, OutPhase::Open) {
@@ -730,12 +738,15 @@ impl OutBodyHandle {
         }
     }
 
-    /// The bytes, once the guest finished the body; the failure if it never will.
-    fn wait_finished(&self) -> Result<Vec<u8>, ErrorCode> {
+    /// The bytes and trailers, once the guest finished the body; the failure if it never will.
+    fn wait_finished(&self) -> Result<(Vec<u8>, Entries), ErrorCode> {
         let mut state = lock(&self.0.state);
         loop {
             match &state.phase {
-                OutPhase::Finished => return Ok(std::mem::take(&mut state.bytes)),
+                OutPhase::Finished => {
+                    let trailers = state.trailers.take().unwrap_or_default();
+                    return Ok((std::mem::take(&mut state.bytes), trailers));
+                }
                 OutPhase::Failed(code) => return Err(code.clone()),
                 OutPhase::Open => {
                     state = self
@@ -753,17 +764,10 @@ impl OutBodyHandle {
 pub(super) struct HttpOutgoingBody {
     handle: OutBodyHandle,
     stream_taken: bool,
-    /// Whether `finish` may carry trailers: a response body can, a request body (the
-    /// `HttpClient` has no place for them) cannot.
-    trailers_ok: bool,
 }
 
 impl HttpOutgoingBody {
-    pub(super) fn new(
-        limit: usize,
-        too_large: fn(Option<u64>) -> ErrorCode,
-        trailers_ok: bool,
-    ) -> Self {
+    pub(super) fn new(limit: usize, too_large: fn(Option<u64>) -> ErrorCode) -> Self {
         HttpOutgoingBody {
             handle: OutBodyHandle(Arc::new(OutBodyShared {
                 state: Mutex::new(OutState {
@@ -776,7 +780,6 @@ impl HttpOutgoingBody {
                 too_large,
             })),
             stream_taken: false,
-            trailers_ok,
         }
     }
 
@@ -787,10 +790,6 @@ impl HttpOutgoingBody {
     /// `write` can be called once.
     pub(super) fn take_stream(&mut self) -> bool {
         !std::mem::replace(&mut self.stream_taken, true)
-    }
-
-    pub(super) fn trailers_ok(&self) -> bool {
-        self.trailers_ok
     }
 }
 
@@ -811,6 +810,8 @@ struct BodyBuf {
     eof: bool,
     /// Why the body ended early; taken when reported.
     error: Option<(ErrorKind, String)>,
+    /// What the client's trailers reader gave once the body ended cleanly.
+    trailers: Option<Entries>,
 }
 
 struct BodyShared {
@@ -839,7 +840,10 @@ pub(super) struct HttpIncomingBody {
 }
 
 impl HttpIncomingBody {
-    pub(super) fn spawn(mut reader: Box<dyn Read + Send>) -> Self {
+    pub(super) fn spawn(
+        mut reader: Box<dyn Read + Send>,
+        mut trailers: Option<ResponseTrailers>,
+    ) -> Self {
         let shared = Arc::new(BodyShared {
             state: Mutex::new(BodyBuf::default()),
             changed: Condvar::new(),
@@ -864,7 +868,23 @@ impl HttpIncomingBody {
                 if body.stop.load(Ordering::SeqCst) {
                     return;
                 }
+                // read outside the lock: a client may block here, and may panic
+                let ended = match read {
+                    Ok(0) => trailers.take(),
+                    _ => None,
+                }
+                .map(|read_trailers| std::panic::catch_unwind(AssertUnwindSafe(read_trailers)));
                 let mut state = lock(&body.state);
+                match ended {
+                    Some(Ok(entries)) => state.trailers = Some(entries).filter(|e| !e.is_empty()),
+                    Some(Err(_)) => {
+                        state.error = Some((
+                            ErrorKind::Other,
+                            "the http client panicked reading trailers".into(),
+                        ));
+                    }
+                    None => {}
+                }
                 match read {
                     Ok(0) => state.eof = true,
                     Ok(n) => state.bytes.extend(chunk.iter().take(n)),
@@ -896,6 +916,11 @@ impl HttpIncomingBody {
 
     pub(super) fn shared(&self) -> BodyHandle {
         BodyHandle(Arc::clone(&self.shared))
+    }
+
+    /// The trailers the client read after the body, if it ended cleanly (once).
+    pub(super) fn take_received_trailers(&self) -> Option<Entries> {
+        lock(&self.shared.state).trailers.take()
     }
 
     /// Ends the reader thread (it notices between reads).

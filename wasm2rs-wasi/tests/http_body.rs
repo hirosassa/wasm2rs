@@ -8,8 +8,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use wasm2rs_wasi::wasi_http_types::{
-    ErrorCode, FutureIncomingResponse, IncomingResponse, Method, OutgoingBody, OutgoingRequest,
-    Scheme,
+    ErrorCode, Fields, FutureIncomingResponse, HeaderError, IncomingResponse, Method, OutgoingBody,
+    OutgoingRequest, Scheme,
 };
 use wasm2rs_wasi::wasi_io_streams::StreamError;
 use wasm2rs_wasi::{
@@ -54,6 +54,7 @@ impl HttpClient for Recording {
             status: 200,
             headers: vec![],
             body: Box::new(Cursor::new(self.body.as_bytes())),
+            trailers: None,
         })
     }
 }
@@ -240,15 +241,86 @@ fn exceeding_the_body_limit_fails_the_stream_and_finish() {
     assert!(requests.try_recv().is_err());
 }
 
+fn fields_of(h: &mut WasiHost, entries: &[(&str, &str)]) -> Fields {
+    let fields = h.wasi_http_types_constructor_fields();
+    for (name, value) in entries {
+        h.wasi_http_types_method_fields_append(fields, name.to_string(), value.as_bytes().to_vec())
+            .unwrap();
+    }
+    fields
+}
+
 #[test]
-fn finish_with_trailers_is_refused_and_the_request_fails() {
+fn request_trailers_reach_the_client() {
     let (mut h, requests) = host();
     let r = post(&mut h);
     let body = h.wasi_http_types_method_outgoing_request_body(r).unwrap();
     let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
-    let trailers = h.wasi_http_types_constructor_fields();
+    write(&mut h, body, b"data");
+    let trailers = fields_of(&mut h, &[("x-sum", "1"), ("x-sum", "2"), ("x-end", "done")]);
+    h.wasi_http_types_static_outgoing_body_finish(body, Some(trailers))
+        .unwrap();
+    let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(request.body, b"data");
+    assert_eq!(
+        request.trailers,
+        vec![
+            ("x-sum".to_string(), b"1".to_vec()),
+            ("x-sum".to_string(), b"2".to_vec()),
+            ("x-end".to_string(), b"done".to_vec()),
+        ]
+    );
+    finished(&mut h, future).unwrap();
+}
+
+#[test]
+fn a_request_finished_without_or_with_empty_trailers_has_none() {
+    let (mut h, requests) = host();
+    for empty in [false, true] {
+        let r = post(&mut h);
+        let body = h.wasi_http_types_method_outgoing_request_body(r).unwrap();
+        let trailers = empty.then(|| fields_of(&mut h, &[]));
+        h.wasi_http_types_static_outgoing_body_finish(body, trailers)
+            .unwrap();
+        let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
+        let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(request.trailers.is_empty());
+        finished(&mut h, future).unwrap();
+    }
+}
+
+#[test]
+fn forbidden_trailers_are_refused_and_the_request_fails() {
+    // a received message may carry names a guest could not set; a clone of its fields is
+    // mutable, so the trailers are checked again at `finish`
+    struct Connection {
+        sent: mpsc::Sender<HttpRequest>,
+    }
+    impl HttpClient for Connection {
+        fn send(&mut self, request: HttpRequest) -> Result<HttpResponse, HttpClientError> {
+            self.sent.send(request).unwrap();
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![("connection".into(), b"close".to_vec())],
+                body: Box::new(Cursor::new(Vec::new())),
+                trailers: None,
+            })
+        }
+    }
+    let (sent, requests) = mpsc::channel();
+    let mut h = builder().http_client(Connection { sent }).build().unwrap();
+    let first = post(&mut h);
+    let future = h.wasi_http_outgoing_handler_handle(first, None).unwrap();
+    let response = finished(&mut h, future).unwrap();
+    requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    let received = h.wasi_http_types_method_incoming_response_headers(response);
+    let cloned = h.wasi_http_types_method_fields_clone(received);
+
+    let r = post(&mut h);
+    let body = h.wasi_http_types_method_outgoing_request_body(r).unwrap();
+    let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
     let refused = h
-        .wasi_http_types_static_outgoing_body_finish(body, Some(trailers))
+        .wasi_http_types_static_outgoing_body_finish(body, Some(cloned))
         .unwrap_err();
     assert!(
         matches!(refused, ErrorCode::InternalError(Some(_))),
@@ -256,6 +328,98 @@ fn finish_with_trailers_is_refused_and_the_request_fails() {
     );
     assert!(finished(&mut h, future).is_err());
     assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn a_guest_cannot_put_a_forbidden_name_in_trailers() {
+    let (mut h, _requests) = host();
+    let fields = h.wasi_http_types_constructor_fields();
+    assert_eq!(
+        h.wasi_http_types_method_fields_append(fields, "transfer-encoding".into(), b"x".to_vec()),
+        Err(HeaderError::Forbidden)
+    );
+}
+
+/// A client answering `200` with `body` and, after it, `trailers` (`None`: no reader).
+struct WithTrailers {
+    trailers: Option<Vec<(String, Vec<u8>)>>,
+}
+
+impl HttpClient for WithTrailers {
+    fn send(&mut self, _request: HttpRequest) -> Result<HttpResponse, HttpClientError> {
+        let trailers = self.trailers.take();
+        Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: Box::new(Cursor::new(b"body".to_vec())),
+            trailers: trailers.map(|t| Box::new(move || t) as _),
+        })
+    }
+}
+
+/// Reads the response body to its end and finishes it; the answer of `future-trailers.get`.
+fn trailers_of_response(h: &mut WasiHost) -> Option<Fields> {
+    let r = post(h);
+    let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
+    let response = finished(h, future).unwrap();
+    let incoming = h
+        .wasi_http_types_method_incoming_response_consume(response)
+        .unwrap();
+    let stream = h
+        .wasi_http_types_method_incoming_body_stream(incoming)
+        .unwrap();
+    let mut read = Vec::new();
+    loop {
+        match h.wasi_io_streams_method_input_stream_blocking_read(stream, 4096) {
+            Ok(chunk) => read.extend(chunk),
+            Err(StreamError::Closed) => break,
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    assert_eq!(read, b"body");
+    h.wasi_io_streams_resource_drop_input_stream(stream);
+    let future = Host::wasi_http_types_static_incoming_body_finish(h, incoming);
+    let pollable = h.wasi_http_types_method_future_trailers_subscribe(future);
+    h.wasi_io_poll_method_pollable_block(pollable);
+    let Some(Ok(Ok(fields))) = h.wasi_http_types_method_future_trailers_get(future) else {
+        panic!("future-trailers.get must answer ok");
+    };
+    fields
+}
+
+#[test]
+fn response_trailers_come_through_future_trailers_after_the_body() {
+    let trailers = vec![
+        ("x-sum".to_string(), b"1".to_vec()),
+        ("x-sum".to_string(), b"2".to_vec()),
+    ];
+    let mut h = builder()
+        .http_client(WithTrailers {
+            trailers: Some(trailers),
+        })
+        .build()
+        .unwrap();
+    let fields = trailers_of_response(&mut h).expect("some trailers");
+    assert_eq!(
+        h.wasi_http_types_method_fields_get(fields, "x-sum".into()),
+        vec![b"1".to_vec(), b"2".to_vec()]
+    );
+    // received trailers cannot be changed
+    assert_eq!(
+        h.wasi_http_types_method_fields_append(fields, "x-more".into(), b"3".to_vec()),
+        Err(HeaderError::Immutable)
+    );
+}
+
+#[test]
+fn a_response_without_or_with_empty_trailers_answers_none() {
+    for trailers in [None, Some(vec![])] {
+        let mut h = builder()
+            .http_client(WithTrailers { trailers })
+            .build()
+            .unwrap();
+        assert!(trailers_of_response(&mut h).is_none());
+    }
 }
 
 #[test]

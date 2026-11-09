@@ -127,7 +127,7 @@ impl Host for WasiHost {
         if self.http_request(self_).body.is_some() {
             return Err(());
         }
-        let (handle, body) = self.http_new_out_body(HttpErrorCode::HTTPRequestBodySize, false);
+        let (handle, body) = self.http_new_out_body(HttpErrorCode::HTTPRequestBodySize);
         self.http_request_mut(self_).body = Some(handle);
         Ok(body)
     }
@@ -144,8 +144,9 @@ impl Host for WasiHost {
         Ok(OutputStream(handle))
     }
 
-    /// Lets the request run. Trailers are not supported (`HttpRequest` has no place for
-    /// them): they are refused and the request fails with the same error.
+    /// Lets the request run, with the trailers it carries. They are checked as a header the
+    /// guest sets is (a `fields.clone` of a received message may hold names the guest could not
+    /// set): a refused one fails the request with the same error.
     fn wasi_http_types_static_outgoing_body_finish(
         &mut self,
         this: OutgoingBody,
@@ -160,13 +161,15 @@ impl Host for WasiHost {
                 .take(handle.0 as usize)
                 .unwrap_or_else(|| http_missing("fields"))
         });
-        if trailers.is_some() && !body.trailers_ok() {
-            let code =
-                HttpErrorCode::InternalError(Some("request trailers are not supported".into()));
+        let entries = trailers.map(|t| t.entries());
+        if let Some(entries) = &entries
+            && let Err(refused) = http::HttpFields::from_list(entries.clone())
+        {
+            let code = HttpErrorCode::InternalError(Some(format!("invalid trailers: {refused:?}")));
             body.handle().fail(code.clone());
             return Err(code);
         }
-        body.handle().finish_with(trailers.map(|t| t.entries()))
+        body.handle().finish_with(entries)
     }
 
     fn wasi_http_types_method_incoming_request_method(&mut self, self_: IncomingRequest) -> Method {
@@ -215,7 +218,7 @@ impl Host for WasiHost {
         let body = request.body.take().ok_or(())?;
         let trailers = request.trailers.take();
         let reader = Box::new(std::io::Cursor::new(body));
-        let mut body = HttpIncomingBody::spawn(reader);
+        let mut body = HttpIncomingBody::spawn(reader, None);
         body.trailers = trailers;
         Ok(IncomingBody(self.http_bodies.insert(body) as u32))
     }
@@ -268,7 +271,7 @@ impl Host for WasiHost {
         if self.http_out_response(self_).body.is_some() {
             return Err(());
         }
-        let (handle, body) = self.http_new_out_body(HttpErrorCode::HTTPResponseBodySize, true);
+        let (handle, body) = self.http_new_out_body(HttpErrorCode::HTTPResponseBodySize);
         self.http_out_response_mut(self_).body = Some(handle);
         Ok(body)
     }
@@ -506,9 +509,10 @@ impl Host for WasiHost {
         &mut self,
         self_: IncomingResponse,
     ) -> Result<IncomingBody, ()> {
-        let reader = self.http_response_mut(self_).body.take().ok_or(())?;
+        let (reader, trailers) = self.http_response_mut(self_).take_body().ok_or(())?;
         Ok(IncomingBody(
-            self.http_bodies.insert(HttpIncomingBody::spawn(reader)) as u32,
+            self.http_bodies
+                .insert(HttpIncomingBody::spawn(reader, trailers)) as u32,
         ))
     }
 
@@ -533,10 +537,11 @@ impl Host for WasiHost {
             .http_bodies
             .take(this.0 as usize)
             .unwrap_or_else(|| http_missing("incoming-body"));
-        FutureTrailers(
-            self.http_trailers
-                .insert(Some(std::mem::take(&mut body.trailers))) as u32,
-        )
+        let trailers = body
+            .trailers
+            .take()
+            .or_else(|| body.take_received_trailers());
+        FutureTrailers(self.http_trailers.insert(Some(trailers)) as u32)
     }
 
     /// Only failures of a response body have an `error-code` (`None` for any other `error`).
