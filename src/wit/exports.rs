@@ -156,7 +156,7 @@ pub(super) struct Reader {
     core_instances: Vec<CoreInstance>,
     instances: Vec<Instance>,
     /// The core module index space; `None` for a module that is not one of the top-level
-    /// core modules (an alias of an instance's export).
+    /// core modules (an import, or an alias of an instance's export).
     modules: Vec<Option<TopModule>>,
     /// How many top-level core modules have been read.
     top_modules: usize,
@@ -251,6 +251,8 @@ impl Reader {
                     match import?.ty {
                         ComponentTypeRef::Func(_) => self.funcs.push(Func::Other("an import")),
                         ComponentTypeRef::Instance(_) => self.instances.push(Instance::Other),
+                        // Counted as in `transpile_component`.
+                        ComponentTypeRef::Module(_) => self.modules.push(None),
                         _ => {}
                     }
                 }
@@ -656,5 +658,40 @@ impl Reader {
                 "export `{label}`: core module {module} has no {kind:?} export `{name}`"
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasmparser::Parser;
+
+    /// The module index space of `Reader` after reading `wat` (without canonical sections,
+    /// which need the type scopes).
+    fn module_space(wat: &str) -> Vec<Option<usize>> {
+        let component = wat::parse_str(wat).unwrap();
+        let mut reader = Reader::default();
+        for payload in Parser::new(0).parse_all(&component) {
+            let payload = payload.unwrap();
+            if !matches!(payload, Payload::ComponentCanonicalSection(_)) {
+                reader.feed(&payload, &[]).unwrap();
+            }
+        }
+        reader
+            .modules
+            .iter()
+            .map(|m| m.as_ref().map(|m| m.ordinal))
+            .collect()
+    }
+
+    #[test]
+    fn an_imported_core_module_takes_a_slot_in_the_module_index_space() {
+        // Same count as `transpile_component`: the import is module 0, `$a` is module 1.
+        let space = module_space(
+            r#"(component
+  (import "m" (core module $im))
+  (core module $a (func (export "f"))))"#,
+        );
+        assert_eq!(space, [None, Some(0)]);
     }
 }
