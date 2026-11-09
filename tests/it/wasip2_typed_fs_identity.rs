@@ -257,8 +257,8 @@ fn a_directory_descriptor_whose_path_now_leads_outside_the_preopen_still_acts_on
          assert_eq!(inst.fs_rmdir(0, {DSUB}), 0);
          assert_eq!(inst.fs_rmdir(0, {D}), 0);
          assert_eq!(inst.fs_rename(0, {E}, 0, {D}), 0);
-         assert_ne!(inst.fs_sync(sub), 100 + 31);
-         assert_ne!(inst.fs_set_times(sub), 100 + 31);"
+         assert_eq!(inst.fs_sync(sub), 0);
+         assert_eq!(inst.fs_set_times(sub), 0);"
     );
     assert_succeeded(&run(&root, &body));
     let after = std::fs::metadata(&outside).unwrap().modified().unwrap();

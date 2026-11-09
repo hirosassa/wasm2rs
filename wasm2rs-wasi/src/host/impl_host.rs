@@ -904,29 +904,30 @@ impl Host for WasiHost {
         }
         let follows = path_flags.contains(PathFlags::SYMLINK_FOLLOW);
         let target = below(&path)?;
-        let entry = names_an_entry(&path);
+        let entry = names_an_entry(&path)
+            .then(|| entry_path(&path))
+            .transpose()?;
         let dir = self.directory(self_.0)?;
-        if (exclusive_create || !follows) && entry {
-            let name = entry_path(&path)?;
-            if dir
-                .symlink_metadata(name)
-                .is_ok_and(|meta| meta.is_symlink())
-            {
-                // `create` + `exclusive` never follows: the name exists (before `loop`),
-                // dangling or not
-                return Err(if exclusive_create {
-                    Fs::Exist
-                } else {
-                    Fs::Loop
-                }
-                .into());
+        let entry_is_symlink = || entry.is_some_and(|name| is_symlink(dir, name));
+        if (exclusive_create || !follows) && entry_is_symlink() {
+            // `create` + `exclusive` never follows: the name exists (before `loop`),
+            // dangling or not
+            return Err(if exclusive_create {
+                Fs::Exist
+            } else {
+                Fs::Loop
             }
+            .into());
+        }
+        if create && entry.is_none() && !matches!(path.as_str(), "" | ".") {
+            // a new name ending in `/` or `/.`: the OS answers differently per platform
+            return Err(Fs::Invalid.into());
         }
         let found = match dir.metadata(target) {
             Ok(meta) => Some(meta),
             Err(e) if create && e.kind() == std::io::ErrorKind::NotFound => {
                 // a symlink that leads nowhere is not a place to create a file
-                if entry && dir.symlink_metadata(entry_path(&path)?).is_ok() {
+                if entry.is_some_and(|name| dir.symlink_metadata(name).is_ok()) {
                     return Err(Fs::NotPermitted.into());
                 }
                 None
@@ -960,16 +961,12 @@ impl Host for WasiHost {
                 .create(create && !exclusive_create)
                 .create_new(exclusive_create)
                 .truncate(truncate);
-            if !follows && entry {
+            if !follows && entry.is_some() {
                 options.follow(FollowSymlinks::No);
             }
             let file = dir.open_with(target, &options).map_err(|e| {
-                let swapped_in = !follows
-                    && entry
-                    && entry_path(&path)
-                        .and_then(|name| dir.symlink_metadata(name).map_err(sandbox_error))
-                        .is_ok_and(|meta| meta.is_symlink());
-                if swapped_in {
+                // a symlink swapped in after the check above
+                if !follows && entry_is_symlink() {
                     Fs::Loop
                 } else {
                     sandbox_error(e)
@@ -977,12 +974,8 @@ impl Host for WasiHost {
             })?;
             (Some(file.into_std()), None)
         };
-        let OpenDescriptor {
-            path: base,
-            preopen,
-            ..
-        } = self.open_descriptor(self_.0)?;
-        let (label, preopen) = (base.join(target), *preopen);
+        let parent = self.open_descriptor(self_.0)?;
+        let (label, preopen) = (parent.path.join(target), parent.preopen);
         let slot = self.descriptors.insert(OpenDescriptor {
             path: label,
             preopen,

@@ -152,7 +152,9 @@ README. Each section names the code or test that backs it.
   from the operation, so a racing swap can change which in-preopen entry is affected or the
   error code, never leave the preopen; (3) a hard link made by the guest or any other process
   inside the preopen to a file outside stays a link to that file (no host can prevent it); (4)
-  the confinement is for Unix (`openat`); other platforms are not tested.
+  a symlink is followed only within the directory descriptor it is resolved from, so
+  `sub/up -> ../f` is `not-permitted` through a descriptor for `sub` although it stays inside the
+  preopen (as in wasmtime); (5) the confinement is for Unix (`openat`); other platforms are not tested.
 - The TCP socket options are not applied to the OS socket. UDP socket options are
   `not-supported`. Only `std::net` is used (no `rustix`), so nothing finer is possible.
 - `wasip2_run` never allows addresses outside loopback and does not flush the send queues after

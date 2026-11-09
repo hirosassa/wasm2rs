@@ -917,7 +917,6 @@ enum Fs {
     ReadOnly,
 }
 
-/// A symlink at `link` holding `target`; hosts without symlinks answer `unsupported`.
 fn io_error_code(e: std::io::Error) -> Fs {
     use std::io::ErrorKind::*;
     match e.kind() {
@@ -932,7 +931,8 @@ fn io_error_code(e: std::io::Error) -> Fs {
     }
 }
 
-/// A symlink named `link` below `dir` that holds `target`.
+/// A symlink named `link` below `dir` that holds `target`; hosts without symlinks answer
+/// `unsupported`.
 fn make_symlink(dir: &Dir, target: &str, link: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     return dir.symlink(target, link);
@@ -978,6 +978,12 @@ fn entry_path(path: &str) -> Result<&Path, Fs> {
     }
     relative.file_name().ok_or(Fs::Invalid)?;
     Ok(relative)
+}
+
+/// Whether the entry `name` below `dir` is a symlink (not if it cannot be looked up).
+fn is_symlink(dir: &Dir, name: &Path) -> bool {
+    dir.symlink_metadata(name)
+        .is_ok_and(|meta| meta.is_symlink())
 }
 
 /// Whether `path` is relative and has no `..`, so it stays under the directory it is

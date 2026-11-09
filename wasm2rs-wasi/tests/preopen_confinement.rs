@@ -224,8 +224,9 @@ fn an_intermediate_directory_swapped_for_a_symlink_does_not_redirect_a_descripto
 fn a_symlink_flipped_between_inside_and_outside_never_opens_outside() {
     use std::sync::atomic::{AtomicBool, Ordering};
     let t = tree("race");
-    std::fs::create_dir(t.root.join("inner")).unwrap();
-    std::fs::write(t.root.join("inner").join("secret"), b"inner").unwrap();
+    let inner = t.root.join("inner");
+    std::fs::create_dir(&inner).unwrap();
+    std::fs::write(inner.join("secret"), b"inner").unwrap();
     let mut host = host(&t);
     let stop = AtomicBool::new(false);
     let swap = t.root.join("swap");
@@ -234,11 +235,7 @@ fn a_symlink_flipped_between_inside_and_outside_never_opens_outside() {
         scope.spawn(|| {
             let mut to_outside = true;
             while !stop.load(Ordering::Relaxed) {
-                let target = if to_outside {
-                    &t.outside
-                } else {
-                    &t.root.join("inner")
-                };
+                let target = if to_outside { &t.outside } else { &inner };
                 std::fs::remove_file(&tmp).ok();
                 symlink(target, &tmp);
                 // an atomic replace: the link always exists
@@ -259,4 +256,27 @@ fn a_symlink_flipped_between_inside_and_outside_never_opens_outside() {
         }
         stop.store(true, Ordering::Relaxed);
     });
+}
+
+#[test]
+fn a_new_name_ending_in_a_slash_is_invalid_and_a_relative_link_up_is_confined_to_the_descriptor() {
+    let t = tree("edges");
+    std::fs::create_dir(t.root.join("sub")).unwrap();
+    std::fs::write(t.root.join("f"), b"top").unwrap();
+    symlink(Path::new("../f"), &t.root.join("sub").join("up"));
+    let mut host = host(&t);
+    for name in ["nope/", "nope/."] {
+        let created = host.wasi_filesystem_types_method_descriptor_open_at(
+            ROOT,
+            PathFlags::SYMLINK_FOLLOW,
+            name.into(),
+            OpenFlags::CREATE,
+            DescriptorFlags::WRITE,
+        );
+        assert_eq!(created, Err(Fs::Invalid), "{name}");
+    }
+    // reachable from the root, refused through the descriptor that would have to leave `sub`
+    assert!(open(&mut host, ROOT, "sub/up").is_ok());
+    let sub = open_dir(&mut host, ROOT, "sub").unwrap();
+    assert_eq!(open(&mut host, sub, "up"), Err(Fs::NotPermitted));
 }
