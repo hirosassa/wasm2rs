@@ -79,7 +79,7 @@ use crate::wasi_sockets_tcp::*;
 use crate::wasi_sockets_udp::*;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, MetadataExt as _};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6, TcpListener,
@@ -188,8 +188,7 @@ pub struct WasiHost {
     http_out_responses: Slab<http::HttpOutgoingResponse>,
     /// The `response-outparam` resources the embedder minted: empty until the guest sets one.
     /// The entry is the embedder's, freed by `take_response` (the guest's drop leaves it).
-    http_outparams:
-        std::collections::HashMap<u32, Option<Result<http::HttpOutgoingResponse, HttpErrorCode>>>,
+    http_outparams: HashMap<u32, Option<Result<http::HttpOutgoingResponse, HttpErrorCode>>>,
     /// The id of the next `response-outparam`. Ids are never reused while the host lives (a
     /// wrapped counter skips the live ones), so an outparam a guest kept after `take_response`
     /// cannot write into another call's answer.
@@ -323,7 +322,7 @@ impl WasiHost {
             .unwrap_or_else(|| http_missing("incoming-body"))
     }
 
-    /// Whether `get` of the future in `http_futures` at `slot` has an answer (a dropped one
+    /// Whether `get` of the future in `http_futures` that `r` refers to has an answer (a dropped one
     /// has: nothing is left to wait for).
     fn http_future_ready(&self, r: SlotRef) -> bool {
         self.http_futures
@@ -331,7 +330,7 @@ impl WasiHost {
             .is_none_or(http::HttpFuture::is_ready)
     }
 
-    /// Whether the body in `http_bodies` at `slot` has bytes or its end to read.
+    /// Whether the body in `http_bodies` that `r` refers to has bytes or its end to read.
     fn http_body_readable(&self, r: SlotRef) -> bool {
         self.http_bodies
             .get_ref(r)
@@ -469,7 +468,7 @@ impl WasiHost {
             http_out_bodies: Slab::new(),
             http_in_requests: Slab::new(),
             http_out_responses: Slab::new(),
-            http_outparams: std::collections::HashMap::new(),
+            http_outparams: HashMap::new(),
             next_outparam: 0,
             http_max_body: DEFAULT_MAX_REQUEST_BODY,
             http_trailers: Slab::new(),
@@ -901,8 +900,8 @@ impl<T> Slab<T> {
         self.slots.get_mut(slot)?.as_mut()
     }
 
-    /// A reference to what the slot holds now (or to a slot that is free: it then matches
-    /// nothing live).
+    /// A reference to what the slot holds now. Only pass a live slot: the reference of a free
+    /// one matches whatever is inserted there next.
     fn slot_ref(&self, slot: usize) -> SlotRef {
         SlotRef {
             slot,
@@ -1419,7 +1418,7 @@ impl WasiHost {
         self.stream_failed(stream, e)
     }
 
-    /// Why the output stream in `tcp_out` at `slot` cannot be written: `last-operation-failed`
+    /// Why the output stream in `tcp_out` that `r` refers to cannot be written: `last-operation-failed`
     /// the first time after its socket failed, `closed` after that and when it was dropped.
     fn tcp_out_error(&mut self, slot: usize) -> StreamError {
         match self.tcp_out.get(slot).and_then(TcpOut::take_failure) {
@@ -1733,7 +1732,7 @@ impl WasiHost {
         self
     }
 
-    /// Whether `accept` on the socket in `slot` would not block (or the socket is not
+    /// Whether `accept` on the socket `r` refers to would not block (or the socket is not
     /// listening, so `accept` answers at once). A connection found here is kept for `accept`.
     fn accept_ready(&self, r: SlotRef) -> bool {
         let Some(NetSocket {
@@ -1755,7 +1754,7 @@ impl WasiHost {
         }
     }
 
-    /// Whether the input stream in `tcp_in` at `slot` has data, is at its end or failed.
+    /// Whether the input stream in `tcp_in` that `r` refers to has data, is at its end or failed.
     fn readable(&self, r: SlotRef) -> bool {
         let Some(stream) = self.tcp_in.get_ref(r) else {
             return true;
@@ -1766,7 +1765,7 @@ impl WasiHost {
         }
     }
 
-    /// What `check-write` of the output stream in `tcp_out` at `slot` permits (see
+    /// What `check-write` of the output stream in `tcp_out` that `r` refers to permits (see
     /// `TcpOut::permit`); `None` when the stream is dropped or failed.
     fn tcp_permit(&self, slot: usize) -> Option<u64> {
         self.tcp_out.get(slot)?.permit()
@@ -1781,7 +1780,7 @@ impl WasiHost {
         }
     }
 
-    /// Whether the output stream in `tcp_out` at `slot` is writable (or failed or dropped).
+    /// Whether the output stream in `tcp_out` that `r` refers to is writable (or failed or dropped).
     fn tcp_writable(&self, r: SlotRef) -> bool {
         self.tcp_out.get_ref(r).is_none() || self.tcp_permit(r.slot) != Some(0)
     }
@@ -2388,7 +2387,7 @@ impl WasiHost {
         Ok((self.udp_in.insert(input), self.udp_out.insert(output)))
     }
 
-    /// Whether the incoming stream at `slot` has a datagram `receive` would return, or failed.
+    /// Whether the incoming stream `r` refers to has a datagram `receive` would return, or failed.
     /// A datagram from another sender than a connected stream's peer is dropped here. A stale
     /// stream is always ready (so a waiting guest wakes up and traps) and takes nothing.
     fn udp_readable(&self, r: SlotRef) -> bool {
