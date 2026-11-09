@@ -2,6 +2,7 @@
 
 use super::{Clock, OpenDescriptor, Preopen, RandomSource, WasiHost};
 use std::fmt;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
 /// What the guest may do under a preopened directory.
@@ -83,6 +84,9 @@ pub struct WasiHostBuilder {
     network: NetworkPolicy,
     clock: Option<Box<dyn Clock>>,
     random: Option<Box<dyn RandomSource>>,
+    stdin: Option<Box<dyn Read + Send>>,
+    stdout: Option<Box<dyn Write + Send>>,
+    stderr: Option<Box<dyn Write + Send>>,
 }
 
 impl WasiHostBuilder {
@@ -139,11 +143,36 @@ impl WasiHostBuilder {
         self
     }
 
+    /// What the guest reads as stdin (the process's by default). `reader` is read on a thread
+    /// that starts when the guest first uses stdin, and its end or failure reaches the guest
+    /// as the stream's.
+    pub fn stdin(mut self, reader: impl Read + Send + 'static) -> Self {
+        self.stdin = Some(Box::new(reader));
+        self
+    }
+
+    /// Where the guest's stdout goes (the process's by default). It is flushed when the guest
+    /// flushes the stream, at `wasi:cli/exit` and when the host is dropped; wrap a buffered
+    /// sink yourself if you want buffering.
+    pub fn stdout(mut self, writer: impl Write + Send + 'static) -> Self {
+        self.stdout = Some(Box::new(writer));
+        self
+    }
+
+    /// Where the guest's stderr goes (the process's by default); flushed like stdout.
+    pub fn stderr(mut self, writer: impl Write + Send + 'static) -> Self {
+        self.stderr = Some(Box::new(writer));
+        self
+    }
+
     /// The host, or why the configuration is not valid.
     pub fn build(self) -> Result<WasiHost, ConfigError> {
         let mut host = WasiHost::new(self.env).with_arguments(self.args);
         host.cwd = self.cwd;
         host.network = self.network;
+        host.stdin_reader = self.stdin;
+        host.stdout = self.stdout;
+        host.stderr = self.stderr;
         if let Some(clock) = self.clock {
             host.clock = clock;
         }

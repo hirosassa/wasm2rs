@@ -1,7 +1,7 @@
 # `wasm2rs-wasi`: promoting the typed WASI 0.2 host to a library
 
-Status: P0 and P1 are implemented (the crate exists, with the trait and the host logic); P2 (the
-configuration surface) and later are design. The "Problem" section describes the state before P1.
+Status: P0, P1 and P2 are implemented (the crate exists, with the trait, the host logic and the
+configuration surface). The "Problem" section describes the state before P1.
 Background: [typed-host-design.md](typed-host-design.md) describes the host as it is today
 (`examples/wasip2_host/typed.rs`, an example); [component-model-poc.md](component-model-poc.md)
 describes how the component analysis came about.
@@ -75,7 +75,7 @@ No `rustc` at run time: the transpile (plus glue) happens in `build.rs` or, late
 | Network | policy: none / loopback only / external (today's `with_external_network`) |
 | Clocks | `Clock` trait for wall and monotonic time, with resolutions; default = system |
 | Random | `RandomSource` trait for `random` and `insecure`/`insecure-seed`; the default must be a CSPRNG for `wasi:random/random` (today's splitmix64 is not) |
-| stdin / stdout / stderr | `Read` / `Write` objects or inherit the process streams |
+| stdin / stdout / stderr | `Read + Send` / `Write + Send` objects or inherit the process streams. The stdin reader runs on a thread started at the guest's first use; stdout and stderr are flushed by the guest's flush, at `wasi:cli/exit` and on drop |
 
 Errors in configuration are `Result`s. A guest-triggered trap stays a panic with the same message
 contract as today (the generated code turns it into a trap).

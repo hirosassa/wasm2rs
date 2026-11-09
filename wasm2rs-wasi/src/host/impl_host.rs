@@ -29,7 +29,7 @@ impl Host for WasiHost {
     /// `exit(status: result)`: `ok` is 0, `error` is 1. The send queues of the connections are
     /// flushed first (see `flush_all_connections`).
     fn wasi_cli_exit_exit(&mut self, status: Result<(), ()>) {
-        std::io::stdout().flush().ok();
+        self.flush_stdio();
         self.flush_all_connections();
         std::process::exit(i32::from(status.is_err()));
     }
