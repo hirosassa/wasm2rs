@@ -12,7 +12,7 @@ Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library, 
 
 - `wit_functions` (`src/wit.rs`) parses the export section only for `Type` and `Instance` kinds, to
   grow the index spaces. Func exports, `canon lift` and its options (`memory`, `realloc`,
-  `post-return`, string encoding) are skipped, and so are the core instance and alias sections.
+  `post-return`, string encoding) are skipped, and so are the core instance section and core-func aliases.
 - `examples/wasip2_run.rs` finds `wasi:cli/run@0.2.0#run` by scanning the largest core module's
   export names and calls `inst.func{N}()`. It never checks that name against a `canon lift`, nor the
   lowered core signature.
@@ -66,7 +66,8 @@ pub trait Exports {
 impl<H: Host> Exports for Instance<Glue<H>> { /* ... */ }
 ```
 
-The method name follows the existing `named_imports` scheme. Each method does the import direction
+The method name is the core export name run through the `named_exports` rule
+(`src/codegen/export_names.rs`). Each method does the import direction
 mirrored:
 
 - **Params are lowered by the host.** Flat values go straight into the core call; params over the
@@ -93,8 +94,8 @@ against the component.
 
 ### Cleanup (A2-4)
 
-The doc comment of `wit_host_glue` and parts of `component-model-poc.md` still say that strings and
-lists are unsupported; the code (`glue_alloc`) implements them. Fix while the files are open.
+The doc comment of `wit_host_glue` (`src/wit.rs`) still says that strings and lists are
+unsupported; the code (`glue_alloc`) implements them. Fix it while the file is open.
 
 ## Phases
 
@@ -106,7 +107,7 @@ lists are unsupported; the code (`glue_alloc`) implements them. Fix while the fi
 | A2-4 | Doc fixes. |
 
 Each phase is its own PR, in this order. Tests extend `tests/it/wasip2_run_example.rs` (typed run:
-ok, error result, trap), `export_names.rs` (the mangled name) and the wit/glue round trips; new
+ok, error result, trap), `named_exports.rs` (the mangled name) and the wit/glue round trips; new
 decoder tests build components with `wit-component`.
 
 ## What `wasi:http` needs on top (separate design)
@@ -128,14 +129,9 @@ still needs:
 
 ## Risks
 
-- **Adapters and composed components.** The lifted core function may sit behind shim or adapter
-  instances; Decision 1 rejects these with a clear error instead of guessing.
-- **`post-return`.** Skipping it leaks guest memory; it must be called after the result is lifted.
 - **Trap leaves the guest inconsistent** (memory allocated for the call, instance state). The host
   must not reuse an instance after a trap unless it knows the guest is reentrant-safe.
 - **Reentrancy.** The host calls the guest, the guest calls imports with `&mut Instance`, and an
   import may call an export again. `reentrant_imports` already handles the borrows; host state in
   `Glue<H>` needs the same care.
 - **Async (component model 0.3)** is not modeled.
-- **Name mangling.** The `wasi:cli/run@0.2.0#run` to method-name mapping is by the existing rules and
-  must be confirmed by a test, not assumed.
