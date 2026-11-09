@@ -9,6 +9,10 @@
 //! that lowers it to the flat `Imports` trait; with `--external-types=<path>`, only the `Glue`,
 //! naming the `Host` trait and the interface-qualified types of the library at `<path>`).
 //!
+//! `wasm2rs --component [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--external-types=<path>]
+//! <component.wasm> [output]` to write a component's program core module plus the typed `Glue`
+//! and `Exports` (like `wasm2rs::transpile_component`).
+//!
 //! Reads a WebAssembly binary and writes the transpiled Rust source. With no
 //! `funcs_per_file`/`max_bytes_per_file`, the whole module is one file, written
 //! to `output` (or stdout when omitted). When either cap is positive, the module
@@ -40,7 +44,7 @@ use wasm2rs::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--external-types=<path>] <component.wasm> [output]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -95,6 +99,7 @@ fn run() -> Result<(), String> {
     let mut unsafe_memory = false;
     let mut dump = false;
     let mut extract_core = false;
+    let mut component = false;
     let mut wit_host = false;
     let mut glue = false;
     let mut external_types: Option<String> = None;
@@ -142,6 +147,7 @@ fn run() -> Result<(), String> {
             "--unsafe-memory" => unsafe_memory = true,
             "--dump" => dump = true,
             "--extract-core" => extract_core = true,
+            "--component" => component = true,
             "--wit-host" => wit_host = true,
             "--glue" => glue = true,
             "--named-exports" => named_exports = true,
@@ -187,6 +193,42 @@ fn run() -> Result<(), String> {
         }
     };
 
+    if component {
+        // `--component` sets the naming/reentrancy/glue flags itself and writes one source,
+        // so a flag it would override or ignore is refused by name rather than dropped.
+        let refused = [
+            (dump, "--dump"),
+            (extract_core, "--extract-core"),
+            (wit_host, "--wit-host"),
+            (glue, "--glue"),
+            (named_exports, "--named-exports"),
+            (named_imports, "--named-imports"),
+            (reentrant_imports, "--reentrant-imports"),
+            (import_memory, "--import-memory"),
+            (entry_exports.is_some(), "--entry-exports"),
+            (
+                funcs_per_file > 0 || max_bytes_per_file > 0,
+                "funcs_per_file/max_bytes_per_file",
+            ),
+        ];
+        if let Some((_, flag)) = refused.into_iter().find(|(given, _)| *given) {
+            return Err(format!("--component cannot be combined with {flag}"));
+        }
+        let wasm = std::fs::read(&input).map_err(|e| format!("cannot read {input}: {e}"))?;
+        let defaults = wasm2rs::ComponentOptions::default();
+        let options = wasm2rs::ComponentOptions {
+            transpile: TranspileOptions {
+                unsafe_memory,
+                split_dispatch,
+                jobs,
+                ..TranspileOptions::default()
+            },
+            external_types: external_types.or(defaults.external_types),
+            ..defaults
+        };
+        let rust = wasm2rs::transpile_component(&wasm, &options).map_err(|e| e.to_string())?;
+        return write_output(output, &rust);
+    }
     if glue && !wit_host {
         return Err("--glue only applies to --wit-host".to_string());
     }
