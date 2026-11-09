@@ -1,6 +1,6 @@
 # Component exports (`canon lift`): typed calls into a guest
 
-Status: design (A2 of the WASI 0.2 coverage work). Nothing here is implemented yet.
+Status: A2-1 (the decoder) is implemented; A2-2 to A2-4 are design.
 Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library, A1, done),
 [component-model-poc.md](component-model-poc.md) (how the component analysis came about).
 
@@ -48,12 +48,20 @@ walks the same payloads and additionally records:
 ```rust
 pub struct WitExport {
     pub func: WitFunc,          // interface, name, params, result
+    pub core_module: usize,     // index among the top-level core modules
     pub core_export: String,    // e.g. "wasi:cli/run@0.2.0#run" (checked against the lift)
+    pub memory: Option<String>,
     pub realloc: Option<String>,
     pub post_return: Option<String>,
     pub utf8: bool,             // other encodings: Unsupported
 }
 ```
+
+As implemented: `wit-component` exports an interface as an instance of a small *shim component* that
+only re-exports its function imports; the decoder reads that shape (a nested component with any
+other content is `Unsupported`). `func.interface` is empty for a function exported at the top level.
+Every resolved name (function, `memory`, `realloc`, `post-return`) is checked to be an export of the
+right kind of the same core module, and all of them must come from one core instance.
 
 ### Generated methods (A2-2)
 
@@ -101,7 +109,7 @@ unsupported; the code (`glue_alloc`) implements them. Fix it while the file is o
 
 | Phase | Content |
 |---|---|
-| A2-1 | `wit_exports` and `WitExport`: export section, `canon lift` options, core instance/alias resolution, `Unsupported` for non-direct shapes. |
+| A2-1 | ✅ `wit_exports` and `WitExport` (`src/wit/exports.rs`): export section, `canon lift` options, core instance/alias resolution, `Unsupported` for non-direct shapes. |
 | A2-2 | `exports` option and the generated `Exports` trait and impl; mirrored lower/lift driver; `post-return`. |
 | A2-3 | `wasip2_run` uses the typed `wasi:cli/run`. |
 | A2-4 | Doc fixes. |
