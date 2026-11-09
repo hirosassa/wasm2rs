@@ -8,7 +8,7 @@
 //! glue from `wasm2rs::wit_host_glue_with_options` (the `Glue` that lowers the library's
 //! `Host` trait to the module's imports) and a `main` calling the `wasi:cli/run` export are
 //! appended, and the result is built with `rustc -C opt-level=1`, linked against the
-//! `wasm2rs-wasi` rlib (built by `cargo build -p wasm2rs-wasi`), and run with `args` as the
+//! `wasm2rs-wasi` library (compiled with `rustc` into the work directory first), and run with `args` as the
 //! program's arguments and this process's environment. The guest's `argv[0]` is `<component.wasm>` as given on the command
 //! line (like a real process's), followed by `args`.
 //!
@@ -35,35 +35,30 @@ use wasmparser::{ExternalKind, Parser, Payload};
 
 const RUN_EXPORT: &str = "wasi:cli/run@0.2.0#run";
 
-/// The path of the `wasm2rs-wasi` rlib, built (or found up to date) by cargo, in the same
-/// profile this example was built in.
-fn wasi_rlib() -> std::path::PathBuf {
-    let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    cargo.args(["build", "-p", "wasm2rs-wasi", "--message-format=json"]);
-    if !cfg!(debug_assertions) {
-        cargo.arg("--release");
-    }
-    let out = cargo
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("run cargo build -p wasm2rs-wasi");
-    assert!(
-        out.status.success(),
-        "cargo build -p wasm2rs-wasi failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| l.contains("\"reason\":\"compiler-artifact\"") && l.contains("wasm2rs-wasi"))
-        .filter_map(|l| {
-            let at = l.find("\"filenames\":[")? + "\"filenames\":[".len();
-            l[at..]
-                .split('"')
-                .find(|p| p.ends_with(".rlib"))
-                .map(Into::into)
-        })
-        .next_back()
-        .expect("cargo reports the wasm2rs-wasi rlib")
+/// Compiles the `wasm2rs-wasi` library to an rlib in `dir` with the `rustc` that builds the
+/// program (the crate has no dependencies, so one call does).
+fn compile_wasi_rlib(dir: &std::path::Path) -> std::path::PathBuf {
+    let rlib = dir.join("libwasm2rs_wasi.rlib");
+    let status = Command::new("rustc")
+        .args([
+            "--edition",
+            "2024",
+            "-C",
+            "opt-level=1",
+            "--crate-type",
+            "rlib",
+        ])
+        .args(["--crate-name", "wasm2rs_wasi"])
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wasm2rs-wasi/src/lib.rs"
+        ))
+        .arg("-o")
+        .arg(&rlib)
+        .status()
+        .expect("run rustc");
+    assert!(status.success(), "wasm2rs-wasi failed to compile");
+    rlib
 }
 
 /// The index of the core module's `wasi:cli/run` export.
@@ -137,17 +132,11 @@ fn main() {
     let src = dir.join("program.rs");
     let bin = dir.join("program");
     std::fs::write(&src, format!("{generated}\n{glue}\n{main}\n")).expect("write source");
-    let rlib = wasi_rlib();
+    let rlib = compile_wasi_rlib(&dir);
     let status = Command::new("rustc")
         .args(["--edition", "2024", "-C", "opt-level=1", "-A", "warnings"])
         .arg("--extern")
         .arg(format!("wasm2rs_wasi={}", rlib.display()))
-        .arg("-L")
-        .arg(format!(
-            "dependency={}",
-            rlib.parent()
-                .map_or_else(String::new, |d| d.display().to_string())
-        ))
         .arg(&src)
         .arg("-o")
         .arg(&bin)
