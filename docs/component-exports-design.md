@@ -147,7 +147,7 @@ still needs:
 - tables and behavior for `fields` (immutability, `header-error`), requests, responses, bodies,
   trailers and futures;
 - body streams behind `wasi:io/streams`, tied to the existing handle ranges without clashing;
-  pollables for bodies and futures (pollable slots are never freed today);
+  pollables for bodies and futures (pollable slots are freed on drop and reused);
 - `finish` ordering, content-length checks, `response-outparam.set` consumption, and a response sink
   that hands the result to the caller;
 - for `outgoing-handler`, an injected HTTP client trait (no TLS dependency by default).

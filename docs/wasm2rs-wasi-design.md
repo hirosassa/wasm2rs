@@ -106,7 +106,7 @@ later get a `_2` suffix. The default naming and its output are unchanged. The CL
 external glue (`--external-types`); the library's trait comes from the API.
 
 Each phase is its own PR; P1 depends on P0, P2 on P1. Out of scope: the known limitations of
-[typed-host-design.md](typed-host-design.md) (pollable slots never freed, stdin thread never joined,
+[typed-host-design.md](typed-host-design.md) (stdin thread never joined,
 TOCTOU preopen escape).
 
 ## Risks and constraints

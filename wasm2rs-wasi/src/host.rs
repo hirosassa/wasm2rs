@@ -128,8 +128,8 @@ pub struct WasiHost {
     /// The source behind `wasi:random`; `None` only for a host made by `new` without the
     /// `os-random` feature, whose random calls then trap.
     random: Option<Box<dyn RandomSource>>,
-    /// One entry per subscription: what it waits for. A dropped pollable keeps its slot.
-    pollables: Vec<Wait>,
+    /// One entry per live subscription: what it waits for. A dropped pollable frees its slot.
+    pollables: Slab<Wait>,
     /// The preopened directories; descriptor slot `i` is `preopens[i]`.
     preopens: Vec<Preopen>,
     /// The initial working directory if set; else "/" when a preopen is named "/".
@@ -429,7 +429,7 @@ impl WasiHost {
             random: Some(Box::new(OsRandom::new())),
             #[cfg(not(feature = "os-random"))]
             random: None,
-            pollables: Vec::new(),
+            pollables: Slab::new(),
             preopens: Vec::new(),
             cwd: None,
             descriptors: Slab::new(),
@@ -725,7 +725,8 @@ impl WasiHost {
             return;
         }
         self.stdin_started = true;
-        let shared = Arc::clone(&self.stdin);
+        // weak: the thread must not keep the buffer alive, and a dropped host ends it
+        let shared = Arc::downgrade(&self.stdin);
         let mut reader = self
             .stdin_reader
             .take()
@@ -738,6 +739,9 @@ impl WasiHost {
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     // the failure ends the input: `read_stream` reports it after the bytes
                     Err(e) => (0, Some(e.to_string())),
+                };
+                let Some(shared) = shared.upgrade() else {
+                    return;
                 };
                 let (buf, changed) = &*shared;
                 let mut buf = buf.lock().unwrap();
@@ -757,8 +761,7 @@ impl WasiHost {
     }
 
     fn subscribe_wait(&mut self, wait: Wait) -> Pollable {
-        self.pollables.push(wait);
-        Pollable((self.pollables.len() - 1) as u32)
+        Pollable(self.pollables.insert(wait) as u32)
     }
 
     /// What a pollable waits for; an unknown one is ready.

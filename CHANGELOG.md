@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of failing with E0046.
 - The generated doc comments of the `Host` trait escape `[` and `]` (no rustdoc link warnings).
 
+### Fixed
+- `wasm2rs-wasi`: `pollable.drop` frees the pollable's slot for reuse (a subscribe/drop loop no
+  longer grows the table), and the stdin thread ends after the host is dropped (once its pending
+  read returns).
+
 ### Removed
 - `examples/wasip2_host/typed.rs` and `filter.rs` (`keep_declared_methods`, `type_aliases`, the
   `// optional:` markers) and the allowlist of `tests/it/wasip2_wit_regression.rs`.

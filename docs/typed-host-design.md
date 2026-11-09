@@ -142,7 +142,6 @@ README. Each section names the code or test that backs it.
   the open `File`, so a FIFO or character device with nothing to read blocks the host; a
   zero-length read decides "end" from the file's metadata length (0 for such files).
   Read directly from the code; there is no test.
-- A pollable's table slot is never freed; a program that subscribes in an endless loop grows it.
 - Directory descriptors are resolved from their path on every use; the check and the use are
   separate steps, so a guest racing a host-side swap of a directory for a symlink can escape the
   preopen. Preopen only a directory you trust the program with.
@@ -150,7 +149,11 @@ README. Each section names the code or test that backs it.
   `not-supported`. Only `std::net` is used (no `rustix`), so nothing finer is possible.
 - `wasip2_run` never allows addresses outside loopback and does not flush the send queues after
   a trap.
-- The stdin thread is never joined; a blocked stdin read cannot be cancelled.
+- The stdin thread is never joined, and a read blocked inside the reader cannot be cancelled. It
+  is started lazily (only when the guest uses stdin) and holds the stdin buffer weakly, so after
+  the host is dropped it exits as soon as that pending read returns; until then it lingers.
+  (Resolved: pollable slots are freed on `pollable.drop` and reused, so a subscribe/drop loop no
+  longer grows the table.)
 - Waiting for a peer (flushes, `blocking-splice` on a connection, `shutdown`, dropping an output
   stream) polls with 1 ms sleeps and has no deadline except in `exit`/drop (5 s). A peer that
   stays alive and never reads blocks the guest there.
