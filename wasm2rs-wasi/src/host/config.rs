@@ -147,8 +147,8 @@ impl WasiHostBuilder {
         if let Some(clock) = self.clock {
             host.clock = clock;
         }
-        if self.random.is_some() {
-            host.random = self.random;
+        if let Some(random) = self.random {
+            host.random = Some(random);
         }
         if host.random.is_none() {
             return Err(ConfigError::MissingRandomSource);

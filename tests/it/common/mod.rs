@@ -187,9 +187,12 @@ fn wasi_lib() -> &'static WasiLib {
     static LIB: OnceLock<WasiLib> = OnceLock::new();
     LIB.get_or_init(|| {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let target = std::env::temp_dir()
-            .join("wasm2rs-testcache")
-            .join("wasi-target");
+        // One target directory per checkout: worktrees with different host sources must not
+        // overwrite each other's rlib.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        root.hash(&mut h);
+        let cache_dir = std::env::temp_dir().join("wasm2rs-testcache");
+        let target = cache_dir.join(format!("wasi-target-{:016x}", h.finish()));
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let out = Command::new(cargo)
             .args(["build", "-p", "wasm2rs-wasi", "--manifest-path"])
@@ -209,16 +212,28 @@ fn wasi_lib() -> &'static WasiLib {
             "wasm2rs-wasi failed to build:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let rlib = target.join("debug").join("libwasm2rs_wasi.rlib");
+        let debug = target.join("debug");
+        // Link a content-addressed copy, so the digest matches the bytes that are linked
+        // even if cargo replaces the uplifted file later.
+        let bytes =
+            std::fs::read(debug.join("libwasm2rs_wasi.rlib")).expect("read wasm2rs-wasi rlib");
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        std::fs::read(&rlib)
-            .expect("read wasm2rs-wasi rlib")
-            .hash(&mut h);
+        bytes.hash(&mut h);
         rustc_version().hash(&mut h);
+        let digest = h.finish();
+        let rlib = cache_dir.join(format!("libwasm2rs_wasi-{digest:016x}.rlib"));
+        if !rlib.exists() {
+            let staged = cache_dir.join(format!(
+                "libwasm2rs_wasi-{digest:016x}-{}.rlib.tmp",
+                std::process::id()
+            ));
+            std::fs::write(&staged, &bytes).expect("stage rlib");
+            std::fs::rename(&staged, &rlib).expect("publish rlib into cache");
+        }
         WasiLib {
             rlib,
-            deps: target.join("debug").join("deps"),
-            digest: h.finish(),
+            deps: debug.join("deps"),
+            digest,
         }
     })
 }

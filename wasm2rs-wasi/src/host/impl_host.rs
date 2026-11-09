@@ -295,9 +295,7 @@ impl Host for WasiHost {
 
     fn wasi_random_random_get_random_u64(&mut self) -> u64 {
         let mut bytes = [0; 8];
-        if let Err(e) = self.random_source().fill_random(&mut bytes) {
-            panic!("wasi:random: the random source failed: {e}");
-        }
+        self.fill_secure(&mut bytes);
         u64::from_le_bytes(bytes)
     }
 

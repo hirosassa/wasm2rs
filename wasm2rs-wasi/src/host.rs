@@ -415,14 +415,19 @@ impl WasiHost {
         }
     }
 
+    /// Fills `buf` with secure random bytes; a source that fails traps.
+    fn fill_secure(&mut self, buf: &mut [u8]) {
+        if let Err(e) = self.random_source().fill_random(buf) {
+            panic!("wasi:random: the random source failed: {e}");
+        }
+    }
+
     /// `len` secure random bytes. A guest-chosen length above 64 MiB traps (as in wasmtime), so
     /// a guest cannot make the host allocate without bound; so does a source that fails.
     fn secure_bytes(&mut self, len: u64) -> Vec<u8> {
         assert!(len <= 64 << 20, "random bytes: length over 64 MiB");
         let mut bytes = vec![0; len as usize];
-        if let Err(e) = self.random_source().fill_random(&mut bytes) {
-            panic!("wasi:random: the random source failed: {e}");
-        }
+        self.fill_secure(&mut bytes);
         bytes
     }
 
