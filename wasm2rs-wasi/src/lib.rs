@@ -15,4 +15,4 @@ pub use generated::*;
 
 mod host;
 
-pub use host::WasiHost;
+pub use host::{Access, ConfigError, NetworkPolicy, WasiHost, WasiHostBuilder};
