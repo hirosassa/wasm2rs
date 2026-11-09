@@ -176,11 +176,40 @@ pub fn build_with_wasi(name: &str, program: &str) -> std::path::PathBuf {
 /// coverage instrumentation cannot leak into the rlib.
 struct WasiLib {
     rlib: std::path::PathBuf,
-    /// The directory holding the rlibs of the library's dependencies.
-    deps: std::path::PathBuf,
+    /// The directories holding the rlibs of the library's dependencies.
+    deps: Vec<std::path::PathBuf>,
     /// Hash of the rlib's bytes and the toolchain: part of the cache key of every program
     /// linked against it, so a change to the host invalidates cached binaries.
     digest: u64,
+}
+
+/// The `wasm2rs-wasi` rlib and the directories of all the rlibs that cargo built, from
+/// `cargo build --message-format=json` output (their places depend on the cargo version).
+fn wasi_artifacts(json_lines: &str) -> Option<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
+    let mut lib = None;
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    for line in json_lines.lines() {
+        if !line.contains("\"reason\":\"compiler-artifact\"") {
+            continue;
+        }
+        let Some(list) = line
+            .split("\"filenames\":[")
+            .nth(1)
+            .and_then(|l| l.split(']').next())
+        else {
+            continue;
+        };
+        for rlib in list.split('"').filter(|f| f.ends_with(".rlib")) {
+            let rlib = std::path::PathBuf::from(rlib);
+            if line.contains("\"name\":\"wasm2rs_wasi\"") {
+                lib = Some(rlib.clone());
+            }
+            if let Some(dir) = rlib.parent().filter(|d| !dirs.iter().any(|x| x == d)) {
+                dirs.push(dir.to_path_buf());
+            }
+        }
+    }
+    Some((lib?, dirs))
 }
 
 fn wasi_lib() -> &'static WasiLib {
@@ -195,7 +224,13 @@ fn wasi_lib() -> &'static WasiLib {
         let target = cache_dir.join(format!("wasi-target-{:016x}", h.finish()));
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let out = Command::new(cargo)
-            .args(["build", "-p", "wasm2rs-wasi", "--manifest-path"])
+            .args([
+                "build",
+                "-p",
+                "wasm2rs-wasi",
+                "--message-format=json",
+                "--manifest-path",
+            ])
             .arg(root.join("Cargo.toml"))
             .arg("--target-dir")
             .arg(&target)
@@ -212,11 +247,14 @@ fn wasi_lib() -> &'static WasiLib {
             "wasm2rs-wasi failed to build:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let debug = target.join("debug");
+        // Where cargo put the rlib is cargo's business (a separate build directory holds the
+        // intermediate files in newer versions): ask for it, and look for the dependencies
+        // beside it.
+        let (built, deps) = wasi_artifacts(&String::from_utf8_lossy(&out.stdout))
+            .expect("cargo reported no wasm2rs-wasi rlib");
         // Link a content-addressed copy, so the digest matches the bytes that are linked
-        // even if cargo replaces the uplifted file later.
-        let bytes =
-            std::fs::read(debug.join("libwasm2rs_wasi.rlib")).expect("read wasm2rs-wasi rlib");
+        // even if cargo replaces the file later.
+        let bytes = std::fs::read(&built).expect("read wasm2rs-wasi rlib");
         let mut h = std::collections::hash_map::DefaultHasher::new();
         bytes.hash(&mut h);
         rustc_version().hash(&mut h);
@@ -230,11 +268,7 @@ fn wasi_lib() -> &'static WasiLib {
             std::fs::write(&staged, &bytes).expect("stage rlib");
             std::fs::rename(&staged, &rlib).expect("publish rlib into cache");
         }
-        WasiLib {
-            rlib,
-            deps: debug.join("deps"),
-            digest,
-        }
+        WasiLib { rlib, deps, digest }
     })
 }
 
@@ -266,9 +300,11 @@ fn build_with(name: &str, program: &str, wasi: Option<&WasiLib>) -> std::path::P
         let mut extern_arg = std::ffi::OsString::from("wasm2rs_wasi=");
         extern_arg.push(&lib.rlib);
         cmd.arg("--extern").arg(extern_arg);
-        let mut deps_arg = std::ffi::OsString::from("dependency=");
-        deps_arg.push(&lib.deps);
-        cmd.arg("-L").arg(deps_arg);
+        for dir in &lib.deps {
+            let mut deps_arg = std::ffi::OsString::from("dependency=");
+            deps_arg.push(dir);
+            cmd.arg("-L").arg(deps_arg);
+        }
     }
     cmd.arg("-o").arg(&staged);
     let out = cmd.output().expect("run rustc");
@@ -277,17 +313,8 @@ fn build_with(name: &str, program: &str, wasi: Option<&WasiLib>) -> std::path::P
         "generated code failed to compile:\n{}\n--- stderr ---\n{}\n--- command ---\n{cmd:?}\n--- deps ---\n{}",
         &program[..program.len().min(400)],
         String::from_utf8_lossy(&out.stderr),
-        wasi.map(|lib| {
-            std::fs::read_dir(&lib.deps)
-                .map(|d| {
-                    d.flatten()
-                        .map(|e| e.file_name().to_string_lossy().into_owned())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .unwrap_or_else(|e| format!("unreadable: {e}"))
-        })
-        .unwrap_or_default(),
+        wasi.map(|lib| format!("{:?}", lib.deps))
+            .unwrap_or_default(),
     );
     std::fs::rename(&staged, &bin).expect("publish binary into cache");
     std::fs::remove_dir_all(&work).ok();

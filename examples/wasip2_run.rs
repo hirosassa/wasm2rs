@@ -37,27 +37,51 @@ const RUN_EXPORT: &str = "wasi:cli/run@0.2.0#run";
 
 /// Builds the `wasm2rs-wasi` library with `cargo` into `dir` (it depends on `getrandom`, which a
 /// bare `rustc` call cannot resolve): the rlib and the directory of its dependencies' rlibs.
-fn build_wasi_rlib(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+fn build_wasi_rlib(dir: &std::path::Path) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
     let target = dir.join("wasi-target");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
+    let out = Command::new(cargo)
         .args([
             "build",
             "--release",
             "-p",
             "wasm2rs-wasi",
+            "--message-format=json-render-diagnostics",
             "--manifest-path",
         ])
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .arg("--target-dir")
         .arg(&target)
-        .status()
+        .stderr(std::process::Stdio::inherit())
+        .output()
         .expect("run cargo");
-    assert!(status.success(), "wasm2rs-wasi failed to build");
-    (
-        target.join("release/libwasm2rs_wasi.rlib"),
-        target.join("release/deps"),
-    )
+    assert!(out.status.success(), "wasm2rs-wasi failed to build");
+    // cargo says where it put the rlibs (it depends on the version): the library, and the
+    // directories to search for its dependencies.
+    let mut lib = None;
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if !line.contains("\"reason\":\"compiler-artifact\"") {
+            continue;
+        }
+        let Some(list) = line
+            .split("\"filenames\":[")
+            .nth(1)
+            .and_then(|l| l.split(']').next())
+        else {
+            continue;
+        };
+        for rlib in list.split('"').filter(|f| f.ends_with(".rlib")) {
+            let rlib = std::path::PathBuf::from(rlib);
+            if line.contains("\"name\":\"wasm2rs_wasi\"") {
+                lib = Some(rlib.clone());
+            }
+            if let Some(dir) = rlib.parent().filter(|d| !dirs.iter().any(|x| x == d)) {
+                dirs.push(dir.to_path_buf());
+            }
+        }
+    }
+    (lib.expect("cargo reported no wasm2rs-wasi rlib"), dirs)
 }
 
 /// The index of the core module's `wasi:cli/run` export.
@@ -136,8 +160,10 @@ fn main() {
         .args(["--edition", "2024", "-C", "opt-level=1", "-A", "warnings"])
         .arg("--extern")
         .arg(format!("wasm2rs_wasi={}", rlib.display()))
-        .arg("-L")
-        .arg(format!("dependency={}", deps.display()))
+        .args(
+            deps.iter()
+                .flat_map(|d| ["-L".to_string(), format!("dependency={}", d.display())]),
+        )
         .arg(&src)
         .arg("-o")
         .arg(&bin)
