@@ -274,8 +274,20 @@ fn build_with(name: &str, program: &str, wasi: Option<&WasiLib>) -> std::path::P
     let out = cmd.output().expect("run rustc");
     assert!(
         out.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
+        "generated code failed to compile:\n{}\n--- stderr ---\n{}\n--- command ---\n{cmd:?}\n--- deps ---\n{}",
+        &program[..program.len().min(400)],
         String::from_utf8_lossy(&out.stderr),
+        wasi.map(|lib| {
+            std::fs::read_dir(&lib.deps)
+                .map(|d| {
+                    d.flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_else(|e| format!("unreadable: {e}"))
+        })
+        .unwrap_or_default(),
     );
     std::fs::rename(&staged, &bin).expect("publish binary into cache");
     std::fs::remove_dir_all(&work).ok();
