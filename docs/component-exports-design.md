@@ -1,6 +1,6 @@
 # Component exports (`canon lift`): typed calls into a guest
 
-Status: A2-1 (the decoder), A2-2 (the `Exports` trait) A2-3 (`wasip2_run` calls the typed `run`) and A2-4 (cleanup) are implemented.
+Status: A2-1 (the decoder), A2-2 (the `Exports` trait), A2-3 (`wasip2_run` calls the typed `run`) and A2-4 (cleanup) are implemented. The `wasi:http` host this document defers is implemented too (see [wasi-http-design.md](wasi-http-design.md)).
 Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library, A1, done),
 [component-model-poc.md](component-model-poc.md) (how the component analysis came about).
 
@@ -65,7 +65,7 @@ right kind of the same core module, and all of them must come from one core inst
 
 ### Generated methods (A2-2)
 
-`WitOptions` gets `exports: bool` (the CLI flag follows `--glue`). With it, the output also contains
+`WitOptions` gets `exports: bool` (there is no CLI flag: `--wit-host --glue` leaves it off, `--component` turns it on). With it, the output also contains
 
 ```rust
 pub trait Exports {
@@ -109,10 +109,10 @@ names (`run_export`, `wasmparser`).
   re-export) is `Unsupported`; its message is printed as is, and the exit code is 2. The same holds for a glue
   error caused by another export (the glue has a method for every export, not only `run`), so
   every function the component exports must be supported for the example to run it.
-- **Core module.** Still the largest one. `WitExport::core_module` indexes the *top-level* core
+- **Core module.** (As of A2-3 the largest one.) `WitExport::core_module` indexes the *top-level* core
   modules, while `extract_core_modules` also returns the modules of nested components, so the two
-  index spaces can differ and the field is not used yet. Selecting the module by `core_module`
-  (and checking that it exports `core_export`) is left to A3.
+  index spaces differ. Since A3-1, `wasm2rs::transpile_component` selects the module by
+  `core_module` (exports from more than one module are `Unsupported`), and `wasip2_run` uses it.
 - **Unchanged.** Trap = 134, `wasi:cli/exit` as before. A real `wasm32-wasip2` component lifts
   `run` directly, so it takes this path.
 
@@ -137,9 +137,10 @@ decoder tests build components with `wit-component`.
 
 ## What `wasi:http` needs on top (separate design)
 
-`wasm2rs-wasi/src/generated.rs` has all `wasi:http` types and methods, each defaulting to a trap;
-nothing is implemented. After A2 a host can call `incoming-handler#handle`, but a guest-facing host
-still needs:
+This section is the original requirements list, written when `wasm2rs-wasi/src/generated.rs` had all
+`wasi:http` methods defaulting to a trap. `WasiHost` now implements them (see
+[wasi-http-design.md](wasi-http-design.md) for the design and status). After A2 a host can call
+`incoming-handler#handle`, but a guest-facing host needed:
 
 - a way for the host to **mint resource handles** (`own<incoming-request>`,
   `own<response-outparam>`): tables for the http resources and a public mint API; today handles are

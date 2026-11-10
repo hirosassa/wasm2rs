@@ -30,11 +30,13 @@ README. Each section names the code or test that backs it.
   (glue + a `main` that makes `Instance::new(Glue(host))`, linked through
   `common::build_with_wasi`, which builds the rlib once per run), and each
   `tests/it/wasip2_typed_*.rs` builds a component from WIT and a core module from WAT.
-- Configuration is by builder methods on `WasiHost`: `with_arguments`, `with_preopen` (read-only
-  directory shown to the guest as `/`), `with_writable_preopen`, `with_external_network` (lifts
-  the loopback-only rule). `wasip2_run` maps `$WASIP2_PREOPEN` and `$WASIP2_PREOPEN_WRITABLE=1`
-  to the first two; it never calls `with_external_network`. A fuller configuration surface is
-  planned (P2 of the library design).
+- Configuration is by `WasiHost::builder()` (`WasiHostBuilder`: `arguments`, `environment`,
+  `initial_cwd`, `preopen(guest_name, host_path, Access)`, `network(NetworkPolicy)`, `clock`,
+  `random`, `http_client`, `max_request_body`, `stdin`/`stdout`/`stderr`, then `build()`), or by
+  the older `WasiHost::new(env)` with `with_arguments`, `with_preopen` (read-only directory shown
+  to the guest as `/`), `with_writable_preopen` and `with_external_network` (lifts the loopback-only
+  rule). `wasip2_run` uses `new` and maps `$WASIP2_PREOPEN` and `$WASIP2_PREOPEN_WRITABLE=1`
+  to the preopen methods; it never calls `with_external_network`.
 - The host runs one guest call at a time and is single-threaded except for the stdin thread.
 
 ## Handles and tables
@@ -42,14 +44,16 @@ README. Each section names the code or test that backs it.
 - A resource handle is the index of a slot in a `Slab<T>`: `insert` reuses the most recently
   freed slot, `remove` frees one. Dropping a descriptor, file input/output stream,
   directory-entry stream, TCP/UDP socket, datagram stream, resolve-address stream, connection
-  stream or `error` frees its slot. A **pollable keeps its slot** (`resource-drop` of a
-  pollable is a no-op; the `pollables` table only grows). `network` and terminal resources have
-  no state.
+  stream, `error` or **pollable** frees its slot (the `pollables` table does not grow in a
+  subscribe/drop loop). `network` and terminal resources have no state.
 - A guest must not use a handle after dropping it. The host does not detect that: a stale handle
-  may fail, succeed, or name a newer resource once the slot is reused.
+  may fail, succeed, or name a newer resource once the slot is reused. (Pollables are the
+  exception: a `Wait` keeps the slot's epoch, so a pollable of a dropped resource never follows
+  whatever reuses its slot; `response-outparam` handles are never reused.)
 - Fixed handles: input stream 0 is stdin; output streams 1 and 2 are stdout and stderr.
   A file's streams are `FIRST_FILE_STREAM (3) + slot` in `files` (input) or `outputs` (output).
-  A connection's streams are `TCP_STREAM + slot` in `tcp_in` / `tcp_out`.
+  A connection's streams are `TCP_STREAM + slot` in `tcp_in` / `tcp_out`; `wasi:http` bodies
+  have their own ranges (`HTTP_STREAM`, `HTTP_OUT_STREAM`, see `docs/wasi-http-design.md`).
   Descriptor 0 is the preopen and is never freed.
 
 ## Stream model
@@ -177,6 +181,8 @@ README. Each section names the code or test that backs it.
 | `wasi:random` | `wasip2_typed_random.rs` |
 | streams, splice, permit | `wasip2_typed_streams.rs`, `wasip2_typed_splice.rs`, `wasip2_typed_splice_permit.rs` |
 | send queue, flush, shutdown, failed peer | `wasip2_typed_send_queue.rs`, `wasip2_typed_io_error.rs` |
-| files and symlinks | `wasip2_typed_fs.rs`, `wasip2_typed_fs_write.rs`, `wasip2_typed_fs_edges.rs`, `wasip2_typed_fs_identity.rs`, `wasip2_typed_fs_symlink.rs` |
+| files and symlinks | `wasip2_typed_fs.rs`, `wasip2_typed_fs_write.rs`, `wasip2_typed_fs_edges.rs`, `wasip2_typed_fs_identity.rs`, `wasip2_typed_fs_symlink.rs`, `wasip2_typed_fs_gaps.rs` |
 | sockets, options, UDP, lookup | `wasip2_typed_sockets.rs`, `wasip2_typed_tcp_options.rs`, `wasip2_typed_udp.rs`, `wasip2_typed_name_lookup.rs` |
 | both filesystem and sockets (two `ErrorCode` enums) | `wasip2_typed_both.rs` |
+| `wasi:http` | `wasip2_typed_http_fields.rs`, `wasip2_typed_http_incoming.rs`, `wasip2_serve_example.rs`; `wasm2rs-wasi/tests/http_*.rs` |
+| the `Host` method surface | `wasip2_wit_regression.rs` (every method overridden), `wasi_generated.rs` (freshness) |

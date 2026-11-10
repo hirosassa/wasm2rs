@@ -1,7 +1,10 @@
 # `wasm2rs-wasi`: promoting the typed WASI 0.2 host to a library
 
 Status: P0, P1 and P2 are implemented (the crate exists, with the trait, the host logic and the
-configuration surface). The "Problem" section describes the state before P1.
+configuration surface), and so are the follow-ups: component input and `include_component!` (A3,
+[component-input-design.md](component-input-design.md)), the release step for the crate, and
+`wasi:http` ([wasi-http-design.md](wasi-http-design.md)). The "Problem" section describes the state
+before P1.
 Background: [typed-host-design.md](typed-host-design.md) describes the host as it is today
 (it described the host as `examples/wasip2_host/typed.rs`; since P1 that code is `wasm2rs-wasi/src/host.rs`); [component-model-poc.md](component-model-poc.md)
 describes how the component analysis came about.
@@ -25,7 +28,8 @@ the generated program as source text:
 1. **A new workspace crate, `wasm2rs-wasi`**, with its own version. The transpiler stays free of
    runtime code and dependencies.
 2. **Methods the host does not implement default to a trap** (documented), so one `impl Host` always
-   compiles and an unsupported interface (today: all of `wasi:http`) fails at the call, not at build.
+   compiles and an unsupported interface fails at the call, not at build (at the time of writing that was all of
+   `wasi:http`; `WasiHost` now implements every method, the default only matters to other `Host` implementors).
 3. **The configuration API ships complete in the first release**: arguments, environment, several
    preopens, network policy, and injectable clocks, random and standard streams.
 
@@ -41,8 +45,8 @@ naming rule for this.
 The trait and types are **generated and checked in** (`wasm2rs-wasi/src/generated.rs`) from the
 official 0.2.0 WIT already vendored in `tests/wasi_p2_wit/`. A freshness test regenerates them and
 fails on any difference, replacing the allowlist-vs-`typed.rs` comparison of
-`tests/it/wasip2_wit_regression.rs` (the allowlist shrinks to the methods that keep the trapping
-default, i.e. `wasi:http`).
+`tests/it/wasip2_wit_regression.rs` (the allowlist shrank to the `wasi:http` methods and is gone now:
+the test requires every method to be overridden).
 
 ### Glue in an "external types" mode
 
@@ -56,15 +60,15 @@ component; it is just short.
 
 ```rust
 let host = WasiHost::builder()
-    .args(["prog", "--flag"])
-    .env([("KEY", "value")])
-    .preopen("/data", "./data", Access::ReadWrite)?
+    .arguments(vec!["prog".into(), "--flag".into()])
+    .environment(vec![("KEY".into(), "value".into())])
+    .preopen("/data", "./data", Access::ReadWrite)
     .build()?;
 let mut inst = Instance::new(Glue(host));
 ```
 
-No `rustc` at run time: the transpile (plus glue) happens in `build.rs` or, later, in an
-`include_component!` macro (A3).
+No `rustc` at run time: the transpile (plus glue) happens in `build.rs` (`wasm2rs::build::transpile_component_to_out_dir`) and
+`wasm2rs_macros::include_component!` includes the result (A3, done).
 
 ### Configuration surface
 
@@ -116,10 +120,10 @@ escape is closed there, see its confinement note).
 - **Lints.** The hardening lints are set in the root `[lints]` only, so the new crate does not
   inherit them. The host uses `unwrap`/`expect`/`assert!` for traps; either keep that behind scoped
   `#[expect(..., reason = ...)]` or convert to `Result` internally.
-- **Release.** The tag-driven `release.yaml` checks only the root version and publishes two crates
-  by hard-coded steps. Adding the crate needs a workspace member entry, a `cargo publish -p
-  wasm2rs-wasi` step after `wasm2rs`, and its own version.
+- **Release.** The tag-driven `release.yaml` checks only the root version and publishes the crates
+  by hard-coded steps. Done: `wasm2rs-wasi` is a workspace member with its own version, published
+  last (skipped when that version is already on crates.io).
 - **Compatibility.** The library targets WASI 0.2.0; import names drop the version suffix
   (`named_imports`), so 0.2.x components using only the 0.2.0 surface work. A host trait for a
   different WASI version would be a different crate version.
-- **`wasi:http`.** Needs the export side (`canon lift`, A2) first.
+- **`wasi:http`.** Needed the export side (`canon lift`, A2) first; both are done.

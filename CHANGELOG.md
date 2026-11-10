@@ -9,8 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `transpile_component_with_exports`: `transpile_component` that also returns the lifted `Vec<WitExport>`, so a caller checking the exports no longer runs a second `wit_exports` pass (`transpile_component` is now a wrapper). `examples/common::transpile_exporting` uses it.
+- `transpile_component` and `ComponentOptions` (#198): a component in, one Rust source out (the program core module picked by the exports' `canon lift`, then the `Glue` for `wasm2rs-wasi` and the typed `Exports`); `named_imports`, `named_exports` and `reentrant_imports` are forced on. The CLI gets `--component` (#200), `wasm2rs::build::transpile_component_to_out_dir` / `transpile_component_to_dir` write `$OUT_DIR/{stem}.rs` for a build script (#201), and `wasm2rs_macros::include_component!("stem")` includes it (a name ending in `.wasm` is a compile error, #203).
+- `wit_exports` and `WitExport` decode the `canon lift` side of a component (#182), and `WitOptions::exports` generates a typed `Exports` trait with one method per exported WIT function, implemented for `Instance<Glue<H>>` (#183). `examples/wasip2_run.rs` calls the typed `wasi:cli/run` through it (#187).
+- `WitNaming::Qualified` (types in one module per defining interface), `WitOptions::external_types` and the CLI flag `--wit-host --glue --external-types=<path>`: the glue refers to a library's `Host` and types instead of declaring them (#175).
+- `wasm2rs-wasi`: `WasiHost::builder()` (`WasiHostBuilder`) with several preopens (`Access`), a `NetworkPolicy`, injectable `Clock` and `RandomSource` (the OS CSPRNG by default, feature `os-random`) and injectable stdin, stdout and stderr (#178 to #180).
+- `wasm2rs-wasi`: the six `wasi:filesystem/types` items that were missing (`get-type`, `read`, `write`, `advise`, `is-same-object`, `filesystem-error-code`, #170) and small gaps in io/poll, clocks, cli/environment and TCP (`address-family`) (#172); `tests/it/wasip2_wit_regression.rs` checks the host against the official 0.2.0 WIT (#171).
+- `wasm2rs-wasi`: `wasi:http` client side: `outgoing-handler.handle`, request and response bodies, `future-trailers`, and the `HttpClient` trait with `UreqClient` behind the feature `http-client` (#190 to #193).
+- `examples/wasip2_serve.rs`: serves a component exporting `wasi:http/incoming-handler` over TCP (#196).
 - `wasm2rs-wasi`: response streaming and incoming-side trailers. **Breaking:** `ServedResponse::body` is a `ServedBody` (`io::Read`, follows the guest's `outgoing-body`; an open body no longer fails `take_response`) and `IncomingRequestParts` has a `trailers` field (delivered by `future-trailers.get`); a response body may finish with trailers (`ServedBody::trailers`). `examples/wasip2_serve` sends such bodies chunked (`--body-timeout`).
-- `wasm2rs-wasi`: client-side trailers (#209). **Breaking:** `HttpRequest` has a `trailers` field (what `outgoing-body.finish` was given, checked like headers) and `HttpResponse` has a `trailers: Option<ResponseTrailers>` reader called after the body, delivered by `future-trailers.get`. `UreqClient` refuses a request with trailers (explicit `HttpClientError`) and never receives any.
+- `wasm2rs-wasi`: client-side trailers (#211). **Breaking:** `HttpRequest` has a `trailers` field (what `outgoing-body.finish` was given, checked like headers) and `HttpResponse` has a `trailers: Option<ResponseTrailers>` reader called after the body, delivered by `future-trailers.get`. `UreqClient` refuses a request with trailers (explicit `HttpClientError`) and never receives any.
 - `wasm2rs-wasi`: `response-outparam` handles are never reused, so a stale one can no longer write into another call's answer; pollables (`Wait::Tcp*`/`Http*`/`Udp*`) carry the slot's epoch and no longer follow a resource that took the slot of a dropped one; `outgoing-response.set-status-code` accepts `100..=999` (wasmtime's range).
 - `wasm2rs-wasi` (new crate, version 0.1.0): the typed WASI 0.2.0 host as a library. `Host`
   declares all 199 methods of the official 0.2.0 WIT, each defaulting to a trap, with the types in
@@ -23,11 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `wasm2rs-wasi`: `wasi:http/types` `fields`, `request-options` and the parts of `outgoing-request`
   (method, path-with-query, scheme, authority, headers), and the `HttpClient` trait with
-  `WasiHostBuilder::http_client` (stored only; `outgoing-handler.handle` and bodies are still to come).
+  `WasiHostBuilder::http_client` (the first step; `outgoing-handler.handle` and bodies followed, see above).
 - `wasm2rs-wasi`: the incoming side of `wasi:http` (a guest exporting `incoming-handler#handle`):
   `incoming-request`, `outgoing-response` and `response-outparam`, with `WasiHost::new_incoming_request`,
   `new_response_outparam` and `take_response` (the answer as `ServedResponse`, read once `handle`
-  returns; no streaming, no trailers). `WasiHost` now overrides every method of the WASI 0.2.0 surface.
+  returns; streaming and trailers followed, see above). `WasiHost` now overrides every method of the WASI 0.2.0 surface.
 
 ### Changed
 - `examples/wasip2_run.rs` links the `wasm2rs-wasi` rlib instead of embedding the host source; a
@@ -36,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The generated doc comments of the `Host` trait escape `[` and `]` (no rustdoc link warnings).
 
 ### Fixed
+- `wasm2rs-wasi`: a preopen can no longer be escaped by swapping a path component for a symlink
+  after a check: paths are resolved below directory handles (`cap-std`, `openat` with `O_NOFOLLOW`
+  per component) in one step (#204).
 - `wit_exports`: an imported core module takes a slot in the module index space (as in
   `transpile_component`), so the modules after it are no longer off by one.
 - `wasm2rs-wasi`: `pollable.drop` frees the pollable's slot for reuse (a subscribe/drop loop no
@@ -618,8 +628,8 @@ bounds checks, and trap behaviour).
   faster code on modules trusted to stay in bounds (an out-of-bounds access
   becomes undefined behaviour instead of a wasm trap).
 
-[Unreleased]: https://github.com/hirosassa/wasm2rs/compare/v0.3.0...HEAD
-[0.3.1]: https://github.com/hirosassa/wasm2rs/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/hirosassa/wasm2rs/compare/wasm2rs-macros-v0.3.1...HEAD
+[0.3.1]: https://github.com/hirosassa/wasm2rs/compare/v0.3.0...wasm2rs-macros-v0.3.1
 [0.3.0]: https://github.com/hirosassa/wasm2rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hirosassa/wasm2rs/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/hirosassa/wasm2rs/compare/v0.1.0...v0.1.1
