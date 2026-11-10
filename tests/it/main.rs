@@ -30,6 +30,7 @@ mod cli;
 mod codegen_limits;
 mod compile_and_run;
 mod component_input;
+mod component_wit_edges;
 mod condition_simplify;
 mod cont;
 mod control_flow;

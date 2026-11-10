@@ -371,3 +371,48 @@ fn a_module_transpiled_without_named_exports_fails_to_build_instead_of_recursing
     );
     common::build("wit_glue_exports_no_named", &program);
 }
+
+#[test]
+fn a_list_of_bytes_param_is_copied_into_guest_memory() {
+    // The guest returns the first byte plus 1000 times the length it was handed.
+    run(
+        "list_u8_param",
+        "package t:p;
+         world w { export f: func(b: list<u8>) -> u32; }",
+        &format!(
+            r#"(module {MEM}
+              (func (export "f") (param i32 i32) (result i32)
+                (i32.add (i32.load8_u (local.get 0)) (i32.mul (local.get 1) (i32.const 1000)))))"#
+        ),
+        "assert_eq!(Exports::f(&mut inst, vec![7, 8, 9]), 3007);\n\
+         assert_eq!(Exports::f(&mut inst, vec![250]), 1250);",
+    );
+}
+
+#[test]
+fn allocating_params_need_the_lift_realloc_to_be_cabi_realloc() {
+    // A string param is lowered by calling `cabi_realloc` on the guest; a lift that names
+    // another function as its realloc would be called with the wrong allocator.
+    let component = wat::parse_str(
+        r#"(component
+  (core module $m
+    (memory (export "mem") 1)
+    (func (export "alloc") (param i32 i32 i32 i32) (result i32) i32.const 0)
+    (func (export "f") (param i32 i32)))
+  (core instance $i (instantiate $m))
+  (alias core export $i "mem" (core memory $mem))
+  (alias core export $i "alloc" (core func $r))
+  (alias core export $i "f" (core func $f))
+  (type $t (func (param "s" string)))
+  (func $l (type $t) (canon lift (core func $f) (memory $mem) (realloc $r)))
+  (export "say" (func $l)))"#,
+    )
+    .unwrap();
+    let err = wit_host_glue_with_options(&component, &exports_on())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("cabi_realloc") && err.contains("`alloc`"),
+        "{err}"
+    );
+}
