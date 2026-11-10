@@ -52,6 +52,5 @@ bytes in a field value (`is_header_value`). `fuzz/tests/boundaries.rs` pins that
 
 ## CI
 
-Not in CI (it takes minutes and needs nightly). A cheap check that the targets still build
-is `cd fuzz && cargo check --bins` (stable); `cargo test` there also runs the fixed-input
-tests in a few seconds.
+CI only runs `cargo check --bins` and `cargo test` in `fuzz/` (stable, the `fuzz-crate` job;
+the tests take about a second). Running the fuzzers (nightly + libFuzzer, minutes) is manual.

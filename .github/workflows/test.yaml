@@ -142,6 +142,39 @@ jobs:
         env:
           WASM2RS_REQUIRE_E2E: emsdk
 
+  # fuzz/ is a detached workspace (nightly + libFuzzer to *run*), so the main jobs never
+  # build it. Only the stable-buildable parts run here: that the targets still compile and
+  # that the fixed-input boundary tests pass. Fuzzing itself stays manual
+  # (docs/fuzzing-http-server.md). fuzz-diff/ is not built in CI: it pulls in wasmtime.
+  fuzz-crate:
+    name: Check fuzz/ crate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # rustc is in the key: `stable` moves, and artifacts of another rustc are unusable.
+      - name: Get rustc version
+        id: rustc
+        run: echo "v=$(rustc -V | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache fuzz/ target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/target
+          key: fuzz-target-${{ runner.os }}-${{ steps.rustc.outputs.v }}-${{ hashFiles('fuzz/Cargo.lock') }}
+
+      - name: Check the fuzz targets build
+        working-directory: fuzz
+        run: cargo check --bins --locked
+
+      - name: Test the fuzz boundary contracts
+        working-directory: fuzz
+        run: cargo test --locked
+
   coverage:
     runs-on: ubuntu-latest
     env:
