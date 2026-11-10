@@ -521,3 +521,37 @@ fn a_dropped_guest_outparam_handle_stays_distinct_after_take() {
     let fresh = h.new_response_outparam();
     assert_ne!(old, fresh);
 }
+
+#[test]
+fn a_body_the_guest_finished_reports_it_finished() {
+    let mut h = host();
+    let out = h.new_response_outparam();
+    let response = new_response(&mut h);
+    write_body(&mut h, response, b"done");
+    set_ok(&mut h, out, response);
+    let served = h.take_response(out).unwrap().unwrap();
+    assert!(served.body.is_finished());
+}
+
+#[test]
+fn a_write_within_the_idle_timeout_is_read_not_timed_out() {
+    let mut h = host();
+    let out = h.new_response_outparam();
+    let response = new_response(&mut h);
+    let body = h
+        .wasi_http_types_method_outgoing_response_body(response)
+        .unwrap();
+    let stream = h.wasi_http_types_method_outgoing_body_write(body).unwrap();
+    set_ok(&mut h, out, response);
+    let mut served = h.take_response(out).unwrap().unwrap();
+    served.body.set_idle_timeout(Some(Duration::from_secs(30)));
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 8];
+        served.body.read(&mut buf).map(|n| buf[..n].to_vec())
+    });
+
+    std::thread::sleep(Duration::from_millis(100));
+    h.wasi_io_streams_method_output_stream_write(stream, b"late".to_vec())
+        .unwrap();
+    assert_eq!(reader.join().unwrap().unwrap(), b"late");
+}

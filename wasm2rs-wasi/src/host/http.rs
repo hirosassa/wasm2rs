@@ -458,9 +458,10 @@ pub(super) fn scheme_name(scheme: &Scheme) -> String {
 
 /// What the thread of a `future-incoming-response` fills.
 struct FutureShared {
+    ///
+    /// A future the guest dropped needs no cancellation: the thread holds the last reference, so
+    /// a late response is dropped with it.
     result: Mutex<Option<Result<HttpResponse, ErrorCode>>>,
-    /// The guest dropped the future: a late response is dropped, not kept.
-    cancelled: AtomicBool,
 }
 
 /// A `future-incoming-response`: a thread runs the client's `send` and leaves the result in a
@@ -484,14 +485,11 @@ impl HttpFuture {
     ) -> Self {
         let shared = Arc::new(FutureShared {
             result: Mutex::new(None),
-            cancelled: AtomicBool::new(false),
         });
         let slot = Arc::clone(&shared);
         std::thread::spawn(move || {
             let result = send_when_finished(&client, request, body);
-            if !slot.cancelled.load(Ordering::SeqCst) {
-                *lock(&slot.result) = Some(result);
-            }
+            *lock(&slot.result) = Some(result);
         });
         HttpFuture {
             shared,
@@ -512,12 +510,6 @@ impl HttpFuture {
         let result = lock(&self.shared.result).take()?;
         self.taken = true;
         Some(Ok(result))
-    }
-
-    pub(super) fn cancel(&self) {
-        self.shared.cancelled.store(true, Ordering::SeqCst);
-        // a response that arrived before the guest gave up
-        drop(lock(&self.shared.result).take());
     }
 }
 

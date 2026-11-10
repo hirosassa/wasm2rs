@@ -662,3 +662,74 @@ fn dropping_the_host_stops_the_reader_threads() {
     drop(h);
     wait_until(&stopped);
 }
+
+/// A body that counts the bytes the host's reader thread has pulled from it.
+struct Counting(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Read for Counting {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        buf.fill(b'c');
+        self.0.fetch_add(buf.len(), Ordering::SeqCst);
+        Ok(buf.len())
+    }
+}
+
+#[test]
+fn the_reader_thread_stops_buffering_ahead_at_the_limit_until_the_guest_reads() {
+    const BUFFER: usize = 1 << 20;
+    let pulled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&pulled);
+    let slot = Mutex::new(Some(Counting(counter)));
+    let mut h = host_with(FnClient(move |_| {
+        Ok(streamed(slot.lock().unwrap().take().unwrap()))
+    }));
+    let resp = endless_response(&mut h);
+    let body = h
+        .wasi_http_types_method_incoming_response_consume(resp)
+        .unwrap();
+    let stream = h.wasi_http_types_method_incoming_body_stream(body).unwrap();
+
+    std::thread::sleep(Duration::from_millis(500));
+    let ahead = pulled.load(Ordering::SeqCst);
+    // it fills the buffer, and the last chunk may overshoot by less than its own size
+    assert!(
+        (BUFFER..BUFFER + 4096).contains(&ahead),
+        "buffered ahead: {ahead}"
+    );
+
+    // reading frees room, so the thread goes on to the new limit
+    let data = h
+        .wasi_io_streams_method_input_stream_blocking_read(stream, BUFFER as u64)
+        .unwrap();
+    assert!(!data.is_empty());
+    std::thread::sleep(Duration::from_millis(300));
+    let after = pulled.load(Ordering::SeqCst);
+    assert!(after > ahead, "the thread resumed: {after} > {ahead}");
+    assert!(after < ahead + BUFFER + 4096 + data.len(), "{after}");
+}
+
+#[test]
+fn the_streams_of_several_incoming_bodies_each_read_their_own_body() {
+    let mut count = 0;
+    let mut h = host_with(FnClient(move |_| {
+        count += 1;
+        Ok(response(
+            200,
+            &[],
+            if count == 1 { "first" } else { "second" },
+        ))
+    }));
+    let mut streams = Vec::new();
+    for _ in 0..2 {
+        let r = get_request(&mut h, "localhost");
+        let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
+        let resp = finished(&mut h, future).unwrap();
+        let body = h
+            .wasi_http_types_method_incoming_response_consume(resp)
+            .unwrap();
+        streams.push(h.wasi_http_types_method_incoming_body_stream(body).unwrap());
+    }
+    // read in the opposite order: a stream is tied to its own body, not to the first slot
+    assert_eq!(read_all(&mut h, streams[1]), b"second");
+    assert_eq!(read_all(&mut h, streams[0]), b"first");
+}

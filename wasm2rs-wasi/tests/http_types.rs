@@ -421,3 +421,13 @@ impl HttpClient for Refusing {
 fn the_builder_holds_an_http_client() {
     builder().http_client(Refusing).build().unwrap();
 }
+
+#[test]
+fn setting_an_empty_list_for_an_absent_name_adds_nothing() {
+    let mut h = host();
+    let f = h.wasi_http_types_constructor_fields();
+    h.wasi_http_types_method_fields_set(f, "x".into(), vec![])
+        .unwrap();
+    assert!(!h.wasi_http_types_method_fields_has(f, "x".into()));
+    assert!(h.wasi_http_types_method_fields_entries(f).is_empty());
+}

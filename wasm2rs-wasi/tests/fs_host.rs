@@ -1093,3 +1093,123 @@ fn a_zero_length_file_stream_read_is_ok_before_the_end_and_closed_at_it() {
         Err(StreamError::Closed)
     );
 }
+
+// ---- open-at: flags and error mapping ----------------------------------------------------
+
+#[test]
+fn a_dangling_symlink_is_no_entry_unless_a_file_is_to_be_created_through_it() {
+    let root = scratch("dangling");
+    std::os::unix::fs::symlink("nowhere", root.join("dangling")).unwrap();
+    let mut host = host_over(&root, Access::ReadWrite);
+    assert_eq!(
+        open(&mut host, "dangling", OpenFlags(0), DescriptorFlags::READ),
+        Err(Fs::NoEntry)
+    );
+    assert_eq!(
+        open(&mut host, "dangling", OpenFlags::CREATE, RW),
+        Err(Fs::NotPermitted)
+    );
+}
+
+#[test]
+fn create_and_truncate_work_without_the_write_descriptor_flag() {
+    let root = scratch("flags-without-write");
+    std::fs::write(root.join("old"), b"contents").unwrap();
+    let mut host = host_over(&root, Access::ReadWrite);
+    open(&mut host, "new", OpenFlags::CREATE, DescriptorFlags::READ).unwrap();
+    assert_eq!(std::fs::read(root.join("new")).unwrap(), b"");
+    open(&mut host, "old", OpenFlags::TRUNCATE, DescriptorFlags::READ).unwrap();
+    assert_eq!(std::fs::read(root.join("old")).unwrap(), b"");
+}
+
+#[test]
+fn an_unreadable_file_is_access_whether_or_not_it_is_reached_through_a_symlink() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch("unreadable");
+    std::fs::write(root.join("secret"), b"x").unwrap();
+    std::fs::set_permissions(root.join("secret"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::os::unix::fs::symlink("secret", root.join("link")).unwrap();
+    let mut host = host_over(&root, Access::ReadWrite);
+    // a process that can read it anyway (root) has nothing to refuse
+    if std::fs::File::open(root.join("secret")).is_ok() {
+        return;
+    }
+    let nofollow = |host: &mut WasiHost, path: &str| {
+        host.wasi_filesystem_types_method_descriptor_open_at(
+            ROOT,
+            PathFlags(0),
+            path.into(),
+            OpenFlags(0),
+            DescriptorFlags::READ,
+        )
+    };
+    assert_eq!(nofollow(&mut host, "secret"), Err(Fs::Access));
+    assert_eq!(
+        open(&mut host, "secret", OpenFlags(0), DescriptorFlags::READ),
+        Err(Fs::Access)
+    );
+    assert_eq!(
+        open(&mut host, "link", OpenFlags(0), DescriptorFlags::READ),
+        Err(Fs::Access)
+    );
+}
+
+#[test]
+fn a_read_of_a_length_that_is_not_a_chunk_multiple_returns_exactly_that_many() {
+    let root = scratch("odd-length");
+    std::fs::write(root.join("f"), vec![5u8; 20_000]).unwrap();
+    let mut host = host_over(&root, Access::ReadOnly);
+    let f = open(&mut host, "f", OpenFlags(0), DescriptorFlags::READ).unwrap();
+    assert_eq!(read_at(&mut host, f, 10_000, 0), (vec![5u8; 10_000], false));
+    assert_eq!(
+        read_at(&mut host, f, 12_000, 5_000),
+        (vec![5u8; 12_000], false)
+    );
+}
+
+#[test]
+fn a_device_is_neither_a_file_nor_a_directory_nor_a_link() {
+    let mut host = host_over(Path::new("/dev"), Access::ReadOnly);
+    let null = open(&mut host, "null", OpenFlags(0), DescriptorFlags::READ).unwrap();
+    // the type of an open file, and of a path looked up in the sandbox
+    assert_eq!(
+        host.wasi_filesystem_types_method_descriptor_get_type(null),
+        Ok(DescriptorType::Unknown)
+    );
+    assert_eq!(
+        host.wasi_filesystem_types_method_descriptor_stat_at(ROOT, FOLLOW, "null".into())
+            .map(|s| s.type_),
+        Ok(DescriptorType::Unknown)
+    );
+}
+
+#[test]
+fn a_directory_path_with_a_trailing_slash_or_dot_opens_the_directory() {
+    let root = scratch("dir-suffix");
+    std::fs::create_dir(root.join("sub")).unwrap();
+    let mut host = host_over(&root, Access::ReadOnly);
+    let dir = OpenFlags::DIRECTORY;
+    for path in ["sub", "sub/", "sub/."] {
+        let d = open(&mut host, path, dir, DescriptorFlags::READ).unwrap();
+        assert_eq!(
+            host.wasi_filesystem_types_method_descriptor_get_type(d),
+            Ok(DescriptorType::Directory),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_write_to_a_dropped_file_stream_is_closed_not_failed() {
+    let root = scratch("dropped-output");
+    let mut host = host_over(&root, Access::ReadWrite);
+    let f = create(&mut host, "f");
+    let w = host
+        .wasi_filesystem_types_method_descriptor_write_via_stream(f, 0)
+        .unwrap();
+    host.wasi_io_streams_resource_drop_output_stream(w);
+    assert_eq!(
+        host.wasi_io_streams_method_output_stream_write(w, b"x".to_vec()),
+        Err(StreamError::Closed)
+    );
+}
