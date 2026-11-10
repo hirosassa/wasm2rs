@@ -215,3 +215,117 @@ fn an_http10_client_gets_a_streamed_body_without_chunk_framing() {
     // delimited by the close; the trailers are dropped
     assert_eq!(body, b"accept");
 }
+
+#[test]
+fn requests_the_parser_must_refuse_are_400_501_or_413_and_the_server_goes_on() {
+    let server = serve(&guest(&echo_handle("")), "refuse");
+    for (request, expected) in [
+        // method is a token
+        ("G@T / HTTP/1.1\r\n\r\n".to_string(), 400),
+        // only origin-form (or `*`) targets
+        ("GET http://example.test/ HTTP/1.1\r\n\r\n".to_string(), 400),
+        ("GET relative HTTP/1.1\r\n\r\n".to_string(), 400),
+        // obsolete line folding and a space before the colon are not header names
+        (
+            "GET / HTTP/1.1\r\nX-A: 1\r\n folded\r\n\r\n".to_string(),
+            400,
+        ),
+        ("GET / HTTP/1.1\r\nX-A : 1\r\n\r\n".to_string(), 400),
+        // two different lengths are a smuggling vector
+        (
+            "POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nab".to_string(),
+            400,
+        ),
+        // transfer-encoding in any case or value
+        (
+            "POST / HTTP/1.1\r\ntransfer-ENCODING: identity\r\n\r\n".to_string(),
+            501,
+        ),
+        // exactly at the head limit's far side
+        (
+            format!("GET / HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(70_000)),
+            413,
+        ),
+        // a length one past the body limit (1 MiB)
+        (
+            format!(
+                "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                1024 * 1024 + 1
+            ),
+            413,
+        ),
+    ] {
+        let (status, ..) = parse(&exchange(&server, request.as_bytes()));
+        assert_eq!(status, expected, "{:?}", &request[..request.len().min(80)]);
+    }
+    // a head that is not UTF-8
+    let (status, ..) = parse(&exchange(&server, b"GET / HTTP/1.1\r\nX: \xff\xfe\r\n\r\n"));
+    assert_eq!(status, 400);
+    assert_eq!(
+        parse(&exchange(&server, post("/ok", "x").as_bytes())).0,
+        202
+    );
+}
+
+#[test]
+fn a_request_cut_short_is_400_not_a_hang() {
+    let server = serve(&guest(&echo_handle("")), "cut");
+    for partial in [
+        // closes inside the head
+        &b"GET / HTTP/1.1\r\nHost: h\r\n"[..],
+        // closes inside a body that announced 10 bytes
+        &b"POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"[..],
+    ] {
+        let mut stream = TcpStream::connect(&server.addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        stream.write_all(partial).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        assert_eq!(parse(&answer).0, 400, "{partial:?}");
+    }
+}
+
+#[test]
+fn a_client_that_stalls_inside_the_head_is_408() {
+    let server = serve(&guest(&echo_handle("")), "stall");
+    let mut stream = TcpStream::connect(&server.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    stream.write_all(b"GET / HTTP/1.1\r\nHost: h\r\n").unwrap();
+    // no more bytes, and no close: the server gives up on its own after its request time
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).unwrap();
+    assert_eq!(parse(&answer).0, 408);
+    assert_eq!(
+        parse(&exchange(&server, post("/ok", "x").as_bytes())).0,
+        202
+    );
+}
+
+#[test]
+fn accepted_oddities_are_parsed_as_the_rfc_allows() {
+    let server = serve(&guest(&echo_handle("")), "accepted");
+    // HEAD: the head of the answer to a GET (its content-length), without the body
+    let head = "HEAD /h HTTP/1.1\r\nHost: h\r\nAccept: a\r\nContent-Length: 5\r\n\r\nhello";
+    let (status, head, body) = parse(&exchange(&server, head.as_bytes()));
+    assert_eq!(status, 201, "{head}"); // 200 + head (1)
+    assert!(head.contains("content-length: 5"), "{head}");
+    assert!(body.is_empty());
+    // the same length twice is one length; bytes past it (pipelining) are not the body
+    let twice = "POST / HTTP/1.1\r\nHost: h\r\nAccept: a\r\nContent-Length: 5\r\ncontent-length: 5\r\n\r\nhelloGET /next HTTP/1.1\r\n\r\n";
+    let (status, _, body) = parse(&exchange(&server, twice.as_bytes()));
+    assert_eq!((status, body), (202, b"hello".to_vec()));
+    // values are trimmed of spaces and tabs; `*` is a target; an unknown method is `other`
+    let odd = "PURGE * HTTP/1.1\r\nHost: \t spaced.test \t\r\nAccept: a\r\n\r\n";
+    let (status, head, _) = parse(&exchange(&server, odd.as_bytes()));
+    assert_eq!(status, 209, "{head}"); // 200 + other (9)
+    assert!(head.contains("x-path: *"), "{head}");
+    assert!(head.contains("x-auth: spaced.test\r\n"), "{head}");
+    // a Content-Length of leading zeros is still its number
+    let zeros = "POST / HTTP/1.1\r\nHost: h\r\nAccept: a\r\nContent-Length: 0005\r\n\r\nhello";
+    assert_eq!(parse(&exchange(&server, zeros.as_bytes())).2, b"hello");
+}
