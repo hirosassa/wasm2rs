@@ -1,0 +1,23 @@
+POST / HTTP/1.1
+cpnten`t-length: 1602"T /a?b=c HTTP/1.1
+Host: example.test
+Acc1.Contenh: /test
+Acc1.Contenh: /1.1
+cpnten`t-leh: 1049"T /a?b=c HTTP/1.1
+Hot:s example.test
+Acc1.Contenh: /1.1
+cpnten`T-length: 1049"T /a?DELETETP/1.1
+Host: example.test
+Acc1.Contenh: 1049"T /a?b=c HTTP/1.1
+Host: example.tenh: /1.1
+cpnten`t-leh: 1049"T /a?b=c HTTP/1.1
+Hot:s example.test
+Acc1.Contenh: /1.1
+cpnten`t-0ength: 1049"T /a?b=c HTTP/1.1
+Host: example.test
+Acc1.Contenh: 1049PATCH?b=c HTTP/1.1
+Host: example.test-Length: .test
+AccepHostP * HTCONNECTTP/5.T
+
+: 
+""""""""""""""""""lllllllll=l 

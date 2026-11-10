@@ -15,3 +15,6 @@ tmp/
 /fuzz-diff/target
 /fuzz-diff/findings
 /fuzz-diff/shrunk
+/fuzz/target
+/fuzz/artifacts
+/fuzz/coverage

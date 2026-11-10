@@ -1,0 +1,13 @@
+GET / HTTP/1.1
+X: 	 v 
+X: 	
+X: 	 v 
+X:	 v 
+X: 	 v 	
+Host:	 h		
+Host:	  v 
+X: 	 v 	
+X: 	
+X: 	 v 
+Xt:	 h	
+

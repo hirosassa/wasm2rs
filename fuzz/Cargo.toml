@@ -1,0 +1,39 @@
+[package]
+name = "wasm2rs-fuzz-serve"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Fuzzing of the HTTP/1.x server of examples/wasip2_serve (not part of the wasm2rs workspace)."
+
+# Detached on purpose: needs nightly + libFuzzer and must not burden the main CI.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+wasm2rs-wasi = { path = "../wasm2rs-wasi" }
+libfuzzer-sys = "0.4"
+libc = "0.2"
+arbitrary = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "serve_request"
+path = "fuzz_targets/serve_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "serve_request_structured"
+path = "fuzz_targets/serve_request_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "serve_response"
+path = "fuzz_targets/serve_response.rs"
+test = false
+doc = false
+bench = false
