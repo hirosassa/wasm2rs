@@ -76,11 +76,17 @@ fn serve_with(core: &str, tag: &str, extra: &[&str]) -> Server {
 }
 
 /// Sends `request` (raw bytes) and reads the answer until the server closes.
-fn exchange(server: &Server, request: &[u8]) -> Vec<u8> {
-    let mut stream = TcpStream::connect(&server.addr).unwrap();
+/// A connection to `server` that gives up reading after 30 s rather than hanging the test.
+fn connect(server: &Server) -> TcpStream {
+    let stream = TcpStream::connect(&server.addr).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
+    stream
+}
+
+fn exchange(server: &Server, request: &[u8]) -> Vec<u8> {
+    let mut stream = connect(server);
     // the server may answer and close before it has read all of a request it rejects
     let _ = stream.write_all(request);
     let mut answer = Vec::new();
@@ -222,7 +228,8 @@ fn requests_the_parser_must_refuse_are_400_501_or_413_and_the_server_goes_on() {
     for (request, expected) in [
         // method is a token
         ("G@T / HTTP/1.1\r\n\r\n".to_string(), 400),
-        // only origin-form (or `*`) targets
+        // only origin-form (or `*`) targets: the example's limit (RFC 9112 3.2.2 would have a
+        // server accept absolute-form too)
         ("GET http://example.test/ HTTP/1.1\r\n\r\n".to_string(), 400),
         ("GET relative HTTP/1.1\r\n\r\n".to_string(), 400),
         // obsolete line folding and a space before the colon are not header names
@@ -276,10 +283,7 @@ fn a_request_cut_short_is_400_not_a_hang() {
         // closes inside a body that announced 10 bytes
         &b"POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"[..],
     ] {
-        let mut stream = TcpStream::connect(&server.addr).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(30)))
-            .unwrap();
+        let mut stream = connect(&server);
         stream.write_all(partial).unwrap();
         stream.shutdown(std::net::Shutdown::Write).unwrap();
         let mut answer = Vec::new();
@@ -291,10 +295,7 @@ fn a_request_cut_short_is_400_not_a_hang() {
 #[test]
 fn a_client_that_stalls_inside_the_head_is_408() {
     let server = serve(&guest(&echo_handle("")), "stall");
-    let mut stream = TcpStream::connect(&server.addr).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .unwrap();
+    let mut stream = connect(&server);
     stream.write_all(b"GET / HTTP/1.1\r\nHost: h\r\n").unwrap();
     // no more bytes, and no close: the server gives up on its own after its request time
     let mut answer = Vec::new();
@@ -319,13 +320,39 @@ fn accepted_oddities_are_parsed_as_the_rfc_allows() {
     let twice = "POST / HTTP/1.1\r\nHost: h\r\nAccept: a\r\nContent-Length: 5\r\ncontent-length: 5\r\n\r\nhelloGET /next HTTP/1.1\r\n\r\n";
     let (status, _, body) = parse(&exchange(&server, twice.as_bytes()));
     assert_eq!((status, body), (202, b"hello".to_vec()));
-    // values are trimmed of spaces and tabs; `*` is a target; an unknown method is `other`
-    let odd = "PURGE * HTTP/1.1\r\nHost: \t spaced.test \t\r\nAccept: a\r\n\r\n";
-    let (status, head, _) = parse(&exchange(&server, odd.as_bytes()));
-    assert_eq!(status, 209, "{head}"); // 200 + other (9)
+    // values are trimmed of spaces and tabs; `OPTIONS *` is asterisk-form
+    let star = "OPTIONS * HTTP/1.1\r\nHost: \t spaced.test \t\r\nAccept: a\r\n\r\n";
+    let (status, head, _) = parse(&exchange(&server, star.as_bytes()));
+    assert_eq!(status, 206, "{head}"); // 200 + options (6)
     assert!(head.contains("x-path: *"), "{head}");
     assert!(head.contains("x-auth: spaced.test\r\n"), "{head}");
+    // an unknown method is `other`
+    let purge = "PURGE /p HTTP/1.1\r\nHost: h\r\nAccept: a\r\n\r\n";
+    assert_eq!(parse(&exchange(&server, purge.as_bytes())).0, 209); // 200 + other (9)
     // a Content-Length of leading zeros is still its number
     let zeros = "POST / HTTP/1.1\r\nHost: h\r\nAccept: a\r\nContent-Length: 0005\r\n\r\nhello";
     assert_eq!(parse(&exchange(&server, zeros.as_bytes())).2, b"hello");
+}
+
+#[test]
+fn the_body_limit_is_inclusive_and_the_head_limit_holds_either_side() {
+    let server = serve(&guest(&echo_handle("")), "boundary");
+    // a length of exactly 1 MiB is accepted (the body is cut short, so 400, not 413)
+    let mut stream = connect(&server);
+    stream
+        .write_all(b"POST / HTTP/1.1\r\nContent-Length: 1048576\r\n\r\nabc")
+        .unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).unwrap();
+    assert_eq!(parse(&answer).0, 400);
+    // a head well under 64 KiB is served, one well over is 413
+    let head = |pad: usize| {
+        format!(
+            "GET / HTTP/1.1\r\nHost: h\r\nAccept: a\r\nX: {}\r\n\r\n",
+            "a".repeat(pad)
+        )
+    };
+    assert_eq!(parse(&exchange(&server, head(60_000).as_bytes())).0, 200);
+    assert_eq!(parse(&exchange(&server, head(70_000).as_bytes())).0, 413);
 }

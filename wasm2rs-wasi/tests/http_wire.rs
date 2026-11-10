@@ -6,9 +6,9 @@ use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 use wasm2rs_wasi::wasi_http_types::{
-    ErrorCode, FutureIncomingResponse, IncomingResponse, Method, Scheme,
+    ErrorCode, FutureIncomingResponse, IncomingResponse, Method, OutgoingRequest, Scheme,
 };
-use wasm2rs_wasi::wasi_io_streams::StreamError;
+use wasm2rs_wasi::wasi_io_streams::{InputStream, StreamError};
 use wasm2rs_wasi::{
     Host, HttpClient, HttpClientError, HttpRequest, HttpResponse, RandomError, RandomSource,
     WasiHost, WasiHostBuilder,
@@ -52,13 +52,28 @@ where
     }
 }
 
-fn empty_response() -> HttpResponse {
+fn host(client: impl HttpClient + 'static) -> WasiHost {
+    builder().http_client(client).build().unwrap()
+}
+
+fn ok_response(body: Box<dyn Read + Send>, trailers: Option<TrailerSource>) -> HttpResponse {
     HttpResponse {
         status: 200,
         headers: vec![],
-        body: Box::new(std::io::empty()),
-        trailers: None,
+        body,
+        trailers,
     }
+}
+
+/// An outgoing request over `scheme` to `localhost`, with the default method and path.
+fn request_to_localhost(h: &mut WasiHost, scheme: Scheme) -> OutgoingRequest {
+    let headers = h.wasi_http_types_constructor_fields();
+    let r = h.wasi_http_types_constructor_outgoing_request(headers);
+    h.wasi_http_types_method_outgoing_request_set_scheme(r, Some(scheme))
+        .unwrap();
+    h.wasi_http_types_method_outgoing_request_set_authority(r, Some("localhost".into()))
+        .unwrap();
+    r
 }
 
 fn finished(
@@ -76,20 +91,12 @@ fn finished(
 fn sent(method: Method, scheme: Scheme) -> HttpRequest {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&seen);
-    let mut h = builder()
-        .http_client(FnClient(move |req: HttpRequest| {
-            recorded.lock().unwrap().push(req);
-            Ok(empty_response())
-        }))
-        .build()
-        .unwrap();
-    let headers = h.wasi_http_types_constructor_fields();
-    let r = h.wasi_http_types_constructor_outgoing_request(headers);
+    let mut h = host(FnClient(move |req: HttpRequest| {
+        recorded.lock().unwrap().push(req);
+        Ok(ok_response(Box::new(std::io::empty()), None))
+    }));
+    let r = request_to_localhost(&mut h, scheme);
     h.wasi_http_types_method_outgoing_request_set_method(r, method)
-        .unwrap();
-    h.wasi_http_types_method_outgoing_request_set_scheme(r, Some(scheme))
-        .unwrap();
-    h.wasi_http_types_method_outgoing_request_set_authority(r, Some("localhost".into()))
         .unwrap();
     h.wasi_http_types_method_outgoing_request_set_path_with_query(r, Some("/x".into()))
         .unwrap();
@@ -129,6 +136,17 @@ fn the_scheme_is_part_of_the_url_the_client_gets() {
     }
 }
 
+/// Sends a GET to `localhost` and returns the stream of the response body.
+fn response_body_stream(h: &mut WasiHost) -> InputStream {
+    let r = request_to_localhost(h, Scheme::HTTP);
+    let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
+    let resp = finished(h, future).unwrap();
+    let body = h
+        .wasi_http_types_method_incoming_response_consume(resp)
+        .unwrap();
+    h.wasi_http_types_method_incoming_body_stream(body).unwrap()
+}
+
 /// A body of one chunk, then an error of `kind`.
 struct FailsWith(std::io::ErrorKind, bool);
 
@@ -146,29 +164,10 @@ impl Read for FailsWith {
 /// The `error-code` of the failure that ends a response body, read through the stream.
 fn code_of_failing_body(body: Box<dyn Read + Send>) -> Option<ErrorCode> {
     let mut body = Some(body);
-    let mut h = builder()
-        .http_client(FnClient(move |_| {
-            Ok(HttpResponse {
-                status: 200,
-                headers: vec![],
-                body: body.take().unwrap(),
-                trailers: None,
-            })
-        }))
-        .build()
-        .unwrap();
-    let headers = h.wasi_http_types_constructor_fields();
-    let r = h.wasi_http_types_constructor_outgoing_request(headers);
-    h.wasi_http_types_method_outgoing_request_set_scheme(r, Some(Scheme::HTTP))
-        .unwrap();
-    h.wasi_http_types_method_outgoing_request_set_authority(r, Some("localhost".into()))
-        .unwrap();
-    let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
-    let resp = finished(&mut h, future).unwrap();
-    let body = h
-        .wasi_http_types_method_incoming_response_consume(resp)
-        .unwrap();
-    let stream = h.wasi_http_types_method_incoming_body_stream(body).unwrap();
+    let mut h = host(FnClient(move |_| {
+        Ok(ok_response(body.take().unwrap(), None))
+    }));
+    let stream = response_body_stream(&mut h);
     loop {
         match h.wasi_io_streams_method_input_stream_blocking_read(stream, 16) {
             Ok(_) => {}
@@ -204,36 +203,11 @@ fn a_failing_body_maps_its_io_error_to_the_matching_error_code() {
 
 #[test]
 fn a_client_that_panics_reading_trailers_fails_the_body_instead_of_hanging() {
-    struct Empty;
-    impl Read for Empty {
-        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-            Ok(0)
-        }
-    }
     let mut trailers: Option<TrailerSource> = Some(Box::new(|| panic!("trailer source broke")));
-    let mut h = builder()
-        .http_client(FnClient(move |_| {
-            Ok(HttpResponse {
-                status: 200,
-                headers: vec![],
-                body: Box::new(Empty),
-                trailers: trailers.take(),
-            })
-        }))
-        .build()
-        .unwrap();
-    let headers = h.wasi_http_types_constructor_fields();
-    let r = h.wasi_http_types_constructor_outgoing_request(headers);
-    h.wasi_http_types_method_outgoing_request_set_scheme(r, Some(Scheme::HTTP))
-        .unwrap();
-    h.wasi_http_types_method_outgoing_request_set_authority(r, Some("localhost".into()))
-        .unwrap();
-    let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
-    let resp = finished(&mut h, future).unwrap();
-    let body = h
-        .wasi_http_types_method_incoming_response_consume(resp)
-        .unwrap();
-    let stream = h.wasi_http_types_method_incoming_body_stream(body).unwrap();
+    let mut h = host(FnClient(move |_| {
+        Ok(ok_response(Box::new(std::io::empty()), trailers.take()))
+    }));
+    let stream = response_body_stream(&mut h);
     let err = match h.wasi_io_streams_method_input_stream_blocking_read(stream, 16) {
         Err(StreamError::LastOperationFailed(err)) => err,
         other => panic!("expected a failed read, got {other:?}"),
