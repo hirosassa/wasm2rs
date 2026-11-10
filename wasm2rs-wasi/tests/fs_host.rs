@@ -2,7 +2,11 @@
 //! refusal, offsets and sizes at their limits, the read-only contract of a preopen, and what
 //! streams over a descriptor see. Real files in a scratch directory; nothing is mocked.
 
-use std::path::PathBuf;
+mod common;
+
+use common::{builder, scratch, traps};
+use std::path::Path;
+use std::time::UNIX_EPOCH;
 use wasm2rs_wasi::wasi_clocks_wall_clock::Datetime;
 use wasm2rs_wasi::wasi_filesystem_types::{
     Advice, Descriptor, DescriptorFlags, DescriptorType, ErrorCode as Fs, NewTimestamp, OpenFlags,
@@ -13,35 +17,10 @@ use wasm2rs_wasi::{Access, Host, WasiHost};
 
 const ROOT: Descriptor = Descriptor(0);
 const FOLLOW: PathFlags = PathFlags::SYMLINK_FOLLOW;
+const RW: DescriptorFlags = DescriptorFlags(DescriptorFlags::READ.0 | DescriptorFlags::WRITE.0);
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("wasm2rs-wasi-fs-{}-{name}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn host_over(root: &PathBuf, access: Access) -> WasiHost {
-    let builder = WasiHost::builder().preopen("/", root, access);
-    #[cfg(not(feature = "os-random"))]
-    let builder = builder.random(NoRandom);
-    builder.build().unwrap()
-}
-
-#[cfg(not(feature = "os-random"))]
-struct NoRandom;
-#[cfg(not(feature = "os-random"))]
-impl wasm2rs_wasi::RandomSource for NoRandom {
-    fn fill_random(&mut self, buf: &mut [u8]) -> Result<(), wasm2rs_wasi::RandomError> {
-        buf.fill(0);
-        Ok(())
-    }
-    fn insecure_u64(&mut self) -> u64 {
-        0
-    }
-    fn insecure_seed(&mut self) -> (u64, u64) {
-        (0, 0)
-    }
+fn host_over(root: &Path, access: Access) -> WasiHost {
+    builder().preopen("/", root, access).build().unwrap()
 }
 
 fn open(
@@ -59,8 +38,6 @@ fn open(
     )
 }
 
-const RW: DescriptorFlags = DescriptorFlags(DescriptorFlags::READ.0 | DescriptorFlags::WRITE.0);
-
 fn create(host: &mut WasiHost, path: &str) -> Descriptor {
     open(host, path, OpenFlags::CREATE, RW).unwrap()
 }
@@ -68,6 +45,13 @@ fn create(host: &mut WasiHost, path: &str) -> Descriptor {
 fn read_at(host: &mut WasiHost, d: Descriptor, length: u64, offset: u64) -> (Vec<u8>, bool) {
     host.wasi_filesystem_types_method_descriptor_read(d, length, offset)
         .unwrap()
+}
+
+fn timestamp(seconds: u64, nanoseconds: u32) -> NewTimestamp {
+    NewTimestamp::Timestamp(Datetime {
+        seconds,
+        nanoseconds,
+    })
 }
 
 // ---- positional read / write ------------------------------------------------------------
@@ -111,7 +95,8 @@ fn an_offset_beyond_what_a_file_can_address_is_an_error_not_a_panic() {
     let mut host = host_over(&root, Access::ReadWrite);
     let f = create(&mut host, "f");
     std::fs::write(root.join("f"), b"abc").unwrap();
-    // `u64::MAX` does not fit a file offset: the OS refuses the seek
+    // `u64::MAX` does not fit a file offset: the OS refuses the seek (reported as the
+    // catch-all `io`, which this pins; the contract is only "an error, not a panic")
     assert_eq!(
         host.wasi_filesystem_types_method_descriptor_read(f, 1, u64::MAX),
         Err(Fs::Io)
@@ -378,9 +363,12 @@ fn a_read_only_preopen_refuses_every_change_but_allows_reading_and_sync() {
         ),
         Err(Fs::ReadOnly)
     );
-    let now = || NewTimestamp::Now;
     assert_eq!(
-        host.wasi_filesystem_types_method_descriptor_set_times(f, now(), now()),
+        host.wasi_filesystem_types_method_descriptor_set_times(
+            f,
+            NewTimestamp::Now,
+            NewTimestamp::Now
+        ),
         Err(Fs::ReadOnly)
     );
     assert_eq!(
@@ -388,8 +376,8 @@ fn a_read_only_preopen_refuses_every_change_but_allows_reading_and_sync() {
             ROOT,
             FOLLOW,
             "f".into(),
-            now(),
-            now()
+            NewTimestamp::Now,
+            NewTimestamp::Now
         ),
         Err(Fs::ReadOnly)
     );
@@ -426,9 +414,7 @@ fn read_directory_lists_each_entry_once_with_its_type() {
         .unwrap();
     let mut entries = Vec::new();
     while let Some(entry) = host
-        .wasi_filesystem_types_method_directory_entry_stream_read_directory_entry(
-            wasm2rs_wasi::wasi_filesystem_types::DirectoryEntryStream(stream.0),
-        )
+        .wasi_filesystem_types_method_directory_entry_stream_read_directory_entry(stream)
         .unwrap()
     {
         entries.push((entry.name, entry.type_));
@@ -443,19 +429,13 @@ fn read_directory_lists_each_entry_once_with_its_type() {
     assert_eq!(entries, expected, "no `.` or `..`, each name once");
     // exhausted stays exhausted
     assert_eq!(
-        host.wasi_filesystem_types_method_directory_entry_stream_read_directory_entry(
-            wasm2rs_wasi::wasi_filesystem_types::DirectoryEntryStream(stream.0)
-        ),
+        host.wasi_filesystem_types_method_directory_entry_stream_read_directory_entry(stream),
         Ok(None)
     );
     // a dropped listing is a bad descriptor
-    host.wasi_filesystem_types_resource_drop_directory_entry_stream(
-        wasm2rs_wasi::wasi_filesystem_types::DirectoryEntryStream(stream.0),
-    );
+    host.wasi_filesystem_types_resource_drop_directory_entry_stream(stream);
     assert_eq!(
-        host.wasi_filesystem_types_method_directory_entry_stream_read_directory_entry(
-            wasm2rs_wasi::wasi_filesystem_types::DirectoryEntryStream(stream.0)
-        ),
+        host.wasi_filesystem_types_method_directory_entry_stream_read_directory_entry(stream),
         Err(Fs::BadDescriptor)
     );
 }
@@ -695,24 +675,16 @@ fn set_times_sets_exactly_what_was_asked_and_leaves_no_change_alone() {
     std::fs::write(root.join("f"), b"1").unwrap();
     let mut host = host_over(&root, Access::ReadWrite);
     let f = open(&mut host, "f", OpenFlags(0), RW).unwrap();
-    let at = |seconds, nanoseconds| {
-        NewTimestamp::Timestamp(Datetime {
-            seconds,
-            nanoseconds,
-        })
-    };
-    host.wasi_filesystem_types_method_descriptor_set_times(f, at(1_000, 500), at(2_000, 7))
-        .unwrap();
+    host.wasi_filesystem_types_method_descriptor_set_times(
+        f,
+        timestamp(1_000, 500),
+        timestamp(2_000, 7),
+    )
+    .unwrap();
     let stat = host
         .wasi_filesystem_types_method_descriptor_stat(f)
         .unwrap();
-    assert_eq!(
-        stat.data_access_timestamp,
-        Some(Datetime {
-            seconds: 1_000,
-            nanoseconds: 500
-        })
-    );
+    // (the access time is not asserted: the OS may update it on its own, as macOS does)
     assert_eq!(
         stat.data_modification_timestamp,
         Some(Datetime {
@@ -722,20 +694,23 @@ fn set_times_sets_exactly_what_was_asked_and_leaves_no_change_alone() {
     );
     assert_eq!(stat.status_change_timestamp, None, "never reported");
     // `no-change` leaves the modification time where it was
-    host.wasi_filesystem_types_method_descriptor_set_times(f, at(3_000, 0), NewTimestamp::NoChange)
-        .unwrap();
+    host.wasi_filesystem_types_method_descriptor_set_times(
+        f,
+        timestamp(3_000, 0),
+        NewTimestamp::NoChange,
+    )
+    .unwrap();
     let stat = host
         .wasi_filesystem_types_method_descriptor_stat(f)
         .unwrap();
-    assert_eq!(stat.data_access_timestamp.unwrap().seconds, 3_000);
     assert_eq!(stat.data_modification_timestamp.unwrap().seconds, 2_000);
     // through a path as well
     host.wasi_filesystem_types_method_descriptor_set_times_at(
         ROOT,
         FOLLOW,
         "f".into(),
-        at(5, 0),
-        at(6, 0),
+        timestamp(5, 0),
+        timestamp(6, 0),
     )
     .unwrap();
     let stat = host
@@ -750,27 +725,28 @@ fn set_times_refuses_a_second_of_nanoseconds_and_an_unrepresentable_time() {
     std::fs::write(root.join("f"), b"1").unwrap();
     let mut host = host_over(&root, Access::ReadWrite);
     let f = open(&mut host, "f", OpenFlags(0), RW).unwrap();
-    let ts = |seconds, nanoseconds| {
-        NewTimestamp::Timestamp(Datetime {
-            seconds,
-            nanoseconds,
-        })
-    };
-    let keep = || NewTimestamp::NoChange;
     // the last valid nanosecond is accepted, the next one is not
     assert_eq!(
-        host.wasi_filesystem_types_method_descriptor_set_times(f, ts(1, 999_999_999), keep()),
+        host.wasi_filesystem_types_method_descriptor_set_times(
+            f,
+            timestamp(1, 999_999_999),
+            NewTimestamp::NoChange
+        ),
         Ok(())
     );
     assert_eq!(
-        host.wasi_filesystem_types_method_descriptor_set_times(f, ts(1, 1_000_000_000), keep()),
+        host.wasi_filesystem_types_method_descriptor_set_times(
+            f,
+            timestamp(1, 1_000_000_000),
+            NewTimestamp::NoChange
+        ),
         Err(Fs::Invalid)
     );
     assert_eq!(
         host.wasi_filesystem_types_method_descriptor_set_times(
             f,
-            keep(),
-            ts(u64::MAX, 999_999_999)
+            NewTimestamp::NoChange,
+            timestamp(u64::MAX, 999_999_999)
         ),
         Err(Fs::Invalid),
         "a time past what the platform can hold is `invalid`, not a panic"
@@ -778,7 +754,11 @@ fn set_times_refuses_a_second_of_nanoseconds_and_an_unrepresentable_time() {
     // a file not opened for write
     let ro = open(&mut host, "f", OpenFlags(0), DescriptorFlags::READ).unwrap();
     assert_eq!(
-        host.wasi_filesystem_types_method_descriptor_set_times(ro, keep(), keep()),
+        host.wasi_filesystem_types_method_descriptor_set_times(
+            ro,
+            NewTimestamp::NoChange,
+            NewTimestamp::NoChange
+        ),
         Err(Fs::BadDescriptor)
     );
 }
@@ -887,10 +867,9 @@ fn a_write_longer_than_check_write_traps() {
     // exactly the permit is fine
     host.wasi_io_streams_method_output_stream_write(w, vec![1; 4096])
         .unwrap();
-    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = host.wasi_io_streams_method_output_stream_write(w, vec![1; 4097]);
-    }));
-    assert!(caught.is_err());
+    assert!(traps(
+        || host.wasi_io_streams_method_output_stream_write(w, vec![1; 4097])
+    ));
     assert_eq!(std::fs::metadata(root.join("f")).unwrap().len(), 4096);
 }
 
@@ -947,21 +926,27 @@ fn a_dropped_descriptor_is_a_bad_descriptor_and_its_slot_is_reused() {
     let f = open(&mut host, "f", OpenFlags(0), RW).unwrap();
     host.wasi_filesystem_types_resource_drop_descriptor(f);
     assert_eq!(
-        host.wasi_filesystem_types_method_descriptor_get_type(Descriptor(f.0)),
+        host.wasi_filesystem_types_method_descriptor_get_type(f),
         Err(Fs::BadDescriptor)
     );
     assert_eq!(
-        host.wasi_filesystem_types_method_descriptor_stat(Descriptor(f.0))
+        host.wasi_filesystem_types_method_descriptor_stat(f)
             .map(|_| ()),
         Err(Fs::BadDescriptor)
     );
     assert_eq!(
-        host.wasi_filesystem_types_method_descriptor_sync(Descriptor(f.0)),
+        host.wasi_filesystem_types_method_descriptor_sync(f),
         Err(Fs::BadDescriptor)
     );
     // an unknown handle and a file used as a directory
     assert_eq!(
-        open_at_unknown(&mut host, Descriptor(500)),
+        host.wasi_filesystem_types_method_descriptor_open_at(
+            Descriptor(500),
+            FOLLOW,
+            "f".into(),
+            OpenFlags(0),
+            DescriptorFlags::READ,
+        ),
         Err(Fs::BadDescriptor)
     );
     let g = open(&mut host, "f", OpenFlags(0), DescriptorFlags::READ).unwrap();
@@ -978,16 +963,6 @@ fn a_dropped_descriptor_is_a_bad_descriptor_and_its_slot_is_reused() {
         host.wasi_filesystem_types_method_descriptor_create_directory_at(g, "x".into()),
         Err(Fs::NotDirectory)
     );
-}
-
-fn open_at_unknown(host: &mut WasiHost, dir: Descriptor) -> Result<Descriptor, Fs> {
-    host.wasi_filesystem_types_method_descriptor_open_at(
-        dir,
-        FOLLOW,
-        "f".into(),
-        OpenFlags(0),
-        DescriptorFlags::READ,
-    )
 }
 
 // ---- symlinks as the last component, without `symlink-follow` ---------------------------
@@ -1041,20 +1016,14 @@ fn set_times_at_without_follow_changes_a_file_but_not_a_symlink() {
     std::fs::write(root.join("f"), b"1").unwrap();
     std::os::unix::fs::symlink("f", root.join("l")).unwrap();
     let mut host = host_over(&root, Access::ReadWrite);
-    let at = |s| {
-        NewTimestamp::Timestamp(Datetime {
-            seconds: s,
-            nanoseconds: 0,
-        })
-    };
     // a symlink's own times cannot be set through `std`
     assert_eq!(
         host.wasi_filesystem_types_method_descriptor_set_times_at(
             ROOT,
             PathFlags(0),
             "l".into(),
-            at(1),
-            at(2)
+            timestamp(1, 0),
+            timestamp(2, 0)
         ),
         Err(Fs::Unsupported)
     );
@@ -1062,8 +1031,8 @@ fn set_times_at_without_follow_changes_a_file_but_not_a_symlink() {
         ROOT,
         PathFlags(0),
         "f".into(),
-        at(11),
-        at(12),
+        timestamp(11, 0),
+        timestamp(12, 0),
     )
     .unwrap();
     let stat = host
@@ -1075,8 +1044,8 @@ fn set_times_at_without_follow_changes_a_file_but_not_a_symlink() {
         ROOT,
         FOLLOW,
         "l".into(),
-        at(21),
-        at(22),
+        timestamp(21, 0),
+        timestamp(22, 0),
     )
     .unwrap();
     assert_eq!(
@@ -1084,7 +1053,7 @@ fn set_times_at_without_follow_changes_a_file_but_not_a_symlink() {
             .unwrap()
             .modified()
             .unwrap()
-            .duration_since(std::time::UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs(),
         22

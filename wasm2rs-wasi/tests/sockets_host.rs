@@ -2,40 +2,25 @@
 //! `Host` trait: the state machine of a socket, which address each policy lets through, data
 //! across a connection, and the pollables that report readiness.
 
+mod common;
+
+use common::{builder, traps};
 use std::time::{Duration, Instant};
-use wasm2rs_wasi::wasi_io_poll::Pollable;
-use wasm2rs_wasi::wasi_io_streams::StreamError;
+use wasm2rs_wasi::wasi_io_streams::{InputStream, OutputStream, StreamError};
 use wasm2rs_wasi::wasi_sockets_network::{
     ErrorCode as Net, IpAddress, IpAddressFamily, IpSocketAddress, Ipv4SocketAddress,
     Ipv6SocketAddress, Network,
 };
 use wasm2rs_wasi::wasi_sockets_tcp::{ShutdownType, TcpSocket};
-use wasm2rs_wasi::wasi_sockets_udp::OutgoingDatagram;
+use wasm2rs_wasi::wasi_sockets_udp::{
+    IncomingDatagram, IncomingDatagramStream, OutgoingDatagram, UdpSocket,
+};
 use wasm2rs_wasi::{Host, NetworkPolicy, WasiHost};
 
 const NET: Network = Network(0);
 
 fn host(policy: NetworkPolicy) -> WasiHost {
-    let builder = WasiHost::builder().network(policy);
-    #[cfg(not(feature = "os-random"))]
-    let builder = builder.random(NoRandom);
-    builder.build().unwrap()
-}
-
-#[cfg(not(feature = "os-random"))]
-struct NoRandom;
-#[cfg(not(feature = "os-random"))]
-impl wasm2rs_wasi::RandomSource for NoRandom {
-    fn fill_random(&mut self, buf: &mut [u8]) -> Result<(), wasm2rs_wasi::RandomError> {
-        buf.fill(0);
-        Ok(())
-    }
-    fn insecure_u64(&mut self) -> u64 {
-        0
-    }
-    fn insecure_seed(&mut self) -> (u64, u64) {
-        (0, 0)
-    }
+    builder().network(policy).build().unwrap()
 }
 
 fn v4(address: (u8, u8, u8, u8), port: u16) -> IpSocketAddress {
@@ -88,15 +73,46 @@ fn listener(host: &mut WasiHost) -> (TcpSocket, u16) {
 fn accept_blocking(
     host: &mut WasiHost,
     server: TcpSocket,
-) -> (
-    TcpSocket,
-    wasm2rs_wasi::wasi_io_streams::InputStream,
-    wasm2rs_wasi::wasi_io_streams::OutputStream,
-) {
-    let p = host.wasi_sockets_tcp_method_tcp_socket_subscribe(TcpSocket(server.0));
+) -> (TcpSocket, InputStream, OutputStream) {
+    let p = host.wasi_sockets_tcp_method_tcp_socket_subscribe(server);
     host.wasi_io_poll_method_pollable_block(p);
     host.wasi_sockets_tcp_method_tcp_socket_accept(server)
         .unwrap()
+}
+
+/// A connected pair over one host: the client socket and its streams, the accepted socket
+/// and its streams, and the listener's port.
+struct Pair {
+    host: WasiHost,
+    port: u16,
+    client: TcpSocket,
+    c_in: InputStream,
+    c_out: OutputStream,
+    accepted: TcpSocket,
+    s_in: InputStream,
+    s_out: OutputStream,
+}
+
+fn pair() -> Pair {
+    let mut host = host(NetworkPolicy::Loopback);
+    let (server, port) = listener(&mut host);
+    let client = tcp(&mut host);
+    host.wasi_sockets_tcp_method_tcp_socket_start_connect(client, NET, lo(port))
+        .unwrap();
+    let (c_in, c_out) = host
+        .wasi_sockets_tcp_method_tcp_socket_finish_connect(client)
+        .unwrap();
+    let (accepted, s_in, s_out) = accept_blocking(&mut host, server);
+    Pair {
+        host,
+        port,
+        client,
+        c_in,
+        c_out,
+        accepted,
+        s_in,
+        s_out,
+    }
 }
 
 // ---- TCP state machine ------------------------------------------------------------------
@@ -261,7 +277,7 @@ fn start_connect_validates_the_peer_address_before_connecting() {
             .map(|_| ()),
         Err(Net::NotInProgress)
     );
-    // a bound socket cannot connect (it is a listener-to-be)
+    // a socket with a bind in progress cannot connect
     let b = tcp(&mut h);
     h.wasi_sockets_tcp_method_tcp_socket_start_bind(b, NET, lo(0))
         .unwrap();
@@ -389,15 +405,16 @@ fn an_accepted_socket_inherits_the_listeners_options() {
 
 #[test]
 fn bytes_cross_a_loopback_connection_in_both_directions_and_shutdown_ends_the_peer() {
-    let mut h = host(NetworkPolicy::Loopback);
-    let (server, port) = listener(&mut h);
-    let client = tcp(&mut h);
-    h.wasi_sockets_tcp_method_tcp_socket_start_connect(client, NET, lo(port))
-        .unwrap();
-    let (c_in, c_out) = h
-        .wasi_sockets_tcp_method_tcp_socket_finish_connect(client)
-        .unwrap();
-    let (accepted, s_in, s_out) = accept_blocking(&mut h, server);
+    let Pair {
+        host: mut h,
+        port,
+        client,
+        c_in,
+        c_out,
+        accepted,
+        s_in,
+        s_out,
+    } = pair();
 
     // the two ends name each other
     let c_local = h
@@ -485,15 +502,14 @@ fn bytes_cross_a_loopback_connection_in_both_directions_and_shutdown_ends_the_pe
 
 #[test]
 fn splice_between_connection_streams_moves_nothing_while_empty_and_relays_when_data_arrives() {
-    let mut h = host(NetworkPolicy::Loopback);
-    let (server, port) = listener(&mut h);
-    let client = tcp(&mut h);
-    h.wasi_sockets_tcp_method_tcp_socket_start_connect(client, NET, lo(port))
-        .unwrap();
-    let (_c_in, c_out) = h
-        .wasi_sockets_tcp_method_tcp_socket_finish_connect(client)
-        .unwrap();
-    let (_accepted, s_in, s_out) = accept_blocking(&mut h, server);
+    let Pair {
+        host: mut h,
+        c_in,
+        c_out,
+        s_in,
+        s_out,
+        ..
+    } = pair();
     // nothing has arrived: `splice` moves nothing and does not wait
     assert_eq!(
         h.wasi_io_streams_method_output_stream_splice(c_out, s_in, 10),
@@ -503,7 +519,7 @@ fn splice_between_connection_streams_moves_nothing_while_empty_and_relays_when_d
         .unwrap();
     // wait for the bytes on the client's side, then relay them back to the server's stream
     let moved = h
-        .wasi_io_streams_method_output_stream_blocking_splice(c_out, _c_in, 10)
+        .wasi_io_streams_method_output_stream_blocking_splice(c_out, c_in, 10)
         .unwrap();
     assert_eq!(moved, 5);
     assert_eq!(
@@ -514,15 +530,12 @@ fn splice_between_connection_streams_moves_nothing_while_empty_and_relays_when_d
 
 #[test]
 fn dropping_an_output_stream_still_delivers_what_was_written() {
-    let mut h = host(NetworkPolicy::Loopback);
-    let (server, port) = listener(&mut h);
-    let client = tcp(&mut h);
-    h.wasi_sockets_tcp_method_tcp_socket_start_connect(client, NET, lo(port))
-        .unwrap();
-    let (_c_in, c_out) = h
-        .wasi_sockets_tcp_method_tcp_socket_finish_connect(client)
-        .unwrap();
-    let (_accepted, s_in, _s_out) = accept_blocking(&mut h, server);
+    let Pair {
+        host: mut h,
+        c_out,
+        s_in,
+        ..
+    } = pair();
     h.wasi_io_streams_method_output_stream_write(c_out, b"queued".to_vec())
         .unwrap();
     h.wasi_io_streams_resource_drop_output_stream(c_out);
@@ -533,39 +546,29 @@ fn dropping_an_output_stream_still_delivers_what_was_written() {
 }
 
 #[test]
-fn a_tcp_write_over_check_write_traps_and_check_write_is_bounded() {
-    let mut h = host(NetworkPolicy::Loopback);
-    let (server, port) = listener(&mut h);
-    let client = tcp(&mut h);
-    h.wasi_sockets_tcp_method_tcp_socket_start_connect(client, NET, lo(port))
-        .unwrap();
-    let (_c_in, c_out) = h
-        .wasi_sockets_tcp_method_tcp_socket_finish_connect(client)
-        .unwrap();
-    let _server_side = accept_blocking(&mut h, server);
+fn a_tcp_check_write_is_at_most_4096_and_a_longer_write_traps() {
+    let Pair {
+        host: mut h, c_out, ..
+    } = pair();
     let permit = h
         .wasi_io_streams_method_output_stream_check_write(c_out)
         .unwrap();
     assert!((1..=4096).contains(&permit), "{permit}");
-    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = h.wasi_io_streams_method_output_stream_write(c_out, vec![0; 4097]);
-    }));
-    assert!(caught.is_err(), "4097 bytes is over any check-write");
+    assert!(
+        traps(|| h.wasi_io_streams_method_output_stream_write(c_out, vec![0; 4097])),
+        "4097 bytes is over any check-write"
+    );
 }
 
 // ---- UDP --------------------------------------------------------------------------------
 
-fn udp_bound(
-    host: &mut WasiHost,
-    family: IpAddressFamily,
-) -> (wasm2rs_wasi::wasi_sockets_udp::UdpSocket, u16) {
+fn udp_bound(host: &mut WasiHost, family: IpAddressFamily) -> (UdpSocket, u16) {
     let s = host
         .wasi_sockets_udp_create_socket_create_udp_socket(family)
         .unwrap();
-    let addr = if family == IpAddressFamily::Ipv4 {
-        lo(0)
-    } else {
-        lo6(0)
+    let addr = match family {
+        IpAddressFamily::Ipv4 => lo(0),
+        IpAddressFamily::Ipv6 => lo6(0),
     };
     host.wasi_sockets_udp_method_udp_socket_start_bind(s, NET, addr)
         .unwrap();
@@ -587,12 +590,10 @@ fn datagram(data: &[u8], to: Option<IpSocketAddress>) -> OutgoingDatagram {
 
 fn wait_receive(
     host: &mut WasiHost,
-    stream: wasm2rs_wasi::wasi_sockets_udp::IncomingDatagramStream,
+    stream: IncomingDatagramStream,
     max: u64,
-) -> Vec<wasm2rs_wasi::wasi_sockets_udp::IncomingDatagram> {
-    let p = host.wasi_sockets_udp_method_incoming_datagram_stream_subscribe(
-        wasm2rs_wasi::wasi_sockets_udp::IncomingDatagramStream(stream.0),
-    );
+) -> Vec<IncomingDatagram> {
+    let p = host.wasi_sockets_udp_method_incoming_datagram_stream_subscribe(stream);
     host.wasi_io_poll_method_pollable_block(p);
     host.wasi_sockets_udp_method_incoming_datagram_stream_receive(stream, max)
         .unwrap()
@@ -687,23 +688,17 @@ fn udp_state_machine_and_unsupported_options() {
 #[test]
 fn an_unconnected_udp_stream_sends_to_each_address_and_receives_from_anyone() {
     let mut h = host(NetworkPolicy::Loopback);
-    let (a, _a_port) = udp_bound(&mut h, IpAddressFamily::Ipv4);
+    let (a, a_port) = udp_bound(&mut h, IpAddressFamily::Ipv4);
     let (b, b_port) = udp_bound(&mut h, IpAddressFamily::Ipv4);
-    let (_a_in, a_out) = h
+    let (_, a_out) = h
         .wasi_sockets_udp_method_udp_socket_stream(a, None)
         .unwrap();
-    let (b_in, _b_out) = h
+    let (b_in, _) = h
         .wasi_sockets_udp_method_udp_socket_stream(b, None)
         .unwrap();
-    let a_port = port_of(
-        h.wasi_sockets_udp_method_udp_socket_local_address(a)
-            .unwrap(),
-    );
 
     assert_eq!(
-        h.wasi_sockets_udp_method_outgoing_datagram_stream_check_send(
-            wasm2rs_wasi::wasi_sockets_udp::OutgoingDatagramStream(a_out.0)
-        ),
+        h.wasi_sockets_udp_method_outgoing_datagram_stream_check_send(a_out),
         Ok(1024)
     );
     let sent = h
@@ -716,30 +711,30 @@ fn an_unconnected_udp_stream_sends_to_each_address_and_receives_from_anyone() {
         )
         .unwrap();
     assert_eq!(sent, 2);
-    let got = wait_receive(&mut h, b_in, 10);
-    // UDP on loopback keeps order for a single sender
-    let payloads: Vec<_> = got.iter().map(|d| d.data.clone()).collect();
-    assert_eq!(payloads[0], b"one");
-    assert!(got.iter().all(|d| d.remote_address == lo(a_port)));
-    // `max_results` bounds what one call returns, and 0 returns nothing
+    // `max_results` bounds one call: of the two queued datagrams only the first is returned
+    let first = wait_receive(&mut h, b_in, 1);
+    assert_eq!(first.len(), 1);
     assert_eq!(
-        h.wasi_sockets_udp_method_incoming_datagram_stream_receive(
-            wasm2rs_wasi::wasi_sockets_udp::IncomingDatagramStream(b_in.0),
-            0
-        ),
-        Ok(vec![])
+        h.wasi_sockets_udp_method_incoming_datagram_stream_receive(b_in, 0),
+        Ok(vec![]),
+        "0 returns nothing and takes nothing"
     );
+    let second = wait_receive(&mut h, b_in, 10);
+    // UDP on loopback keeps order for a single sender
+    let got: Vec<_> = first.into_iter().chain(second).collect();
+    assert_eq!(
+        got.iter().map(|d| d.data.as_slice()).collect::<Vec<_>>(),
+        [b"one".as_slice(), b"two".as_slice()]
+    );
+    assert!(got.iter().all(|d| d.remote_address == lo(a_port)));
     // an unconnected stream needs an address for every datagram
     assert_eq!(
-        h.wasi_sockets_udp_method_outgoing_datagram_stream_send(
-            wasm2rs_wasi::wasi_sockets_udp::OutgoingDatagramStream(a_out.0),
-            vec![datagram(b"x", None)]
-        ),
+        h.wasi_sockets_udp_method_outgoing_datagram_stream_send(a_out, vec![datagram(b"x", None)]),
         Err(Net::InvalidArgument)
     );
     // nothing queued: an empty list, not an error
     let (c, _) = udp_bound(&mut h, IpAddressFamily::Ipv4);
-    let (c_in, _c_out) = h
+    let (c_in, _) = h
         .wasi_sockets_udp_method_udp_socket_stream(c, None)
         .unwrap();
     assert_eq!(
@@ -751,7 +746,7 @@ fn an_unconnected_udp_stream_sends_to_each_address_and_receives_from_anyone() {
 #[test]
 fn a_connected_udp_stream_drops_other_senders_and_rejects_other_destinations() {
     let mut h = host(NetworkPolicy::Loopback);
-    let (a, _) = udp_bound(&mut h, IpAddressFamily::Ipv4);
+    let (a, a_port) = udp_bound(&mut h, IpAddressFamily::Ipv4);
     let (peer, peer_port) = udp_bound(&mut h, IpAddressFamily::Ipv4);
     let (stranger, stranger_port) = udp_bound(&mut h, IpAddressFamily::Ipv4);
     let (a_in, a_out) = h
@@ -761,14 +756,10 @@ fn a_connected_udp_stream_drops_other_senders_and_rejects_other_destinations() {
         h.wasi_sockets_udp_method_udp_socket_remote_address(a),
         Ok(lo(peer_port))
     );
-    let a_port = port_of(
-        h.wasi_sockets_udp_method_udp_socket_local_address(a)
-            .unwrap(),
-    );
-    let (_p_in, p_out) = h
+    let (_, p_out) = h
         .wasi_sockets_udp_method_udp_socket_stream(peer, None)
         .unwrap();
-    let (_s_in, s_out) = h
+    let (_, s_out) = h
         .wasi_sockets_udp_method_udp_socket_stream(stranger, None)
         .unwrap();
 
@@ -787,19 +778,18 @@ fn a_connected_udp_stream_drops_other_senders_and_rejects_other_destinations() {
     assert_eq!(got.len(), 1, "{got:?}");
     assert_eq!(got[0].data, b"peer");
     assert_eq!(got[0].remote_address, lo(peer_port));
-    let _ = stranger_port;
 
     // the connected stream sends to its peer without an address, and refuses any other one
     assert_eq!(
         h.wasi_sockets_udp_method_outgoing_datagram_stream_send(
-            wasm2rs_wasi::wasi_sockets_udp::OutgoingDatagramStream(a_out.0),
+            a_out,
             vec![datagram(b"x", Some(lo(stranger_port)))]
         ),
         Err(Net::InvalidArgument)
     );
     assert_eq!(
         h.wasi_sockets_udp_method_outgoing_datagram_stream_send(
-            wasm2rs_wasi::wasi_sockets_udp::OutgoingDatagramStream(a_out.0),
+            a_out,
             vec![datagram(b"x", Some(lo(peer_port)))]
         ),
         Ok(1),
@@ -818,13 +808,13 @@ fn a_connected_udp_stream_drops_other_senders_and_rejects_other_destinations() {
 fn udp_datagram_size_limits_follow_the_family() {
     let mut h = host(NetworkPolicy::Loopback);
     let (a, _) = udp_bound(&mut h, IpAddressFamily::Ipv4);
-    let (_b, b_port) = udp_bound(&mut h, IpAddressFamily::Ipv4);
-    let (_a_in, a_out) = h
+    let (_, b_port) = udp_bound(&mut h, IpAddressFamily::Ipv4);
+    let (_, a_out) = h
         .wasi_sockets_udp_method_udp_socket_stream(a, None)
         .unwrap();
     let send = |h: &mut WasiHost, len| {
         h.wasi_sockets_udp_method_outgoing_datagram_stream_send(
-            wasm2rs_wasi::wasi_sockets_udp::OutgoingDatagramStream(a_out.0),
+            a_out,
             vec![datagram(&vec![0; len], Some(lo(b_port)))],
         )
     };
@@ -835,7 +825,7 @@ fn udp_datagram_size_limits_follow_the_family() {
     // a later datagram that fails the rules ends the batch instead of failing it
     assert_eq!(
         h.wasi_sockets_udp_method_outgoing_datagram_stream_send(
-            wasm2rs_wasi::wasi_sockets_udp::OutgoingDatagramStream(a_out.0),
+            a_out,
             vec![
                 datagram(b"ok", Some(lo(b_port))),
                 datagram(&vec![0; 65_508], Some(lo(b_port))),
@@ -853,38 +843,30 @@ fn a_replaced_udp_stream_traps_and_its_subscription_wakes() {
     let (old_in, old_out) = h
         .wasi_sockets_udp_method_udp_socket_stream(a, None)
         .unwrap();
-    let wait = h.wasi_sockets_udp_method_incoming_datagram_stream_subscribe(
-        wasm2rs_wasi::wasi_sockets_udp::IncomingDatagramStream(old_in.0),
-    );
+    let wait = h.wasi_sockets_udp_method_incoming_datagram_stream_subscribe(old_in);
     assert!(
-        !h.wasi_io_poll_method_pollable_ready(Pollable(wait.0)),
+        !h.wasi_io_poll_method_pollable_ready(wait),
         "nothing queued"
     );
-    let (_new_in, _new_out) = h
-        .wasi_sockets_udp_method_udp_socket_stream(a, None)
+    h.wasi_sockets_udp_method_udp_socket_stream(a, None)
         .unwrap();
     assert!(
         h.wasi_io_poll_method_pollable_ready(wait),
         "a stale stream is ready so that a waiting guest wakes up and traps"
     );
-    for trap in [
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = h.wasi_sockets_udp_method_incoming_datagram_stream_receive(
-                wasm2rs_wasi::wasi_sockets_udp::IncomingDatagramStream(old_in.0),
-                1,
-            );
-        })),
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = h.wasi_sockets_udp_method_outgoing_datagram_stream_check_send(
-                wasm2rs_wasi::wasi_sockets_udp::OutgoingDatagramStream(old_out.0),
-            );
-        })),
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = h.wasi_sockets_udp_method_outgoing_datagram_stream_send(old_out, vec![]);
-        })),
-    ] {
-        assert!(trap.is_err());
-    }
+    assert!(traps(|| h
+        .wasi_sockets_udp_method_incoming_datagram_stream_receive(
+            old_in, 1
+        )));
+    assert!(traps(|| h
+        .wasi_sockets_udp_method_outgoing_datagram_stream_check_send(
+            old_out
+        )));
+    assert!(traps(|| h
+        .wasi_sockets_udp_method_outgoing_datagram_stream_send(
+            old_out,
+            vec![]
+        )));
 }
 
 #[test]
@@ -904,10 +886,10 @@ fn udp_over_ipv6_loopback_round_trips() {
             .unwrap(),
     );
     let (b, _) = udp_bound(&mut h, IpAddressFamily::Ipv6);
-    let (a_in, _a_out) = h
+    let (a_in, _) = h
         .wasi_sockets_udp_method_udp_socket_stream(a, None)
         .unwrap();
-    let (_b_in, b_out) = h
+    let (_, b_out) = h
         .wasi_sockets_udp_method_udp_socket_stream(b, None)
         .unwrap();
     h.wasi_sockets_udp_method_outgoing_datagram_stream_send(
@@ -926,23 +908,17 @@ fn resolve(h: &mut WasiHost, name: &str) -> Result<Vec<IpAddress>, Net> {
     let stream = h.wasi_sockets_ip_name_lookup_resolve_addresses(NET, name.into())?;
     let mut out = Vec::new();
     while let Some(a) = h
-        .wasi_sockets_ip_name_lookup_method_resolve_address_stream_resolve_next_address(
-            wasm2rs_wasi::wasi_sockets_ip_name_lookup::ResolveAddressStream(stream.0),
-        )
+        .wasi_sockets_ip_name_lookup_method_resolve_address_stream_resolve_next_address(stream)
         .unwrap()
     {
         out.push(a);
     }
     // an exhausted stream stays exhausted, and its pollable is ready at once
     assert_eq!(
-        h.wasi_sockets_ip_name_lookup_method_resolve_address_stream_resolve_next_address(
-            wasm2rs_wasi::wasi_sockets_ip_name_lookup::ResolveAddressStream(stream.0)
-        ),
+        h.wasi_sockets_ip_name_lookup_method_resolve_address_stream_resolve_next_address(stream),
         Ok(None)
     );
-    let p = h.wasi_sockets_ip_name_lookup_method_resolve_address_stream_subscribe(
-        wasm2rs_wasi::wasi_sockets_ip_name_lookup::ResolveAddressStream(stream.0),
-    );
+    let p = h.wasi_sockets_ip_name_lookup_method_resolve_address_stream_subscribe(stream);
     assert!(h.wasi_io_poll_method_pollable_ready(p));
     h.wasi_sockets_ip_name_lookup_resource_drop_resolve_address_stream(stream);
     Ok(out)
@@ -1011,10 +987,7 @@ fn poll_returns_the_ready_indices_and_waits_for_the_earliest_deadline() {
     let long = h.wasi_clocks_monotonic_clock_subscribe_duration(60_000_000_000);
     let soon = h.wasi_clocks_monotonic_clock_subscribe_duration(20_000_000);
     let start = Instant::now();
-    assert_eq!(
-        h.wasi_io_poll_poll(vec![Pollable(long.0), Pollable(soon.0)]),
-        vec![1]
-    );
+    assert_eq!(h.wasi_io_poll_poll(vec![long, soon]), vec![1]);
     let waited = start.elapsed();
     assert!(waited >= Duration::from_millis(15), "{waited:?}");
     assert!(waited < Duration::from_secs(10), "{waited:?}");
@@ -1030,10 +1003,7 @@ fn poll_returns_the_ready_indices_and_waits_for_the_earliest_deadline() {
 #[test]
 fn polling_an_empty_list_traps() {
     let mut h = host(NetworkPolicy::Loopback);
-    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = h.wasi_io_poll_poll(vec![]);
-    }));
-    assert!(caught.is_err());
+    assert!(traps(|| h.wasi_io_poll_poll(vec![])));
 }
 
 #[test]
@@ -1055,66 +1025,29 @@ fn a_huge_duration_does_not_overflow_the_deadline() {
 fn accept_and_stream_pollables_turn_ready_when_data_arrives() {
     let mut h = host(NetworkPolicy::Loopback);
     let (server, port) = listener(&mut h);
-    let accept_wait = h.wasi_sockets_tcp_method_tcp_socket_subscribe(TcpSocket(server.0));
-    assert!(!h.wasi_io_poll_method_pollable_ready(Pollable(accept_wait.0)));
+    let accept_wait = h.wasi_sockets_tcp_method_tcp_socket_subscribe(server);
+    assert!(!h.wasi_io_poll_method_pollable_ready(accept_wait));
     let client = tcp(&mut h);
     h.wasi_sockets_tcp_method_tcp_socket_start_connect(client, NET, lo(port))
         .unwrap();
-    let (c_in, c_out) = h
+    let (_, c_out) = h
         .wasi_sockets_tcp_method_tcp_socket_finish_connect(client)
         .unwrap();
-    h.wasi_io_poll_method_pollable_block(Pollable(accept_wait.0));
+    h.wasi_io_poll_method_pollable_block(accept_wait);
     // the connection that made the poll ready is the one `accept` returns
-    let (_accepted, s_in, s_out) = h.wasi_sockets_tcp_method_tcp_socket_accept(server).unwrap();
+    let (_, s_in, s_out) = h.wasi_sockets_tcp_method_tcp_socket_accept(server).unwrap();
     // reading: not ready until bytes come
-    let readable = h.wasi_io_streams_method_input_stream_subscribe(
-        wasm2rs_wasi::wasi_io_streams::InputStream(s_in.0),
-    );
-    assert!(!h.wasi_io_poll_method_pollable_ready(Pollable(readable.0)));
+    let readable = h.wasi_io_streams_method_input_stream_subscribe(s_in);
+    assert!(!h.wasi_io_poll_method_pollable_ready(readable));
     h.wasi_io_streams_method_output_stream_blocking_write_and_flush(c_out, b"x".to_vec())
         .unwrap();
-    assert_eq!(h.wasi_io_poll_poll(vec![Pollable(readable.0)]), vec![0]);
+    assert_eq!(h.wasi_io_poll_poll(vec![readable]), vec![0]);
     // writing: ready while the send queue has room
-    let writable = h.wasi_io_streams_method_output_stream_subscribe(
-        wasm2rs_wasi::wasi_io_streams::OutputStream(s_out.0),
-    );
+    let writable = h.wasi_io_streams_method_output_stream_subscribe(s_out);
     assert!(h.wasi_io_poll_method_pollable_ready(writable));
-    let _ = c_in;
 }
 
 // ---- back-pressure and failure of a connection's output ---------------------------------
-
-/// A connected pair: the client's streams and the server side's, over one host.
-struct Pair {
-    host: WasiHost,
-    c_out: wasm2rs_wasi::wasi_io_streams::OutputStream,
-    c_in: wasm2rs_wasi::wasi_io_streams::InputStream,
-    client: TcpSocket,
-    s_in: wasm2rs_wasi::wasi_io_streams::InputStream,
-    s_out: wasm2rs_wasi::wasi_io_streams::OutputStream,
-    accepted: TcpSocket,
-}
-
-fn pair() -> Pair {
-    let mut host = host(NetworkPolicy::Loopback);
-    let (server, port) = listener(&mut host);
-    let client = tcp(&mut host);
-    host.wasi_sockets_tcp_method_tcp_socket_start_connect(client, NET, lo(port))
-        .unwrap();
-    let (c_in, c_out) = host
-        .wasi_sockets_tcp_method_tcp_socket_finish_connect(client)
-        .unwrap();
-    let (accepted, s_in, s_out) = accept_blocking(&mut host, server);
-    Pair {
-        host,
-        c_out,
-        c_in,
-        client,
-        s_in,
-        s_out,
-        accepted,
-    }
-}
 
 #[test]
 fn a_peer_that_does_not_read_fills_the_send_queue_and_reading_frees_it() {
@@ -1124,9 +1057,7 @@ fn a_peer_that_does_not_read_fills_the_send_queue_and_reading_frees_it() {
         s_in,
         ..
     } = pair();
-    let writable = host.wasi_io_streams_method_output_stream_subscribe(
-        wasm2rs_wasi::wasi_io_streams::OutputStream(c_out.0),
-    );
+    let writable = host.wasi_io_streams_method_output_stream_subscribe(c_out);
     // write until the permit is 0: the socket buffers and the 64 KiB queue are full
     let mut written = 0usize;
     loop {
@@ -1202,11 +1133,11 @@ fn a_dead_peer_fails_the_output_once_and_then_it_is_closed() {
     };
     assert!(
         !host
-            .wasi_io_error_method_error_to_debug_string(wasm2rs_wasi::wasi_io_error::Error(err.0))
+            .wasi_io_error_method_error_to_debug_string(err)
             .is_empty()
     );
     assert_eq!(
-        host.wasi_filesystem_types_filesystem_error_code(wasm2rs_wasi::wasi_io_error::Error(err.0)),
+        host.wasi_filesystem_types_filesystem_error_code(err),
         None,
         "a connection's failure is not a filesystem error"
     );
@@ -1229,8 +1160,6 @@ fn a_zero_length_read_succeeds_only_while_the_connection_is_open() {
     let Pair {
         mut host,
         c_in,
-        client,
-        s_out,
         accepted,
         ..
     } = pair();
@@ -1245,10 +1174,7 @@ fn a_zero_length_read_succeeds_only_while_the_connection_is_open() {
     // the peer closes its side: the zero-length read now sees the end
     host.wasi_sockets_tcp_method_tcp_socket_shutdown(accepted, ShutdownType::Both)
         .unwrap();
-    let _ = s_out;
-    let p = host.wasi_io_streams_method_input_stream_subscribe(
-        wasm2rs_wasi::wasi_io_streams::InputStream(c_in.0),
-    );
+    let p = host.wasi_io_streams_method_input_stream_subscribe(c_in);
     host.wasi_io_poll_method_pollable_block(p);
     assert_eq!(
         host.wasi_io_streams_method_input_stream_read(c_in, 0),
@@ -1262,8 +1188,6 @@ fn a_zero_length_read_succeeds_only_while_the_connection_is_open() {
         host.wasi_io_streams_method_input_stream_blocking_read(c_in, 0),
         Err(StreamError::Closed)
     );
-    // shutting down twice, or shutting what is not connected, is an error and not a crash
-    let _ = client;
 }
 
 #[test]
@@ -1302,9 +1226,7 @@ fn the_instance_network_is_one_handle_that_can_be_dropped() {
     let (u_in, u_out) = h
         .wasi_sockets_udp_method_udp_socket_stream(u, None)
         .unwrap();
-    let out_ready = h.wasi_sockets_udp_method_outgoing_datagram_stream_subscribe(
-        wasm2rs_wasi::wasi_sockets_udp::OutgoingDatagramStream(u_out.0),
-    );
+    let out_ready = h.wasi_sockets_udp_method_outgoing_datagram_stream_subscribe(u_out);
     assert!(h.wasi_io_poll_method_pollable_ready(out_ready));
     h.wasi_sockets_udp_resource_drop_incoming_datagram_stream(u_in);
     h.wasi_sockets_udp_resource_drop_outgoing_datagram_stream(u_out);

@@ -1,39 +1,17 @@
 //! The injectable sources (clock, randomness) with their defaults, the text of the
 //! configuration errors, and how a failed file stream is reported to the guest.
 
+mod common;
+
+use common::{builder, scratch, traps};
 use std::error::Error as _;
-use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use wasm2rs_wasi::wasi_clocks_wall_clock::Datetime;
 use wasm2rs_wasi::wasi_io_error::Error as IoError;
 use wasm2rs_wasi::{
     Access, Clock, ConfigError, Host, HttpClientError, InsecureRandom, RandomError, RandomSource,
     SystemClock, WasiHost,
 };
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("wasm2rs-wasi-misc-{}-{name}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-struct Zeros;
-impl RandomSource for Zeros {
-    fn fill_random(&mut self, buf: &mut [u8]) -> Result<(), RandomError> {
-        buf.fill(0);
-        Ok(())
-    }
-    fn insecure_u64(&mut self) -> u64 {
-        0
-    }
-    fn insecure_seed(&mut self) -> (u64, u64) {
-        (0, 0)
-    }
-}
-
-fn builder() -> wasm2rs_wasi::WasiHostBuilder {
-    WasiHost::builder().random(Zeros)
-}
 
 // ---- configuration errors ---------------------------------------------------------------
 
@@ -84,7 +62,7 @@ fn each_config_error_says_what_is_wrong_and_only_a_failed_resolve_has_a_source()
         .unwrap();
     assert_eq!(err.to_string(), "a preopen has an empty guest name");
 
-    // the one-line messages of the other two errors are part of what users see
+    // the message of this error is part of what users see
     assert_eq!(
         ConfigError::MissingRandomSource.to_string(),
         "no random source: give one to the builder or enable the `os-random` feature"
@@ -169,20 +147,20 @@ fn a_clock_that_gives_only_the_required_methods_has_one_nanosecond_resolution() 
 fn the_system_clock_counts_from_its_creation_and_the_wall_clock_is_the_systems() {
     let clock = SystemClock::default();
     let first = clock.monotonic_now();
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    std::thread::sleep(Duration::from_millis(5));
     let second = clock.monotonic_now();
     assert!(second >= first + 4_000_000, "{first} -> {second}");
     // counted from creation, not from the machine's boot
     assert!(first < 60_000_000_000, "{first}");
     assert_eq!(clock.monotonic_resolution(), 1);
 
-    let before = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let before = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let wall = clock.wall_now();
-    let after = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let after = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
     assert!((before..=after).contains(&wall.seconds), "{wall:?}");
@@ -197,8 +175,7 @@ fn the_insecure_generator_is_splitmix64() {
     assert_eq!(g.next_u64(), 0x6E78_9E6A_A1B9_65F4);
     assert_eq!(g.next_u64(), 0x06C4_5D18_8009_454F);
     // a seed near the top of the range wraps instead of overflowing
-    let mut wrap = InsecureRandom::new(u64::MAX);
-    assert_eq!(wrap.next_u64(), InsecureRandom::new(u64::MAX).next_u64());
+    assert_eq!(InsecureRandom::new(u64::MAX).next_u64(), 0xE4D971771B652C20);
     // two OS-seeded generators do not start in the same place
     assert_ne!(
         InsecureRandom::from_os().next_u64(),
@@ -224,11 +201,9 @@ fn the_os_source_fills_every_length_and_its_insecure_values_move() {
     let mut odd = [0u8; 1031];
     os.fill_random(&mut odd).unwrap();
     assert!(odd.iter().any(|&b| b != 0));
-    let a = os.insecure_u64();
-    let b = os.insecure_u64();
-    assert_ne!(a, b);
-    let (s1, s2) = os.insecure_seed();
-    assert_ne!((s1, s2), os.insecure_seed());
+    assert_ne!(os.insecure_u64(), os.insecure_u64());
+    let seed = os.insecure_seed();
+    assert_ne!(seed, os.insecure_seed());
     let mut empty: [u8; 0] = [];
     assert!(os.fill_random(&mut empty).is_ok());
 }
@@ -261,11 +236,17 @@ fn insecure_bytes_are_the_generators_words_in_order_and_zero_length_is_empty() {
     // secure bytes come from `fill_random`, not from the insecure counter
     assert_eq!(host.wasi_random_random_get_random_bytes(2), [1, 1]);
     assert_eq!(host.wasi_random_insecure_get_insecure_random_u64(), 3);
-    // exactly the limit is allowed
+    // 64 MiB exactly is allowed, one byte more traps (for both generators)
     assert_eq!(
-        host.wasi_random_random_get_random_bytes(1 << 20).len(),
-        1 << 20
+        host.wasi_random_random_get_random_bytes(64 << 20).len(),
+        64 << 20
     );
+    assert!(traps(
+        || host.wasi_random_random_get_random_bytes((64 << 20) + 1)
+    ));
+    assert!(traps(
+        || host.wasi_random_insecure_get_insecure_random_bytes((64 << 20) + 1)
+    ));
 }
 
 // ---- error handles ----------------------------------------------------------------------
@@ -317,12 +298,12 @@ fn a_failed_file_write_reports_a_filesystem_error_code_once_then_closes() {
         panic!("the first failure is last-operation-failed");
     };
     assert_eq!(
-        host.wasi_filesystem_types_filesystem_error_code(IoError(err.0)),
-        Some(Fs::Io)
+        host.wasi_filesystem_types_filesystem_error_code(err),
+        Some(Fs::Io) // pins the current mapping of ENOSPC: relax if `insufficient-space` is added
     );
     assert!(
         !host
-            .wasi_io_error_method_error_to_debug_string(IoError(err.0))
+            .wasi_io_error_method_error_to_debug_string(err)
             .is_empty()
     );
     assert_eq!(
