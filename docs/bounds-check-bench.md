@@ -42,8 +42,8 @@ their `slice_index` panic paths and extra compares (matmul inner loop: 10 `cmp` 
 
 - `matmul` pays about **48%** for its checks: two loads per inner step, each a
   bounds-checked 4-byte slice on an address computed from loop counters. This is
-  the shape a loop-invariant / range analysis (roadmap 6b) or base reuse (6a) could
-  attack, since the addresses are affine in the induction variables.
+  the shape a loop-invariant / range analysis or base reuse could attack,
+  since the addresses are affine in the induction variables.
 - `hash` and `random` pay about 1%: the loop is bound by a multiply chain or by
   memory latency, and the well-predicted check branches are hidden behind it.
 - For scale, `unsafe_memory` was about 17% faster end to end on googlesql. So
@@ -80,7 +80,7 @@ About 23% of googlesql's memory accesses are inside loops.
 - Merging checks could reach up to ~43% but needs a "no side effect in between"
   condition that was not measured, and changes where an out-of-bounds trap fires.
 - The matmul gap (about 48%) comes from addresses computed from loop counters, which
-  share no base local; only a range analysis over induction variables (6b) would
+  share no base local; only a range analysis over induction variables would
   remove those, and that needs an IR the transpiler does not have (high effort and
   risk).
 - Decision: stop here. Users who trust their module can already use
@@ -89,7 +89,7 @@ About 23% of googlesql's memory accesses are inside loops.
 
 ## Fixed-size memory (`min == max`) prototype
 
-Idea (roadmap 6d): when a defined memory declares `min == max`, keep it as
+Idea: when a defined memory declares `min == max`, keep it as
 `Box<[u8; N]>`, so its length is a compile-time constant (and `memory.size` could be a
 constant; `memory.grow` would return the current size for a delta of 0 and -1 otherwise).
 

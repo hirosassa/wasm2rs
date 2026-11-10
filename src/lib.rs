@@ -234,8 +234,9 @@ pub(crate) fn reject_component(encoding: wasmparser::Encoding) -> Result<(), Tra
     match encoding {
         wasmparser::Encoding::Module => Ok(()),
         wasmparser::Encoding::Component => Err(TranspileError::Unsupported(
-            "WebAssembly components are not supported; give wasm2rs a core module \
-             (for example extract it with `wasm2rs --extract-core`)"
+            "WebAssembly components are not supported here; give wasm2rs a core module \
+             (for example extract it with `wasm2rs --extract-core`), or transpile the \
+             component itself with `wasm2rs --component` (library: `transpile_component`)"
                 .into(),
         )),
     }

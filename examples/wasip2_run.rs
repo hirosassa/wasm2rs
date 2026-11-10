@@ -21,11 +21,12 @@
 //! program trapped`); panics outside the call (host setup) stay 101. The build goes in
 //! `$WASIP2_WORK_DIR` (default: a temporary directory). The program sees the
 //! directory `$WASIP2_PREOPEN`, if set, as its `/`: read-only, or also writable if
-//! `$WASIP2_PREOPEN_WRITABLE=1`. A function the host does not implement (`wasi:http`) traps
-//! when the guest calls it; an import outside the WASI 0.2.0 surface does not build (E0407)
-//! and this program exits with 2. The program is dropped before a normal exit, which sends
-//! what the connections' send queues still hold (up to 5 seconds); after a trap (134) it is
-//! not. Addresses outside loopback stay `access-denied` (`with_external_network` is not
+//! `$WASIP2_PREOPEN_WRITABLE=1`. `wasi:http` is implemented, but no
+//! `HttpClient` is set here (`UreqClient` needs the `http-client` feature), so
+//! `outgoing-handler.handle` fails with `internal-error` (for a loopback address). An import outside the WASI 0.2.0
+//! surface does not build (E0407) and this program exits with 2. The program is dropped
+//! before a normal exit, which sends what the connections' send queues still hold (up to 5
+//! seconds); after a trap (134) it is not. Addresses outside loopback stay `access-denied` (`with_external_network` is not
 //! called here). See `docs/typed-host-design.md` and `docs/component-exports-design.md`.
 
 use std::process::Command;

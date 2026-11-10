@@ -233,9 +233,6 @@ impl std::error::Error for HttpClientError {}
 /// Executes the requests of `wasi:http/outgoing-handler`, set with
 /// [`WasiHostBuilder::http_client`](super::WasiHostBuilder::http_client). Without one, `handle`
 /// fails with `internal-error`.
-///
-/// The host only stores the client so far: nothing calls it until `outgoing-handler.handle` is
-/// implemented, and this shape may still change until then.
 pub trait HttpClient: Send {
     fn send(&mut self, request: HttpRequest) -> Result<HttpResponse, HttpClientError>;
 }
