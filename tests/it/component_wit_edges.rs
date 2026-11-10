@@ -7,8 +7,12 @@ fn component(text: &str) -> Vec<u8> {
     wat::parse_str(text).unwrap()
 }
 
+fn transpile(text: &str) -> Result<String, TranspileError> {
+    transpile_component(&component(text), &ComponentOptions::default())
+}
+
 fn unsupported(text: &str) -> String {
-    let err = transpile_component(&component(text), &ComponentOptions::default()).unwrap_err();
+    let err = transpile(text).unwrap_err();
     assert!(matches!(err, TranspileError::Unsupported(_)), "{err:?}");
     err.to_string()
 }
@@ -18,10 +22,11 @@ fn rejection(text: &str) -> String {
 }
 
 fn code_of(text: &str) -> String {
-    transpile_component(&component(text), &ComponentOptions::default()).unwrap()
+    transpile(text).unwrap()
 }
 
-/// A program the exports are lifted from, in the module at `$p`.
+/// Instantiates core module `${module}` and exports a lift of its core export `export` as
+/// `e{module}`.
 fn lift_of(module: &str, export: &str) -> String {
     format!(
         r#"(core instance $i{module} (instantiate ${module}))
@@ -106,7 +111,7 @@ fn a_receiver_with_only_a_start_function_is_drivable() {
 
 #[test]
 fn an_outer_alias_of_a_module_repeats_its_entry() {
-    // `$alias` (index 1) is the same module as `$program` (index 0).
+    // `$alias` (index 2) is the same module as `$program` (index 0).
     let text = format!(
         r#"(component
   {LOWERED_PREFIX}
@@ -138,7 +143,7 @@ fn a_module_taken_from_an_imported_instance_is_never_a_candidate() {
 // --- shapes `wit_exports` refuses ---
 
 #[test]
-fn a_re_exported_import_is_not_a_lift() {
+fn a_function_import_is_refused_before_the_exports_are_read() {
     let err = rejection(
         r#"(component
   (import "f" (func $f))
