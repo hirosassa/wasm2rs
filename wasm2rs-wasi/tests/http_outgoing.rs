@@ -678,8 +678,7 @@ impl Read for Counting {
 fn the_reader_thread_stops_buffering_ahead_at_the_limit_until_the_guest_reads() {
     const BUFFER: usize = 1 << 20;
     let pulled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counter = Arc::clone(&pulled);
-    let slot = Mutex::new(Some(Counting(counter)));
+    let slot = Mutex::new(Some(Counting(Arc::clone(&pulled))));
     let mut h = host_with(FnClient(move |_| {
         Ok(streamed(slot.lock().unwrap().take().unwrap()))
     }));

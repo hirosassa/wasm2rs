@@ -1233,6 +1233,23 @@ fn the_instance_network_is_one_handle_that_can_be_dropped() {
     h.wasi_sockets_udp_resource_drop_udp_socket(u);
 }
 
+/// Writes to `out` until `check-write` permits nothing (the peer must not be reading); returns
+/// the bytes written.
+fn fill_send_queue(host: &mut WasiHost, out: OutputStream) -> usize {
+    let mut written = 0;
+    loop {
+        let permit = host
+            .wasi_io_streams_method_output_stream_check_write(out)
+            .unwrap();
+        if permit == 0 {
+            return written;
+        }
+        host.wasi_io_streams_method_output_stream_write(out, vec![9; permit as usize])
+            .unwrap();
+        written += permit as usize;
+    }
+}
+
 #[test]
 fn splice_into_a_full_send_queue_moves_nothing_and_leaves_the_source_alone() {
     let Pair {
@@ -1245,17 +1262,8 @@ fn splice_into_a_full_send_queue_moves_nothing_and_leaves_the_source_alone() {
     // the peer sends nothing more: `c_in` is at its end
     host.wasi_sockets_tcp_method_tcp_socket_shutdown(accepted, ShutdownType::Send_)
         .unwrap();
-    // the peer does not read: fill the send queue until the permit is 0
-    loop {
-        let permit = host
-            .wasi_io_streams_method_output_stream_check_write(c_out)
-            .unwrap();
-        if permit == 0 {
-            break;
-        }
-        host.wasi_io_streams_method_output_stream_write(c_out, vec![1; permit as usize])
-            .unwrap();
-    }
+    // the peer does not read
+    fill_send_queue(&mut host, c_out);
     // nothing can be written, so nothing is read from `src`, not even its end
     assert_eq!(
         host.wasi_io_streams_method_output_stream_splice(c_out, c_in, 10),
@@ -1278,18 +1286,8 @@ fn filled_connection() -> (WasiHost, TcpSocket, std::net::TcpStream, usize) {
         .wasi_sockets_tcp_method_tcp_socket_finish_connect(client)
         .unwrap();
     let (peer, _) = listener.accept().unwrap();
-    let mut written = 0usize;
-    loop {
-        let permit = host
-            .wasi_io_streams_method_output_stream_check_write(c_out)
-            .unwrap();
-        if permit == 0 {
-            return (host, client, peer, written);
-        }
-        host.wasi_io_streams_method_output_stream_write(c_out, vec![9; permit as usize])
-            .unwrap();
-        written += permit as usize;
-    }
+    let written = fill_send_queue(&mut host, c_out);
+    (host, client, peer, written)
 }
 
 fn read_to_end_in_a_thread(mut peer: std::net::TcpStream) -> std::thread::JoinHandle<usize> {

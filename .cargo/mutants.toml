@@ -31,7 +31,7 @@ exclude_re = [
     'replace Wait::polls_socket -> bool with true',
     # the size of the user-space send queue on top of socket buffers whose size is the OS's:
     # no portable test can see the sum
-    'replace \* with \+$',
+    'wasm2rs-wasi/src/host\.rs:\d+:\d+: replace \* with \+$',
     # process stdout/stderr when no writer was given: not observable from inside the process
     'in WasiHost::with_stdio',
     # `stream == 0` is the only stream that reaches the stdin wait; other streams return first
@@ -41,7 +41,7 @@ exclude_re = [
     'in TcpOut::flush$',
     # a connection's failed read reaching `stream_failed` needs an OS-level reset on read; the
     # file/connection split of the filesystem error code is covered for writes
-    'replace && with \\|\\| in WasiHost::stream_failed',
+    'replace && with \|\| in WasiHost::stream_failed',
     # a stale-handle guard whose only effect is a flush that is harmless for a reused slot
     'replace == with != in WasiHost::tcp_shutdown',
     'replace \+= with \*= in WasiHost::open_tcp_streams',

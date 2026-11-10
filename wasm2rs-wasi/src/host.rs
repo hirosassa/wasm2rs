@@ -2656,23 +2656,23 @@ mod tests {
 
     #[test]
     fn stream_handles_split_into_disjoint_ranges() {
-        let h = |base: usize, offset: usize| (base + offset) as u32;
+        let h = |base: usize| base as u32;
         // incoming bodies: the range below the outgoing ones
-        assert_eq!(http_slot(h(HTTP_STREAM, 0)), Some(0));
+        assert_eq!(http_slot(h(HTTP_STREAM)), Some(0));
         assert_eq!(
-            http_slot(h(HTTP_OUT_STREAM, 0) - 1),
+            http_slot(h(HTTP_OUT_STREAM) - 1),
             Some(HTTP_OUT_STREAM - HTTP_STREAM - 1)
         );
-        assert_eq!(http_slot(h(HTTP_OUT_STREAM, 0)), None);
-        assert_eq!(http_slot(h(HTTP_STREAM, 0) - 1), None);
+        assert_eq!(http_slot(h(HTTP_OUT_STREAM)), None);
+        assert_eq!(http_slot(h(HTTP_STREAM) - 1), None);
         // outgoing bodies: the range below the connections
-        assert_eq!(http_out_slot(h(HTTP_OUT_STREAM, 0)), Some(0));
+        assert_eq!(http_out_slot(h(HTTP_OUT_STREAM)), Some(0));
         assert_eq!(
-            http_out_slot(h(TCP_STREAM, 0) - 1),
+            http_out_slot(h(TCP_STREAM) - 1),
             Some(TCP_STREAM - HTTP_OUT_STREAM - 1)
         );
-        assert_eq!(http_out_slot(h(TCP_STREAM, 0)), None);
-        assert_eq!(http_out_slot(h(HTTP_OUT_STREAM, 0) - 1), None);
+        assert_eq!(http_out_slot(h(TCP_STREAM)), None);
+        assert_eq!(http_out_slot(h(HTTP_OUT_STREAM) - 1), None);
     }
 
     #[test]
