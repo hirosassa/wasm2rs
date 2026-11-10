@@ -28,6 +28,13 @@ fn dump_rejects_a_component() {
 }
 
 #[test]
+fn the_rejection_points_at_the_component_entry_points() {
+    let err = transpile(&component()).unwrap_err().to_string();
+    assert!(err.contains("--component"), "{err}");
+    assert!(err.contains("transpile_component"), "{err}");
+}
+
+#[test]
 fn a_core_module_still_transpiles() {
     let wasm = wat::parse_str("(module (func (export \"f\")))").unwrap();
     assert!(transpile(&wasm).is_ok());
