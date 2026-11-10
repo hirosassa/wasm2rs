@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use wasmparser::{
     ComponentAlias, ComponentExternalKind, ComponentOuterAliasKind, ComponentTypeRef, Encoding,
-    ExternalKind, Instance, InstantiationArgKind, Parser, Payload,
+    ExternalKind, Instance, Parser, Payload,
 };
 
 use crate::{
@@ -256,8 +256,8 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
                         Instance::Instantiate { module_index, args } => {
                             let module = at(&module_space, module_index).flatten();
                             let gets_functions = args.iter().any(|arg| {
-                                arg.kind == InstantiationArgKind::Instance
-                                    && at(&instances, arg.index).unwrap_or(false)
+                                // An instantiation argument of a core module is always an instance.
+                                at(&instances, arg.index).unwrap_or(false)
                             });
                             if let (Some(module), true) = (module, gets_functions) {
                                 layout.receivers.insert(module);

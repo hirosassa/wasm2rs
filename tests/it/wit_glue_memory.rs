@@ -1164,3 +1164,76 @@ fn signed_bytes_and_chars_are_stored_and_loaded_at_their_memory_widths() {
         "#,
     );
 }
+
+#[test]
+fn a_scalar_is_loaded_with_exactly_its_memory_width() {
+    // Each list sits at the very end of the one-page memory (65536 bytes), so a load wider
+    // than the element would run past it and trap. The last two bytes are `05 01`.
+    go(
+        "mem_width_at_the_end",
+        r#"(type $f3 (flags "a" "b" "c"))
+        (export "f3" (type $f3t (eq $f3)))
+        (type $f12 (flags "a" "b" "c" "d" "e" "f" "g" "h" "i" "j" "k" "l"))
+        (export "f12" (type $f12t (eq $f12)))
+        (export "s8s" (func (param "l" (list s8))))
+        (export "bools" (func (param "l" (list bool))))
+        (export "u16s" (func (param "l" (list u16))))
+        (export "s16s" (func (param "l" (list s16))))
+        (export "f3s" (func (param "l" (list $f3t))))
+        (export "f12s" (func (param "l" (list $f12t))))"#,
+        r#"(import "a:b/c" "s8s" (func $s8s (param i32 i32)))
+        (import "a:b/c" "bools" (func $bools (param i32 i32)))
+        (import "a:b/c" "u16s" (func $u16s (param i32 i32)))
+        (import "a:b/c" "s16s" (func $s16s (param i32 i32)))
+        (import "a:b/c" "f3s" (func $f3s (param i32 i32)))
+        (import "a:b/c" "f12s" (func $f12s (param i32 i32)))"#,
+        r#"(data (i32.const 65534) "\05\01")
+        (func (export "run")
+          (call $s8s (i32.const 65535) (i32.const 1))
+          (call $bools (i32.const 65535) (i32.const 1))
+          (call $u16s (i32.const 65534) (i32.const 1))
+          (call $s16s (i32.const 65534) (i32.const 1))
+          (call $f3s (i32.const 65535) (i32.const 1))
+          (call $f12s (i32.const 65534) (i32.const 1)))"#,
+        r#"
+        struct H;
+        impl Host for H {
+            fn a_b_c_s8s(&mut self, l: Vec<i8>) { assert_eq!(l, vec![1]); }
+            fn a_b_c_bools(&mut self, l: Vec<bool>) { assert_eq!(l, vec![true]); }
+            fn a_b_c_u16s(&mut self, l: Vec<u16>) { assert_eq!(l, vec![0x0105]); }
+            fn a_b_c_s16s(&mut self, l: Vec<i16>) { assert_eq!(l, vec![0x0105]); }
+            fn a_b_c_f3s(&mut self, l: Vec<F3>) { assert_eq!(l, vec![F3(1)]); }
+            fn a_b_c_f12s(&mut self, l: Vec<F12>) { assert_eq!(l, vec![F12(0x105)]); }
+        }
+        fn main() { Instance::new(Glue(H)).run(); }
+        "#,
+    );
+}
+
+#[test]
+fn a_bool_is_loaded_from_its_own_byte_and_stored_as_a_zero_or_one_byte() {
+    // The byte after the `bool` at 16 is nonzero: a wider load would read `true`.
+    go(
+        "bool_mem",
+        r#"(export "flags" (func (param "l" (list bool)) (result (list bool))))"#,
+        r#"(import "a:b/c" "flags" (func $flags (param i32 i32 i32)))"#,
+        r#"(data (i32.const 16) "\00\01\00\00")
+        (func (export "run") (call $flags (i32.const 16) (i32.const 2) (i32.const 64)))"#,
+        r#"
+        struct H;
+        impl Host for H {
+            fn a_b_c_flags(&mut self, l: Vec<bool>) -> Vec<bool> {
+                assert_eq!(l, vec![false, true]);
+                vec![true, false, true]
+            }
+        }
+        fn main() {
+            let mut inst = Instance::new(Glue(H));
+            inst.run();
+            let m = inst.memory();
+            let (p, n) = (u32_at(m, 64) as usize, u32_at(m, 68));
+            assert_eq!((&m[p..p + 4], n), (&[1u8, 0, 1, 0][..], 3));
+        }
+        "#,
+    );
+}
