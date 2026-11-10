@@ -9,6 +9,23 @@ pub mod model;
 pub mod net;
 pub mod respond;
 
+/// An RFC 9110 `token` (a header name or a method).
+pub fn is_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+/// A byte a field value or a reason phrase may hold: HTAB, SP, VCHAR or obs-text.
+pub fn is_field_byte(b: u8) -> bool {
+    b == b'\t' || (b >= 0x20 && b != 0x7f)
+}
+
+/// The offset of the first `needle` in `bytes`.
+pub fn find(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+    bytes.windows(needle.len()).position(|w| w == needle)
+}
+
 #[allow(
     dead_code,
     unused_imports,

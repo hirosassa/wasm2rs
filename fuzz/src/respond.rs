@@ -2,9 +2,9 @@
 //! `handle` does), send it with the server's writer, and check the bytes with a strict
 //! HTTP/1.1 response parser.
 
-use crate::{api, net};
+use crate::{api, find, is_field_byte, is_token, net};
 use std::time::Duration;
-use wasm2rs_wasi::wasi_http_types::OutgoingResponse;
+use wasm2rs_wasi::wasi_http_types::{Fields, OutgoingResponse};
 use wasm2rs_wasi::{Host, ServedResponse, WasiHost};
 
 /// Header names and values the host accepts, plus (so far) all of what it refuses.
@@ -25,15 +25,22 @@ pub fn host() -> WasiHost {
     WasiHost::new(Vec::new())
 }
 
-/// The response the host hands the embedder for `plan`. Entries the host refuses (bad syntax,
-/// forbidden names) are dropped, as a guest's failed `append` leaves them out; `None` when the
-/// host fails somewhere else (e.g. a status it refuses is kept at the default 200).
-pub fn served(h: &mut WasiHost, plan: &Plan) -> Option<ServedResponse> {
+/// A `fields` resource holding the `entries` the host accepts.
+fn fields(h: &mut WasiHost, entries: &Entries) -> Fields {
     let fields = h.wasi_http_types_constructor_fields();
-    for (name, value) in &plan.headers {
+    for (name, value) in entries {
         let _ = h.wasi_http_types_method_fields_append(fields, name.clone(), value.clone());
     }
-    let response: OutgoingResponse = h.wasi_http_types_constructor_outgoing_response(fields);
+    fields
+}
+
+/// The response the host hands the embedder for `plan`. Entries the host refuses (bad syntax,
+/// forbidden names) are dropped, as a guest's failed `append` leaves them out, and a status it
+/// refuses is ignored (it stays 200). `None` when the body calls (`body`, `write`, `finish`) or
+/// `take_response` fail.
+pub fn served(h: &mut WasiHost, plan: &Plan) -> Option<ServedResponse> {
+    let headers = fields(h, &plan.headers);
+    let response: OutgoingResponse = h.wasi_http_types_constructor_outgoing_response(headers);
     let _ = h.wasi_http_types_method_outgoing_response_set_status_code(response, plan.status);
     let body = h
         .wasi_http_types_method_outgoing_response_body(response)
@@ -45,13 +52,7 @@ pub fn served(h: &mut WasiHost, plan: &Plan) -> Option<ServedResponse> {
     }
     h.wasi_io_streams_resource_drop_output_stream(stream);
     if !plan.open {
-        let trailers = plan.trailers.as_ref().map(|entries| {
-            let t = h.wasi_http_types_constructor_fields();
-            for (name, value) in entries {
-                let _ = h.wasi_http_types_method_fields_append(t, name.clone(), value.clone());
-            }
-            t
-        });
+        let trailers = plan.trailers.as_ref().map(|entries| fields(h, entries));
         h.wasi_http_types_static_outgoing_body_finish(body, trailers)
             .ok()?;
     }
@@ -69,28 +70,30 @@ pub fn wire(response: ServedResponse, head_only: bool, http10: bool, idle: Durat
 pub struct Wire {
     pub status: u16,
     pub reason: String,
-    pub headers: Vec<(String, Vec<u8>)>,
+    pub headers: Entries,
     pub payload: Vec<u8>,
 }
 
-fn is_token(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+/// Splits a `name: value` line whose name is a token; `what` names the line in errors.
+fn split_field<'a>(line: &'a [u8], what: &str) -> Result<(&'a str, &'a [u8]), String> {
+    let colon = find(line, b": ")
+        .ok_or_else(|| format!("{what} line {:?}", String::from_utf8_lossy(line)))?;
+    let name = std::str::from_utf8(&line[..colon]).map_err(|_| format!("{what} name"))?;
+    if !is_token(name) {
+        return Err(format!("{what} name {name:?}"));
+    }
+    Ok((name, &line[colon + 2..]))
 }
 
 /// Parses an answer strictly: any CR/LF outside a line end, an odd status line or a header
 /// that is not `token: value` fails. Returns the head's parts and everything after it.
 pub fn parse_head(bytes: &[u8]) -> Result<Wire, String> {
-    let end = bytes
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or("no blank line ends the head")?;
+    let end = find(bytes, b"\r\n\r\n").ok_or("no blank line ends the head")?;
     // header values may hold obs-text (0x80 and up): the head is bytes, not UTF-8
     let head = &bytes[..end];
     let mut lines: Vec<&[u8]> = Vec::new();
     let mut rest = head;
-    while let Some(at) = rest.windows(2).position(|w| w == b"\r\n") {
+    while let Some(at) = find(rest, b"\r\n") {
         lines.push(&rest[..at]);
         rest = &rest[at + 2..];
     }
@@ -115,22 +118,13 @@ pub fn parse_head(bytes: &[u8]) -> Result<Wire, String> {
     if code.len() != 3 || !code.bytes().all(|b| b.is_ascii_digit()) {
         return Err(format!("status code {code:?}"));
     }
-    let no_ctl = |b: &u8| *b == b'\t' || (*b >= 0x20 && *b != 0x7f);
-    if !reason.bytes().all(|b| no_ctl(&b)) {
+    if !reason.bytes().all(is_field_byte) {
         return Err(format!("reason {reason:?}"));
     }
     let mut headers = Vec::new();
     for line in lines {
-        let colon = line
-            .windows(2)
-            .position(|w| w == b": ")
-            .ok_or_else(|| format!("line {:?}", String::from_utf8_lossy(line)))?;
-        let name = std::str::from_utf8(&line[..colon]).map_err(|_| "header name")?;
-        if !is_token(name) {
-            return Err(format!("header name {name:?}"));
-        }
-        let value = &line[colon + 2..];
-        if !value.iter().all(no_ctl) {
+        let (name, value) = split_field(line, "header")?;
+        if !value.iter().copied().all(is_field_byte) {
             return Err(format!("header value {:?}", String::from_utf8_lossy(value)));
         }
         headers.push((name.to_string(), value.to_vec()));
@@ -148,10 +142,7 @@ pub fn parse_head(bytes: &[u8]) -> Result<Wire, String> {
 pub fn dechunk(mut p: &[u8]) -> Result<(Vec<u8>, Entries), String> {
     let mut body = Vec::new();
     loop {
-        let nl = p
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .ok_or("chunk size line is unterminated")?;
+        let nl = find(p, b"\r\n").ok_or("chunk size line is unterminated")?;
         let size = std::str::from_utf8(&p[..nl]).map_err(|_| "chunk size")?;
         if size.is_empty() || !size.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(format!("chunk size {size:?}"));
@@ -169,24 +160,12 @@ pub fn dechunk(mut p: &[u8]) -> Result<(Vec<u8>, Entries), String> {
     }
     let mut trailers = Vec::new();
     loop {
-        let nl = p
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .ok_or("the trailer section is unterminated")?;
+        let nl = find(p, b"\r\n").ok_or("the trailer section is unterminated")?;
         if nl == 0 {
             p = &p[2..];
             break;
         }
-        let line = &p[..nl];
-        let colon = line
-            .windows(2)
-            .position(|w| w == b": ")
-            .ok_or("trailer line")?;
-        let name = std::str::from_utf8(&line[..colon]).map_err(|_| "trailer name")?;
-        if !is_token(name) {
-            return Err(format!("trailer name {name:?}"));
-        }
-        let value = &line[colon + 2..];
+        let (name, value) = split_field(&p[..nl], "trailer")?;
         trailers.push((name.to_string(), value.to_vec()));
         p = &p[nl + 2..];
     }
@@ -221,7 +200,7 @@ pub fn check_wire(
             .iter()
             .any(|h| n.eq_ignore_ascii_case(h))
     };
-    let mut want: Vec<(String, Vec<u8>)> = served
+    let mut want: Entries = served
         .iter()
         .filter(|(n, _)| !replaced(n))
         .cloned()

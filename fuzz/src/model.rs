@@ -2,7 +2,8 @@
 //! server documents), not from its code: the same bytes must give the same verdict.
 
 use crate::api::{self, MAX_BODY, MAX_HEAD};
-use crate::net;
+use crate::respond::Entries;
+use crate::{find, is_token, net};
 use std::time::{Duration, Instant};
 use wasm2rs_wasi::IncomingRequestParts;
 use wasm2rs_wasi::wasi_http_types::{Method, Scheme};
@@ -13,7 +14,7 @@ pub struct Parsed {
     pub method: String,
     pub target: String,
     pub http10: bool,
-    pub headers: Vec<(String, Vec<u8>)>,
+    pub headers: Entries,
     pub authority: Option<String>,
     pub body: Vec<u8>,
 }
@@ -34,20 +35,12 @@ pub struct Model {
 
 const READ_CHUNK: usize = 4096;
 
-fn is_tchar(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
-}
-
-fn is_token(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(is_tchar)
-}
-
 pub fn model(input: &[u8]) -> Model {
     let reject = |status| Model {
         verdict: Verdict::Reject(status),
         head_limit_band: false,
     };
-    let Some(end) = input.windows(4).position(|w| w == b"\r\n\r\n") else {
+    let Some(end) = find(input, b"\r\n\r\n") else {
         // read to EOF without a blank line: over the limit the check fires first
         return reject(if input.len() > MAX_HEAD { 413 } else { 400 });
     };
@@ -133,7 +126,8 @@ fn parse(head: &[u8], rest: &[u8]) -> Verdict {
     })
 }
 
-fn method_of(name: &str) -> Method {
+/// The method a request line's `name` stands for.
+pub fn method_of(name: &str) -> Method {
     match name {
         "GET" => Method::Get,
         "HEAD" => Method::Head,

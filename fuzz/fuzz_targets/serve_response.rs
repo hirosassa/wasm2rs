@@ -10,6 +10,7 @@ use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 use wasm2rs_fuzz_serve::api::{self, Frame};
 use wasm2rs_fuzz_serve::respond::{self, Entries, Plan};
+use wasm2rs_fuzz_serve::{is_field_byte, is_token};
 
 #[derive(Arbitrary, Debug)]
 enum Name {
@@ -52,31 +53,46 @@ fn entries(list: &[(Name, Vec<u8>)]) -> Entries {
         .collect()
 }
 
-fn is_token(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
-}
-
 fuzz_target!(|r: Resp| {
     let headers = entries(&r.headers);
     let trailers = r.trailers.as_deref().map(entries);
 
     // `head` on entries as they come, no host in between.
-    let framing = match r.raw_framing % 3 {
-        0 => None,
-        1 => Some(Frame::Length(r.body.len())),
-        _ => Some(Frame::Chunked),
+    let (framing, framing_line) = match r.raw_framing % 3 {
+        0 => (None, None),
+        1 => (
+            Some(Frame::Length(r.body.len())),
+            Some(("content-length", r.body.len().to_string().into_bytes())),
+        ),
+        _ => (
+            Some(Frame::Chunked),
+            Some(("transfer-encoding", b"chunked".to_vec())),
+        ),
     };
     let raw = api::head(r.status, &headers, framing);
     assert!(raw.ends_with(b"\r\n\r\n"));
     let clean = headers
         .iter()
-        .all(|(n, v)| is_token(n) && v.iter().all(|&b| b == b'\t' || (b >= 0x20 && b != 0x7f)));
+        .all(|(n, v)| is_token(n) && v.iter().copied().all(is_field_byte));
     if clean && (100..=599).contains(&r.status) {
         // exactly one blank line, at the end: nothing got in through a value
         assert_eq!(raw.windows(4).filter(|w| *w == b"\r\n\r\n").count(), 1);
-        respond::parse_head(&raw).expect("a head of clean entries is strict HTTP/1.1");
+        let parsed = respond::parse_head(&raw).expect("a head of clean entries is strict HTTP/1.1");
+        // the guest's framing/connection headers are replaced, whatever their case, by ours
+        let mut want: Entries = headers
+            .iter()
+            .filter(|(n, _)| {
+                !["content-length", "connection", "transfer-encoding"]
+                    .iter()
+                    .any(|h| n.eq_ignore_ascii_case(h))
+            })
+            .cloned()
+            .collect();
+        if r.status >= 200 && r.status != 204 {
+            want.extend(framing_line.map(|(n, v)| (n.to_string(), v)));
+        }
+        want.push(("connection".into(), b"close".to_vec()));
+        assert_eq!(parsed.headers, want);
     }
 
     // The whole answer through the host.

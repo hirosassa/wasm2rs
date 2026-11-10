@@ -6,8 +6,8 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use wasm2rs_fuzz_serve::model::check_request;
-use wasm2rs_wasi::wasi_http_types::{Method, Scheme};
+use wasm2rs_fuzz_serve::model::{check_request, method_of};
+use wasm2rs_wasi::wasi_http_types::Scheme;
 
 const TCHARS: &[u8] =
     b"!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -26,7 +26,7 @@ fn token(raw: &[u8], max: usize) -> String {
 
 /// A header value: visible ASCII, spaces and tabs inside (the reader trims the ends).
 fn value(raw: &[u8], max: usize) -> Vec<u8> {
-    let mut v: Vec<u8> = raw
+    let v: Vec<u8> = raw
         .iter()
         .take(max)
         .map(|b| match b % 40 {
@@ -35,13 +35,8 @@ fn value(raw: &[u8], max: usize) -> Vec<u8> {
             n => 0x21 + (b.wrapping_add(n)) % 0x5e,
         })
         .collect();
-    while matches!(v.last(), Some(b' ' | b'\t')) {
-        v.pop();
-    }
-    while matches!(v.first(), Some(b' ' | b'\t')) {
-        v.remove(0);
-    }
-    v
+    // the only whitespace `v` can hold is SP and HTAB, so this trims exactly those
+    v.trim_ascii().to_vec()
 }
 
 #[derive(Arbitrary, Debug)]
@@ -72,36 +67,17 @@ struct Request {
     corrupt: Option<(u16, u8)>,
 }
 
-type MakeMethod = fn() -> Method;
-
-const KNOWN: &[(&str, MakeMethod)] = &[
-    ("GET", || Method::Get),
-    ("HEAD", || Method::Head),
-    ("POST", || Method::Post),
-    ("PUT", || Method::Put),
-    ("DELETE", || Method::Delete),
-    ("CONNECT", || Method::Connect),
-    ("OPTIONS", || Method::Options),
-    ("TRACE", || Method::Trace),
-    ("PATCH", || Method::Patch),
+const KNOWN: &[&str] = &[
+    "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH",
 ];
 
 fuzz_target!(|req: Request| {
-    let (method_text, method) = match &req.method {
-        MethodPick::Known(i) => {
-            let (name, make) = KNOWN[usize::from(*i) % KNOWN.len()];
-            (name.to_string(), make())
-        }
-        MethodPick::Custom(raw) => {
-            let m = token(raw, 16);
-            // a custom method that spells a known one is that one
-            let method = KNOWN
-                .iter()
-                .find(|(n, _)| *n == m)
-                .map_or_else(|| Method::Other(m.clone()), |(_, make)| make());
-            (m, method)
-        }
+    let method_text = match &req.method {
+        MethodPick::Known(i) => KNOWN[usize::from(*i) % KNOWN.len()].to_string(),
+        MethodPick::Custom(raw) => token(raw, 16),
     };
+    // a custom method that spells a known one is that one
+    let method = method_of(&method_text);
     let mut target = String::from("/");
     target.extend(
         req.target
@@ -114,9 +90,9 @@ fuzz_target!(|req: Request| {
     for (n, v) in req.headers.iter().take(16) {
         let name = token(n, 12);
         // the structured request exercises the plain path: the framing headers are ours
-        if name.eq_ignore_ascii_case("transfer-encoding")
-            || name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case("host")
+        if ["transfer-encoding", "content-length", "host"]
+            .iter()
+            .any(|framing| name.eq_ignore_ascii_case(framing))
         {
             continue;
         }
@@ -130,7 +106,7 @@ fuzz_target!(|req: Request| {
         headers.push(("Host".to_string(), h.clone().into_bytes()));
     }
     let mut wire_headers = headers.clone();
-    match req.length {
+    let body_sent: &[u8] = match req.length {
         Length::Exact { times, pad } => {
             for _ in 0..=(times % 3) {
                 let text = if pad {
@@ -140,11 +116,10 @@ fuzz_target!(|req: Request| {
                 };
                 wire_headers.push(("Content-Length".to_string(), text.into_bytes()));
             }
+            &body
         }
-        Length::Absent => {}
-    }
-    let sends_body = matches!(req.length, Length::Exact { .. });
-    let body_sent: &[u8] = if sends_body { &body } else { &[] };
+        Length::Absent => &[],
+    };
 
     let mut bytes = format!(
         "{method_text} {target} HTTP/1.{}\r\n",

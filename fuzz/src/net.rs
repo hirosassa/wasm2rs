@@ -77,8 +77,11 @@ pub fn capture<R>(server_side: impl FnOnce(&mut TcpStream) -> R) -> (R, Vec<u8>)
             out
         });
         let result = server_side(&mut server);
-        drop(server);
+        // a graceful FIN first: with linger 0 a plain close would reset the connection and
+        // drop what the peer has not read yet, cutting the capture short
+        let _ = server.shutdown(Shutdown::Write);
         let received = reader.join().expect("reader");
+        drop(server);
         (result, received)
     })
 }
