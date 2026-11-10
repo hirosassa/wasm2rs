@@ -1,0 +1,40 @@
+GET / HTTP/1.1
+x: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1.1
+Iost: exam:.te1
+Iost: exam:.teb=c HTTP/1.1
+Iost: exam/:.te1
+Iost: ex=c HTT1
+Iam:.te1
+Iost: ex=c HTTP/1.1
+Iost: exam:.te1
+Iost: exam:.teb=c HaTP/0.1
+Iost: exam:.te1
+Iost: exam:.teb=c HTTP/1.1
+Iost: examaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaGET /d?b=c HTTP/1.1
+Iost: exam7t.e1
+Iost: exam:.teb=c HTTP/1.1
+Iost: exam:.te1
+Iost: ex=c HTT2
+Iam:.te1
+Iost: ex=c HTTP/0.1
+Iost: exam:.tGET /d?b=c HTTP/1.1
+Iost: exam:.te1
+Iost: exam:.teb=c HTTP/1.1
+Iost: exam:.te1
+Iost: ex=c HTT1
+Iam:.te.
+Iost: ex=c HTTP/1.1
+Iost: exam:.taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac HTTP/1.1
+Iost: exam:.te1
+Iost: ex=c HTT1
+Iam:.te1
+Iost: ex=c HTTP/1.1
+Iost: exam:.tGET /d?b=c HTTP/1.1
+Iost: exam:.te1
+Iost: exam:.teb=c HTTP/1.1
+Iost: exam:.te1
+Iost: ex=c HTT1
+Iam:.te1
+Iost: ex=c HTTP/1.1
+Iost: exam:/taaaaaaaaaa
+

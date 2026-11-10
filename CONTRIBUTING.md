@@ -45,6 +45,7 @@ cargo build
 | `docs/` | Design and test-infrastructure notes |
 | `examples/` | Usage examples (`wasip2_run`, `wasip2_serve`, ...) |
 | `fuzz-diff/` | Differential fuzzer against wasmtime, a separate crate (see [docs/differential-fuzzing.md](docs/differential-fuzzing.md)) |
+| `fuzz/` | libFuzzer targets for the HTTP/1.x server of `examples/wasip2_serve`, a separate crate (see [docs/fuzzing-http-server.md](docs/fuzzing-http-server.md)) |
 
 ## Before you open a pull request
 

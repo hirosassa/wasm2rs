@@ -1,0 +1,11 @@
+GET / HTTP/1.1
+x: a1
+Transfer-Encodine: cST / H
+Transfer-Encodine:  HTTP/0.1
+Transfer-Encodine: cST / H
+Transfer-Encodine: chunkedaa/0.1
+Transfer-Encodine: cST / H
+Transfer-Encodine:  HTTP/1.1
+Transfer-Encodine: cST / H
+Transfer-Encodine: caaaa
+
