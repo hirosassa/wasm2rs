@@ -20,10 +20,10 @@ module-level `assert_trap (module ...)` is replayed as "instantiation traps" (a 
 module has no instantiation, so it is skipped). If a state-changing call is skipped, the rest of
 that module's assertions are skipped too, so a skipped call never causes a false failure.
 
-Not vendored yet: `memory_grow64` and `memory_size` (`memory.grow` does not honor a
-memory's declared maximum), `table` and `ref_func` (nothing would run: their modules
-need `register`), `return_call*`, `type` (only `assert_malformed`) and `names` (the `wast` parser's
-confusing-unicode lint rejects it). `global`, `elem` and `data` are vendored but
-replay only part of their assertions.
+Not vendored yet: `memory_grow64` and `memory_size`, `table` and `ref_func` (nothing would run:
+their modules need `register`), `type` (only `assert_malformed`) and `names` (the `wast` parser's
+confusing-unicode lint rejects it). `return_call*`, `switch` and the exception-handling files
+(`throw`, `throw_ref`, `try_table`, `unwind`) are vendored. `global`, `elem` and `data` are vendored
+but replay only part of their assertions.
 
 `try_table` replays only 2 assertions: its main modules need imports, so the rest are skipped and reported.

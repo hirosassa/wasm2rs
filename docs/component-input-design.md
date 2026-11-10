@@ -1,6 +1,6 @@
 # Component input: `transpile_component`
 
-Status: A3-1 (the library API), A3-2 (the examples use it) and A3-3 (the CLI flag) and A3-4 (`build.rs` and the macro) are implemented.
+Status: A3-1 (the library API), A3-2 (the examples use it), A3-3 (the CLI flag), A3-4 (`build.rs` and the macro) and A3-5 (the `.wasm` extension guard) are implemented.
 Background: [component-exports-design.md](component-exports-design.md) (`wit_exports`, the `Exports`
 trait, A2), [typed-host-design.md](typed-host-design.md) (the import glue),
 [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library).
@@ -68,6 +68,10 @@ pub struct ComponentOptions {
 
 pub fn transpile_component(component: &[u8], options: &ComponentOptions)
     -> Result<String, TranspileError>;
+
+/// The same, also returning the lifted `Vec<WitExport>` (#212).
+pub fn transpile_component_with_exports(component: &[u8], options: &ComponentOptions)
+    -> Result<(String, Vec<WitExport>), TranspileError>;
 ```
 
 ## Phases
@@ -78,7 +82,7 @@ Each phase is its own PR, in this order.
 |---|---|
 | A3-1 | ✅ `transpile_component` and `ComponentOptions` (`src/component.rs`), the selection above. Tests: `tests/it/component_input.rs`. |
 | A3-2 | ✅ `examples/wasip2_run.rs` and `wasip2_serve.rs` call `transpile_component`; the duplicated assembly in `examples/common` goes away (the `rustc` build helper stays). `common::transpile_exporting` calls `transpile_component_with_exports` and checks that the wanted export is among the returned ones (the caller no longer runs its own `wit_exports` pass before `transpile_component`). |
-| A3-3 | ✅ CLI `--component`: an explicit flag (a component is still rejected without it, as today). It switches on `--named-imports --named-exports --reentrant-imports --wit-host --glue --exports` together and writes one source (stdout without an output). Combines with `--unsafe-memory`, `--jobs=N`, `--split-dispatch=N` and `--external-types=<path>` (all reach `ComponentOptions`); everything else, including `--entry-exports`, `--import-memory` and the split arguments, is refused by name. The CLI always uses an external types library (default `wasm2rs_wasi`); a self-declared `Host` is library-only (`external_types: None`). Tests: `tests/it/component_input.rs`. |
+| A3-3 | ✅ CLI `--component`: an explicit flag (a component is still rejected without it, as today). It switches on `--named-imports --named-exports --reentrant-imports` and the external-types glue with the typed `Exports` (`WitOptions::exports`, which has no CLI flag) together and writes one source (stdout without an output). Combines with `--unsafe-memory`, `--jobs=N`, `--split-dispatch=N` and `--external-types=<path>` (all reach `ComponentOptions`); everything else, including `--entry-exports`, `--import-memory` and the split arguments, is refused by name. The CLI always uses an external types library (default `wasm2rs_wasi`); a self-declared `Host` is library-only (`external_types: None`). Tests: `tests/it/component_input.rs`. |
 | A3-4 | ✅ `wasm2rs::build::transpile_component_to_out_dir(path, &ComponentOptions)` writes `$OUT_DIR/{file stem}.rs` (and prints `cargo:rerun-if-changed`); `transpile_component_to_dir` takes the directory. `wasm2rs_macros::include_component!("{file stem}")` is `include!` of that file (a proc macro next to `include_wasm!`: a `macro_rules!` in `wasm2rs` would make a build-dependency-only crate a runtime dependency). A core module or a missing file is a `BuildError` and writes nothing. Tests: `tests/it/build_helper.rs`, `wasm2rs-macros/tests/include_component.rs`. |
 | A3-5 | ✅ `include_component!("run.wasm")` (a name ending in `.wasm`, any case) is a `compile_error!` that names the fix (`include_component!("run")`) instead of a "file not found" for `run.wasm.rs`; `foo.bar` stays a valid name (the stem of `foo.bar.wasm`). Tests: unit tests in `wasm2rs-macros/src/lib.rs`, and `tests/it/include_component_project.rs`, a real Cargo project (`build.rs` → `transpile_component_to_out_dir` → `include_component!` → `wasm2rs-wasi` → run the component) plus the extension error through `cargo build`. |
 

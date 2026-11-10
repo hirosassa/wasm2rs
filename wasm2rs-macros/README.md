@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/wasm2rs-macros.svg)](https://crates.io/crates/wasm2rs-macros)
 [![Documentation](https://docs.rs/wasm2rs-macros/badge.svg)](https://docs.rs/wasm2rs-macros)
 
-A procedural macro that embeds a WebAssembly module as native Rust source at compile time, using [wasm2rs](https://crates.io/crates/wasm2rs).
+Procedural macros that embed a WebAssembly module as native Rust source at compile time, using [wasm2rs](https://crates.io/crates/wasm2rs).
 
 `include_wasm!` reads a `.wasm` file, transpiles it with wasm2rs and expands to the generated items. There is no build script and no WebAssembly runtime: the module is compiled by `rustc` like the rest of your crate.
 
@@ -45,6 +45,10 @@ wasm2rs_macros::include_wasm!("path.wasm" [, option]*);
 | `reentrant_imports` | Let the host call back into the guest while an import runs. |
 
 See the [wasm2rs README](https://github.com/hirosassa/wasm2rs#readme) for details on each option, the generated API, WASI support and supported proposals.
+
+## Components
+
+`include_component!("name")` includes the Rust that a build script wrote for a WebAssembly *component* with `wasm2rs::build::transpile_component_to_out_dir("assets/name.wasm", &options)`. It expands to `include!` of `$OUT_DIR/name.rs`; the name is the input file's name without the `.wasm` extension (`include_component!("name.wasm")` is a compile error). Unlike `include_wasm!`, the transpiling happens in the build script, not in the macro.
 
 ## When not to use it
 

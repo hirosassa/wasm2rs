@@ -1,5 +1,12 @@
 # Component Model PoC: what a wasip2 component looks like to wasm2rs
 
+Status: historical investigation. Its recommendations were carried out and went further: the typed
+host is the `wasm2rs-wasi` library ([typed-host-design.md](typed-host-design.md)), the export side
+is [component-exports-design.md](component-exports-design.md), and a component now goes in
+directly through `transpile_component` / `--component` ([component-input-design.md](component-input-design.md)).
+Statements below describe the state at the time of each Result (e.g. `transpile`/`wasm2rs <core module>` still
+rejects a component, but `--component` does not).
+
 wasm2rs transpiles core modules only; a component is rejected with a clear error
 (#60). This note records what a real `wasm32-wasip2` component contains, whether its
 core module can already go through wasm2rs, and how far its WASI preview2 imports are
@@ -100,8 +107,9 @@ rustc --target wasm32-wasip2 -C opt-level=3 hello.rs -o hello.component.wasm
 cargo run --release --example wasip2_run -- hello.component.wasm
 ```
 
-The example extracts the component's core modules itself and runs the largest (the
-program); a function the host does not implement (`wasi:http`) traps when the guest calls it.
+(At this stage) the example extracted the component's core modules itself and ran the largest (the
+program); it now calls `wasm2rs::transpile_component`, which picks the module by the exports'
+`canon lift`. `wasm2rs-wasi` implements `wasi:http` too, so no WASI 0.2.0 import traps by default.
 
 Two programs ran: `println!("hello")` (21 imports) and one using `eprintln!`,
 `print!`, `flush` and `std::env::args` (22; the extra one is `get-arguments`). A small
@@ -225,8 +233,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
   descriptor opened for reading (`bad-descriptor` for a write-only one; one opened with no
   flags still reads) and gives `is-directory` for a directory.
 - Handles are reused: `resource-drop` of a descriptor, file input stream, file output
-  stream, directory-entry-stream or `error` frees its slot (a pollable keeps its slot: the
-  host's pollable table only grows), and the next resource of that kind takes the
+  stream, directory-entry-stream, `error` or pollable frees its slot, and the next resource of that kind takes the
   most recently freed one, so a program that opens and drops in a loop does not grow
   the host's tables. The preopen (descriptor 0) is never freed.
 - **Contract:** a guest must not use a handle after dropping it (the Component Model
@@ -256,7 +263,7 @@ preopens), and both `hello.txt` and `/hello.txt` open the same file.
    version (`@0.2.0`) differs from the component import's (`@0.2.12`) and `named_imports` drops the version suffix.*
 3. **A preview2 host shim over `Imports`** (large; hello world, arguments, environment, `poll`, stdin, clocks, random and reading files are done, see Results 3 to 7): implement the canonical ABI for the
    `wasi:cli`/`io`/`clocks`/`random` subset (args, env, exit, stdio, clocks, random) as an opt-in
-   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at` and `readlink-at` are done too; `symlink-at` and `link-at` are done too; so are TCP sockets over loopback (UDP and `ip-name-lookup` only in the typed host, below). This is what makes a wasip2 hello-world run natively. `examples/wasip2_host/typed.rs` redoes the `println!` subset (stdio, environment, exit, streams, pollables, `poll`, terminal queries) against the generated typed `Host` and glue, without canonical-ABI code; it also covers the arguments (`with_arguments`), the clocks (monotonic `now`, `subscribe-duration`, `subscribe-instant`, wall-clock `now`) and the real process stdin (reader thread, non-blocking `read`, pollable that wakes on data and at the end of input; `tests/it/wasip2_typed_cli.rs`, `tests/it/wasip2_typed_clocks.rs`, `tests/it/wasip2_typed_stdin.rs`), the other stream methods (`blocking-read`, `skip`, `blocking-skip`, `flush`, `blocking-write-and-flush`, `write-zeroes`, `blocking-write-zeroes-and-flush`, `splice`, `blocking-splice`; a write of over 4096 bytes traps, a blocking write to a connection waits for the peer to read; `tests/it/wasip2_typed_streams.rs`, `tests/it/wasip2_typed_splice.rs`), and `wasi:random` and files (`with_preopen`, read-only: `get-directories`, `open-at`, `read-via-stream`, `stat`, `stat-at`, `get-flags`, `read-directory`, `readlink-at`, `metadata-hash`, file `input-stream.read`; `with_writable_preopen` adds writing, appending, creating, truncating, removing, renaming, linking and `set-times`; `tests/it/wasip2_typed_fs.rs`, `tests/it/wasip2_typed_fs_write.rs`); TCP sockets over loopback are covered too (`tests/it/wasip2_typed_sockets.rs`; a connection's output stream has a 64 KiB host send queue, so `write` never waits and `check-write`/`subscribe` report back-pressure, `tests/it/wasip2_typed_send_queue.rs`), also together with files in one component (`tests/it/wasip2_typed_both.rs`; the host source is linked against the `wasm2rs-wasi` library). UDP over loopback (`udp-create-socket`, bind, `stream` with or without a remote address, `receive`, `check-send`/`send`, which never block, addresses, `subscribe`; `tests/it/wasip2_typed_udp.rs`) and `ip-name-lookup` (`localhost` and numeric addresses locally, other names only with `with_external_network`, else `permanent-resolver-failure`; `tests/it/wasip2_typed_name_lookup.rs`) are covered too; the socket options of UDP (hop limit, buffer sizes) answer `not-supported`.
+   generated or companion module, with a handle table. Writing, removing and renaming files are done (Result 7); `set-times-at` and `readlink-at` are done too; `symlink-at` and `link-at` are done too; so are TCP sockets over loopback (UDP and `ip-name-lookup` only in the typed host, below). This is what makes a wasip2 hello-world run natively. `examples/wasip2_host/typed.rs` (since moved into the `wasm2rs-wasi` crate as `WasiHost`) redoes the `println!` subset (stdio, environment, exit, streams, pollables, `poll`, terminal queries) against the generated typed `Host` and glue, without canonical-ABI code; it also covers the arguments (`with_arguments`), the clocks (monotonic `now`, `subscribe-duration`, `subscribe-instant`, wall-clock `now`) and the real process stdin (reader thread, non-blocking `read`, pollable that wakes on data and at the end of input; `tests/it/wasip2_typed_cli.rs`, `tests/it/wasip2_typed_clocks.rs`, `tests/it/wasip2_typed_stdin.rs`), the other stream methods (`blocking-read`, `skip`, `blocking-skip`, `flush`, `blocking-write-and-flush`, `write-zeroes`, `blocking-write-zeroes-and-flush`, `splice`, `blocking-splice`; a write of over 4096 bytes traps, a blocking write to a connection waits for the peer to read; `tests/it/wasip2_typed_streams.rs`, `tests/it/wasip2_typed_splice.rs`), and `wasi:random` and files (`with_preopen`, read-only: `get-directories`, `open-at`, `read-via-stream`, `stat`, `stat-at`, `get-flags`, `read-directory`, `readlink-at`, `metadata-hash`, file `input-stream.read`; `with_writable_preopen` adds writing, appending, creating, truncating, removing, renaming, linking and `set-times`; `tests/it/wasip2_typed_fs.rs`, `tests/it/wasip2_typed_fs_write.rs`); TCP sockets over loopback are covered too (`tests/it/wasip2_typed_sockets.rs`; a connection's output stream has a 64 KiB host send queue, so `write` never waits and `check-write`/`subscribe` report back-pressure, `tests/it/wasip2_typed_send_queue.rs`), also together with files in one component (`tests/it/wasip2_typed_both.rs`; the host source is linked against the `wasm2rs-wasi` library). UDP over loopback (`udp-create-socket`, bind, `stream` with or without a remote address, `receive`, `check-send`/`send`, which never block, addresses, `subscribe`; `tests/it/wasip2_typed_udp.rs`) and `ip-name-lookup` (`localhost` and numeric addresses locally, other names only with `with_external_network`, else `permanent-resolver-failure`; `tests/it/wasip2_typed_name_lookup.rs`) are covered too; the socket options of UDP (hop limit, buffer sizes) answer `not-supported`.
 4. **Full component support** (very large): parse the component, resolve instances
    and `canon lift/lower` per the spec, and generate glue for arbitrary WIT worlds.
    Months of work; only worth it if general components are a goal.

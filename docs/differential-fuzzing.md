@@ -10,7 +10,6 @@ cargo run --release -- [first_seed] [count]       # default: 100 seeds from 0
 cargo run --release --example one -- file.wasm    # both reports for one module
 wasm-tools shrink ./shrink.sh finding.wasm -o small.wasm   # minimize a finding
 cargo test --release                              # harness tests
-cargo test --release -- --ignored                 # known bugs (they fail until fixed)
 ```
 
 ## What is compared
@@ -37,9 +36,11 @@ About 1500 modules compared equal. Findings:
 
 1. **A trapping operation whose value is discarded by a function-level `br` is
    dropped**, so the trap never happens (`i32.const 1; i32.load; br 0` on an empty
-   memory). Most mismatches (seeds 162, 282, 316, 1046, 1346, 1358) are this.
+   memory). Most mismatches (seeds 162, 282, 316, 1046, 1346, 1358) are this. Fixed
+   (a branch or return keeps the trapping operand it discards).
 2. **`memory.grow` ignored the declared maximum**; it only enforced 65536 pages
-   (seeds 796, 1080). Fixed: each memory's grow is bounded by its own maximum.
+   (seeds 796, 1080). Fixed (0.3.0): `memory.grow` fails (returns -1)
+   past each memory's declared maximum.
 3. Two runs hang in wasm2rs after a first call that traps (seeds 973, 1010); not
    yet reduced, possibly related to 1.
 4. `unsupported` (about 5%): active element/data segments used by
@@ -47,8 +48,9 @@ About 1500 modules compared equal. Findings:
    Both are now supported (an active segment reads as empty after instantiation,
    and an `i32` offset is unsigned).
 
-1 and 2 are reproduced by `#[ignore]`d tests in `fuzz-diff/src/lib.rs`; remove the
-`ignore` when each is fixed.
+1 and 2 are pinned by regression tests in `fuzz-diff/src/lib.rs`
+(`a_trapping_load_before_a_function_level_br_still_traps`,
+`memory_grow_respects_the_declared_maximum`).
 
 ## Feature profiles
 
@@ -58,7 +60,7 @@ base feature set. Findings of a non-base profile are saved as
 
 Re-run of every profile with seeds 1–300 after the exception-handling work (`try_table`,
 `exnref`, `br_table` out of a `try`): no `unsupported` module in any profile, and the
-only mismatch is the known declared-maximum one below.
+only mismatch was the declared-maximum one below (since fixed in 0.3.0).
 
 | Profile | Adds | Seeds 1–300 |
 | --- | --- | --- |
@@ -78,8 +80,8 @@ a call's result or trap.
 
 - 81 modules were `unsupported` because the profile also turns on 64-bit tables.
   These are now supported (a defined `table i64`; an imported 64-bit table is not).
-- The one mismatch (seed 258) is the declared-maximum bug above: `(memory 3 4)` grows
-  past its maximum.
+- The one mismatch (seed 258) was the declared-maximum bug above: `(memory 3 4)` grew
+  past its maximum (fixed in 0.3.0).
 
 New-profile findings (seeds 0–299):
 

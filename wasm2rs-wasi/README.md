@@ -8,6 +8,26 @@ them, and the types it uses (`wasi_filesystem_types::ErrorCode`, ...).
 a test regenerates it and fails on any difference. To refresh it after a generator change, run
 `WASM2RS_BLESS=1 cargo test --test it wasi_generated`.
 
+## Coverage
+
+`WasiHost` implements every method of WASI 0.2.0 (199, generated from the official WIT):
+
+| Package | Methods | Notes |
+|---|---|---|
+| `wasi:cli` | 12 | arguments, environment, exit, stdio, terminal types |
+| `wasi:clocks` | 6 | monotonic and wall clocks, replaceable with `.clock(..)` |
+| `wasi:filesystem` | 32 | preopens only, confined below each preopen (Unix; see the limits below) |
+| `wasi:http` | 63 | client (needs an `HttpClient`) and incoming-handler side, with trailers |
+| `wasi:io` | 23 | streams, pollables, `poll` |
+| `wasi:random` | 5 | OS CSPRNG by default (feature `os-random`) |
+| `wasi:sockets` | 58 | TCP, UDP and name lookup, gated by `NetworkPolicy` |
+
+Status, entry points and the known limitations of the whole WASI 0.2 support are in
+[docs/wasi-p2-status.md](../docs/wasi-p2-status.md); the design is in
+[docs/typed-host-design.md](../docs/typed-host-design.md) and
+[docs/wasi-http-design.md](../docs/wasi-http-design.md). File confinement relies on `cap-std`
+and is only tested on Unix.
+
 ## Configuring a host
 
 `WasiHost::builder()` sets everything; `build()` returns a `ConfigError` for an unusable

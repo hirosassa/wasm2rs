@@ -1,9 +1,8 @@
 # `wasi:http` host (0.2.0)
 
-Status: H1 to H5 and the T5 follow-ups (streaming, trailers on the incoming side) are implemented; H1, H2 and H3 are (48 of the 63 `wasi_http_*` methods in
-`wasm2rs-wasi/src/generated.rs`: fields, request-options, the parts of outgoing-request,
-`outgoing-handler.handle`, future-incoming-response, incoming-response, incoming-body (receive
-side), `http-error-code`, outgoing-body (send side), future-trailers, their drops); the others keep the default trap.
+Status: implemented. H1 to H5, the T5 follow-ups (streaming, incoming-side trailers) and T6 (client-side
+trailers) are done: `WasiHost` overrides all 63 `wasi_http_*` methods of
+`wasm2rs-wasi/src/generated.rs` (none is left at the trapping default).
 Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library),
 [component-exports-design.md](component-exports-design.md) (the export side that `incoming-handler`
 needs).
@@ -17,7 +16,7 @@ needs).
   `read_stream` / `write_stream`. Pollables are `Wait` values (`Copy`, slot indexes into host tables)
   waited in `wait_any`; stdin is fed by a thread through shared state.
 - Pluggable parts (`Clock`, `RandomSource`) are boxed trait objects set through the builder.
-- There are no HTTP dependencies. `tests/it/wasip2_wit_regression.rs` requires every method, `wasi:http`
+- (At the start) no HTTP dependencies; the only one now is the optional `ureq` behind the `http-client` feature. `tests/it/wasip2_wit_regression.rs` requires every method, `wasi:http`
   included, to be overridden (until H5 the http ones were exempt, which was the progress measure).
 
 ## Decisions
@@ -43,7 +42,7 @@ needs).
 6. **Incoming API on `WasiHost`.** Before calling `Exports::..._handle` the embedder mints
    `new_incoming_request(..)` and `new_response_outparam()`; afterwards `take_response(outparam)`
    returns the `Result<OutgoingResponse, ErrorCode>` that `response-outparam.set` stored. The first
-   version has no trailers and no streaming response (the response is read once `handle` returns).
+   version (H5) had no trailers and no streaming response; both were added later (see "Streaming and trailers").
    `incoming-handler` is not in the generated trait (it is an export), so no trait change.
 7. **Limits.** Header count/size, body buffer size and request timeouts (`request-options`
    connect/first-byte/between-bytes) are enforced by the host; a violation maps to the matching

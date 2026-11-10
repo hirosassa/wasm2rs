@@ -35,11 +35,15 @@ cargo build
 |------|----------|
 | `src/main.rs` | CLI (behind the default `cli` feature, which pulls in mimalloc) |
 | `src/lib.rs` | Public library API (`transpile`, `TranspileOptions`, ...) |
+| `src/build.rs` | Build-script helpers (`transpile_to_out_dir`, `transpile_component_to_out_dir`) |
+| `src/component.rs`, `src/wit.rs`, `src/wit_abi.rs` | Component Model input (`transpile_component`) and the WIT-derived host trait / glue / `Exports` trait |
 | `src/codegen/` | The transpiler: IR, flattening (state machines), rendering, WASI / SIMD runtime |
 | `src/codegen/func/` | Per-function lowering |
+| `wasm2rs-wasi/` | Typed WASI 0.2 host library (`Host` trait, `WasiHost`), a separate crate with its own version |
+| `wasm2rs-macros/` | Proc macros `include_wasm!` / `include_component!`, a separate crate |
 | `tests/it/` | Integration tests, bundled into a single binary (`tests/it/main.rs`) |
 | `docs/` | Design and test-infrastructure notes |
-| `examples/` | Usage examples |
+| `examples/` | Usage examples (`wasip2_run`, `wasip2_serve`, ...) |
 | `fuzz-diff/` | Differential fuzzer against wasmtime, a separate crate (see [docs/differential-fuzzing.md](docs/differential-fuzzing.md)) |
 
 ## Before you open a pull request
@@ -48,9 +52,9 @@ Run the same checks as CI:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo build --lib --no-default-features   # the library must build without the CLI feature
-cargo test --release
+cargo test --release --workspace
 ```
 
 Run a subset of the integration tests by module name:
@@ -122,8 +126,8 @@ Commit messages: a short imperative summary, optionally with a `feat:` / `fix:` 
 ## Releasing (maintainers)
 
 1. Move `[Unreleased]` entries in `CHANGELOG.md` under the new version heading.
-2. Bump `version` in `Cargo.toml` and in `wasm2rs-macros/Cargo.toml` (its own version and its `wasm2rs` dependency), then refresh `Cargo.lock`.
-3. Tag the release; `.github/workflows/release.yaml` builds the prebuilt binaries.
+2. Bump `version` in `Cargo.toml` and in `wasm2rs-macros/Cargo.toml` (its own version and its `wasm2rs` dependency), then refresh `Cargo.lock`. `wasm2rs-wasi` has its own version in `wasm2rs-wasi/Cargo.toml`; bump it only when that crate changed.
+3. Tag the release (`vX.Y.Z`, matching the `wasm2rs` version); `.github/workflows/release.yaml` builds the prebuilt binaries and publishes `wasm2rs`, then `wasm2rs-macros`, then `wasm2rs-wasi` (skipped if that version is already on crates.io).
 
 ## License
 
