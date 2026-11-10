@@ -329,3 +329,126 @@ fn a_module_aliased_from_an_instance_is_not_taken_for_a_top_level_module() {
         "{err}"
     );
 }
+
+/// A component that lifts core module `$a`'s export `f` as `$lf`, passes it through the
+/// nested component `$shim` (which re-exports its import `f`, with `shim_body` in between)
+/// and exports the shim's instance as `i`. `before` comes first, to shift the index spaces.
+fn exported_shim_instance_with(before: &str, shim_body: &str) -> String {
+    format!(
+        r#"(component
+  {before}
+  (core module $a (func (export "f")))
+  (core instance $i (instantiate $a))
+  (alias core export $i "f" (core func $f))
+  (func $lf (canon lift (core func $f)))
+  (component $shim
+    (import "f" (func $f))
+    {shim_body}
+    (export "f" (func $f)))
+  (instance $s (instantiate $shim (with "f" (func $lf))))
+  (export "i" (instance $s)))"#
+    )
+}
+
+/// Asserts that, with a shim that only re-exports its import, the one export is `i`'s `f`.
+fn assert_exports_the_shim_instance(before: &str) {
+    let exports = exports_of(&exported_shim_instance_with(before, "")).unwrap();
+    assert_eq!(exports.len(), 1);
+    assert_eq!(
+        (
+            exports[0].func.interface.as_str(),
+            exports[0].func.name.as_str()
+        ),
+        ("i", "f")
+    );
+}
+
+#[test]
+fn an_aliased_instance_takes_a_slot_of_the_instance_index_space() {
+    assert_exports_the_shim_instance(
+        r#"(import "x" (instance $x (export "n" (instance))))
+  (alias export $x "n" (instance $n))"#,
+    );
+}
+
+#[test]
+fn an_aliased_component_takes_a_slot_of_the_component_index_space() {
+    // Components are [aliased, $shim]: the instantiation of index 1 must still be the shim.
+    assert_exports_the_shim_instance(
+        r#"(import "x" (instance $x (export "c" (component))))
+  (alias export $x "c" (component $c))"#,
+    );
+}
+
+#[test]
+fn an_instance_of_an_aliased_component_is_never_traced() {
+    // Nothing is known about what an aliased component defines.
+    let err = rejection(
+        r#"(component
+  (import "x" (instance $x (export "c" (component))))
+  (alias export $x "c" (component $c))
+  (instance $ci (instantiate $c))
+  (export "n" (instance $ci)))"#,
+    );
+    assert!(
+        err.contains("`n`") && err.contains("nested component"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_outer_alias_of_a_component_takes_a_slot_of_the_component_index_space() {
+    // Components are [$c, alias of $c, $shim]; `$c` is empty, so the alias instantiates fine.
+    assert_exports_the_shim_instance(
+        r#"(component $c)
+  (alias outer 0 $c (component $c2))"#,
+    );
+}
+
+#[test]
+fn a_shim_that_defines_anything_of_its_own_is_not_a_passthrough() {
+    // Each shim re-exports its import `f`, but also defines something (an instance, a core
+    // module, a component), so it is not traced as a re-export.
+    for body in [
+        r#"(instance $i (export "g" (func $f)))"#,
+        r#"(core module $m)"#,
+        r#"(component $c)"#,
+    ] {
+        let err = rejection(&exported_shim_instance_with("", body));
+        assert!(
+            err.contains("`i`") && err.contains("nested component"),
+            "{body}: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_type_aliased_out_of_a_nested_instance_type_keeps_its_shape() {
+    // `wit_exports` never reads the imported functions, so the nested instance is not
+    // refused there: its exported record must still resolve for the lifted parameter.
+    let wasm = wat::parse_str(
+        r#"(component
+  (type $it (instance
+    (export "inner" (instance
+      (type $r (record (field "a" u32)))
+      (export "t" (type (eq $r)))))
+    (alias export 0 "t" (type $t))
+    (export "t2" (type (eq $t)))))
+  (import "x" (instance $x (type $it)))
+  (alias export $x "t2" (type $t2))
+  (core module $a (memory (export "memory") 1) (func (export "f") (param i32)))
+  (core instance $i (instantiate $a))
+  (alias core export $i "f" (core func $f))
+  (type $ft (func (param "p" $t2)))
+  (func $lf (type $ft) (canon lift (core func $f)))
+  (export "f" (func $lf)))"#,
+    )
+    .unwrap();
+    let exports = wit_exports(&wasm).unwrap();
+    let WitType::Record(record) = &exports[0].func.params[0].1 else {
+        unreachable!("{:?}", exports[0].func.params);
+    };
+    assert_eq!(record.fields.len(), 1);
+    assert_eq!(record.fields[0].0, "a");
+    assert!(matches!(*record.fields[0].1, WitType::U32));
+}

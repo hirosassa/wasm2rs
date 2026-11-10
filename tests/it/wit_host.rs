@@ -1422,3 +1422,116 @@ fn an_alias_of_a_type_exported_by_an_instantiated_component_is_not_an_error_when
     );
     assert!(host(&wasm).contains("fn a_b_c_f(&mut self) -> u8;"));
 }
+
+#[test]
+fn a_record_inside_a_tuple_is_declared() {
+    let rust = host(&component(
+        "",
+        "a:b/c",
+        r#"(type $p (record (field "x" u32)))
+        (export "point" (type $pt (eq $p)))
+        (export "f" (func (result (tuple $pt u8))))"#,
+    ));
+    assert!(rust.contains("pub struct Point {"), "{rust}");
+    assert!(rust.contains("-> (Point, u8);"), "{rust}");
+}
+
+#[test]
+fn a_variant_case_named_record_keeps_its_name() {
+    // A case whose name has no letters or digits falls back to `Record` and is renamed
+    // `Case`; a real `record` case is not.
+    let rust = host(&component(
+        "",
+        "a:b/c",
+        r#"(type $v (variant (case "record") (case "x")))
+        (export "v" (type $vt (eq $v)))
+        (export "f" (func (result $vt)))"#,
+    ));
+    assert!(rust.contains("Record,") && rust.contains("X,"), "{rust}");
+    assert!(!rust.contains("Case"), "{rust}");
+}
+
+#[test]
+fn an_exported_type_takes_a_slot_of_the_component_type_space() {
+    // Types: `$ta` (0), the export of it (1), `$tb` (2). The interface uses `$tb`, which
+    // resolves to the second record only if the export took its slot.
+    let wasm = wat::parse_str(
+        r#"(component
+  (import "i" (instance $i
+    (type $a (record (field "x" u32)))
+    (export "a" (type (eq $a)))
+    (type $b (record (field "y" u8)))
+    (export "b" (type (eq $b)))))
+  (alias export $i "a" (type $ta))
+  (export $e "exported" (type $ta))
+  (alias export $i "b" (type $tb))
+  (import "a:b/c" (instance
+    (alias outer 1 $tb (type $t))
+    (export "t" (type $tt (eq $t)))
+    (export "f" (func (result $tt))))))"#,
+    )
+    .unwrap();
+    let rust = host(&wasm);
+    assert!(rust.contains("pub y: u8,"), "{rust}");
+}
+
+#[test]
+fn a_nested_component_with_nested_items_keeps_all_its_resource_drops() {
+    // The nested component holds an inner component and then drops a resource itself. That
+    // drop cannot be tied to a top-level resource, so both resources keep their
+    // `[resource-drop]`. If the inner component ended the nested one early, the drop would be
+    // read at the top level, where type 2 is the first resource.
+    let wasm = wat::parse_str(
+        r#"(component
+  (import "a:b/one" (instance $one (export "r1" (type (sub resource)))))
+  (import "a:b/two" (instance $two (export "r2" (type (sub resource)))))
+  (alias export $one "r1" (type $r1))
+  (alias export $two "r2" (type $r2))
+  (core module $m)
+  (component $n
+    (import "pad0" (type (sub resource)))
+    (import "pad1" (type (sub resource)))
+    (import "r" (type $r (sub resource)))
+    (component $inner)
+    (core func (canon resource.drop $r))))"#,
+    )
+    .unwrap();
+    let names: Vec<String> = wasm2rs::wit_functions(&wasm)
+        .unwrap()
+        .into_iter()
+        .map(|f| format!("{}#{}", f.interface, f.name))
+        .collect();
+    assert_eq!(
+        names,
+        ["a:b/one#[resource-drop]r1", "a:b/two#[resource-drop]r2"],
+        "{names:?}"
+    );
+}
+
+/// A trait whose functions each return a tuple of `u8`s, one function per size.
+fn tuples_of(sizes: &[usize]) -> Result<String, wasm2rs::TranspileError> {
+    let funcs: String = sizes
+        .iter()
+        .enumerate()
+        .map(|(i, k)| {
+            format!(
+                r#"(export "f{i}" (func (result (tuple {}))))"#,
+                "u8 ".repeat(*k)
+            )
+        })
+        .collect();
+    wit_host_trait(&component("", "a:b/c", &funcs))
+}
+
+#[test]
+fn the_type_node_budget_is_exactly_two_hundred_thousand() {
+    // Each tuple node and each element is visited twice (declared, then rendered), so ten
+    // tuples of 99 990 elements in all take 2 * (99 990 + 10) = 200 000 visits: the last
+    // one that fits. One element more is refused.
+    let mut sizes = vec![10_000; 9];
+    sizes.push(9_990);
+    assert!(tuples_of(&sizes).is_ok());
+    sizes[9] = 9_991;
+    let err = tuples_of(&sizes).unwrap_err().to_string();
+    assert!(err.contains("200000 type nodes"), "{err}");
+}

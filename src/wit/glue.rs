@@ -291,8 +291,8 @@ fn mem_width(ty: &WitType) -> usize {
         WitType::U8 | WitType::S8 | WitType::Bool => 1,
         WitType::U16 | WitType::S16 => 2,
         WitType::U64 | WitType::S64 | WitType::F64 => 8,
+        // A flags type without flags has no value to load, so its width is never used.
         WitType::Flags(f) => match f.flags.len() {
-            0 => 0,
             1..=8 => 1,
             9..=16 => 2,
             _ => 4,

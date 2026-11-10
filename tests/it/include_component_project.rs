@@ -38,6 +38,11 @@ fn target_dir() -> PathBuf {
 /// name carries `tag` because cargo's artifact hash would otherwise be the same for both
 /// projects in the shared [`target_dir`].
 fn build_project(tag: &str, include_name: &str) -> (PathBuf, Output) {
+    build_project_with_main(tag, &MAIN_RS.replace("NAME", include_name))
+}
+
+/// Like [`build_project`], with the given `src/main.rs`.
+fn build_project_with_main(tag: &str, main_rs: &str) -> (PathBuf, Output) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let dir = std::env::temp_dir().join(format!("wasm2rs-include-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -68,11 +73,7 @@ wasm2rs = {{ path = {root:?}, default-features = false }}
     std::fs::copy(root.join("Cargo.lock"), dir.join("Cargo.lock")).unwrap();
     std::fs::write(dir.join("build.rs"), BUILD_RS).unwrap();
     std::fs::write(dir.join("assets/run.wasm"), component()).unwrap();
-    std::fs::write(
-        dir.join("src/main.rs"),
-        MAIN_RS.replace("NAME", include_name),
-    )
-    .unwrap();
+    std::fs::write(dir.join("src/main.rs"), main_rs).unwrap();
     let out = Command::new(env!("CARGO"))
         .current_dir(&dir)
         .args(["build", "--quiet", "--offline"])
@@ -109,4 +110,25 @@ fn the_wasm_extension_is_a_compile_error_with_the_fix() {
     );
     assert!(stderr.contains("include_component!(\"run\")"), "{stderr}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn include_wasm_with_malformed_arguments_is_a_usage_compile_error() {
+    // Each call is malformed in a different place: a punctuation other than a comma between
+    // the arguments, a non-identifier option, and a path that is not a plain literal.
+    for (tag, args) in [
+        ("sep", r#""assets/run.wasm"; opt"#),
+        ("opt", r#""assets/run.wasm", 1"#),
+        ("lit", "assets"),
+    ] {
+        let main = format!("mod m {{ wasm2rs_macros::include_wasm!({args}); }}\nfn main() {{}}\n");
+        let (dir, build) = build_project_with_main(tag, &main);
+        let stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(!build.status.success(), "{args}: {stderr}");
+        assert!(
+            stderr.contains("expected `include_wasm!(\"path.wasm\" [, option]*)`"),
+            "{args}: {stderr}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

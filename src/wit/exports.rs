@@ -666,9 +666,9 @@ mod tests {
     use super::*;
     use wasmparser::Parser;
 
-    /// The module index space of `Reader` after reading `wat` (without canonical sections,
-    /// which need the type scopes).
-    fn module_space(wat: &str) -> Vec<Option<usize>> {
+    /// The `Reader` after reading `wat` (without canonical sections, which need the type
+    /// scopes).
+    fn read(wat: &str) -> Reader {
         let component = wat::parse_str(wat).unwrap();
         let mut reader = Reader::default();
         for payload in Parser::new(0).parse_all(&component) {
@@ -678,10 +678,23 @@ mod tests {
             }
         }
         reader
+    }
+
+    fn module_space(wat: &str) -> Vec<Option<usize>> {
+        read(wat)
             .modules
             .iter()
             .map(|m| m.as_ref().map(|m| m.ordinal))
             .collect()
+    }
+
+    #[test]
+    fn an_imported_function_takes_a_slot_in_the_function_index_space() {
+        let reader = read(r#"(component (import "f" (func)))"#);
+        assert!(matches!(
+            reader.funcs.as_slice(),
+            [Func::Other("an import")]
+        ));
     }
 
     #[test]

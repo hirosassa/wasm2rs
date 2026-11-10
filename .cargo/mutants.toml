@@ -1,0 +1,15 @@
+# cargo-mutants configuration. Every exclusion is an equivalent mutant (no input can tell it
+# from the original) or code that valid input cannot reach; the reason is given with each.
+exclude_re = [
+    # `read_component` hands the payloads of nested components and modules to `Reader::feed`
+    # only through `depth`; a nested section already marks the shim `opaque`, and a core module
+    # cannot nest, so reading a payload deeper than one level changes nothing observable.
+    'src/wit/exports\.rs:\d+:\d+: replace match guard inner\.depth > 1 with false in Reader::feed_inner',
+    'src/wit/exports\.rs:\d+:\d+: replace > with < in Reader::feed_inner',
+    # Only the first payload of a component is a `Version`; every nested one arrives at
+    # `depth > 0` and never reaches the guard.
+    'src/wit\.rs:\d+:\d+: replace match guard first with true in read_component',
+    # `wit_exports` validates the component first, so a lifted function always names an
+    # export of the right name and kind; `check_exists` is defence in depth.
+    'src/wit/exports\.rs:\d+:\d+: replace && with \|\| in Reader::check_exists',
+]

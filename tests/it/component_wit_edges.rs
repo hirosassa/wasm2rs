@@ -223,3 +223,21 @@ fn outer_aliases_and_exports_of_components_and_modules_do_not_disturb_the_export
     assert_eq!(exports[0].core_export, "f");
     assert_eq!(exports[0].core_module, 0);
 }
+
+#[test]
+fn a_component_without_core_modules_has_no_program() {
+    let why = unsupported("(component)");
+    assert!(why.contains("the component has no core module"), "{why}");
+}
+
+#[test]
+fn modules_inside_a_nested_component_are_not_top_level_modules() {
+    // The nested component holds two modules; only `$m` is the component's own. If the
+    // inner modules counted, the choice among three modules would be ambiguous.
+    let code = code_of(
+        r#"(component
+  (component $inner (core module) (core module))
+  (core module $m (func (export "marker_only_here"))))"#,
+    );
+    assert!(code.contains("marker_only_here"), "{code}");
+}
