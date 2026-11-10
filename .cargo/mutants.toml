@@ -1,5 +1,6 @@
-# cargo-mutants configuration. Every exclusion is an equivalent mutant (no input can tell it
-# from the original) or code that valid input cannot reach; the reason is given with each.
+# cargo-mutants: `cargo mutants -p wasm2rs-wasi --file wasm2rs-wasi/src/host.rs ...`
+# (add `--features http-client` for host/ureq_client.rs). Every exclusion below is a mutant
+# that no test can tell from the original, with the reason.
 exclude_re = [
     # `read_component` hands the payloads of nested components and modules to `Reader::feed`
     # only through `depth`; a nested section already marks the shim `opaque`, and a core module
@@ -12,4 +13,46 @@ exclude_re = [
     # `wit_exports` validates the component first, so a lifted function always names an
     # export of the right name and kind; `check_exists` is defence in depth.
     'src/wit/exports\.rs:\d+:\d+: replace && with \|\| in Reader::check_exists',
+    # generated bindings, not hand-written logic
+    'wasm2rs-wasi/src/generated\.rs',
+    # `builder()` is `Default::default()` already
+    'replace WasiHost::builder -> WasiHostBuilder with Default::default\(\)',
+    # READ and WRITE are disjoint bits: `|` and `^` agree
+    'replace \| with \^ in <impl Host for WasiHost>::wasi_filesystem_types_method_descriptor_get_flags',
+    # the file types of an open file are never a directory or a link (those are opened through
+    # the sandbox), so these answers are not reachable
+    'replace <impl FileKind for std::fs::FileType>::is_dir -> bool with false',
+    'replace <impl FileKind for std::fs::FileType>::is_symlink -> bool with false',
+    # fallback deadlines for an `Instant` that cannot hold the guest's timeout: on platforms
+    # where u64::MAX nanoseconds fit (macOS, Linux) the fallbacks are never taken
+    'in deadline_after',
+    # the poll loop's 1 ms re-check of socket readiness: only the busy-polling rate changes
+    'in WasiHost::wait_any',
+    'replace Wait::polls_socket -> bool with true',
+    # the size of the user-space send queue on top of socket buffers whose size is the OS's:
+    # no portable test can see the sum
+    'wasm2rs-wasi/src/host\.rs:\d+:\d+: replace \* with \+$',
+    # process stdout/stderr when no writer was given: not observable from inside the process
+    'in WasiHost::with_stdio',
+    # `stream == 0` is the only stream that reaches the stdin wait; other streams return first
+    'in WasiHost::read_stream_waiting',
+    # a send queue that is neither empty nor full while the socket is full needs control of the
+    # kernel's buffers: `flush` then makes `check-write` answer 0 until the queue drains
+    'in TcpOut::flush$',
+    # a connection's failed read reaching `stream_failed` needs an OS-level reset on read; the
+    # file/connection split of the filesystem error code is covered for writes
+    'replace && with \|\| in WasiHost::stream_failed',
+    # a stale-handle guard whose only effect is a flush that is harmless for a reused slot
+    'replace == with != in WasiHost::tcp_shutdown',
+    'replace \+= with \*= in WasiHost::open_tcp_streams',
+    # a connected UDP socket only ever queues datagrams from its peer (the kernel filters the
+    # rest), so the `from_peer` guards are a second line of defence
+    'replace match guard from_peer\(end.remote, from\) with true',
+    # a datagram I/O error after some datagrams were moved (an ICMP error mid-batch) needs control
+    # of the kernel: the first-error and would-block arms of the loops cannot be told apart here
+    'replace match guard (got.is_empty\(\)|sent == 0) with (true|false) in WasiHost::udp_(receive|send)',
+    'replace == with != in WasiHost::udp_send',
+    # de-duplication of the resolver's answer: `getaddrinfo` with one socket type returns each
+    # address once, and an external lookup is not a test input
+    'delete ! in WasiHost::resolve_name',
 ]

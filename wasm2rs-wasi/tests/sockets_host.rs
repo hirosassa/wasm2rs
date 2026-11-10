@@ -1232,3 +1232,91 @@ fn the_instance_network_is_one_handle_that_can_be_dropped() {
     h.wasi_sockets_udp_resource_drop_outgoing_datagram_stream(u_out);
     h.wasi_sockets_udp_resource_drop_udp_socket(u);
 }
+
+/// Writes to `out` until `check-write` permits nothing (the peer must not be reading); returns
+/// the bytes written.
+fn fill_send_queue(host: &mut WasiHost, out: OutputStream) -> usize {
+    let mut written = 0;
+    loop {
+        let permit = host
+            .wasi_io_streams_method_output_stream_check_write(out)
+            .unwrap();
+        if permit == 0 {
+            return written;
+        }
+        host.wasi_io_streams_method_output_stream_write(out, vec![9; permit as usize])
+            .unwrap();
+        written += permit as usize;
+    }
+}
+
+#[test]
+fn splice_into_a_full_send_queue_moves_nothing_and_leaves_the_source_alone() {
+    let Pair {
+        mut host,
+        c_in,
+        c_out,
+        accepted,
+        ..
+    } = pair();
+    // the peer sends nothing more: `c_in` is at its end
+    host.wasi_sockets_tcp_method_tcp_socket_shutdown(accepted, ShutdownType::Send_)
+        .unwrap();
+    // the peer does not read
+    fill_send_queue(&mut host, c_out);
+    // nothing can be written, so nothing is read from `src`, not even its end
+    assert_eq!(
+        host.wasi_io_streams_method_output_stream_splice(c_out, c_in, 10),
+        Ok(0)
+    );
+}
+
+// ---- what the send queue still holds when the connection ends --------------------------
+
+/// A host connected to a plain `std` peer that has not read anything yet, with the send queue
+/// filled until `check-write` permits nothing; returns the bytes written.
+fn filled_connection() -> (WasiHost, TcpSocket, std::net::TcpStream, usize) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut host = host(NetworkPolicy::Loopback);
+    let client = tcp(&mut host);
+    host.wasi_sockets_tcp_method_tcp_socket_start_connect(client, NET, lo(port))
+        .unwrap();
+    let (_c_in, c_out) = host
+        .wasi_sockets_tcp_method_tcp_socket_finish_connect(client)
+        .unwrap();
+    let (peer, _) = listener.accept().unwrap();
+    let written = fill_send_queue(&mut host, c_out);
+    (host, client, peer, written)
+}
+
+fn read_to_end_in_a_thread(mut peer: std::net::TcpStream) -> std::thread::JoinHandle<usize> {
+    std::thread::spawn(move || {
+        let mut total = 0;
+        let mut buf = [0u8; 65536];
+        loop {
+            match std::io::Read::read(&mut peer, &mut buf).unwrap() {
+                0 => return total,
+                n => total += n,
+            }
+        }
+    })
+}
+
+#[test]
+fn dropping_the_host_sends_what_the_send_queue_still_holds() {
+    let (host, _client, peer, written) = filled_connection();
+    let reader = read_to_end_in_a_thread(peer);
+    drop(host);
+    assert_eq!(reader.join().unwrap(), written);
+}
+
+#[test]
+fn shutdown_of_the_send_side_sends_the_queue_first() {
+    let (mut host, client, peer, written) = filled_connection();
+    let reader = read_to_end_in_a_thread(peer);
+    host.wasi_sockets_tcp_method_tcp_socket_shutdown(client, ShutdownType::Send_)
+        .unwrap();
+    // the peer sees the end of the stream only after every byte that was accepted
+    assert_eq!(reader.join().unwrap(), written);
+}

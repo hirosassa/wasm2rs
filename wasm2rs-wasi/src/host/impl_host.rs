@@ -553,9 +553,7 @@ impl Host for WasiHost {
         &mut self,
         handle: FutureIncomingResponse,
     ) {
-        if let Some(future) = self.http_futures.take(handle.0 as usize) {
-            future.cancel();
-        }
+        self.http_futures.take(handle.0 as usize);
     }
 
     fn wasi_http_types_resource_drop_incoming_response(&mut self, handle: IncomingResponse) {

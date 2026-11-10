@@ -695,3 +695,38 @@ fn the_stdin_thread_ends_once_the_host_is_dropped() {
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("the stdin thread outlived the host");
 }
+
+#[test]
+fn the_stdin_pollable_is_ready_with_bytes_or_at_the_end_not_before() {
+    use std::sync::mpsc;
+    struct Fed(mpsc::Receiver<Vec<u8>>);
+    impl Read for Fed {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let Ok(data) = self.0.recv() else {
+                return Ok(0);
+            };
+            out[..data.len()].copy_from_slice(&data);
+            Ok(data.len())
+        }
+    }
+    let (feed, rx) = mpsc::channel();
+    let mut host = builder().stdin(Fed(rx)).build().unwrap();
+    let i = host.wasi_cli_stdin_get_stdin();
+    let ready = host.wasi_io_streams_method_input_stream_subscribe(i);
+    assert!(!host.wasi_io_poll_method_pollable_ready(ready));
+    feed.send(b"abc".to_vec()).unwrap();
+    host.wasi_io_poll_method_pollable_block(ready);
+    assert_eq!(
+        host.wasi_io_streams_method_input_stream_read(i, 8),
+        Ok(b"abc".to_vec())
+    );
+    // drained again: not ready until the input ends
+    let again = host.wasi_io_streams_method_input_stream_subscribe(i);
+    assert!(!host.wasi_io_poll_method_pollable_ready(again));
+    drop(feed);
+    host.wasi_io_poll_method_pollable_block(again);
+    assert_eq!(
+        host.wasi_io_streams_method_input_stream_read(i, 8),
+        Err(wasm2rs_wasi::wasi_io_streams::StreamError::Closed)
+    );
+}

@@ -579,3 +579,27 @@ fn a_pollable_of_a_dropped_future_does_not_follow_the_future_in_its_slot() {
         "a pollable of a dropped resource is ready, whatever took its slot"
     );
 }
+
+#[test]
+fn the_streams_of_several_outgoing_bodies_each_write_their_own_body() {
+    let (mut h, requests) = host();
+    let mut bodies = Vec::new();
+    for _ in 0..2 {
+        let r = post(&mut h);
+        let body = h.wasi_http_types_method_outgoing_request_body(r).unwrap();
+        let future = h.wasi_http_outgoing_handler_handle(r, None).unwrap();
+        bodies.push((body, future));
+    }
+    // the second body is written first, through its own stream
+    write(&mut h, bodies[1].0, b"second");
+    write(&mut h, bodies[0].0, b"first");
+    for (body, _) in &bodies {
+        h.wasi_http_types_static_outgoing_body_finish(*body, None)
+            .unwrap();
+    }
+    let mut got: Vec<Vec<u8>> = (0..2)
+        .map(|_| requests.recv_timeout(Duration::from_secs(5)).unwrap().body)
+        .collect();
+    got.sort();
+    assert_eq!(got, vec![b"first".to_vec(), b"second".to_vec()]);
+}

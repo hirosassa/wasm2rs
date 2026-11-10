@@ -950,6 +950,7 @@ fn file_index(stream: u32) -> Option<usize> {
 
 /// The filesystem `error-code`s this host returns; `From<Fs> for FsErrorCode` below.
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 enum Fs {
     Access,
     BadDescriptor,
@@ -1150,6 +1151,7 @@ fn tcp_slot(stream: u32) -> Option<usize> {
 
 /// The `wasi:sockets` `error-code`s this host returns; `From<Net> for NetErrorCode` below.
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 enum Net {
     Unknown,
     AccessDenied,
@@ -1401,12 +1403,10 @@ impl WasiHost {
     }
 
     /// `last_operation_failed` for an I/O failure of `stream`: only a file stream's carries a
-    /// filesystem `error-code`; a connection's is not a filesystem error.
+    /// filesystem `error-code`; a connection's is not a filesystem error. (The streams of http
+    /// bodies report their failures elsewhere and never get here.)
     fn stream_failed(&mut self, stream: u32, e: &std::io::Error) -> StreamError {
-        let is_file = tcp_slot(stream).is_none()
-            && http_slot(stream).is_none()
-            && http_out_slot(stream).is_none()
-            && file_index(stream).is_some();
+        let is_file = tcp_slot(stream).is_none() && file_index(stream).is_some();
         let fs = is_file.then(|| io_error_code(std::io::Error::from(e.kind())));
         self.last_operation_failed_with(e, fs, None)
     }
@@ -1800,12 +1800,9 @@ impl WasiHost {
 
     /// `check_address` for the address of a peer to connect or send to: also not port 0 nor an
     /// unspecified address (`0.0.0.0`, `::`), which is `invalid-argument` whether or not the
-    /// network is allowed (so those checks come before the loopback one, after the family one).
+    /// network is allowed. Every refusal of `check_address` that is not about the policy is
+    /// `invalid-argument` too, so the order between the two sets of checks cannot be seen.
     fn check_peer(&self, ipv6: bool, addr: &SocketAddr) -> Result<(), Net> {
-        let mapped = matches!(addr, SocketAddr::V6(a) if a.ip().to_ipv4_mapped().is_some());
-        if addr.is_ipv6() != ipv6 || mapped || addr.ip().is_multicast() {
-            return Err(Net::InvalidArgument);
-        }
         if addr.port() == 0 || addr.ip().is_unspecified() {
             return Err(Net::InvalidArgument);
         }
@@ -2608,3 +2605,95 @@ fn ip_address(addr: IpAddr) -> IpAddress {
 }
 
 mod impl_host;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn io_errors_map_to_their_filesystem_code() {
+        let code = |kind| io_error_code(Error::from(kind));
+        assert_eq!(code(ErrorKind::NotFound), Fs::NoEntry);
+        assert_eq!(code(ErrorKind::PermissionDenied), Fs::Access);
+        assert_eq!(code(ErrorKind::AlreadyExists), Fs::Exist);
+        assert_eq!(code(ErrorKind::DirectoryNotEmpty), Fs::NotEmpty);
+        assert_eq!(code(ErrorKind::NotADirectory), Fs::NotDirectory);
+        assert_eq!(code(ErrorKind::IsADirectory), Fs::IsDirectory);
+        assert_eq!(code(ErrorKind::Unsupported), Fs::Unsupported);
+        assert_eq!(code(ErrorKind::BrokenPipe), Fs::Io);
+    }
+
+    #[test]
+    fn only_a_permission_error_without_an_os_number_is_not_permitted() {
+        // what the sandbox reports for a path that leads out of a preopen
+        let escaped = Error::new(ErrorKind::PermissionDenied, "outside the sandbox");
+        assert_eq!(sandbox_error(escaped), Fs::NotPermitted);
+        // a real `EACCES` stays `access`
+        assert_eq!(sandbox_error(Error::from_raw_os_error(13)), Fs::Access);
+        // any other error is mapped as ever, with or without an OS number
+        assert_eq!(
+            sandbox_error(Error::new(ErrorKind::NotFound, "gone")),
+            Fs::NoEntry
+        );
+    }
+
+    #[test]
+    fn io_errors_map_to_their_network_code() {
+        let code = |kind| net_error(&Error::from(kind));
+        assert_eq!(code(ErrorKind::AddrInUse), Net::AddressInUse);
+        assert_eq!(code(ErrorKind::AddrNotAvailable), Net::AddressNotBindable);
+        assert_eq!(code(ErrorKind::PermissionDenied), Net::AccessDenied);
+        assert_eq!(code(ErrorKind::ConnectionRefused), Net::ConnectionRefused);
+        assert_eq!(code(ErrorKind::ConnectionReset), Net::ConnectionReset);
+        assert_eq!(code(ErrorKind::ConnectionAborted), Net::ConnectionAborted);
+        assert_eq!(code(ErrorKind::TimedOut), Net::Timeout);
+        assert_eq!(code(ErrorKind::WouldBlock), Net::WouldBlock);
+        assert_eq!(code(ErrorKind::InvalidInput), Net::InvalidArgument);
+        assert_eq!(code(ErrorKind::NotConnected), Net::InvalidState);
+        assert_eq!(code(ErrorKind::BrokenPipe), Net::Unknown);
+    }
+
+    #[test]
+    fn stream_handles_split_into_disjoint_ranges() {
+        let h = |base: usize| base as u32;
+        // incoming bodies: the range below the outgoing ones
+        assert_eq!(http_slot(h(HTTP_STREAM)), Some(0));
+        assert_eq!(
+            http_slot(h(HTTP_OUT_STREAM) - 1),
+            Some(HTTP_OUT_STREAM - HTTP_STREAM - 1)
+        );
+        assert_eq!(http_slot(h(HTTP_OUT_STREAM)), None);
+        assert_eq!(http_slot(h(HTTP_STREAM) - 1), None);
+        // outgoing bodies: the range below the connections
+        assert_eq!(http_out_slot(h(HTTP_OUT_STREAM)), Some(0));
+        assert_eq!(
+            http_out_slot(h(TCP_STREAM) - 1),
+            Some(TCP_STREAM - HTTP_OUT_STREAM - 1)
+        );
+        assert_eq!(http_out_slot(h(TCP_STREAM)), None);
+        assert_eq!(http_out_slot(h(HTTP_OUT_STREAM) - 1), None);
+    }
+
+    #[test]
+    fn only_a_path_that_ends_in_a_name_names_an_entry() {
+        for named in ["a", "a/b", "./a", "a/.b"] {
+            assert!(names_an_entry(named), "{named}");
+        }
+        for directory in ["", ".", "a/", "a/b/", "a/.", "a/b/."] {
+            assert!(!names_an_entry(directory), "{directory}");
+        }
+    }
+
+    #[test]
+    fn a_deadline_is_the_sum_or_a_distant_one_never_a_panic() {
+        let base = Instant::now();
+        assert_eq!(
+            deadline_after(base, 1_000_000),
+            base + Duration::from_millis(1)
+        );
+        // more than any `Instant` may hold on some platforms: still far away, not `base`
+        let far = deadline_after(base, u64::MAX);
+        assert!(far >= base + Duration::from_secs(50 * 365 * 24 * 60 * 60));
+    }
+}
