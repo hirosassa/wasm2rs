@@ -156,11 +156,16 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      # rustc is in the key: `stable` moves, and artifacts of another rustc are unusable.
+      - name: Get rustc version
+        id: rustc
+        run: echo "v=$(rustc -V | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+
       - name: Cache fuzz/ target
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/target
-          key: fuzz-target-${{ hashFiles('fuzz/Cargo.lock') }}
+          key: fuzz-target-${{ runner.os }}-${{ steps.rustc.outputs.v }}-${{ hashFiles('fuzz/Cargo.lock') }}
 
       - name: Check the fuzz targets build
         working-directory: fuzz
