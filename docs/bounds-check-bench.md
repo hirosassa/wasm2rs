@@ -42,8 +42,8 @@ their `slice_index` panic paths and extra compares (matmul inner loop: 10 `cmp` 
 
 - `matmul` pays about **48%** for its checks: two loads per inner step, each a
   bounds-checked 4-byte slice on an address computed from loop counters. This is
-  the shape a loop-invariant / range analysis or base reuse could
-  attack, since the addresses are affine in the induction variables.
+  the shape a loop-invariant / range analysis or base reuse could attack,
+  since the addresses are affine in the induction variables.
 - `hash` and `random` pay about 1%: the loop is bound by a multiply chain or by
   memory latency, and the well-predicted check branches are hidden behind it.
 - For scale, `unsafe_memory` was about 17% faster end to end on googlesql. So
