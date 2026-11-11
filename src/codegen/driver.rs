@@ -201,8 +201,9 @@ impl ModuleCtx<'_> {
     /// declared subtype of it, ascending: the funcrefs a test against the function
     /// type `target` accepts. `None` when the type relation is unavailable.
     pub(crate) fn funcs_of_subtype(&self, target: u32) -> Option<&[usize]> {
-        self.type_rel?;
-        Some(self.dispatch_targets(target))
+        self.type_rel
+            .is_some()
+            .then(|| self.dispatch_targets(target))
     }
 
     /// The full indices of the functions a `call_indirect`/`call_ref` of function type
@@ -876,14 +877,6 @@ fn index_by_signature<'a>(
     index
 }
 
-/// For every type index, the concrete struct/array types whose declared
-/// supertype chain reaches it (a type reaches itself), each list ascending.
-///
-/// Each candidate walks its own chain once and registers itself with every
-/// ancestor, so the whole table costs O(types x chain depth) instead of a
-/// full-hierarchy scan per query. The walk is bounded by the type count, so a
-/// cycle (which a validated module cannot contain) still terminates; the
-/// `last()` check keeps a cycle from registering a type twice.
 /// Per type index, the functions a `call_indirect`/`call_ref` of that function type
 /// can reach (see [`ModuleCtx::dispatch_targets`]): the `referenced` functions whose
 /// declared type is the type or a declared subtype of it (the type relation, when
@@ -915,11 +908,11 @@ fn index_func_targets(
     type_kinds
         .iter()
         .enumerate()
-        .map(|(t, kind)| {
+        .map(|(i, kind)| {
             if !matches!(kind, CompositeKind::Func) {
                 return Vec::new();
             }
-            let Ok(t) = u32::try_from(t) else {
+            let Ok(t) = u32::try_from(i) else {
                 return Vec::new();
             };
             if let Some(rel) = type_rel {
@@ -931,7 +924,7 @@ fn index_func_targets(
                 targets.sort_unstable();
                 targets
             } else {
-                types.get(t as usize).map_or_else(Vec::new, |sig| {
+                types.get(i).map_or_else(Vec::new, |sig| {
                     funcs_by_sig
                         .get(&(sig.params.clone(), sig.results.clone()))
                         .map_or_else(Vec::new, |funcs| {
@@ -947,6 +940,14 @@ fn index_func_targets(
         .collect()
 }
 
+/// For every type index, the concrete struct/array types whose declared
+/// supertype chain reaches it (a type reaches itself), each list ascending.
+///
+/// Each candidate walks its own chain once and registers itself with every
+/// ancestor, so the whole table costs O(types x chain depth) instead of a
+/// full-hierarchy scan per query. The walk is bounded by the type count, so a
+/// cycle (which a validated module cannot contain) still terminates; the
+/// `last()` check keeps a cycle from registering a type twice.
 fn index_descendants(type_kinds: &[CompositeKind], supers: &[Option<u32>]) -> Vec<Vec<u32>> {
     let n = type_kinds.len();
     let mut index = vec![Vec::new(); n];
