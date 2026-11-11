@@ -443,21 +443,19 @@ impl WasiFn {
         )
     }
 
-    /// The same definition as [`Self::lines`], rewritten for a shared linear
-    /// memory: guest memory is reached through the `SharedMemory` slice
-    /// (`self.memory.bytes()`) instead of `self.mem()` / `self.mem_mut()`.
-    pub(super) fn lines_shared(self, files: bool) -> Vec<String> {
-        self.lines(files)
-            .into_iter()
-            .map(|l| share_memory_access(&l))
-            .collect()
-    }
-
     /// The Rust source for this WASI method's inherent-method definition. When
     /// `files` is set the module also imports the preopen/`path_open` functions,
     /// so `fd_read`/`fd_write`/`fd_seek`/`fd_close` route descriptors >= 4 to the
     /// instance's `wasi_fds` table instead of handling stdio alone.
-    pub(super) fn lines(self, files: bool) -> Vec<String> {
+    pub(super) fn lines(self, files: bool, access: WasiAccess) -> Vec<String> {
+        self.template(files, access)
+            .into_iter()
+            .map(|l| access.fill(&l))
+            .collect()
+    }
+
+    /// [`Self::lines`] before the access placeholders are filled in.
+    fn template(self, files: bool, access: WasiAccess) -> Vec<String> {
         let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
         match self {
             // `proc_exit(code)` ends the process; it never returns.
@@ -477,9 +475,9 @@ impl WasiFn {
                     "    let mut buf: Vec<u8> = Vec::new();",
                     "    for i in 0..a2 as usize {",
                     "        let e = a1 as u32 as usize + i * 8;",
-                    "        let ptr = u32::from_le_bytes([self.mem()[e], self.mem()[e + 1], self.mem()[e + 2], self.mem()[e + 3]]) as usize;",
-                    "        let len = u32::from_le_bytes([self.mem()[e + 4], self.mem()[e + 5], self.mem()[e + 6], self.mem()[e + 7]]) as usize;",
-                    "        buf.extend_from_slice(&self.mem()[ptr..ptr + len]);",
+                    "        let ptr = u32::from_le_bytes([@MEM@[e], @MEM@[e + 1], @MEM@[e + 2], @MEM@[e + 3]]) as usize;",
+                    "        let len = u32::from_le_bytes([@MEM@[e + 4], @MEM@[e + 5], @MEM@[e + 6], @MEM@[e + 7]]) as usize;",
+                    "        buf.extend_from_slice(&@MEM@[ptr..ptr + len]);",
                     "    }",
                     "    let ok = match a0 {",
                     "        1 => std::io::stdout().write_all(&buf).is_ok(),",
@@ -491,7 +489,7 @@ impl WasiFn {
                     body.extend([
                         "        _ => {",
                         "            let idx = a0 as u32 as usize;",
-                        "            match self.wasi_fds.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {",
+                        "            match @FDS@.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {",
                         "                Some(f) => f.write_all(&buf).is_ok(),",
                         "                None => return 8,",
                         "            }",
@@ -507,7 +505,7 @@ impl WasiFn {
                     "    }",
                     "    let n = (buf.len() as u32).to_le_bytes();",
                     "    let w = a3 as u32 as usize;",
-                    "    self.mem_mut()[w..w + 4].copy_from_slice(&n);",
+                    "    @MEM_MUT@[w..w + 4].copy_from_slice(&n);",
                     "    0",
                     "}",
                 ]);
@@ -525,8 +523,8 @@ impl WasiFn {
                     "    let mut cap = 0usize;",
                     "    for i in 0..a2 as usize {",
                     "        let e = a1 as u32 as usize + i * 8;",
-                    "        let ptr = u32::from_le_bytes([self.mem()[e], self.mem()[e + 1], self.mem()[e + 2], self.mem()[e + 3]]) as usize;",
-                    "        let len = u32::from_le_bytes([self.mem()[e + 4], self.mem()[e + 5], self.mem()[e + 6], self.mem()[e + 7]]) as usize;",
+                    "        let ptr = u32::from_le_bytes([@MEM@[e], @MEM@[e + 1], @MEM@[e + 2], @MEM@[e + 3]]) as usize;",
+                    "        let len = u32::from_le_bytes([@MEM@[e + 4], @MEM@[e + 5], @MEM@[e + 6], @MEM@[e + 7]]) as usize;",
                     "        iovs.push((ptr, len));",
                     "        cap += len;",
                     "    }",
@@ -540,7 +538,7 @@ impl WasiFn {
                     body.extend([
                         "        _ => {",
                         "            let idx = a0 as u32 as usize;",
-                        "            match self.wasi_fds.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {",
+                        "            match @FDS@.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {",
                         "                Some(f) => match f.read(&mut tmp) { Ok(n) => n, Err(_) => return 29 },",
                         "                None => return 8,",
                         "            }",
@@ -557,11 +555,11 @@ impl WasiFn {
                     "            break;",
                     "        }",
                     "        let take = len.min(n - off);",
-                    "        self.mem_mut()[ptr..ptr + take].copy_from_slice(&tmp[off..off + take]);",
+                    "        @MEM_MUT@[ptr..ptr + take].copy_from_slice(&tmp[off..off + take]);",
                     "        off += take;",
                     "    }",
                     "    let w = a3 as u32 as usize;",
-                    "    self.mem_mut()[w..w + 4].copy_from_slice(&(n as u32).to_le_bytes());",
+                    "    @MEM_MUT@[w..w + 4].copy_from_slice(&(n as u32).to_le_bytes());",
                     "    0",
                     "}",
                 ]);
@@ -573,7 +571,7 @@ impl WasiFn {
             WasiFn::FdClose if files => owned(&[
                 "fn wasi_fd_close(&mut self, a0: i32) -> i32 {",
                 "    let idx = a0 as u32 as usize;",
-                "    if let Some(slot) = self.wasi_fds.get_mut(idx.wrapping_sub(4)) {",
+                "    if let Some(slot) = @FDS@.get_mut(idx.wrapping_sub(4)) {",
                 "        *slot = None;",
                 "    }",
                 "    0",
@@ -597,12 +595,12 @@ impl WasiFn {
                 "        _ => return 28,",
                 "    };",
                 "    let idx = a0 as u32 as usize;",
-                "    let newoff = match self.wasi_fds.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {",
+                "    let newoff = match @FDS@.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {",
                 "        Some(f) => match f.seek(pos) { Ok(n) => n, Err(_) => return 29 },",
                 "        None => return 70,",
                 "    };",
                 "    let w = a3 as u32 as usize;",
-                "    self.mem_mut()[w..w + 8].copy_from_slice(&newoff.to_le_bytes());",
+                "    @MEM_MUT@[w..w + 8].copy_from_slice(&newoff.to_le_bytes());",
                 "    0",
                 "}",
             ]),
@@ -626,7 +624,7 @@ impl WasiFn {
                 "        3u8",
                 "    } else {",
                 "        let idx = a0 as u32 as usize;",
-                "        match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
+                "        match @FDS@.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
                 "            Some(_) => 4u8,",
                 "            None => return 8,",
                 "        }",
@@ -636,7 +634,7 @@ impl WasiFn {
                 "    stat[0] = filetype;",
                 "    stat[8..16].copy_from_slice(&u64::MAX.to_le_bytes());",
                 "    stat[16..24].copy_from_slice(&u64::MAX.to_le_bytes());",
-                "    self.mem_mut()[b..b + 24].copy_from_slice(&stat);",
+                "    @MEM_MUT@[b..b + 24].copy_from_slice(&stat);",
                 "    0",
                 "}",
             ]),
@@ -650,7 +648,7 @@ impl WasiFn {
                 "    stat[0] = 2;",
                 "    stat[8..16].copy_from_slice(&u64::MAX.to_le_bytes());",
                 "    stat[16..24].copy_from_slice(&u64::MAX.to_le_bytes());",
-                "    self.mem_mut()[b..b + 24].copy_from_slice(&stat);",
+                "    @MEM_MUT@[b..b + 24].copy_from_slice(&stat);",
                 "    0",
                 "}",
             ]),
@@ -680,7 +678,7 @@ impl WasiFn {
                 "        .map(|d| d.as_nanos() as u64)",
                 "        .unwrap_or(0);",
                 "    let t = a2 as u32 as usize;",
-                "    self.mem_mut()[t..t + 8].copy_from_slice(&now.to_le_bytes());",
+                "    @MEM_MUT@[t..t + 8].copy_from_slice(&now.to_le_bytes());",
                 "    0",
                 "}",
             ]),
@@ -696,7 +694,7 @@ impl WasiFn {
                 "    if read.is_err() {",
                 "        return 29;",
                 "    }",
-                "    self.mem_mut()[buf..buf + len].copy_from_slice(&tmp);",
+                "    @MEM_MUT@[buf..buf + len].copy_from_slice(&tmp);",
                 "    0",
                 "}",
             ]),
@@ -715,7 +713,7 @@ impl WasiFn {
                 "    let b = a1 as u32 as usize;",
                 "    let mut pre = [0u8; 8];",
                 "    pre[4..8].copy_from_slice(&name_len.to_le_bytes());",
-                "    self.mem_mut()[b..b + 8].copy_from_slice(&pre);",
+                "    @MEM_MUT@[b..b + 8].copy_from_slice(&pre);",
                 "    0",
                 "}",
             ]),
@@ -731,7 +729,7 @@ impl WasiFn {
                 "    let name = self.wasi_preopen.as_os_str().as_bytes().to_vec();",
                 "    let p = a1 as u32 as usize;",
                 "    let n = (a2 as u32 as usize).min(name.len());",
-                "    self.mem_mut()[p..p + n].copy_from_slice(&name[..n]);",
+                "    @MEM_MUT@[p..p + n].copy_from_slice(&name[..n]);",
                 "    0",
                 "}",
             ]),
@@ -778,13 +776,37 @@ impl WasiFn {
                     "            _ => 29,",
                     "        },",
                     "    };",
-                    "    let idx = match self.wasi_fds.iter().position(|s| s.is_none()) {",
-                    "        Some(i) => { self.wasi_fds[i] = Some((file, full)); i }",
-                    "        None => { self.wasi_fds.push(Some((file, full))); self.wasi_fds.len() - 1 }",
-                    "    };",
+                ]));
+                // The slot search and insertion must run under one guard when the
+                // table is locked: two threads could otherwise take the same slot,
+                // and a guard in a `match` scrutinee must not be locked again in
+                // its arms.
+                body.extend(
+                    if access.locked_fds {
+                        &[
+                            "    let idx = {",
+                            "        let mut fds = @FDS@;",
+                            "        match fds.iter().position(|s| s.is_none()) {",
+                            "            Some(i) => { fds[i] = Some((file, full)); i }",
+                            "            None => { fds.push(Some((file, full))); fds.len() - 1 }",
+                            "        }",
+                            "    };",
+                        ][..]
+                    } else {
+                        &[
+                            "    let idx = match @FDS@.iter().position(|s| s.is_none()) {",
+                            "        Some(i) => { @FDS@[i] = Some((file, full)); i }",
+                            "        None => { @FDS@.push(Some((file, full))); @FDS@.len() - 1 }",
+                            "    };",
+                        ][..]
+                    }
+                    .iter()
+                    .map(|l| (*l).to_string()),
+                );
+                body.extend(owned(&[
                     "    let fd = idx as u32 + 4;",
                     "    let w = a8 as u32 as usize;",
-                    "    self.mem_mut()[w..w + 4].copy_from_slice(&fd.to_le_bytes());",
+                    "    @MEM_MUT@[w..w + 4].copy_from_slice(&fd.to_le_bytes());",
                     "    0",
                     "}",
                 ]));
@@ -802,7 +824,7 @@ impl WasiFn {
                 "        (3u8, 0u64)",
                 "    } else {",
                 "        let idx = a0 as u32 as usize;",
-                "        match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
+                "        match @FDS@.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
                 "            Some(f) => match f.metadata() { Ok(m) => (4u8, m.len()), Err(_) => return 29 },",
                 "            None => return 8,",
                 "        }",
@@ -812,7 +834,7 @@ impl WasiFn {
                 "    st[24..32].copy_from_slice(&1u64.to_le_bytes());",
                 "    st[32..40].copy_from_slice(&size.to_le_bytes());",
                 "    let b = a1 as u32 as usize;",
-                "    self.mem_mut()[b..b + 64].copy_from_slice(&st);",
+                "    @MEM_MUT@[b..b + 64].copy_from_slice(&st);",
                 "    0",
                 "}",
             ]),
@@ -825,12 +847,12 @@ impl WasiFn {
                 "        return 70;",
                 "    }",
                 "    let idx = a0 as u32 as usize;",
-                "    let off = match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
+                "    let off = match @FDS@.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
                 "        Some(f) => match (&*f).stream_position() { Ok(n) => n, Err(_) => return 29 },",
                 "        None => return if a0 == 3 { 31 } else { 8 },",
                 "    };",
                 "    let w = a1 as u32 as usize;",
-                "    self.mem_mut()[w..w + 8].copy_from_slice(&off.to_le_bytes());",
+                "    @MEM_MUT@[w..w + 8].copy_from_slice(&off.to_le_bytes());",
                 "    0",
                 "}",
             ]),
@@ -988,9 +1010,9 @@ impl WasiFn {
                     "    let bytes = target.as_os_str().as_bytes();",
                     "    let n = bytes.len().min(a4 as u32 as usize);",
                     "    let b = a3 as u32 as usize;",
-                    "    self.mem_mut()[b..b + n].copy_from_slice(&bytes[..n]);",
+                    "    @MEM_MUT@[b..b + n].copy_from_slice(&bytes[..n]);",
                     "    let w = a5 as u32 as usize;",
-                    "    self.mem_mut()[w..w + 4].copy_from_slice(&(n as u32).to_le_bytes());",
+                    "    @MEM_MUT@[w..w + 4].copy_from_slice(&(n as u32).to_le_bytes());",
                     "    0",
                     "}",
                 ]));
@@ -1028,7 +1050,7 @@ impl WasiFn {
             // directory (fd 0-3) are virtual and cannot be rebound (ENOTSUP).
             WasiFn::FdRenumber if files => owned(&[
                 "fn wasi_fd_renumber(&mut self, a0: i32, a1: i32) -> i32 {",
-                "    if a0 == a1 && a0 >= 0 && self.wasi_fds.get((a0 as u32 as usize).wrapping_sub(4)).is_some_and(|s| s.is_some()) {",
+                "    if a0 == a1 && a0 >= 0 && @FDS@.get((a0 as u32 as usize).wrapping_sub(4)).is_some_and(|s| s.is_some()) {",
                 "        return 0;",
                 "    }",
                 "    if (0..=3).contains(&a0) || (0..=3).contains(&a1) {",
@@ -1036,14 +1058,14 @@ impl WasiFn {
                 "    }",
                 "    let from = (a0 as u32 as usize).wrapping_sub(4);",
                 "    let to = (a1 as u32 as usize).wrapping_sub(4);",
-                "    if self.wasi_fds.get(from).is_none_or(|s| s.is_none()) {",
+                "    if @FDS@.get(from).is_none_or(|s| s.is_none()) {",
                 "        return 8;",
                 "    }",
-                "    if self.wasi_fds.get(to).is_none_or(|s| s.is_none()) {",
+                "    if @FDS@.get(to).is_none_or(|s| s.is_none()) {",
                 "        return 8;",
                 "    }",
-                "    let moved = self.wasi_fds[from].take();",
-                "    self.wasi_fds[to] = moved;",
+                "    let moved = @FDS@[from].take();",
+                "    @FDS@[to] = moved;",
                 "    0",
                 "}",
             ]),
@@ -1066,7 +1088,7 @@ impl WasiFn {
                     "        return 28;",
                     "    }",
                     "    let inp = a0 as u32 as usize;",
-                    "    let subs = self.mem()[inp..inp + n * 48].to_vec();",
+                    "    let subs = @MEM@[inp..inp + n * 48].to_vec();",
                     "    let now = std::time::SystemTime::now()",
                     "        .duration_since(std::time::UNIX_EPOCH)",
                     "        .map(|d| d.as_nanos() as u64)",
@@ -1121,9 +1143,9 @@ impl WasiFn {
                     "        ev[10] = *kind;",
                     "    }",
                     "    let o = a1 as u32 as usize;",
-                    "    self.mem_mut()[o..o + out.len()].copy_from_slice(&out);",
+                    "    @MEM_MUT@[o..o + out.len()].copy_from_slice(&out);",
                     "    let p = a3 as u32 as usize;",
-                    "    self.mem_mut()[p..p + 4].copy_from_slice(&(events.len() as u32).to_le_bytes());",
+                    "    @MEM_MUT@[p..p + 4].copy_from_slice(&(events.len() as u32).to_le_bytes());",
                     "    0",
                     "}",
                 ]));
@@ -1193,7 +1215,7 @@ impl WasiFn {
             WasiFn::ClockResGet => owned(&[
                 "fn wasi_clock_res_get(&mut self, a0: i32, a1: i32) -> i32 {",
                 "    let r = a1 as u32 as usize;",
-                "    self.mem_mut()[r..r + 8].copy_from_slice(&1u64.to_le_bytes());",
+                "    @MEM_MUT@[r..r + 8].copy_from_slice(&1u64.to_le_bytes());",
                 "    0",
                 "}",
             ]),
@@ -1208,8 +1230,8 @@ impl WasiFn {
                 "    let mut cap = 0usize;",
                 "    for i in 0..a2 as usize {",
                 "        let e = a1 as u32 as usize + i * 8;",
-                "        let ptr = u32::from_le_bytes([self.mem()[e], self.mem()[e + 1], self.mem()[e + 2], self.mem()[e + 3]]) as usize;",
-                "        let len = u32::from_le_bytes([self.mem()[e + 4], self.mem()[e + 5], self.mem()[e + 6], self.mem()[e + 7]]) as usize;",
+                "        let ptr = u32::from_le_bytes([@MEM@[e], @MEM@[e + 1], @MEM@[e + 2], @MEM@[e + 3]]) as usize;",
+                "        let len = u32::from_le_bytes([@MEM@[e + 4], @MEM@[e + 5], @MEM@[e + 6], @MEM@[e + 7]]) as usize;",
                 "        iovs.push((ptr, len));",
                 "        cap += len;",
                 "    }",
@@ -1218,7 +1240,7 @@ impl WasiFn {
                 "        0 | 1 | 2 => return 70,",
                 "        _ => {",
                 "            let idx = a0 as u32 as usize;",
-                "            match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
+                "            match @FDS@.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
                 "                Some(f) => match f.read_at(&mut tmp, a3 as u64) { Ok(n) => n, Err(_) => return 29 },",
                 "                None => return 8,",
                 "            }",
@@ -1230,11 +1252,11 @@ impl WasiFn {
                 "            break;",
                 "        }",
                 "        let take = len.min(n - off);",
-                "        self.mem_mut()[ptr..ptr + take].copy_from_slice(&tmp[off..off + take]);",
+                "        @MEM_MUT@[ptr..ptr + take].copy_from_slice(&tmp[off..off + take]);",
                 "        off += take;",
                 "    }",
                 "    let w = a4 as u32 as usize;",
-                "    self.mem_mut()[w..w + 4].copy_from_slice(&(n as u32).to_le_bytes());",
+                "    @MEM_MUT@[w..w + 4].copy_from_slice(&(n as u32).to_le_bytes());",
                 "    0",
                 "}",
             ]),
@@ -1258,22 +1280,22 @@ impl WasiFn {
                 "    let mut buf: Vec<u8> = Vec::new();",
                 "    for i in 0..a2 as usize {",
                 "        let e = a1 as u32 as usize + i * 8;",
-                "        let ptr = u32::from_le_bytes([self.mem()[e], self.mem()[e + 1], self.mem()[e + 2], self.mem()[e + 3]]) as usize;",
-                "        let len = u32::from_le_bytes([self.mem()[e + 4], self.mem()[e + 5], self.mem()[e + 6], self.mem()[e + 7]]) as usize;",
-                "        buf.extend_from_slice(&self.mem()[ptr..ptr + len]);",
+                "        let ptr = u32::from_le_bytes([@MEM@[e], @MEM@[e + 1], @MEM@[e + 2], @MEM@[e + 3]]) as usize;",
+                "        let len = u32::from_le_bytes([@MEM@[e + 4], @MEM@[e + 5], @MEM@[e + 6], @MEM@[e + 7]]) as usize;",
+                "        buf.extend_from_slice(&@MEM@[ptr..ptr + len]);",
                 "    }",
                 "    let n = match a0 {",
                 "        0 | 1 | 2 => return 70,",
                 "        _ => {",
                 "            let idx = a0 as u32 as usize;",
-                "            match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
+                "            match @FDS@.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {",
                 "                Some(f) => match f.write_at(&buf, a3 as u64) { Ok(n) => n, Err(_) => return 29 },",
                 "                None => return 8,",
                 "            }",
                 "        }",
                 "    };",
                 "    let w = a4 as u32 as usize;",
-                "    self.mem_mut()[w..w + 4].copy_from_slice(&(n as u32).to_le_bytes());",
+                "    @MEM_MUT@[w..w + 4].copy_from_slice(&(n as u32).to_le_bytes());",
                 "    0",
                 "}",
             ]),
@@ -1316,7 +1338,7 @@ impl WasiFn {
                     "    st[24..32].copy_from_slice(&1u64.to_le_bytes());",
                     "    st[32..40].copy_from_slice(&meta.len().to_le_bytes());",
                     "    let b = a4 as u32 as usize;",
-                    "    self.mem_mut()[b..b + 64].copy_from_slice(&st);",
+                    "    @MEM_MUT@[b..b + 64].copy_from_slice(&st);",
                     "    0",
                     "}",
                 ]));
@@ -1364,7 +1386,7 @@ impl WasiFn {
                     "    }",
                     "    let tp = a0 as u32 as usize;",
                     "    let tlen = a1 as u32 as usize;",
-                    "    let traw = self.mem()[tp..tp + tlen].to_vec();",
+                    "    let traw = @MEM@[tp..tp + tlen].to_vec();",
                     "    let target = match std::str::from_utf8(&traw) { Ok(s) => s.to_owned(), Err(_) => return 28 };",
                     "    if std::path::Path::new(&target).is_absolute() {",
                     "        return 76;",
@@ -1412,7 +1434,7 @@ impl WasiFn {
                 "        self.wasi_preopen.clone()",
                 "    } else {",
                 "        let idx = a0 as u32 as usize;",
-                "        match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()) {",
+                "        match @FDS@.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()) {",
                 "            Some((_, p)) => p.clone(),",
                 "            None => return 8,",
                 "        }",
@@ -1454,20 +1476,20 @@ impl WasiFn {
                 "        head[16..20].copy_from_slice(&(name.len() as u32).to_le_bytes());",
                 "        head[20] = *ftype;",
                 "        let take = (buf_len - used).min(24);",
-                "        self.mem_mut()[buf + used..buf + used + take].copy_from_slice(&head[..take]);",
+                "        @MEM_MUT@[buf + used..buf + used + take].copy_from_slice(&head[..take]);",
                 "        used += take;",
                 "        if take < 24 || used >= buf_len {",
                 "            break;",
                 "        }",
                 "        let take = (buf_len - used).min(name.len());",
-                "        self.mem_mut()[buf + used..buf + used + take].copy_from_slice(&name[..take]);",
+                "        @MEM_MUT@[buf + used..buf + used + take].copy_from_slice(&name[..take]);",
                 "        used += take;",
                 "        if take < name.len() {",
                 "            break;",
                 "        }",
                 "    }",
                 "    let w = a4 as u32 as usize;",
-                "    self.mem_mut()[w..w + 4].copy_from_slice(&(used as u32).to_le_bytes());",
+                "    @MEM_MUT@[w..w + 4].copy_from_slice(&(used as u32).to_le_bytes());",
                 "    0",
                 "}",
             ]),
@@ -1539,7 +1561,7 @@ fn contain_path(out: &str, ptr_arg: &str, len_arg: &str, follow: bool) -> Vec<St
     vec![
         format!("    let {out}_p = {ptr_arg} as u32 as usize;"),
         format!("    let {out}_len = {len_arg} as u32 as usize;"),
-        format!("    let {out}_raw = self.mem()[{out}_p..{out}_p + {out}_len].to_vec();"),
+        format!("    let {out}_raw = @MEM@[{out}_p..{out}_p + {out}_len].to_vec();"),
         format!(
             "    let {out}_s = match std::str::from_utf8(&{out}_raw) {{ Ok(s) => s.to_owned(), Err(_) => return 28 }};"
         ),
@@ -1593,7 +1615,7 @@ struct FdOp<'a> {
 fn fd_open_expr(var: &str, files: bool) -> String {
     if files {
         format!(
-            "(0..=3).contains(&{var}) || self.wasi_fds.get(({var} as u32 as usize).wrapping_sub(4)).is_some_and(|s| s.is_some())"
+            "(0..=3).contains(&{var}) || @FDS@.get(({var} as u32 as usize).wrapping_sub(4)).is_some_and(|s| s.is_some())"
         )
     } else {
         format!("(0..=2).contains(&{var})")
@@ -1632,7 +1654,7 @@ fn fd_op_lines(method: &str, sig: &str, op: &FdOp<'_>, files: bool) -> Vec<Strin
         lines.push("    }".to_string());
         lines.push("    let idx = a0 as u32 as usize;".to_string());
         lines.push(
-            "    match self.wasi_fds.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {"
+            "    match @FDS@.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {"
                 .to_string(),
         );
         lines.push(format!("        Some(f) => {},", op.file));
@@ -1686,9 +1708,9 @@ fn sizes_lines(method: &str, source: &str) -> Vec<String> {
             "    let count = items.len() as u32;",
             "    let size: u32 = items.iter().map(|s| s.len() as u32 + 1).sum();",
             "    let c = a0 as u32 as usize;",
-            "    self.mem_mut()[c..c + 4].copy_from_slice(&count.to_le_bytes());",
+            "    @MEM_MUT@[c..c + 4].copy_from_slice(&count.to_le_bytes());",
             "    let b = a1 as u32 as usize;",
-            "    self.mem_mut()[b..b + 4].copy_from_slice(&size.to_le_bytes());",
+            "    @MEM_MUT@[b..b + 4].copy_from_slice(&size.to_le_bytes());",
             "    0",
             "}",
         ]
@@ -1710,11 +1732,11 @@ fn get_lines(method: &str, source: &str) -> Vec<String> {
             "    let mut pb = a1 as u32 as usize;",
             "    for item in &items {",
             "        let bytes = item.as_bytes();",
-            "        self.mem_mut()[pv..pv + 4].copy_from_slice(&(pb as u32).to_le_bytes());",
+            "        @MEM_MUT@[pv..pv + 4].copy_from_slice(&(pb as u32).to_le_bytes());",
             "        pv += 4;",
-            "        self.mem_mut()[pb..pb + bytes.len()].copy_from_slice(bytes);",
+            "        @MEM_MUT@[pb..pb + bytes.len()].copy_from_slice(bytes);",
             "        pb += bytes.len();",
-            "        self.mem_mut()[pb] = 0;",
+            "        @MEM_MUT@[pb] = 0;",
             "        pb += 1;",
             "    }",
             "    0",
@@ -1725,47 +1747,97 @@ fn get_lines(method: &str, source: &str) -> Vec<String> {
     lines
 }
 
-/// Rewrite one line of a native WASI body, written against `self.mem()` /
-/// `self.mem_mut()` (a borrowed buffer), for a `shared` memory, whose bytes are
-/// reached through `self.memory.bytes()`.
-fn share_memory_access(line: &str) -> String {
-    line.replace("self.mem_mut()", "self.memory.bytes()")
-        .replace("self.mem()", "self.memory.bytes()")
+/// How a native WASI body reaches guest memory and the descriptor table. Bodies
+/// are written against `@MEM@` / `@MEM_MUT@` / `@FDS@` placeholders that
+/// [`Self::fill`] resolves when the body is generated, so no already-generated
+/// source is rewritten afterwards.
+#[derive(Clone, Copy, Default)]
+pub(super) struct WasiAccess {
+    /// Guest memory is a `SharedMemory`, reached through `self.memory.bytes()`
+    /// instead of the borrowed `self.mem()` / `self.mem_mut()` buffer.
+    pub(super) shared_memory: bool,
+    /// The descriptor table is `wasi_fds: Arc<Mutex<..>>` (shared between
+    /// threads), so every access locks it. The lock is held only for the
+    /// statement and never together with the memory lock.
+    pub(super) locked_fds: bool,
 }
 
-/// Rewrite WASI method source for a descriptor table shared between threads
-/// (`wasi_fds: Arc<Mutex<..>>`): every access locks the table. The lock is held
-/// only for the statement (a `match` scrutinee's guard lives to the end of the
-/// `match`) and never together with the memory lock. `path_open`'s slot search
-/// and insertion must run under one guard, or two threads could take the same
-/// slot — and a guard in a `match` scrutinee must not be locked again in its
-/// arms — so that block is replaced wholesale.
-pub(super) fn share_fd_table(lines: Vec<String>) -> Vec<String> {
-    const SLOT_SEARCH: &str =
-        "    let idx = match self.wasi_fds.iter().position(|s| s.is_none()) {";
-    // The search is four lines: the `match`, its two arms and the closing `};`.
-    const SLOT_SEARCH_LEN: usize = 4;
-    let mut out = Vec::with_capacity(lines.len());
-    let mut i = 0;
-    while let Some(line) = lines.get(i) {
-        if line == SLOT_SEARCH {
-            out.extend(
-                [
-                    "    let idx = {",
-                    "        let mut fds = self.wasi_fds.lock().unwrap();",
-                    "        match fds.iter().position(|s| s.is_none()) {",
-                    "            Some(i) => { fds[i] = Some((file, full)); i }",
-                    "            None => { fds.push(Some((file, full))); fds.len() - 1 }",
-                    "        }",
-                    "    };",
-                ]
-                .map(str::to_string),
-            );
-            i += SLOT_SEARCH_LEN;
+impl WasiAccess {
+    fn fill(self, line: &str) -> String {
+        let (mem, mem_mut) = if self.shared_memory {
+            ("self.memory.bytes()", "self.memory.bytes()")
         } else {
-            out.push(line.replace("self.wasi_fds", "self.wasi_fds.lock().unwrap()"));
-            i += 1;
+            ("self.mem()", "self.mem_mut()")
+        };
+        let fds = if self.locked_fds {
+            "self.wasi_fds.lock().unwrap()"
+        } else {
+            "self.wasi_fds"
+        };
+        line.replace("@MEM_MUT@", mem_mut)
+            .replace("@MEM@", mem)
+            .replace("@FDS@", fds)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ACCESS: [WasiAccess; 4] = [
+        WasiAccess {
+            shared_memory: false,
+            locked_fds: false,
+        },
+        WasiAccess {
+            shared_memory: true,
+            locked_fds: false,
+        },
+        WasiAccess {
+            shared_memory: false,
+            locked_fds: true,
+        },
+        WasiAccess {
+            shared_memory: true,
+            locked_fds: true,
+        },
+    ];
+
+    #[test]
+    fn generated_bodies_never_leak_a_placeholder() {
+        for access in ACCESS {
+            for files in [false, true] {
+                for w in [
+                    WasiFn::PathOpen,
+                    WasiFn::FdRead,
+                    WasiFn::FdWrite,
+                    WasiFn::PollOneoff,
+                ] {
+                    let text = w.lines(files, access).join("\n");
+                    assert!(!text.contains("@MEM") && !text.contains("@FDS"), "{text}");
+                }
+            }
         }
     }
-    out
+
+    #[test]
+    fn path_open_locks_the_table_once_for_search_and_insert() {
+        let locked = WasiFn::PathOpen
+            .lines(
+                true,
+                WasiAccess {
+                    shared_memory: true,
+                    locked_fds: true,
+                },
+            )
+            .join("\n");
+        assert!(locked.contains("let mut fds = self.wasi_fds.lock().unwrap();"));
+        assert_eq!(locked.matches("self.wasi_fds.lock()").count(), 1);
+        assert!(locked.contains("self.memory.bytes()"));
+        let plain = WasiFn::PathOpen
+            .lines(true, WasiAccess::default())
+            .join("\n");
+        assert!(plain.contains("match self.wasi_fds.iter().position"));
+        assert!(!plain.contains("lock()"));
+    }
 }

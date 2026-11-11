@@ -235,12 +235,12 @@ pub(super) fn switch_result(
 /// `__args`. `pass` renders the body of the `Suspend`/`Switch` arms from the
 /// re-raised result expression (the callee's own result, rebuilt from the
 /// bindings); `sep` separates the arms; `on_return` is the `Return` arm's
-/// value, with the callee's results bound to `bind`.
+/// value, which reads the callee's results from `__cret` (always bound; the
+/// leading underscores keep it warning-free when the arm ignores it).
 pub(super) fn drive_callee_match(
     callee: impl std::fmt::Display,
     pass: impl Fn(&str) -> String,
     sep: &str,
-    bind: &str,
     on_return: &str,
 ) -> String {
     let suspend = pass("StepResult::Suspend { tag: __t, payload: __p }");
@@ -249,6 +249,6 @@ pub(super) fn drive_callee_match(
         "match self.cont_step_func{callee}(&mut __frame.sub, __args) {{ \
          StepResult::Suspend {{ tag: __t, payload: __p }} => {suspend}{sep}\
          StepResult::Switch {{ tag: __t, target: __tgt, ty: __ty, args: __a }} => {switch}{sep}\
-         StepResult::Return({bind}) => {on_return} }}"
+         StepResult::Return(__cret) => {on_return} }}"
     )
 }

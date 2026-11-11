@@ -289,11 +289,6 @@ impl super::FuncGen<'_> {
                                 ));
                             }
                             let save = self.save_mutated_locals()?;
-                            let bind = if payload.contains("__cret") {
-                                "__cret"
-                            } else {
-                                "_"
-                            };
                             // Forward this step's `__args` to the callee: on the
                             // first drive they are ignored (the callee takes no
                             // parameters, so its `pc == 0` reads nothing); on a
@@ -304,7 +299,6 @@ impl super::FuncGen<'_> {
                                 g,
                                 |result| format!("{{ {save}{result} }}"),
                                 ", ",
-                                bind,
                                 &format!("StepResult::Return(vec![{payload}])"),
                             )
                         }
