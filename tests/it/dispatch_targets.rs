@@ -67,3 +67,20 @@ fn a_host_owned_table_keeps_every_function_of_the_signature_as_a_target() {
     );
     assert_eq!(arms, vec![0, 1]);
 }
+
+#[test]
+fn a_function_taking_a_funcref_parameter_keeps_every_function_as_a_target() {
+    // Every defined function is a public method, so the host can pass any raw
+    // funcref into `$run` even though nothing exports it.
+    let arms = dispatch_arms(
+        r#"(module
+          (type $t (func (result i32)))
+          (table 1 funcref)
+          (func $f0 (type $t) (i32.const 10))
+          (func $f1 (type $t) (i32.const 11))
+          (func $run (param funcref) (result i32)
+            (table.set (i32.const 0) (local.get 0))
+            (call_indirect (type $t) (i32.const 0))))"#,
+    );
+    assert_eq!(arms, vec![0, 1]);
+}

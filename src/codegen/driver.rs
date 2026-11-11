@@ -466,18 +466,17 @@ pub(crate) fn build_ctx<'a>(
     //
     // A host can also mint a funcref naming any local function (it knows the
     // indices): through a host-owned table, an imported global, an imported
-    // function's funcref result or an exported function's funcref parameter. A
+    // function's funcref result or any defined function's funcref parameter (every
+    // defined function is a public method, exported or not). A
     // module with such a source keeps every function a possible target.
     let is_ref = |ty: &ValType| matches!(ty, ValType::Ref(_));
     let host_funcrefs = table.is_some_and(|t| t.imported)
         || imported_globals.iter().any(|g| is_ref(&g.ty))
         || imports.iter().any(|im| im.results.iter().any(is_ref))
-        || parts.exports.iter().any(|e| {
-            (e.func_index as usize)
-                .checked_sub(n_imports)
-                .and_then(|i| funcs.get(i))
-                .is_some_and(|f| f.params.iter().any(is_ref))
-        });
+        || funcs
+            .iter()
+            .zip(parts.live)
+            .any(|(f, &live)| live && f.params.iter().any(is_ref));
     let mut referenced = vec![host_funcrefs; n_imports + funcs.len()];
     let named = elements
         .iter()
