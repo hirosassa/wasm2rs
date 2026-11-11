@@ -72,7 +72,7 @@ fn abort(shared: &Shared) {
 }
 
 /// The worker count for `requested` jobs (`0` = auto) over `live` functions.
-fn resolve_jobs(requested: usize, live: usize) -> usize {
+pub(super) fn resolve_jobs(requested: usize, live: usize) -> usize {
     let jobs = if requested == 0 {
         if live < AUTO_MIN_FUNCS {
             1
