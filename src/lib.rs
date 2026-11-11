@@ -1024,7 +1024,7 @@ fn is_supported_table_element(
     element: wasmparser::RefType,
     type_kinds: &[codegen::CompositeKind],
 ) -> bool {
-    if codegen::is_abstract_u32_ref(element) {
+    if codegen::is_abstract_u32_ref(element) || codegen::is_exn_hierarchy(element.heap_type()) {
         return true;
     }
     let wasmparser::HeapType::Concrete(idx) = element.heap_type() else {

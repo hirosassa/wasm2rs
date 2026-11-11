@@ -1,6 +1,6 @@
 use wasmparser::{FunctionBody, StorageType, ValType};
 
-use super::WasiFn;
+use super::{WasiFn, is_exn_hierarchy};
 
 /// Size in bytes of one WebAssembly linear-memory page (64 KiB).
 pub(crate) const WASM_PAGE_SIZE: u64 = 65536;
@@ -232,5 +232,23 @@ impl TypeRel {
         })
         .take(self.canon_super.len() + 1)
         .any(|c| c == b)
+    }
+}
+
+/// The Rust element type of a table holding `element` references: a managed
+/// `GcRef` for an `exnref` table, a `u32` handle (`u32::MAX` is null) otherwise.
+pub(crate) fn table_elem_rust(element: ValType) -> &'static str {
+    match element {
+        ValType::Ref(rt) if is_exn_hierarchy(rt.heap_type()) => "GcRef",
+        _ => "u32",
+    }
+}
+
+/// The Rust expression for a null entry of a table of `element` references.
+pub(crate) fn table_null(element: ValType) -> &'static str {
+    if table_elem_rust(element) == "GcRef" {
+        "GcRef::Null"
+    } else {
+        "u32::MAX"
     }
 }

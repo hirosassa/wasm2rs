@@ -33,6 +33,22 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
+    /// Whether `table` holds managed `GcRef` entries (an `exnref` table) rather
+    /// than `u32` handles.
+    fn table_elem_rust(&self, table: u32) -> &'static str {
+        let element = self
+            .ctx
+            .table_elements
+            .get(table as usize)
+            .copied()
+            .unwrap_or(ValType::FUNCREF);
+        super::super::table_elem_rust(element)
+    }
+
+    fn is_gc_table(&self, table: u32) -> bool {
+        self.table_elem_rust(table) == "GcRef"
+    }
+
     pub(super) fn table_copy(
         &mut self,
         dst_table: u32,
@@ -42,7 +58,8 @@ impl<'a> super::FuncGen<'a> {
         let src_table = self.require_table_index(src_table)?;
         let (dest, src, len) = self.pop_bulk_operands()?;
         let any64 = self.is_table64(dst_table) || self.is_table64(src_table);
-        if dst_table == 0 && src_table == 0 && !any64 {
+        let gc = self.is_gc_table(dst_table);
+        if dst_table == 0 && src_table == 0 && !any64 && !gc {
             self.used_helpers.insert((Helper::TableCopy, 0));
             self.line(format!(
                 "self.table_copy(({}) as u32, ({}) as u32, ({}) as u32);",
@@ -67,12 +84,15 @@ impl<'a> super::FuncGen<'a> {
         };
         let src_expr = self.table_index_expr(src_table, &src.code);
         let dest_expr = self.table_index_expr(dst_table, &dest.code);
-        let body = if dst_table == src_table {
+        let elem = self.table_elem_rust(dst_table);
+        let body = if dst_table == src_table && !gc {
             format!("self.{dst_mut}().copy_within(s..s + n, d);")
         } else {
+            // A managed entry is not `Copy`, so it is cloned through the temporary
+            // (which also covers overlapping ranges within one table).
             format!(
-                "let tmp: Vec<u32> = self.{src_get}()[s..s + n].to_vec(); \
-                 self.{dst_mut}()[d..d + n].copy_from_slice(&tmp);"
+                "let tmp: Vec<{elem}> = self.{src_get}()[s..s + n].to_vec(); \
+                 self.{dst_mut}()[d..d + n].clone_from_slice(&tmp);"
             )
         };
         self.line(format!(
@@ -94,9 +114,14 @@ impl<'a> super::FuncGen<'a> {
             .copied()
             .unwrap_or(ValType::FUNCREF);
         let (get, _) = table_accessor(table);
+        let clone = if self.is_gc_table(table) {
+            ".clone()"
+        } else {
+            ""
+        };
         self.push_trapping(
             format!(
-                "self.{get}()[{}]",
+                "self.{get}()[{}]{clone}",
                 self.table_index_expr(table, &index.code)
             ),
             element,
@@ -111,10 +136,14 @@ impl<'a> super::FuncGen<'a> {
         let value = self.pop()?;
         let index = self.pop()?;
         let (_, get_mut) = table_accessor(table);
+        let stored = if self.is_gc_table(table) {
+            self.move_val(&value)?
+        } else {
+            format!("({}) as u32", value.code)
+        };
         self.line(format!(
-            "self.{get_mut}()[{}] = ({}) as u32;",
+            "self.{get_mut}()[{}] = {stored};",
             self.table_index_expr(table, &index.code),
-            value.code
         ));
         Ok(())
     }
@@ -162,6 +191,11 @@ impl<'a> super::FuncGen<'a> {
             .copied()
             .flatten()
             .unwrap_or(u32::MAX);
+        let init_value = if self.is_gc_table(table) {
+            self.move_val(&init)?
+        } else {
+            format!("({}) as u32", init.code)
+        };
         // A failed allocation reports -1 instead of aborting (an allocator that
         // overcommits can still succeed here and fail later, as for memory).
         // A 64-bit table is still capped at `u32::MAX` entries (an
@@ -171,10 +205,9 @@ impl<'a> super::FuncGen<'a> {
              match old.checked_add(n) {{ \
              Some(len) if len <= {limit}usize => {{ \
              if self.{get_mut}().try_reserve_exact(n).is_err() {{ -1 }} else {{ \
-             self.{get_mut}().resize(len, ({}) as u32); old as {rust_ty} }} }} \
+             self.{get_mut}().resize(len, {init_value}); old as {rust_ty} }} }} \
              _ => -1, }} }};",
             self.table_index_expr(table, &delta.code),
-            init.code
         ));
         self.push(Val {
             code: name,
@@ -190,7 +223,8 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn table_fill(&mut self, table: u32) -> Result<(), TranspileError> {
         let table = self.require_table_index(table)?;
         let (dest, val, len) = self.pop_bulk_operands()?;
-        if table == 0 && !self.is_table64(table) {
+        let gc = self.is_gc_table(table);
+        if table == 0 && !self.is_table64(table) && !gc {
             self.used_helpers.insert((Helper::TableFill, 0));
             self.line(format!(
                 "self.table_fill(({}) as u32, ({}) as u32, ({}) as u32);",
@@ -199,10 +233,14 @@ impl<'a> super::FuncGen<'a> {
             return Ok(());
         }
         let (_, get_mut) = table_accessor(table);
+        let value = if gc {
+            self.move_val(&val)?
+        } else {
+            format!("({}) as u32", val.code)
+        };
         self.line(format!(
-            "{{ let d = {}; let v = ({}) as u32; let n = {}; self.{get_mut}()[d..d + n].fill(v); }}",
+            "{{ let d = {}; let v = {value}; let n = {}; self.{get_mut}()[d..d + n].fill(v); }}",
             self.table_index_expr(table, &dest.code),
-            val.code,
             self.table_index_expr(table, &len.code)
         ));
         Ok(())
@@ -310,6 +348,22 @@ impl<'a> super::FuncGen<'a> {
         let table = self.require_table_index(table)?;
         let (dest, src, len) = self.pop_bulk_operands()?;
         let (_, get_mut) = table_accessor(table);
+        if self.is_gc_table(table) {
+            // A managed table's segment holds only `ref.null` items, so initialising
+            // it writes nulls; the range is still checked against the segment.
+            let seg = if self.is_passive(&self.ctx.elem_passive, elem_index, "elem")? {
+                format!("self.elem{elem_index}")
+            } else {
+                "{ let empty: &[u32] = &[]; empty }".to_string()
+            };
+            self.line(format!(
+                "{{ let seg = {seg}; let n = ({}) as usize; let s = ({}) as usize; \
+                 let d = ({}) as usize; let _ = &seg[s..s + n]; \
+                 self.{get_mut}()[d..d + n].fill(GcRef::Null); }}",
+                len.code, src.code, dest.code
+            ));
+            return Ok(());
+        }
         // An active or declared segment is already dropped: an empty slice.
         let seg = if self.is_passive(&self.ctx.elem_passive, elem_index, "elem")? {
             format!("self.elem{elem_index}")

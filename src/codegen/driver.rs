@@ -666,6 +666,10 @@ pub(crate) fn generate_module_pieces(
     if ctx.needs_gc_types {
         out.push_str(GCREF_DEF);
         out.push('\n');
+        if deps.uses_eh {
+            out.push_str(EXN_REF_DEF);
+            out.push('\n');
+        }
     }
     // Shared state structs from split flattened methods, at module scope ahead of
     // the `struct Instance`/functions that reference them (a field may be a
@@ -854,6 +858,10 @@ pub(crate) fn generate_module_split(
     if ctx.needs_gc_types {
         prefix.push_str(GCREF_DEF);
         prefix.push('\n');
+        if deps.uses_eh {
+            prefix.push_str(EXN_REF_DEF);
+            prefix.push('\n');
+        }
     }
     if !deps.state_structs.is_empty() {
         prefix.push_str(&deps.state_structs.join("\n"));

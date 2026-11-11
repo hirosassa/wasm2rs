@@ -53,7 +53,7 @@ pub(crate) use self::export_names::{
 pub(crate) use self::info::{
     CompositeKind, DataSegment, ElemSegment, ExportInfo, FieldInfo, FuncInput, GlobalExportInfo,
     GlobalInfo, ImportInfo, ImportedGlobalInfo, MemInfo, SegOffset, TableFill, TableInfo, TagInfo,
-    TypeRel, TypeSig, WASM_MAX_PAGES, WASM_PAGE_SIZE,
+    TypeRel, TypeSig, WASM_MAX_PAGES, WASM_PAGE_SIZE, table_elem_rust, table_null,
 };
 pub(crate) use self::reach::{ReachInput, live_functions};
 pub(crate) use self::wasi::WasiFn;
@@ -202,29 +202,47 @@ const EXC_DEF: &str = "\
 struct Wasm2RsException {
     tag: u32,
     values: Vec<u64>,
-}
-
-// An `exnref` is a handle (`u32::MAX` is null) into this per-thread store of the
-// exceptions `catch_ref` / `catch_all_ref` captured. Entries are never freed.
-thread_local! {
-    static WASM2RS_EXNS: std::cell::RefCell<Vec<Wasm2RsException>> = const { std::cell::RefCell::new(Vec::new()) };
+    // The `exnref` payload values: `values` holds an index into this vector for
+    // each of them (`None` is a null reference).
+    exns: Vec<Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>>,
+}";
+/// The `exnref` helpers: an `exnref` is a managed `GcRef::Exn`, so they exist only
+/// when both [`EXC_DEF`] and [`GCREF_DEF`] are emitted.
+const EXN_REF_DEF: &str = "\
+// An `exnref` is a `GcRef::Exn` sharing the caught exception, so the exception is
+// freed once the last reference to it is dropped. It is an `Arc` (not an `Rc`)
+// because the exception itself is the payload of a panic, which must be `Send`.
+#[allow(dead_code)]
+fn wasm2rs_exn_new(exn: &Wasm2RsException) -> GcRef {
+    GcRef::Exn(std::sync::Arc::new(exn.clone()))
 }
 
 #[allow(dead_code)]
-fn wasm2rs_exn_store(exn: &Wasm2RsException) -> u32 {
-    WASM2RS_EXNS.with(|store| {
-        let mut store = store.borrow_mut();
-        store.push(exn.clone());
-        (store.len() - 1) as u32
-    })
+fn wasm2rs_exn_load(exn: &GcRef) -> Wasm2RsException {
+    match exn {
+        GcRef::Exn(e) => match e.downcast_ref::<Wasm2RsException>() {
+            Some(exn) => exn.clone(),
+            None => panic!(\"not an exception reference\"),
+        },
+        _ => panic!(\"null exception reference\"),
+    }
 }
 
 #[allow(dead_code)]
-fn wasm2rs_exn_load(handle: u32) -> Wasm2RsException {
-    WASM2RS_EXNS.with(|store| match store.borrow().get(handle as usize) {
-        Some(exn) => exn.clone(),
-        None => panic!(\"null exception reference\"),
-    })
+fn wasm2rs_exn_pack(exns: &mut Vec<Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>>, exn: GcRef) -> u64 {
+    exns.push(match exn {
+        GcRef::Exn(e) => Some(e),
+        _ => None,
+    });
+    (exns.len() - 1) as u64
+}
+
+#[allow(dead_code)]
+fn wasm2rs_exn_unpack(exns: &[Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>], index: u64) -> GcRef {
+    match &exns[index as usize] {
+        Some(e) => GcRef::Exn(e.clone()),
+        None => GcRef::Null,
+    }
 }";
 /// The managed value model for heap-allocated `struct`/`array` objects (GC
 /// phase 4b). Every managed object — struct or array alike — is an
@@ -240,6 +258,7 @@ pub enum GcRef {
     Null,
     I31(i32),
     Obj { ty: u32, slots: std::rc::Rc<std::cell::RefCell<Vec<GcSlot>>> },
+    Exn(std::sync::Arc<dyn std::any::Any + Send + Sync>),
 }
 
 #[derive(Clone)]
@@ -259,7 +278,7 @@ impl GcRef {
     fn obj(&self) -> std::rc::Rc<std::cell::RefCell<Vec<GcSlot>>> {
         match self {
             GcRef::Obj { slots, .. } => slots.clone(),
-            GcRef::Null | GcRef::I31(_) => panic!(\"null reference\"),
+            GcRef::Null | GcRef::I31(_) | GcRef::Exn(_) => panic!(\"null reference\"),
         }
     }
 }";
@@ -278,6 +297,11 @@ fn encode_exc_value(
         // A `u32`-backed handle (e.g. `funcref`/`externref`/`exnref`) rides as its
         // value; a managed `GcRef` cannot.
         ValType::Ref(_) if is_u32_ref(ty, kinds)? => format!("({expr}) as u64"),
+        // An `exnref` rides as an index into the exception's `exns` side vector
+        // (`__exns`, declared by the throw site).
+        ValType::Ref(rt) if is_exn_hierarchy(rt.heap_type()) => {
+            format!("wasm2rs_exn_pack(&mut __exns, {expr})")
+        }
         ValType::Ref(_) => {
             return Err(TranspileError::Unsupported(
                 "exception payload with a reference type".into(),
@@ -291,10 +315,11 @@ fn encode_exc_value(
     })
 }
 /// The Rust expression decoding a `u64` (given as `expr`) from an exception's
-/// `values` back into an operand of type `ty`, inverting [`encode_exc_value`].
+/// `values` (with `exns` the expression for its `exns` vector) back into an operand of type `ty`, inverting [`encode_exc_value`].
 fn decode_exc_value(
     ty: ValType,
     expr: &str,
+    exns: &str,
     kinds: &[CompositeKind],
 ) -> Result<String, TranspileError> {
     Ok(match ty {
@@ -303,6 +328,9 @@ fn decode_exc_value(
         ValType::F32 => format!("f32::from_bits({expr} as u32)"),
         ValType::F64 => format!("f64::from_bits({expr})"),
         ValType::Ref(_) if is_u32_ref(ty, kinds)? => format!("{expr} as u32"),
+        ValType::Ref(rt) if is_exn_hierarchy(rt.heap_type()) => {
+            format!("wasm2rs_exn_unpack(&{exns}, {expr})")
+        }
         ValType::Ref(_) => {
             return Err(TranspileError::Unsupported(
                 "exception payload with a reference type".into(),

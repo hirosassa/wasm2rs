@@ -738,7 +738,7 @@ impl super::FuncGen<'_> {
         };
         Ok(format!(
             "match &({ref_expr}) {{ GcRef::Null => {null_matches}, \
-             GcRef::I31(_) => {i31_arm}, GcRef::Obj {{ ty, .. }} => {obj_arm} }}"
+             GcRef::I31(_) => {i31_arm}, GcRef::Exn(_) => false, GcRef::Obj {{ ty, .. }} => {obj_arm} }}"
         ))
     }
 
