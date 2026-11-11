@@ -7,8 +7,7 @@
 //! [`WINDOW_PER_JOB`] functions ahead of the consumer, which bounds the pieces
 //! held in memory.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
@@ -22,6 +21,9 @@ use crate::TranspileError;
 const WORKER_STACK: usize = 256 << 20;
 /// How many functions a worker may run ahead of the consumer, per job.
 const WINDOW_PER_JOB: usize = 32;
+/// Functions claimed per `fetch_add`: with ~40k tiny functions a claim per
+/// function makes the shared counter a hot cache line.
+const CLAIM_CHUNK: usize = 16;
 /// Throttled workers are woken once per this fraction of the window, not per
 /// piece, which would make every consumed piece wake every waiting worker.
 const WAKE_DIVISOR: usize = 4;
@@ -34,24 +36,42 @@ const AUTO_MAX_JOBS: usize = 8;
 
 type Piece = Result<(String, GenMeta), TranspileError>;
 
-#[derive(Default)]
-struct State {
-    done: HashMap<usize, Piece>,
-    consumed: usize,
-    consumer_waiting: bool,
-    abort: bool,
-}
-
+/// Blocking state only; the hot path (parking a piece, taking one) touches the
+/// per-slot mutexes and atomics in [`Shared`] instead of this lock.
 struct Shared {
-    state: Mutex<State>,
+    /// Ring of `window` slots: function `k` parks in `k % window`. A worker only
+    /// produces `k < consumed + window`, so the slot of `k - window` is free.
+    slots: Vec<Mutex<Option<Piece>>>,
+    /// Functions the consumer has taken so far.
+    consumed: AtomicUsize,
+    consumer_waiting: AtomicBool,
+    abort: AtomicBool,
+    /// Held only to sleep and wake on the condvars below.
+    gate: Mutex<()>,
     /// Signalled when a piece lands (wakes the consumer).
     ready: Condvar,
     /// Signalled when the consumer advances or aborts (wakes throttled workers).
     room: Condvar,
 }
 
-fn lock(shared: &Shared) -> MutexGuard<'_, State> {
-    shared.state.lock().unwrap_or_else(PoisonError::into_inner)
+impl Shared {
+    fn slot(&self, k: usize) -> Option<&Mutex<Option<Piece>>> {
+        self.slots.get(k.checked_rem(self.slots.len())?)
+    }
+
+    fn gate(&self) -> MutexGuard<'_, ()> {
+        self.gate.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Takes and releases the gate before a notify, so the stores preceding it
+    /// are ordered before any sleeper's re-check and the wake-up is not lost.
+    fn pass_gate(&self) {
+        drop(self.gate());
+    }
+}
+
+fn lock_slot(slot: &Mutex<Option<Piece>>) -> MutexGuard<'_, Option<Piece>> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Stops the others if a worker unwinds, so the consumer never waits for a piece
@@ -66,7 +86,8 @@ impl Drop for AbortOnUnwind<'_> {
 }
 
 fn abort(shared: &Shared) {
-    lock(shared).abort = true;
+    shared.abort.store(true, Ordering::SeqCst);
+    shared.pass_gate();
     shared.ready.notify_all();
     shared.room.notify_all();
 }
@@ -127,41 +148,43 @@ where
         return serial(&mut consume);
     }
 
+    let window = jobs.saturating_mul(WINDOW_PER_JOB);
     let shared = Shared {
-        state: Mutex::new(State::default()),
+        slots: (0..window).map(|_| Mutex::new(None)).collect(),
+        consumed: AtomicUsize::new(0),
+        consumer_waiting: AtomicBool::new(false),
+        abort: AtomicBool::new(false),
+        gate: Mutex::new(()),
         ready: Condvar::new(),
         room: Condvar::new(),
     };
     let next = AtomicUsize::new(0);
-    let window = jobs.saturating_mul(WINDOW_PER_JOB);
     let wake_every = (window / WAKE_DIVISOR).max(1);
     let total = live.len();
     thread::scope(|scope| {
         let worker = || {
             let _guard = AbortOnUnwind(&shared);
             loop {
-                let k = next.fetch_add(1, Ordering::Relaxed);
-                if k >= total {
+                let start = next.fetch_add(CLAIM_CHUNK, Ordering::Relaxed);
+                if start >= total {
                     return;
                 }
-                {
-                    let mut st = lock(&shared);
-                    while !st.abort && k >= st.consumed.saturating_add(window) {
-                        st = shared.room.wait(st).unwrap_or_else(PoisonError::into_inner);
-                    }
-                    if st.abort {
+                for k in start..start.saturating_add(CLAIM_CHUNK).min(total) {
+                    if !wait_for_room(&shared, k, window) {
                         return;
                     }
-                }
-                let mut out = String::new();
-                let piece = generate(k, &mut out).map(|meta| (out, meta));
-                let wake = {
-                    let mut st = lock(&shared);
-                    st.done.insert(k, piece);
-                    st.consumer_waiting
-                };
-                if wake {
-                    shared.ready.notify_one();
+                    let mut out = String::new();
+                    let piece = generate(k, &mut out).map(|meta| (out, meta));
+                    if let Some(slot) = shared.slot(k) {
+                        *lock_slot(slot) = Some(piece);
+                    }
+                    // Pairs with the fence in the consumer: either it sees the
+                    // piece, or this sees `consumer_waiting` and wakes it.
+                    fence(Ordering::SeqCst);
+                    if shared.consumer_waiting.load(Ordering::SeqCst) {
+                        shared.pass_gate();
+                        shared.ready.notify_one();
+                    }
                 }
             }
         };
@@ -182,29 +205,10 @@ where
         // throttled workers must be released or the scope would never join.
         let _consumer_guard = AbortOnUnwind(&shared);
         for k in 0..total {
-            let piece = {
-                let mut st = lock(&shared);
-                loop {
-                    if let Some(piece) = st.done.remove(&k) {
-                        st.consumed = k + 1;
-                        if (k + 1) % wake_every == 0 {
-                            shared.room.notify_all();
-                        }
-                        break Some(piece);
-                    }
-                    if st.abort {
-                        break None;
-                    }
-                    st.consumer_waiting = true;
-                    st = shared
-                        .ready
-                        .wait(st)
-                        .unwrap_or_else(PoisonError::into_inner);
-                    st.consumer_waiting = false;
-                }
+            let Some(piece) = take_piece(&shared, k, wake_every) else {
+                // A worker panicked; the scope re-raises it on join.
+                return Ok(());
             };
-            // `None`: a worker panicked; the scope re-raises it on join.
-            let Some(piece) = piece else { return Ok(()) };
             if let Err(e) = piece.and_then(|(src, meta)| consume(&src, meta)) {
                 abort(&shared);
                 return Err(e);
@@ -212,4 +216,61 @@ where
         }
         Ok(())
     })
+}
+
+/// Blocks until function `k` is within the window; `false` means aborted.
+fn wait_for_room(shared: &Shared, k: usize, window: usize) -> bool {
+    let has_room = || {
+        k < shared
+            .consumed
+            .load(Ordering::SeqCst)
+            .saturating_add(window)
+    };
+    if !has_room() {
+        let _gate = shared
+            .room
+            .wait_while(shared.gate(), |()| {
+                !shared.abort.load(Ordering::SeqCst) && !has_room()
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+    !shared.abort.load(Ordering::SeqCst)
+}
+
+/// Takes function `k`'s piece, sleeping until it lands; `None` means aborted.
+fn take_piece(shared: &Shared, k: usize, wake_every: usize) -> Option<Piece> {
+    let slot = shared.slot(k)?;
+    let try_take = || lock_slot(slot).take();
+    let piece = loop {
+        if let Some(piece) = try_take() {
+            break piece;
+        }
+        let mut gate = shared.gate();
+        shared.consumer_waiting.store(true, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        // Re-check after announcing the wait, under the gate, so a worker that
+        // parked just before cannot be missed.
+        let found = try_take();
+        if found.is_none() && !shared.abort.load(Ordering::SeqCst) {
+            gate = shared
+                .ready
+                .wait(gate)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        shared.consumer_waiting.store(false, Ordering::SeqCst);
+        drop(gate);
+        if let Some(piece) = found {
+            break piece;
+        }
+        if shared.abort.load(Ordering::SeqCst) {
+            // One last look: a piece may have landed alongside the abort.
+            return try_take();
+        }
+    };
+    shared.consumed.store(k + 1, Ordering::SeqCst);
+    if (k + 1).is_multiple_of(wake_every) {
+        shared.pass_gate();
+        shared.room.notify_all();
+    }
+    Some(piece)
 }
