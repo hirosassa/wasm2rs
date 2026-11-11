@@ -932,20 +932,21 @@ pub(crate) fn generate_function_into(
     let branches_to_label = flag(&ctx.branches_to_function_label)?;
     // A function that tail-calls itself loops instead of trampolining: its
     // parameters are reassigned, so they must be declared `mut`.
-    let self_loop = !branches_to_label
-        && ctx.has_tc_variant(index)
-        && calls_itself_in_tail(input.body, index_u32(index)?)?;
+    let self_loop = if !branches_to_label && ctx.has_tc_variant(index) {
+        let own = index_u32(index)?;
+        calls_itself_in_tail(input.body, own)?.then_some(own)
+    } else {
+        None
+    };
     let params_mutable;
-    let loop_mutated = if self_loop {
+    let loop_mutated = if self_loop.is_some() {
         params_mutable = mutated.with_first_marked(input.params.len());
         &params_mutable
     } else {
         mutated
     };
     let mut func = FuncGen::new(input.params, input.results, input.body, ctx, loop_mutated)?;
-    if self_loop {
-        func.self_loop = Some(index_u32(index)?);
-    }
+    func.self_loop = self_loop;
     // A step function (a continuation body, or a function reached from one
     // through a suspend-crossing call) is emitted as a resumable
     // `cont_step_func{N}` state machine instead of an ordinary `func{N}`.

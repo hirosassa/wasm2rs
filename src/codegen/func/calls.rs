@@ -46,8 +46,7 @@ impl<'a> super::FuncGen<'a> {
                 .ctx
                 .full_sig(function_index as usize)
                 .ok_or_else(|| TranspileError::Unsupported("call to unknown function".into()))?;
-            let param_count = params.len();
-            let args = self.pop_bound_args(param_count)?;
+            let args = self.pop_bound_args(params.len())?;
             let sep = if args.is_empty() { "" } else { ", " };
             let receiver = if self.ctx.is_method { "__s." } else { "" };
             self.park_tail_call(&format!(
@@ -71,8 +70,9 @@ impl<'a> super::FuncGen<'a> {
             self.local_store(index_u32(i)?, false)?;
         }
         for i in param_count..self.local_types.len() {
-            if self.mutable_locals.contains(index_u32(i)?) {
-                let ty = self.local_ty(index_u32(i)?)?;
+            let local = index_u32(i)?;
+            if self.mutable_locals.contains(local) {
+                let ty = self.local_ty(local)?;
                 self.line(format!(
                     "l{i} = {};",
                     default_value(ty, self.ctx.type_kinds)
@@ -283,8 +283,8 @@ impl<'a> super::FuncGen<'a> {
             "let {entry} = self.{table_get}()[{}];",
             self.table_index_expr(table_index, &index.code)
         ));
+        self.dispatch_sigs.insert(type_index);
         if use_tc {
-            self.dispatch_sigs.insert(type_index);
             return self.park_dispatch(type_index, &entry, &arg_list);
         }
 
@@ -292,7 +292,6 @@ impl<'a> super::FuncGen<'a> {
         // `dispatch_method_lines`): it holds the `match` on the funcref and is
         // also the public entry point the host uses to invoke a funcref the
         // module handed out. A null or wrong-type entry traps inside it.
-        self.dispatch_sigs.insert(type_index);
         let (prefix, temps) = self.result_binding(&results)?;
         let sep = if arg_list.is_empty() { "" } else { ", " };
         self.line(format!(
@@ -358,14 +357,13 @@ impl<'a> super::FuncGen<'a> {
         // earlier borrow live across it. Copying out the `u32` releases it.
         let entry = self.fresh_temp();
         self.line(format!("let {entry} = ({}) as u32;", funcref.code));
+        self.dispatch_sigs.insert(type_index);
         if use_tc {
-            self.dispatch_sigs.insert(type_index);
             return self.park_dispatch(type_index, &entry, &arg_list);
         }
 
         // Dispatch through the shared `call_ref_t{ti}` method (see
         // `dispatch_method_lines`): it holds the `match` on the funcref.
-        self.dispatch_sigs.insert(type_index);
         let (prefix, temps) = self.result_binding(&results)?;
         let sep = if arg_list.is_empty() { "" } else { ", " };
         self.line(format!(
@@ -489,25 +487,21 @@ impl<'a> super::FuncGen<'a> {
             .map(|i| format!("l{i}"))
             .collect::<Vec<_>>()
             .join(", ");
+        let plain_params = Self::plain_params_src(ctx, params)?;
         let mut lines = Vec::new();
         if !ctx.is_method {
             lines.push(ALLOW.to_string());
         }
         if tc_body {
-            let plain_params = Self::plain_params_src(ctx, params)?;
             lines.push(format!("pub fn func{index}({plain_params}){ret} {{"));
             lines.push("    let mut __tc = Tc::new();".to_string());
             let sep = if args.is_empty() { "" } else { ", " };
             lines.push(format!(
                 "    let __r = {receiver}func{index}_tc({args}{sep}&mut __tc);"
             ));
-            if ctx.is_method {
-                lines.push("    __tc.run(self, __r)".to_string());
-            } else {
-                lines.push("    __tc.run(&mut (), __r)".to_string());
-            }
+            let state = if ctx.is_method { "self" } else { "&mut ()" };
+            lines.push(format!("    __tc.run({state}, __r)"));
         } else {
-            let plain_params = Self::plain_params_src(ctx, params)?;
             let sep = if plain_params.is_empty() { "" } else { ", " };
             let tc_ty = ctx.tc_type(results)?;
             let head =

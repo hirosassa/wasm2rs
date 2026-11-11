@@ -131,10 +131,8 @@ impl LocalFlags {
     /// function that reassigns its parameters to loop on a self tail call.
     pub(crate) fn with_first_marked(&self, n: usize) -> Self {
         let mut flags = self.clone();
-        for i in 0..n {
-            if let Some(flag) = flags.0.get_mut(i) {
-                *flag = true;
-            }
+        for flag in flags.0.iter_mut().take(n) {
+            *flag = true;
         }
         flags
     }
