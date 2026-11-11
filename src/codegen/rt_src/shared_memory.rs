@@ -66,6 +66,13 @@ impl SharedBytes {
             self.out_of_range(start, end);
         }
     }
+
+    #[inline(always)]
+    fn check_index(&self, i: usize) {
+        if i >= self.len {
+            panic!("index out of bounds: the len is {} but the index is {i}", self.len);
+        }
+    }
 }
 
 impl std::ops::Index<usize> for SharedBytes {
@@ -73,9 +80,7 @@ impl std::ops::Index<usize> for SharedBytes {
 
     #[inline(always)]
     fn index(&self, i: usize) -> &u8 {
-        if i >= self.len {
-            panic!("index out of bounds: the len is {} but the index is {i}", self.len);
-        }
+        self.check_index(i);
         // SAFETY: `i < len <= cap`; the reference covers one byte for one access.
         unsafe { &*self.base.add(i) }
     }
@@ -84,9 +89,7 @@ impl std::ops::Index<usize> for SharedBytes {
 impl std::ops::IndexMut<usize> for SharedBytes {
     #[inline(always)]
     fn index_mut(&mut self, i: usize) -> &mut u8 {
-        if i >= self.len {
-            panic!("index out of bounds: the len is {} but the index is {i}", self.len);
-        }
+        self.check_index(i);
         // SAFETY: as in `index`.
         unsafe { &mut *self.base.add(i) }
     }
@@ -122,9 +125,16 @@ struct SharedPark {
 }
 
 fn shared_layout(cap: usize) -> std::alloc::Layout {
-    // 16-aligned so that an `addr % width == 0` check makes the cell's address
-    // aligned for `Atomic{U16,U32,U64}` too (a `u8` layout only promises 1).
-    std::alloc::Layout::from_size_align(cap.max(1), 16).unwrap()
+    // Aligned for `AtomicU64` so that an `addr % width == 0` check makes the
+    // cell's address aligned for `Atomic{U16,U32,U64}` too (a `u8` layout only
+    // promises 1). No more than that: an alignment above the allocator's minimum
+    // (8 on 32-bit hosts) turns `alloc_zeroed` into allocate-then-memset, which
+    // would touch the whole reservation instead of leaving it lazily backed.
+    std::alloc::Layout::from_size_align(
+        cap.max(1),
+        std::mem::align_of::<std::sync::atomic::AtomicU64>(),
+    )
+    .unwrap()
 }
 
 fn shared_width_mask(width: usize) -> u64 {
