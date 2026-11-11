@@ -781,28 +781,24 @@ impl WasiFn {
                 // table is locked: two threads could otherwise take the same slot,
                 // and a guard in a `match` scrutinee must not be locked again in
                 // its arms.
-                body.extend(
-                    if access.locked_fds {
-                        &[
-                            "    let idx = {",
-                            "        let mut fds = @FDS@;",
-                            "        match fds.iter().position(|s| s.is_none()) {",
-                            "            Some(i) => { fds[i] = Some((file, full)); i }",
-                            "            None => { fds.push(Some((file, full))); fds.len() - 1 }",
-                            "        }",
-                            "    };",
-                        ][..]
-                    } else {
-                        &[
-                            "    let idx = match @FDS@.iter().position(|s| s.is_none()) {",
-                            "        Some(i) => { @FDS@[i] = Some((file, full)); i }",
-                            "        None => { @FDS@.push(Some((file, full))); @FDS@.len() - 1 }",
-                            "    };",
-                        ][..]
-                    }
-                    .iter()
-                    .map(|l| (*l).to_string()),
-                );
+                body.extend(owned(if access.locked_fds {
+                    &[
+                        "    let idx = {",
+                        "        let mut fds = @FDS@;",
+                        "        match fds.iter().position(|s| s.is_none()) {",
+                        "            Some(i) => { fds[i] = Some((file, full)); i }",
+                        "            None => { fds.push(Some((file, full))); fds.len() - 1 }",
+                        "        }",
+                        "    };",
+                    ]
+                } else {
+                    &[
+                        "    let idx = match @FDS@.iter().position(|s| s.is_none()) {",
+                        "        Some(i) => { @FDS@[i] = Some((file, full)); i }",
+                        "        None => { @FDS@.push(Some((file, full))); @FDS@.len() - 1 }",
+                        "    };",
+                    ]
+                }));
                 body.extend(owned(&[
                     "    let fd = idx as u32 + 4;",
                     "    let w = a8 as u32 as usize;",
@@ -1784,37 +1780,25 @@ impl WasiAccess {
 mod tests {
     use super::*;
 
-    const ACCESS: [WasiAccess; 4] = [
-        WasiAccess {
-            shared_memory: false,
-            locked_fds: false,
-        },
-        WasiAccess {
-            shared_memory: true,
-            locked_fds: false,
-        },
-        WasiAccess {
-            shared_memory: false,
-            locked_fds: true,
-        },
-        WasiAccess {
-            shared_memory: true,
-            locked_fds: true,
-        },
-    ];
-
     #[test]
     fn generated_bodies_never_leak_a_placeholder() {
-        for access in ACCESS {
-            for files in [false, true] {
-                for w in [
-                    WasiFn::PathOpen,
-                    WasiFn::FdRead,
-                    WasiFn::FdWrite,
-                    WasiFn::PollOneoff,
-                ] {
-                    let text = w.lines(files, access).join("\n");
-                    assert!(!text.contains("@MEM") && !text.contains("@FDS"), "{text}");
+        let fns = [
+            WasiFn::PathOpen,
+            WasiFn::FdRead,
+            WasiFn::FdWrite,
+            WasiFn::PollOneoff,
+        ];
+        for shared_memory in [false, true] {
+            for locked_fds in [false, true] {
+                let access = WasiAccess {
+                    shared_memory,
+                    locked_fds,
+                };
+                for files in [false, true] {
+                    for w in fns {
+                        let text = w.lines(files, access).join("\n");
+                        assert!(!text.contains("@MEM") && !text.contains("@FDS"), "{text}");
+                    }
                 }
             }
         }
