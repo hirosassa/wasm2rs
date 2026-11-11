@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::helpers::{HELPER_ORDER, helper_lines, shared_helper_lines, table_accessor};
 use super::render_cont::{continuation_method_lines, continuation_runtime_lines};
 use super::runtime::render_rt_helpers;
-use super::wasi::share_fd_table;
+use super::wasi::{confine_lines, share_fd_table};
 use super::{
     ALLOW, DataSegment, ElemSegment, ExportInfo, GlobalExportInfo, Helper, ImportInfo,
     ImportedGlobalInfo, ModuleCtx, ModuleParts, SegOffset, TableFill, WASM_PAGE_SIZE, WasiFn,
@@ -1000,6 +1000,12 @@ fn wasi_method_lines(imports: &[ImportInfo], layout: &Layout, shared: bool) -> V
     let wasi_files = layout.wasi_files;
     let mut inner: Vec<String> = Vec::new();
     let mut wasi_emitted: Vec<WasiFn> = Vec::new();
+    if imports
+        .iter()
+        .any(|im| im.wasi.is_some_and(WasiFn::confines_path))
+    {
+        inner.extend(confine_lines());
+    }
     for im in imports {
         if let Some(w) = im.wasi
             && !wasi_emitted.contains(&w)
