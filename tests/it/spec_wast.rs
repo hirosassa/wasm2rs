@@ -116,6 +116,7 @@ fn trap_needles(spec_message: &str) -> &'static [&'static str] {
         "invalid conversion to integer" => &["invalid conversion to integer"],
         "unreachable" => &["unreachable"],
         "call stack exhausted" => &["call stack exhausted"],
+        // An overflowing `offset + len` bulk range panics in the index arithmetic.
         "out of bounds memory access" => &[
             "out of range for slice",
             "out of bounds",
