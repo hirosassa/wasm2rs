@@ -1983,6 +1983,53 @@ mod shared_memory_rt {
         assert_eq!(mem.atomic_load(8, 4), 9);
     }
 
+    // Generated helpers each bind `bytes()` once, and a `memory.copy` / host
+    // data init can hold more than one view at a time; none may be a whole-memory
+    // `&mut [u8]` (UB under Stacked Borrows, checked by `cargo +nightly miri test`).
+    #[test]
+    fn simultaneous_views_do_not_alias() {
+        let mem = SharedMemory::new(65536);
+        let mut a = mem.bytes();
+        let mut b = mem.bytes();
+        a[0] = 1;
+        b[1] = 2;
+        a[0] = 3;
+        b[2..4].copy_from_slice(&[4, 5]);
+        assert_eq!((a[0], a[1], b[2], b[3]), (3, 2, 4, 5));
+    }
+
+    #[test]
+    fn plain_access_interleaves_with_atomics() {
+        let mem = SharedMemory::new(65536);
+        let mut m = mem.bytes();
+        m[0..4].copy_from_slice(&7u32.to_le_bytes());
+        assert_eq!(mem.atomic_load(0, 4), 7);
+        mem.atomic_store(4, 4, 9);
+        assert_eq!(u32::from_le_bytes(m[4..8].try_into().unwrap()), 9);
+        m[0] = 1;
+        assert_eq!(mem.atomic_rmw(0, 4, 0, 1), 1);
+        assert_eq!(m[0], 2);
+    }
+
+    #[test]
+    fn copy_within_moves_overlapping_ranges_and_traps_out_of_bounds() {
+        let mem = SharedMemory::new(65536);
+        let mut m = mem.bytes();
+        m[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        m.copy_within(0..4, 2);
+        assert_eq!(&m[0..6], &[1, 2, 1, 2, 3, 4]);
+        assert!(std::panic::catch_unwind(move || m.copy_within(0..4, 65534)).is_err());
+    }
+
+    #[test]
+    fn view_out_of_bounds_panics() {
+        let mem = SharedMemory::new(65536);
+        let m = mem.bytes();
+        assert!(std::panic::catch_unwind(|| m[65536]).is_err());
+        assert!(std::panic::catch_unwind(|| m[65530..65537].len()).is_err());
+        assert!(std::panic::catch_unwind(|| m[usize::MAX..usize::MAX].len()).is_err());
+    }
+
     #[test]
     fn wait_times_out_and_mismatch_returns_not_equal() {
         let mem = SharedMemory::new(65536);

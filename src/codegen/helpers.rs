@@ -406,7 +406,13 @@ pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
             "}".to_string(),
         ];
     }
-    let binding = "    let __m = self.memory.bytes();";
+    // Stores index through `IndexMut`, which needs a `mut` binding (the view is a
+    // `Copy` raw-pointer struct, not a `&mut [u8]`).
+    let binding = if base.first().is_some_and(|sig| sig.contains("&mut self")) {
+        "    let mut __m = self.memory.bytes();"
+    } else {
+        "    let __m = self.memory.bytes();"
+    };
     let mut out = Vec::with_capacity(base.len() + 1);
     for (i, line) in base.iter().enumerate() {
         // The signature line is first; the slice is bound immediately after it,

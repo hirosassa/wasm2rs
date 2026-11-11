@@ -23,6 +23,95 @@ impl Drop for SharedMemInner {
     }
 }
 
+// The bytes of a `SharedMemory` at one instant (see `SharedMemory::bytes`).
+// It is `Copy` and borrows nothing: `base` is valid for `len <= cap` bytes for
+// as long as the owning `SharedMemory` lives, which the generated code (holding
+// `&self.memory`) guarantees. Plain accesses that race with another thread's
+// access to the same bytes are wasm data races, as in any wasm engine.
+#[derive(Clone, Copy)]
+struct SharedBytes {
+    base: *mut u8,
+    len: usize,
+}
+
+#[allow(dead_code)]
+impl SharedBytes {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    // `memory.copy`: overlapping ranges behave as a memmove; traps like
+    // `<[u8]>::copy_within` when either range is out of bounds.
+    fn copy_within(&mut self, src: std::ops::Range<usize>, dest: usize) {
+        self.check(src.start, src.end);
+        let n = src.end - src.start;
+        let dest_end = dest.checked_add(n).unwrap_or(usize::MAX);
+        self.check(dest, dest_end);
+        // SAFETY: both ranges are within `len <= cap`; `ptr::copy` allows overlap.
+        unsafe { std::ptr::copy(self.base.add(src.start), self.base.add(dest), n) }
+    }
+
+    // The traps of out-of-range indexing, reported like slice indexing.
+    #[cold]
+    fn out_of_range(&self, start: usize, end: usize) -> ! {
+        if start > end {
+            panic!("slice index starts at {start} but ends at {end}");
+        }
+        panic!("range end index {end} out of range for slice of length {}", self.len);
+    }
+
+    #[inline(always)]
+    fn check(&self, start: usize, end: usize) {
+        if start > end || end > self.len {
+            self.out_of_range(start, end);
+        }
+    }
+}
+
+impl std::ops::Index<usize> for SharedBytes {
+    type Output = u8;
+
+    #[inline(always)]
+    fn index(&self, i: usize) -> &u8 {
+        if i >= self.len {
+            panic!("index out of bounds: the len is {} but the index is {i}", self.len);
+        }
+        // SAFETY: `i < len <= cap`; the reference covers one byte for one access.
+        unsafe { &*self.base.add(i) }
+    }
+}
+
+impl std::ops::IndexMut<usize> for SharedBytes {
+    #[inline(always)]
+    fn index_mut(&mut self, i: usize) -> &mut u8 {
+        if i >= self.len {
+            panic!("index out of bounds: the len is {} but the index is {i}", self.len);
+        }
+        // SAFETY: as in `index`.
+        unsafe { &mut *self.base.add(i) }
+    }
+}
+
+impl std::ops::Index<std::ops::Range<usize>> for SharedBytes {
+    type Output = [u8];
+
+    #[inline(always)]
+    fn index(&self, r: std::ops::Range<usize>) -> &[u8] {
+        self.check(r.start, r.end);
+        // SAFETY: `start <= end <= len <= cap`; the reference covers only this range.
+        unsafe { std::slice::from_raw_parts(self.base.add(r.start), r.end - r.start) }
+    }
+}
+
+impl std::ops::IndexMut<std::ops::Range<usize>> for SharedBytes {
+    #[inline(always)]
+    fn index_mut(&mut self, r: std::ops::Range<usize>) -> &mut [u8] {
+        self.check(r.start, r.end);
+        // SAFETY: as in `index`.
+        unsafe { std::slice::from_raw_parts_mut(self.base.add(r.start), r.end - r.start) }
+    }
+}
+
 #[derive(Default)]
 struct SharedPark {
     // addr -> FIFO of tickets of the waiters still parked there
@@ -33,7 +122,9 @@ struct SharedPark {
 }
 
 fn shared_layout(cap: usize) -> std::alloc::Layout {
-    std::alloc::Layout::array::<u8>(cap.max(1)).unwrap()
+    // 16-aligned so that an `addr % width == 0` check makes the cell's address
+    // aligned for `Atomic{U16,U32,U64}` too (a `u8` layout only promises 1).
+    std::alloc::Layout::from_size_align(cap.max(1), 16).unwrap()
 }
 
 fn shared_width_mask(width: usize) -> u64 {
@@ -87,19 +178,20 @@ impl SharedMemory {
         }))
     }
 
-    // The current contents. Callers index it with a bounds check, which is the
-    // wasm out-of-bounds trap; the slice is not synchronised (see above).
-    // `len` is read Relaxed: it only bounds the slice, never shrinks, and the
+    // A view of the current contents. Callers index it with a bounds check, which
+    // is the wasm out-of-bounds trap. The view holds a raw pointer, never a
+    // `&mut [u8]` over the whole memory: any number of views may coexist (and
+    // overlap `&Atomic*` cells other threads use), and only the bytes of one
+    // access are borrowed, for the length of that access.
+    // `len` is read Relaxed: it only bounds the view, never shrinks, and the
     // bytes below `cap` are zeroed before any thread sees them, so there is no
     // data to acquire. A thread that learns of a grow through a synchronising
     // atomic op on memory it could already reach sees the new `len` via that
     // happens-before edge; as before, a flag placed inside the freshly grown
     // page itself gives no such edge. Relaxed avoids a load-acquire per access.
-    #[allow(clippy::mut_from_ref)]
-    fn bytes(&self) -> &mut [u8] {
+    fn bytes(&self) -> SharedBytes {
         let len = self.0.len.load(std::sync::atomic::Ordering::Relaxed);
-        // SAFETY: `base` is valid for `cap >= len` bytes for the life of `self`.
-        unsafe { std::slice::from_raw_parts_mut(self.0.base, len) }
+        SharedBytes { base: self.0.base, len }
     }
 
     // Raises the length by `delta` pages; returns the old page count, or -1 if
