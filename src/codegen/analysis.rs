@@ -89,6 +89,9 @@ pub(crate) struct BodyScan {
     pub(crate) branches_to_function_label: Vec<bool>,
     /// Per defined function (0-based): whether its body contains a `return`.
     pub(crate) has_return: Vec<bool>,
+    /// Per defined function (0-based): whether its body contains a
+    /// `return_call`/`return_call_indirect`/`return_call_ref`.
+    pub(crate) has_tail_call: Vec<bool>,
     /// The concrete type indices that `ref.test`/`ref.cast`/`br_on_cast` target (any
     /// kind; the driver keeps the continuation ones).
     pub(crate) cast_targets: Vec<u32>,
@@ -122,6 +125,18 @@ pub(crate) struct LocalFlags(Vec<bool>);
 impl LocalFlags {
     fn with_len(n: usize) -> Self {
         Self(vec![false; n])
+    }
+
+    /// A copy with the first `n` locals (the parameters) also flagged, for a
+    /// function that reassigns its parameters to loop on a self tail call.
+    pub(crate) fn with_first_marked(&self, n: usize) -> Self {
+        let mut flags = self.clone();
+        for i in 0..n {
+            if let Some(flag) = flags.0.get_mut(i) {
+                *flag = true;
+            }
+        }
+        flags
     }
 
     fn insert(&mut self, index: u32) {
@@ -223,6 +238,7 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
         suspends: vec![false; funcs.len()],
         branches_to_function_label: Vec::with_capacity(funcs.len()),
         has_return: Vec::with_capacity(funcs.len()),
+        has_tail_call: Vec::with_capacity(funcs.len()),
         calls: vec![Vec::new(); funcs.len()],
         uses_extern_box: false,
         cast_targets: Vec::new(),
@@ -247,10 +263,17 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
         let mut last_ref_func: Option<u32> = None;
         let mut label_branch = FunctionLabelBranch::default();
         let mut has_return = false;
+        let mut has_tail_call = false;
         for op in input.body.get_operators_reader()? {
             let op = op?;
             label_branch.observe(&op)?;
             has_return |= matches!(op, Operator::Return);
+            has_tail_call |= matches!(
+                op,
+                Operator::ReturnCall { .. }
+                    | Operator::ReturnCallIndirect { .. }
+                    | Operator::ReturnCallRef { .. }
+            );
             if !scan.uses_abstract_gc && creates_abstract_gc(&op) {
                 scan.uses_abstract_gc = true;
             }
@@ -300,6 +323,7 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
         scan.mutated.push(mutated);
         scan.branches_to_function_label.push(label_branch.found);
         scan.has_return.push(has_return);
+        scan.has_tail_call.push(has_tail_call);
     }
     scan.cont_bodies.sort_unstable();
     scan.cont_bodies.dedup();

@@ -159,6 +159,9 @@ pub(crate) enum Rt {
     /// #[inline(never)]` helper so the panic stays out-of-line even when the
     /// dispatch method is inlined onto the hot indirect-call path.
     TrapIndirectTypeMismatch,
+    /// The tail-call trampoline slot: a `return_call*` parks the callee here and
+    /// returns, and the caller's wrapper runs it so the stack stays constant.
+    Tc,
     /// The wrapper a `delegate` raises when it must bypass enclosing `try`
     /// bodies: the exception plus how many more bodies to skip.
     DelegateExc,

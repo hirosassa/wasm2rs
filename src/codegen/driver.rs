@@ -2,7 +2,7 @@ use super::*;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use wasmparser::ValType;
+use wasmparser::{FunctionBody, Operator, ValType};
 
 use crate::TranspileError;
 
@@ -65,6 +65,8 @@ pub(crate) struct ModuleCtx<'a> {
     /// Per defined function: whether its body has a `return` (only a continuation
     /// step lowers it as a branch to the wrapping block).
     has_return: Vec<bool>,
+    /// Per defined function: whether its body has a `return_call*`.
+    has_tail_call: Vec<bool>,
     /// Function indices (imports then defined, ascending) grouped by exact
     /// `(params, results)` signature: the set of functions a `call_indirect`
     /// of that signature can reach. Built once so each call site and dispatch
@@ -222,6 +224,37 @@ impl ModuleCtx<'_> {
         self.func_targets
             .get(type_index as usize)
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether the defined function at full index `fidx` has a trampolined body
+    /// `func{fidx}_tc` (see [`Rt::Tc`]): it contains a `return_call*` and is not a
+    /// continuation step function (those lower tail calls as checkpoints).
+    pub(crate) fn has_tc_variant(&self, fidx: usize) -> bool {
+        let Some(defined) = fidx.checked_sub(self.imports.len()) else {
+            return false;
+        };
+        self.has_tail_call.get(defined).copied().unwrap_or(false)
+            && u32::try_from(fidx).is_ok_and(|f| self.cont.step_set.binary_search(&f).is_err())
+    }
+
+    /// Whether `call_ref_t{ti}_tc`, the trampolined dispatch for function type
+    /// `type_index`, exists: some function it can reach has a `_tc` body.
+    pub(crate) fn has_tc_dispatch(&self, type_index: u32) -> bool {
+        self.dispatch_targets(type_index)
+            .iter()
+            .any(|&f| self.has_tc_variant(f))
+    }
+
+    /// The `Tc<Self, R>` (method) / `Tc<(), R>` (free function) type a `_tc` body
+    /// takes by `&mut` for a function producing `results`.
+    pub(crate) fn tc_type(&self, results: &[ValType]) -> Result<String, TranspileError> {
+        let ret = match results {
+            [] => "()".to_string(),
+            [ty] => rust_type(*ty, self.type_kinds)?.to_string(),
+            many => format!("({})", rust_types(many, self.type_kinds)?.join(", ")),
+        };
+        let state = if self.is_method { "Self" } else { "()" };
+        Ok(format!("Tc<{state}, {ret}>"))
     }
 
     /// A call to host method `name`. A re-entrant host also gets the instance; the
@@ -517,6 +550,7 @@ pub(crate) fn build_ctx<'a>(
         mutated_locals: scan.mutated,
         branches_to_function_label: scan.branches_to_function_label,
         has_return: scan.has_return,
+        has_tail_call: scan.has_tail_call,
         funcs_by_sig,
         types,
         type_kinds,
@@ -896,7 +930,22 @@ pub(crate) fn generate_function_into(
             })
     };
     let branches_to_label = flag(&ctx.branches_to_function_label)?;
-    let mut func = FuncGen::new(input.params, input.results, input.body, ctx, mutated)?;
+    // A function that tail-calls itself loops instead of trampolining: its
+    // parameters are reassigned, so they must be declared `mut`.
+    let self_loop = !branches_to_label
+        && ctx.has_tc_variant(index)
+        && calls_itself_in_tail(input.body, index_u32(index)?)?;
+    let params_mutable;
+    let loop_mutated = if self_loop {
+        params_mutable = mutated.with_first_marked(input.params.len());
+        &params_mutable
+    } else {
+        mutated
+    };
+    let mut func = FuncGen::new(input.params, input.results, input.body, ctx, loop_mutated)?;
+    if self_loop {
+        func.self_loop = Some(index_u32(index)?);
+    }
     // A step function (a continuation body, or a function reached from one
     // through a suspend-crossing call) is emitted as a resumable
     // `cont_step_func{N}` state machine instead of an ordinary `func{N}`.
@@ -904,8 +953,26 @@ pub(crate) fn generate_function_into(
         let wrap = branches_to_label || flag(&ctx.has_return)?;
         return func.emit_cont_step(index, input.params, input.body, wrap, line_prefix, out);
     }
+    func.tc_enabled = ctx.has_tc_variant(index);
     func.run(input.body, branches_to_label)?;
+    // A flattened body is a `loop { match pc }` (possibly split over sibling part
+    // functions) that cannot reach the `__tc` slot, so such a function regenerates
+    // with plain tail calls and only gets a forwarder `_tc` entry.
+    if func.tc_enabled && func.would_flatten() {
+        func = FuncGen::new(input.params, input.results, input.body, ctx, mutated)?;
+        func.run(input.body, branches_to_label)?;
+    }
     func.finish(index, input.params, input.results, line_prefix, out)
+}
+
+/// Whether `body` has a `return_call` to the function at full index `own`.
+fn calls_itself_in_tail(body: &FunctionBody<'_>, own: u32) -> Result<bool, TranspileError> {
+    for op in body.get_operators_reader()? {
+        if matches!(op?, Operator::ReturnCall { function_index } if function_index == own) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Function indices keyed by exact `(params, results)` signature.

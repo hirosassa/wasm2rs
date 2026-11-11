@@ -194,6 +194,13 @@ pub(super) struct FuncGen<'a> {
     /// shared return-signal flag (`__returning`) and result holders (`__rv{i}`)
     /// that each enclosing try's dispatch re-issues the function return from.
     uses_ret_escape: bool,
+    /// Whether a `return_call*` parks its callee in the `__tc` trampoline slot
+    /// (set by the driver for a function with a `_tc` body) rather than calling it.
+    pub(super) tc_enabled: bool,
+    /// The function's own full index when its `return_call`s to itself loop: the
+    /// body is wrapped in a synthetic `loop` frame and a self tail call reassigns
+    /// the parameters and branches back to it, with no trampoline.
+    pub(super) self_loop: Option<u32>,
 }
 
 impl<'a> FuncGen<'a> {
@@ -280,6 +287,8 @@ impl<'a> FuncGen<'a> {
             uses_eh: false,
             try_barriers: Vec::new(),
             uses_ret_escape: false,
+            tc_enabled: false,
+            self_loop: None,
         })
     }
 
@@ -291,9 +300,17 @@ impl<'a> FuncGen<'a> {
         // A branch to the function's own label is a `return` of its results. Only
         // a function that has one is wrapped in a synthetic block frame (which the
         // body's final `end` then closes), so ordinary functions are unchanged.
+        // A self-looping function is wrapped in a `loop` frame instead (the driver
+        // never combines the two).
+        let wrap = wrap || self.self_loop.is_some();
         if wrap {
             let results = self.results.clone();
-            self.push_frame_typed(FrameKind::Block, &[], &results, None)?;
+            let kind = if self.self_loop.is_some() {
+                FrameKind::Loop
+            } else {
+                FrameKind::Block
+            };
+            self.push_frame_typed(kind, &[], &results, None)?;
         }
         for op in body.get_operators_reader()? {
             self.emit_op(op?)?;

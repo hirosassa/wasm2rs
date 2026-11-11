@@ -735,19 +735,6 @@ fn directive_location(directive: &WastDirective<'_>, src: &str, name: &str) -> S
     format!("{name}.wast:{}", line + 1)
 }
 
-/// The body of the generated `main`. A tail call is an ordinary Rust call (no
-/// constant-stack guarantee) and the `return_call*` specs recurse a million deep,
-/// so only those files run on a thread with a big stack.
-fn main_body(name: &str, body: &str) -> String {
-    if name.contains("return_call") {
-        format!(
-            "std::thread::Builder::new().stack_size(2 << 30).spawn(|| {{\n{body}\n}}).unwrap().join().unwrap();"
-        )
-    } else {
-        body.to_string()
-    }
-}
-
 /// Compile and run one group. A spec file calls only some of a module's
 /// functions, so the harness (not the generator) tolerates unused code; every
 /// other warning in the generated source is still an error.
@@ -755,7 +742,7 @@ fn run_group(name: &str, group: &Group) {
     let generated = wasm2rs::transpile(&group.wasm).expect("transpile module");
     let program = format!(
         "#![allow(dead_code, unused_mut, unused_variables)]\n{generated}\nfn main() {{\n{}\n}}\n",
-        main_body(name, &group.body)
+        group.body
     );
     let bin = common::build(name, &program);
     let run = std::process::Command::new(&bin)

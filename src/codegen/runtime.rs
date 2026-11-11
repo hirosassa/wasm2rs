@@ -27,6 +27,7 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::TrapUnreachable => "trap_unreachable",
         Rt::TrapIndirectTypeMismatch => "trap_indirect_type_mismatch",
         Rt::DelegateExc => "Wasm2RsDelegate",
+        Rt::Tc => "Tc",
     }
 }
 
@@ -37,8 +38,9 @@ pub(super) fn is_rt_name(name: &str) -> bool {
 
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
-const RT_ORDER: [Rt; 23] = [
+const RT_ORDER: [Rt; 24] = [
     Rt::DelegateExc,
+    Rt::Tc,
     Rt::TrapUnreachable,
     Rt::TrapIndirectTypeMismatch,
     Rt::F32Min,
@@ -88,6 +90,26 @@ fn rt_lines(rt: Rt) -> Vec<String> {
             "struct Wasm2RsDelegate {".to_string(),
             "    skip: u32,".to_string(),
             "    payload: Box<dyn ::std::any::Any + Send>,".to_string(),
+            "}".to_string(),
+        ],
+        Rt::Tc => vec![
+            "#[allow(dead_code)]".to_string(),
+            "pub struct Tc<S, R>(Option<Box<dyn FnOnce(&mut S, &mut Tc<S, R>) -> R>>);".to_string(),
+            "#[allow(dead_code)]".to_string(),
+            "impl<S, R> Tc<S, R> {".to_string(),
+            "    fn new() -> Self {".to_string(),
+            "        Tc(None)".to_string(),
+            "    }".to_string(),
+            "    fn set(&mut self, f: impl FnOnce(&mut S, &mut Tc<S, R>) -> R + 'static) {"
+                .to_string(),
+            "        self.0 = Some(Box::new(f));".to_string(),
+            "    }".to_string(),
+            "    fn run(&mut self, s: &mut S, mut r: R) -> R {".to_string(),
+            "        while let Some(f) = self.0.take() {".to_string(),
+            "            r = f(s, self);".to_string(),
+            "        }".to_string(),
+            "        r".to_string(),
+            "    }".to_string(),
             "}".to_string(),
         ],
         Rt::TrapUnreachable => vec![
