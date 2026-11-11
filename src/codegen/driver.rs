@@ -956,7 +956,7 @@ pub(crate) fn generate_function_into(
     // through a suspend-crossing call) is emitted as a resumable
     // `cont_step_func{N}` state machine instead of an ordinary `func{N}`.
     if ctx.cont.step_set.binary_search(&index_u32(index)?).is_ok() {
-        let wrap = branches_to_label || flag(&ctx.has_return)?;
+        let wrap = branches_to_label || flag(&ctx.has_return)? || flag(&ctx.has_tail_call)?;
         return func.emit_cont_step(index, input.params, input.body, wrap, line_prefix, out);
     }
     func.tc_enabled = ctx.has_tc_variant(index);

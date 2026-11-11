@@ -1400,3 +1400,66 @@ fn conditional_return_from_inside_a_suspending_loop() {
         "let mut inst = Instance::new(); assert_eq!(inst.func1(), 103);",
     );
 }
+
+#[test]
+fn return_call_to_non_step_function_ends_the_continuation() {
+    // `return_call $a` in a continuation body replaces the body's frame: `$a`'s
+    // result becomes the continuation's final result (30). `$a` never suspends,
+    // so it is an ordinary function, not a step function. Driver: 10 + 30 = 40.
+    compile_run(
+        "cont_return_call_non_step",
+        r#"(module
+            (elem declare func $gen)
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $a (result i32) i32.const 30)
+            (func $gen (result i32)
+              i32.const 10 suspend $yield
+              return_call $a)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        // `$a` is func0, `$gen` func1, `run` func2.
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 40);",
+    );
+}
+
+#[test]
+fn return_call_ref_to_non_step_function_ends_the_continuation() {
+    // Same as above through `return_call_ref`: the callee's result (10 + 20 = 30) is the
+    // continuation's final result.
+    compile_run(
+        "cont_return_call_ref_non_step",
+        r#"(module
+            (elem declare func $gen $a)
+            (type $at (func (param i32) (result i32)))
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $a (param i32) (result i32) local.get 0 i32.const 20 i32.add)
+            (func $gen (result i32)
+              i32.const 10 suspend $yield
+              i32.const 10 ref.func $a return_call_ref $at)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 40);",
+    );
+}

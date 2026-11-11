@@ -408,6 +408,14 @@ impl super::FuncGen<'_> {
         Ok(false)
     }
 
+    /// Branch to the synthetic function block, carrying the function's results.
+    fn branch_to_outermost(&mut self) -> Result<(), TranspileError> {
+        let outermost = index_u32(self.frames.len().saturating_sub(1))?;
+        self.emit_op(Operator::Br {
+            relative_depth: outermost,
+        })
+    }
+
     /// Emit this function as a resumable step function via the flat continuation
     /// dispatch (see the module docs and [`flatten_cont_body`]). Unlike
     /// [`Self::emit_cont_step`], the whole body is first walked into a [`Node`]
@@ -487,14 +495,33 @@ impl super::FuncGen<'_> {
                         return_payload = Some(self.encode_stack_tail(&results)?);
                     }
                 }
+                // A `return_call*` to a non-step callee replaces this body's frame,
+                // so the callee's results are the continuation's results: an
+                // ordinary call followed by a `return` (callees that suspend are
+                // rejected above). `wrap` is set for any body containing one.
+                Operator::ReturnCall { function_index } => {
+                    self.emit_op(Operator::Call { function_index })?;
+                    self.branch_to_outermost()?;
+                }
+                Operator::ReturnCallIndirect {
+                    type_index,
+                    table_index,
+                } => {
+                    self.emit_op(Operator::CallIndirect {
+                        type_index,
+                        table_index,
+                    })?;
+                    self.branch_to_outermost()?;
+                }
+                Operator::ReturnCallRef { type_index } => {
+                    self.emit_op(Operator::CallRef { type_index })?;
+                    self.branch_to_outermost()?;
+                }
                 // `return` leaves through the synthetic function block (`wrap` is
                 // always set when a body contains one): a branch to its outermost
                 // frame carrying the results.
                 Operator::Return => {
-                    let outermost = index_u32(self.frames.len().saturating_sub(1))?;
-                    self.emit_op(Operator::Br {
-                        relative_depth: outermost,
-                    })?;
+                    self.branch_to_outermost()?;
                 }
                 other @ (Operator::Try { .. }
                 | Operator::TryTable { .. }
