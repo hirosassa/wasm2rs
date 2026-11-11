@@ -941,16 +941,14 @@ pub(crate) fn generate_function_into(
     let mutated = index
         .checked_sub(ctx.imports.len())
         .and_then(|defined| ctx.mutated_locals.get(defined))
-        .ok_or_else(|| {
-            TranspileError::Unsupported(format!("function {index} has no scanned body"))
-        })?;
+        .ok_or_else(|| TranspileError::Internal(format!("function {index} has no scanned body")))?;
     let flag = |flags: &[bool]| -> Result<bool, TranspileError> {
         index
             .checked_sub(ctx.imports.len())
             .and_then(|defined| flags.get(defined))
             .copied()
             .ok_or_else(|| {
-                TranspileError::Unsupported(format!("function {index} has no scanned body"))
+                TranspileError::Internal(format!("function {index} has no scanned body"))
             })
     };
     let branches_to_label = flag(&ctx.branches_to_function_label)?;

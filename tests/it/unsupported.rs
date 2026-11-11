@@ -33,7 +33,7 @@ use wasm2rs::{TranspileError, transpile};
 /// with a message containing `needle`.
 fn assert_unsupported(wat: &str, needle: &str) {
     let wasm = wat::parse_str(wat).expect("wat should assemble to valid wasm");
-    match transpile(&wasm) {
+    match transpile(&wasm).as_ref().map_err(TranspileError::root) {
         Err(TranspileError::Unsupported(msg)) => assert!(
             msg.contains(needle),
             "wrong rejection reason: expected to contain {needle:?}, got {msg:?}",
@@ -748,4 +748,32 @@ fn invalid_wasm_is_rejected_by_validation() {
 #[test]
 fn leftover_stack_value_is_rejected_by_validation() {
     assert_invalid("(module (func i32.const 1))");
+}
+
+/// A rejection raised while transpiling a function body names the function and
+/// keeps the underlying kind reachable through `root()`.
+#[test]
+fn a_function_body_rejection_is_wrapped_with_its_index() {
+    let wasm = wat::parse_str(
+        r#"(module
+            (import "env" "f" (func))
+            (tag $e (param v128))
+            (func (export "f")
+              v128.const i32x4 0 0 0 0
+              throw $e))"#,
+    )
+    .expect("valid wat");
+    let err = transpile(&wasm).expect_err("v128 payload is rejected");
+    match &err {
+        TranspileError::InFunction { index, source } => {
+            assert_eq!(*index, 1, "{err}");
+            assert!(matches!(**source, TranspileError::Unsupported(_)), "{err}");
+        }
+        other => panic!("expected InFunction, got {other:?}"),
+    }
+    assert!(
+        err.to_string().starts_with("in function 1: unsupported: "),
+        "{err}"
+    );
+    assert!(matches!(err.root(), TranspileError::Unsupported(_)));
 }

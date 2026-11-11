@@ -55,7 +55,7 @@ impl Default for ComponentOptions {
 ///
 /// # Errors
 ///
-/// [`TranspileError::Unsupported`] when the input is a core module (use
+/// [`TranspileError::InvalidInput`] when the input is a core module (use
 /// [`transpile`](crate::transpile)), has no core module, has exports lifted from more than one
 /// module, or has several candidate modules and nothing tells them apart; plus every error of
 /// [`wit_exports`](crate::wit_exports), [`transpile_with_options`] and
@@ -107,14 +107,14 @@ fn select_module<'a>(
 ) -> Result<&'a [u8], TranspileError> {
     let index = select_index(layout, exports)?;
     layout.modules.get(index).map(Vec::as_slice).ok_or_else(|| {
-        TranspileError::Unsupported(format!("core module {index} is not in the component"))
+        TranspileError::InvalidInput(format!("core module {index} is not in the component"))
     })
 }
 
 fn select_index(layout: &Layout, exports: &[WitExport]) -> Result<usize, TranspileError> {
     if let Some(first) = exports.first() {
         if let Some(other) = exports.iter().find(|e| e.core_module != first.core_module) {
-            return Err(TranspileError::Unsupported(format!(
+            return Err(TranspileError::InvalidInput(format!(
                 "the exports come from more than one core module (`{}` and `{}`)",
                 first.core_export, other.core_export
             )));
@@ -122,7 +122,7 @@ fn select_index(layout: &Layout, exports: &[WitExport]) -> Result<usize, Transpi
         return Ok(first.core_module);
     }
     match layout.modules.len() {
-        0 => Err(TranspileError::Unsupported(
+        0 => Err(TranspileError::InvalidInput(
             "the component has no core module".into(),
         )),
         1 => Ok(0),
@@ -135,12 +135,12 @@ fn select_index(layout: &Layout, exports: &[WitExport]) -> Result<usize, Transpi
                 .collect();
             match candidates.as_slice() {
                 [only] => Ok(*only),
-                [] => Err(TranspileError::Unsupported(
+                [] => Err(TranspileError::InvalidInput(
                     "the component exports nothing and no core module is instantiated with \
                      lowered imports, so there is no program to pick among its core modules"
                         .into(),
                 )),
-                many => Err(TranspileError::Unsupported(format!(
+                many => Err(TranspileError::InvalidInput(format!(
                     "the component exports nothing and more than one core module \
                      ({many:?}, by position) is instantiated with lowered imports: \
                      it cannot tell which is the program"
@@ -188,7 +188,7 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
                 encoding: Encoding::Module,
                 ..
             } => {
-                return Err(TranspileError::Unsupported(
+                return Err(TranspileError::InvalidInput(
                     "the input is a core module, not a component: use `transpile`".into(),
                 ));
             }
@@ -200,9 +200,7 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
                     .ok()
                     .zip(usize::try_from(unchecked_range.end).ok())
                     .and_then(|(start, end)| component.get(start..end))
-                    .ok_or_else(|| {
-                        TranspileError::Unsupported("module range out of bounds".into())
-                    })?;
+                    .ok_or_else(|| TranspileError::Internal("module range out of bounds".into()))?;
                 module_space.push(Some(layout.modules.len()));
                 layout.modules.push(bytes.to_vec());
             }

@@ -39,7 +39,7 @@ pub(crate) fn live_functions(
             .iter()
             .find(|e| e.name == *name)
             .ok_or_else(|| {
-                TranspileError::Unsupported(format!(
+                TranspileError::InvalidOptions(format!(
                     "entry export `{name}` is not an exported function"
                 ))
             })?;

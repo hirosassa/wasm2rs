@@ -464,7 +464,7 @@ fn fd_write_without_memory_is_rejected() {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let err = wasm2rs::transpile(&wasm).expect_err("should reject fd_write without memory");
     assert!(
-        matches!(err, wasm2rs::TranspileError::Unsupported(_)),
+        matches!(err.root(), wasm2rs::TranspileError::Unsupported(_)),
         "expected Unsupported, got {err:?}"
     );
 }

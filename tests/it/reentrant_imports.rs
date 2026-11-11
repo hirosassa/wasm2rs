@@ -258,12 +258,12 @@ fn reentrant_imports_cannot_be_combined_with_wasi_thread_spawn() {
     )
     .expect("valid wat");
     match wasm2rs::transpile_with_options(&wasm, &options()) {
-        Err(wasm2rs::TranspileError::Unsupported(msg)) => {
+        Err(wasm2rs::TranspileError::InvalidOptions(msg)) => {
             assert!(
                 msg.contains("reentrant_imports with wasi thread-spawn"),
                 "{msg}"
             );
         }
-        other => panic!("expected Unsupported, got {other:?}"),
+        other => panic!("expected InvalidOptions, got {other:?}"),
     }
 }

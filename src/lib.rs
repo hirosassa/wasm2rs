@@ -28,12 +28,32 @@ pub use wit::{
 };
 
 /// An error that can occur while transpiling a wasm module.
+///
+/// The enum is `#[non_exhaustive]`: match the kinds you care about and keep a
+/// wildcard arm. [`TranspileError::root`] peels the per-function context
+/// ([`InFunction`](TranspileError::InFunction)) off to reach the underlying kind.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TranspileError {
     /// The wasm binary could not be parsed, or failed validation.
     Parse(wasmparser::BinaryReaderError),
     /// The module used a feature that is not supported yet.
     Unsupported(String),
+    /// The options passed to the transpiler contradict each other, or the
+    /// module (for example `entry_exports` naming a missing export).
+    InvalidOptions(String),
+    /// The input is not what the entry point expects (for example a component
+    /// where a core module is required, or a component with no usable core
+    /// module).
+    InvalidInput(String),
+    /// A transpiler invariant was violated: a bug in wasm2rs, not in the input.
+    Internal(String),
+    /// `source` happened while transpiling the function at `index` (its index
+    /// in the module's function index space, imports included).
+    InFunction {
+        index: usize,
+        source: Box<TranspileError>,
+    },
     /// The operand stack was empty when a value was required, indicating a
     /// malformed module (or a bug in the transpiler).
     StackUnderflow,
@@ -44,12 +64,34 @@ impl std::fmt::Display for TranspileError {
         match self {
             Self::Parse(e) => write!(f, "failed to parse wasm: {e}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
+            Self::InvalidOptions(what) => write!(f, "invalid options: {what}"),
+            Self::InvalidInput(what) => write!(f, "invalid input: {what}"),
+            Self::Internal(what) => write!(f, "internal error: {what}"),
+            Self::InFunction { index, source } => write!(f, "in function {index}: {source}"),
             Self::StackUnderflow => write!(f, "operand stack underflow"),
         }
     }
 }
 
-impl std::error::Error for TranspileError {}
+impl TranspileError {
+    /// The underlying error, with any [`InFunction`](Self::InFunction) context removed.
+    pub fn root(&self) -> &TranspileError {
+        match self {
+            Self::InFunction { source, .. } => source.root(),
+            other => other,
+        }
+    }
+}
+
+impl std::error::Error for TranspileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Parse(e) => Some(e),
+            Self::InFunction { source, .. } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl From<wasmparser::BinaryReaderError> for TranspileError {
     fn from(e: wasmparser::BinaryReaderError) -> Self {
@@ -61,7 +103,7 @@ impl From<std::fmt::Error> for TranspileError {
     fn from(_: std::fmt::Error) -> Self {
         // Writing into an in-memory `String` is infallible in practice; this
         // conversion exists only to satisfy `write!`'s `Result` contract.
-        Self::Unsupported("string formatting failed".into())
+        Self::Internal("string formatting failed".into())
     }
 }
 
@@ -266,7 +308,7 @@ pub fn cargo_manifest(package_name: &str) -> String {
 pub(crate) fn reject_component(encoding: wasmparser::Encoding) -> Result<(), TranspileError> {
     match encoding {
         wasmparser::Encoding::Module => Ok(()),
-        wasmparser::Encoding::Component => Err(TranspileError::Unsupported(
+        wasmparser::Encoding::Component => Err(TranspileError::InvalidInput(
             "WebAssembly components are not supported here; give wasm2rs a core module \
              (for example extract it with `wasm2rs --extract-core`), or transpile the \
              component itself with `wasm2rs --component` (library: `transpile_component`)"
@@ -312,7 +354,7 @@ pub fn transpile_with_options(
         Ok(())
     })?;
     // The single-file path always emits exactly one file.
-    code.ok_or_else(|| TranspileError::Unsupported("no source emitted".into()))
+    code.ok_or_else(|| TranspileError::Internal("no source emitted".into()))
 }
 
 /// Transpile a wasm binary into a single Rust source, returned in three
@@ -416,7 +458,7 @@ fn transpile_impl<R>(
             || ir.table.as_ref().is_some_and(|t| t.imported)
             || !ir.imported_globals.is_empty();
         if host_owned {
-            return Err(TranspileError::Unsupported(
+            return Err(TranspileError::InvalidOptions(
                 "reentrant_imports with an imported memory, table or global".into(),
             ));
         }
@@ -425,7 +467,7 @@ fn transpile_impl<R>(
             .iter()
             .any(|im| im.wasi.is_some_and(codegen::WasiFn::spawns_threads))
         {
-            return Err(TranspileError::Unsupported(
+            return Err(TranspileError::InvalidOptions(
                 "reentrant_imports with wasi thread-spawn".into(),
             ));
         }

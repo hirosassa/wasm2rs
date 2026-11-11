@@ -98,7 +98,7 @@ fn modules_without_wasi_thread_start_gain_no_wrapper() {
 fn wasi_thread_start_with_the_wrong_signature_is_rejected() {
     let wasm = wat::parse_str(r#"(module (func (export "wasi_thread_start") (param i32)))"#)
         .expect("valid wat");
-    match transpile(&wasm) {
+    match transpile(&wasm).as_ref().map_err(TranspileError::root) {
         Err(TranspileError::Unsupported(msg)) => assert!(
             msg.contains("wasi_thread_start"),
             "wrong rejection reason: {msg:?}"
