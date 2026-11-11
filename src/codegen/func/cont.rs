@@ -20,9 +20,9 @@
 //! `emit_cont_step`). A `suspend` or `switch` that crosses a region
 //! boundary instead takes the flat path (`emit_cont_step_flat`), which
 //! weaves the `pc` machine through the nested structure and keeps any operands
-//! that outlive the suspend in the frame's `ostack`. At the top level of the
+//! that outlive the transfer in the frame's `ostack`. At the top level of the
 //! arm-splitting path the operand stack must be empty at every suspend point.
-//! Anything unsupported (e.g. `try`/`try_table`, or `resume` inside a
+//! Anything unsupported (e.g. `try`/`try_table` or `resume` inside a
 //! continuation body) is rejected as `Unsupported`.
 
 use wasmparser::{FunctionBody, HeapType, Operator, ValType};
