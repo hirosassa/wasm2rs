@@ -24,10 +24,9 @@
 
 use std::fmt::Write as _;
 
-use super::{
-    Records, WitExport, WitFunc, WitType, case_idents, doc_text, flags_int, typed_signature,
-    unique_idents, unsupported,
-};
+use super::emit::{Records, case_idents, doc_text, flags_int, typed_signature, unique_idents};
+use super::read::unsupported;
+use super::{WitExport, WitFunc, WitType};
 use crate::TranspileError;
 use crate::codegen::assign_export_names;
 use crate::wit_abi::{
