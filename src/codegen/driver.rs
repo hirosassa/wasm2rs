@@ -58,6 +58,13 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) funcs: &'a [FuncInput<'a>],
     /// Per defined function (parallel to `funcs`): the locals it writes.
     pub(crate) mutated_locals: Vec<LocalFlags>,
+    /// Per defined function: whether its body is wrapped in a synthetic block
+    /// frame (it branches to its own label, or — as a continuation step — returns).
+    /// Precomputed by [`scan_bodies`] so no function re-parses its body.
+    branches_to_function_label: Vec<bool>,
+    /// Per defined function: whether its body has a `return` (only a continuation
+    /// step lowers it as a branch to the wrapping block).
+    has_return: Vec<bool>,
     /// Function indices (imports then defined, ascending) grouped by exact
     /// `(params, results)` signature: the set of functions a `call_indirect`
     /// of that signature can reach. Built once so each call site and dispatch
@@ -508,6 +515,8 @@ pub(crate) fn build_ctx<'a>(
         imports,
         funcs,
         mutated_locals: scan.mutated,
+        branches_to_function_label: scan.branches_to_function_label,
+        has_return: scan.has_return,
         funcs_by_sig,
         types,
         type_kinds,
@@ -842,14 +851,25 @@ pub(crate) fn generate_function_into(
         .ok_or_else(|| {
             TranspileError::Unsupported(format!("function {index} has no scanned body"))
         })?;
+    let flag = |flags: &[bool]| -> Result<bool, TranspileError> {
+        index
+            .checked_sub(ctx.imports.len())
+            .and_then(|defined| flags.get(defined))
+            .copied()
+            .ok_or_else(|| {
+                TranspileError::Unsupported(format!("function {index} has no scanned body"))
+            })
+    };
+    let branches_to_label = flag(&ctx.branches_to_function_label)?;
     let mut func = FuncGen::new(input.params, input.results, input.body, ctx, mutated)?;
     // A step function (a continuation body, or a function reached from one
     // through a suspend-crossing call) is emitted as a resumable
     // `cont_step_func{N}` state machine instead of an ordinary `func{N}`.
     if ctx.cont.step_set.binary_search(&index_u32(index)?).is_ok() {
-        return func.emit_cont_step(index, input.params, input.body, line_prefix, out);
+        let wrap = branches_to_label || flag(&ctx.has_return)?;
+        return func.emit_cont_step(index, input.params, input.body, wrap, line_prefix, out);
     }
-    func.run(input.body)?;
+    func.run(input.body, branches_to_label)?;
     func.finish(index, input.params, input.results, line_prefix, out)
 }
 
