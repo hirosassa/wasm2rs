@@ -1507,3 +1507,62 @@ fn relaxed_dot_products() {
          assert_eq!(func2(0), 114);",
     );
 }
+
+const SNAN_ROUND_OPS: &[(&str, &str)] = &[
+    ("f32x4.ceil", "f32x4_ceil"),
+    ("f32x4.floor", "f32x4_floor"),
+    ("f32x4.trunc", "f32x4_trunc"),
+    ("f32x4.nearest", "f32x4_nearest"),
+    ("f32x4.sqrt", "f32x4_sqrt"),
+];
+
+#[test]
+fn float_lane_rounding_quiets_signaling_nan_in_source() {
+    // Baseline x86_64 returns a signaling NaN unchanged from ceil/floor/trunc/
+    // nearest/sqrt, so the helper itself must quiet NaN lanes (as the scalar
+    // `quiet_f32` does); the test host's hardware cannot be relied on to expose it.
+    for (op, helper) in SNAN_ROUND_OPS {
+        let wat =
+            format!("(module (func (result v128) (v128.const f32x4 nan:0x200001 0 0 0) {op}))");
+        let wasm = wat::parse_str(&wat).expect("valid wat");
+        let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
+        let start = generated
+            .find(&format!("fn {helper}("))
+            .expect("helper emitted");
+        let body = &generated[start..];
+        let body = &body[..body.find("\n}\n").expect("helper end")];
+        assert!(
+            body.contains("is_nan()") && body.contains("r + r"),
+            "{helper} must quiet NaN lanes:\n{body}"
+        );
+    }
+}
+
+#[test]
+fn float_lane_rounding_signaling_nan_result_is_quiet() {
+    let ops = [
+        ("f32x4.ceil", "f32x4"),
+        ("f32x4.floor", "f32x4"),
+        ("f32x4.trunc", "f32x4"),
+        ("f32x4.nearest", "f32x4"),
+        ("f32x4.sqrt", "f32x4"),
+    ];
+    let funcs: String = ops
+        .iter()
+        .map(|(op, _)| {
+            format!(
+                "(func (result i32) (i32x4.extract_lane 0 ({op} \
+                 (v128.const f32x4 nan:0x200001 0 0 0))))\n"
+            )
+        })
+        .collect();
+    // The quiet bit (bit 22) of the f32 result must be set for every op.
+    let checks: String = (0..ops.len())
+        .map(|i| format!("assert_ne!(func{i}() as u32 & 0x0040_0000, 0, \"op {i}\");\n"))
+        .collect();
+    expect_ok(
+        "float_lane_round_snan",
+        &format!("(module\n{funcs})"),
+        &checks,
+    );
+}

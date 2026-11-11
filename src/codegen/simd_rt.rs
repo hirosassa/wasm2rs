@@ -28,6 +28,9 @@ enum Combine {
     Infix(&'static str),
     /// A method call: `x.<m>(y)` for binary lanes, `x.<m>()` for unary.
     Method(&'static str),
+    /// A float unary method whose NaN result is quieted, since baseline x86_64
+    /// returns a signaling NaN input unchanged (mirrors the scalar `quiet_f32`).
+    QuietMethod(&'static str),
     /// wasm `min`/`max`: NaN-propagating, and for equal operands (notably ±0)
     /// picks by sign. `order` is `<` for min / `>` for max; `equal` chooses the
     /// winner when `x == y`. Mirrors the scalar `f32_min`/`f32_max` helpers.
@@ -146,16 +149,16 @@ const LANE: &[Lane] = &[
     lane("f32x4_pmax", "f32", 4, Shape::Binary, Combine::Expr("if x < y { y } else { x }")),
     lane("f64x2_pmax", "f64", 8, Shape::Binary, Combine::Expr("if x < y { y } else { x }")),
     // Float unary (per-lane method).
-    lane("f32x4_sqrt", "f32", 4, Shape::Unary, Combine::Method("sqrt")),
-    lane("f64x2_sqrt", "f64", 8, Shape::Unary, Combine::Method("sqrt")),
-    lane("f32x4_ceil", "f32", 4, Shape::Unary, Combine::Method("ceil")),
-    lane("f64x2_ceil", "f64", 8, Shape::Unary, Combine::Method("ceil")),
-    lane("f32x4_floor", "f32", 4, Shape::Unary, Combine::Method("floor")),
-    lane("f64x2_floor", "f64", 8, Shape::Unary, Combine::Method("floor")),
-    lane("f32x4_trunc", "f32", 4, Shape::Unary, Combine::Method("trunc")),
-    lane("f64x2_trunc", "f64", 8, Shape::Unary, Combine::Method("trunc")),
-    lane("f32x4_nearest", "f32", 4, Shape::Unary, Combine::Method("round_ties_even")),
-    lane("f64x2_nearest", "f64", 8, Shape::Unary, Combine::Method("round_ties_even")),
+    lane("f32x4_sqrt", "f32", 4, Shape::Unary, Combine::QuietMethod("sqrt")),
+    lane("f64x2_sqrt", "f64", 8, Shape::Unary, Combine::QuietMethod("sqrt")),
+    lane("f32x4_ceil", "f32", 4, Shape::Unary, Combine::QuietMethod("ceil")),
+    lane("f64x2_ceil", "f64", 8, Shape::Unary, Combine::QuietMethod("ceil")),
+    lane("f32x4_floor", "f32", 4, Shape::Unary, Combine::QuietMethod("floor")),
+    lane("f64x2_floor", "f64", 8, Shape::Unary, Combine::QuietMethod("floor")),
+    lane("f32x4_trunc", "f32", 4, Shape::Unary, Combine::QuietMethod("trunc")),
+    lane("f64x2_trunc", "f64", 8, Shape::Unary, Combine::QuietMethod("trunc")),
+    lane("f32x4_nearest", "f32", 4, Shape::Unary, Combine::QuietMethod("round_ties_even")),
+    lane("f64x2_nearest", "f64", 8, Shape::Unary, Combine::QuietMethod("round_ties_even")),
     // Integer lane comparisons (all-ones / zero mask). `_u` reads unsigned.
     lane("i8x16_eq", "i8", 1, Shape::Binary, Combine::Compare("==")),
     lane("i8x16_ne", "i8", 1, Shape::Binary, Combine::Compare("!=")),
@@ -446,6 +449,9 @@ fn combine_expr(lane: &Lane) -> String {
             } else {
                 format!("x.{m}()")
             }
+        }
+        Combine::QuietMethod(m) => {
+            format!("{{ let r = x.{m}(); if r.is_nan() {{ r + r }} else {{ r }} }}")
         }
         Combine::MinMax { equal, order } => format!(
             "if x.is_nan() || y.is_nan() {{ {elem}::NAN }} \
