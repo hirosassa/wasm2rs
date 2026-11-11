@@ -64,6 +64,9 @@ impl<'a> super::FuncGen<'a> {
                 .full_sig(function_index as usize)
                 .ok_or_else(|| TranspileError::Unsupported("call to unknown function".into()))?;
             let args = self.pop_bound_args(params.len())?;
+            // `call_expr` spells the receiver `self`; inside the parked closure
+            // it is `__s`. `self.` only occurs as that receiver (callees are
+            // followed by `(`), so the textual rewrite is exact.
             let call = self
                 .ctx
                 .call_expr(function_index as usize, &args)
