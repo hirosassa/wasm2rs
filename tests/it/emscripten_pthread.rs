@@ -83,8 +83,8 @@ const CREATE: &str = r#"(import "env" "__pthread_create_js"
 
 fn rejection(wat: &str) -> String {
     let wasm = wat::parse_str(wat).unwrap();
-    match transpile(&wasm) {
-        Err(TranspileError::Unsupported(m)) => m,
+    match transpile(&wasm).as_ref().map_err(TranspileError::root) {
+        Err(TranspileError::Unsupported(m)) => m.clone(),
         other => panic!("expected Unsupported, got {:?}", other.map(|_| ())),
     }
 }

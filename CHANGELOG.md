@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `Cargo.toml` emitted with split output (`cargo_manifest`) no longer sets `panic = "abort"`, which made every Wasm exception and host-caught trap abort the process in release builds.
 
 ### Changed
+- **Breaking:** `TranspileError` is now `#[non_exhaustive]` and gained `InvalidOptions` (contradictory
+  options, e.g. `reentrant_imports` with an imported memory, or an unknown `entry_exports` name),
+  `InvalidInput` (a component given to `transpile`, or a component with no usable core module) and
+  `Internal` (transpiler invariants, formerly `Unsupported`), plus `InFunction { index, source }`,
+  which wraps any error raised while generating a function body. Matching `Unsupported` directly no
+  longer sees those cases: add a wildcard arm and use the new `TranspileError::root()` to look
+  through `InFunction`. `Unsupported` messages are unchanged and generated code is byte-identical.
 - `transpile` validates the input wasm first (`wasmparser::Validator::validate_all`, all features) and rejects an invalid module with `TranspileError::Parse` instead of generating wrong Rust for it. The spec harness now replays `assert_invalid` and binary `assert_malformed` as "must be rejected".
 
 ### Added
@@ -80,7 +87,7 @@ Only `wasm2rs-macros` is released as 0.3.1; `wasm2rs` stays at 0.3.0.
 - `TranspileOptions` gained the public fields `named_exports`, `named_imports`, `import_memory` and
   `reentrant_imports` (all `false` by default, so the default output is unchanged). A struct literal
   that lists every field no longer compiles: add `..Default::default()`.
-- A Component Model binary is rejected with `TranspileError::Unsupported` instead of generating
+- A Component Model binary is rejected with `TranspileError::InvalidInput` (`Unsupported` before the error classification) instead of generating
   its inner modules. Use `--extract-core` / `extract_core_modules` first.
 - `memory.grow` now fails (returns -1) past the declared maximum of a memory.
 - `--dump` rejects code-generation flags and extra arguments instead of ignoring them; `--glue` is

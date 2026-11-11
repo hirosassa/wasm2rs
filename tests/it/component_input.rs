@@ -61,8 +61,8 @@ fn the_cli_fails_on_a_component() {
 #[allow(clippy::panic, reason = "test code")]
 fn unsupported(wasm: &[u8]) -> String {
     match transpile_component(wasm, &ComponentOptions::default()) {
-        Err(TranspileError::Unsupported(why)) => why,
-        other => panic!("expected Unsupported, got {other:?}"),
+        Err(TranspileError::InvalidInput(why)) => why,
+        other => panic!("expected InvalidInput, got {other:?}"),
     }
 }
 

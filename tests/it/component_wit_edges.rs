@@ -13,7 +13,7 @@ fn transpile(text: &str) -> Result<String, TranspileError> {
 
 fn unsupported(text: &str) -> String {
     let err = transpile(text).unwrap_err();
-    assert!(matches!(err, TranspileError::Unsupported(_)), "{err:?}");
+    assert!(matches!(err, TranspileError::InvalidInput(_)), "{err:?}");
     err.to_string()
 }
 

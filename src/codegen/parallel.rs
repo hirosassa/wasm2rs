@@ -124,14 +124,20 @@ where
     let generate =
         |k: usize, out: &mut String| -> Result<GenMeta, TranspileError> {
             let index = live.get(k).copied().ok_or_else(|| {
-                TranspileError::Unsupported("function slot out of range".to_string())
+                TranspileError::Internal("function slot out of range".to_string())
             })?;
             let input = parts.funcs.get(index).ok_or_else(|| {
-                TranspileError::Unsupported(format!("function {index} has no input"))
+                TranspileError::Internal(format!("function {index} has no input"))
             })?;
             // Defined functions are named by their full function index, i.e.
             // after the imported functions in the shared index space.
-            generate_function_into(base + index, input, ctx, line_prefix, out)
+            let func_index = base + index;
+            generate_function_into(func_index, input, ctx, line_prefix, out).map_err(|e| {
+                TranspileError::InFunction {
+                    index: func_index,
+                    source: Box::new(e),
+                }
+            })
         };
 
     let jobs = resolve_jobs(parts.jobs, live.len());

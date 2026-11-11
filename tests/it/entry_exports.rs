@@ -362,3 +362,13 @@ fn the_cli_ignores_empty_names_in_the_list() {
         gen_with("--entry-exports=a")
     );
 }
+
+#[test]
+fn an_unknown_entry_export_is_invalid_options() {
+    let wasm = wat::parse_str(r#"(module (func (export "a")))"#).expect("valid wat");
+    let err = transpile_with_options(&wasm, &opts(&["missing"])).expect_err("rejected");
+    assert!(
+        matches!(&err, wasm2rs::TranspileError::InvalidOptions(m) if m.contains("`missing`")),
+        "{err:?}"
+    );
+}
