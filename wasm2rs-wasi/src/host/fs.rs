@@ -280,13 +280,19 @@ impl From<std::fs::Metadata> for Stat {
 
 impl From<cap_std::fs::Metadata> for Stat {
     fn from(meta: cap_std::fs::Metadata) -> Self {
+        // cap-std's Windows `dev`/`ino`/`nlink` panic unless the metadata came from an open
+        // handle, so non-Unix hosts report no identity, like the `std` conversion above.
+        #[cfg(unix)]
+        let (link_count, id) = { (meta.nlink(), (meta.dev(), meta.ino())) };
+        #[cfg(not(unix))]
+        let (link_count, id) = (1u64, (0u64, 0u64));
         Stat {
             kind: descriptor_type(&meta.file_type()),
             size: meta.len(),
-            link_count: meta.nlink(),
+            link_count,
             accessed: datetime(meta.accessed().map(cap_std::time::SystemTime::into_std)),
             modified: datetime(meta.modified().map(cap_std::time::SystemTime::into_std)),
-            id: (meta.dev(), meta.ino()),
+            id,
         }
     }
 }

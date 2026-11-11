@@ -79,7 +79,9 @@ use crate::wasi_sockets_network::*;
 use crate::wasi_sockets_tcp::*;
 use crate::wasi_sockets_udp::*;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Dir, MetadataExt as _};
+use cap_std::fs::Dir;
+#[cfg(unix)]
+use cap_std::fs::MetadataExt as _;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::net::{
