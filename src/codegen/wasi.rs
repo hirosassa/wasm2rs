@@ -424,7 +424,8 @@ impl WasiFn {
         )
     }
 
-    /// Whether this method calls `wasi_confine` (every `contain_path` user).
+    /// Whether this method calls `wasi_confine` (every `contain_path` user, plus
+    /// `fd_readdir`, which re-resolves a stored directory path).
     pub(super) fn confines_path(self) -> bool {
         matches!(
             self,
@@ -438,6 +439,7 @@ impl WasiFn {
                 | WasiFn::PathLink
                 | WasiFn::PathFilestatSetTimes
                 | WasiFn::PathReadlink
+                | WasiFn::FdReaddir
         )
     }
 
@@ -749,43 +751,43 @@ impl WasiFn {
                 ]);
                 body.extend(contain_path("full", "a2", "a3", true));
                 body.extend(owned(&[
-                "    let creat = a4 & 0x1 != 0;",
-                "    let excl = a4 & 0x4 != 0;",
-                "    let trunc = a4 & 0x8 != 0;",
-                "    let want_write = (a5 as u64) & (1 << 6) != 0;",
-                "    let mut opts = std::fs::OpenOptions::new();",
-                "    opts.read(true);",
-                "    if want_write || creat || trunc {",
-                "        opts.write(true);",
-                "    }",
-                "    if creat {",
-                "        opts.create(true);",
-                "    }",
-                "    if excl {",
-                "        opts.create_new(true);",
-                "    }",
-                "    if trunc {",
-                "        opts.truncate(true);",
-                "    }",
-                "    let file = match opts.open(&full) {",
-                "        Ok(f) => f,",
-                "        Err(e) => return match e.kind() {",
-                "            std::io::ErrorKind::NotFound => 44,",
-                "            std::io::ErrorKind::PermissionDenied => 2,",
-                "            std::io::ErrorKind::AlreadyExists => 20,",
-                "            _ => 29,",
-                "        },",
-                "    };",
-                "    let idx = match self.wasi_fds.iter().position(|s| s.is_none()) {",
-                "        Some(i) => { self.wasi_fds[i] = Some((file, full)); i }",
-                "        None => { self.wasi_fds.push(Some((file, full))); self.wasi_fds.len() - 1 }",
-                "    };",
-                "    let fd = idx as u32 + 4;",
-                "    let w = a8 as u32 as usize;",
-                "    self.mem_mut()[w..w + 4].copy_from_slice(&fd.to_le_bytes());",
-                "    0",
-                "}",
-            ]));
+                    "    let creat = a4 & 0x1 != 0;",
+                    "    let excl = a4 & 0x4 != 0;",
+                    "    let trunc = a4 & 0x8 != 0;",
+                    "    let want_write = (a5 as u64) & (1 << 6) != 0;",
+                    "    let mut opts = std::fs::OpenOptions::new();",
+                    "    opts.read(true);",
+                    "    if want_write || creat || trunc {",
+                    "        opts.write(true);",
+                    "    }",
+                    "    if creat {",
+                    "        opts.create(true);",
+                    "    }",
+                    "    if excl {",
+                    "        opts.create_new(true);",
+                    "    }",
+                    "    if trunc {",
+                    "        opts.truncate(true);",
+                    "    }",
+                    "    let file = match opts.open(&full) {",
+                    "        Ok(f) => f,",
+                    "        Err(e) => return match e.kind() {",
+                    "            std::io::ErrorKind::NotFound => 44,",
+                    "            std::io::ErrorKind::PermissionDenied => 2,",
+                    "            std::io::ErrorKind::AlreadyExists => 20,",
+                    "            _ => 29,",
+                    "        },",
+                    "    };",
+                    "    let idx = match self.wasi_fds.iter().position(|s| s.is_none()) {",
+                    "        Some(i) => { self.wasi_fds[i] = Some((file, full)); i }",
+                    "        None => { self.wasi_fds.push(Some((file, full))); self.wasi_fds.len() - 1 }",
+                    "    };",
+                    "    let fd = idx as u32 + 4;",
+                    "    let w = a8 as u32 as usize;",
+                    "    self.mem_mut()[w..w + 4].copy_from_slice(&fd.to_le_bytes());",
+                    "    0",
+                    "}",
+                ]));
                 body
             }
             // `fd_filestat_get(fd, buf)` writes a 64-byte `filestat`. Only the
@@ -1288,8 +1290,8 @@ impl WasiFn {
             // `path_filestat_get(dirfd, flags, path, path_len, buf)` stats a path
             // within the preopen (fd 3) *without opening it*, writing a 64-byte
             // `filestat` (filetype @16, nlink=1 @24, size @32). Path containment
-            // is lexical, as in `path_open`: absolute paths and ".." escapes are
-            // refused with ENOTCAPABLE (76). `flags` (symlink follow) is ignored;
+            // is as in `path_open`: absolute paths, ".." escapes, and symlink
+            // escapes are refused with ENOTCAPABLE (76). `flags` (symlink follow) is ignored;
             // `std::fs::metadata` follows symlinks.
             WasiFn::PathFilestatGet => {
                 let mut body = owned(&[
@@ -1300,30 +1302,31 @@ impl WasiFn {
                 ]);
                 body.extend(contain_path("rel", "a2", "a3", true));
                 body.extend(owned(&[
-                "    let meta = match std::fs::metadata(&rel) {",
-                "        Ok(m) => m,",
-                "        Err(e) => return match e.kind() {",
-                "            std::io::ErrorKind::NotFound => 44,",
-                "            std::io::ErrorKind::PermissionDenied => 2,",
-                "            _ => 29,",
-                "        },",
-                "    };",
-                "    let filetype = if meta.is_dir() { 3u8 } else if meta.is_file() { 4u8 } else { 0u8 };",
-                "    let mut st = [0u8; 64];",
-                "    st[16] = filetype;",
-                "    st[24..32].copy_from_slice(&1u64.to_le_bytes());",
-                "    st[32..40].copy_from_slice(&meta.len().to_le_bytes());",
-                "    let b = a4 as u32 as usize;",
-                "    self.mem_mut()[b..b + 64].copy_from_slice(&st);",
-                "    0",
-                "}",
-            ]));
+                    "    let meta = match std::fs::metadata(&rel) {",
+                    "        Ok(m) => m,",
+                    "        Err(e) => return match e.kind() {",
+                    "            std::io::ErrorKind::NotFound => 44,",
+                    "            std::io::ErrorKind::PermissionDenied => 2,",
+                    "            _ => 29,",
+                    "        },",
+                    "    };",
+                    "    let filetype = if meta.is_dir() { 3u8 } else if meta.is_file() { 4u8 } else { 0u8 };",
+                    "    let mut st = [0u8; 64];",
+                    "    st[16] = filetype;",
+                    "    st[24..32].copy_from_slice(&1u64.to_le_bytes());",
+                    "    st[32..40].copy_from_slice(&meta.len().to_le_bytes());",
+                    "    let b = a4 as u32 as usize;",
+                    "    self.mem_mut()[b..b + 64].copy_from_slice(&st);",
+                    "    0",
+                    "}",
+                ]));
                 body
             }
             // `path_create_directory(fd, path)`, `path_remove_directory(fd,
             // path)`, and `path_unlink_file(fd, path)` mutate a single path
-            // within the preopen (fd 3). Path containment is lexical, as in
-            // `path_open` (absolute paths and ".." escapes are ENOTCAPABLE, 76).
+            // within the preopen (fd 3). Path containment is as in `path_open`
+            // (absolute paths, ".." escapes, and symlink escapes are
+            // ENOTCAPABLE, 76).
             WasiFn::PathCreateDirectory => {
                 path_mutate_lines("wasi_path_create_directory", "std::fs::create_dir")
             }
@@ -1414,6 +1417,9 @@ impl WasiFn {
                 "            None => return 8,",
                 "        }",
                 "    };",
+                "    if !self.wasi_confine(&dir, true) {",
+                "        return 76;",
+                "    }",
                 "    let mut entries: Vec<(u64, Vec<u8>, u8)> = vec![(0, b\".\".to_vec(), 3u8), (0, b\"..\".to_vec(), 3u8)];",
                 "    let rd = match std::fs::read_dir(&dir) {",
                 "        Ok(rd) => rd,",
@@ -1476,8 +1482,10 @@ impl WasiFn {
 /// preopen root. With `follow`, the final component is resolved too (a dangling
 /// symlink there is refused, since `O_CREAT` would create its target); without
 /// it only the parent is, matching calls that act on the link itself. This is
-/// check-then-use, so a concurrent host process swapping a path component can
-/// still race it; the guest alone cannot.
+/// check-then-use, so a concurrent host process, or a sibling guest thread
+/// (wasi-threads share the filesystem), swapping a path component between the
+/// check and the use can still race it; closing that needs `openat` with
+/// `RESOLVE_BENEATH`, which `std` does not expose.
 pub(super) fn confine_lines() -> Vec<String> {
     [
         "fn wasi_confine(&self, full: &std::path::Path, follow: bool) -> bool {",
@@ -1505,7 +1513,7 @@ pub(super) fn confine_lines() -> Vec<String> {
 
 /// The body of a single-path WASI mutator (`path_create_directory`,
 /// `path_remove_directory`, `path_unlink_file`): refuse a dirfd other than the
-/// preopen (fd 3), lexically contain the path, then apply `op` to it.
+/// preopen (fd 3), contain the path (`contain_path`), then apply `op` to it.
 fn path_mutate_lines(method: &str, op: &str) -> Vec<String> {
     let mut body = vec![
         format!("fn {method}(&mut self, a0: i32, a1: i32, a2: i32) -> i32 {{"),
@@ -1521,8 +1529,10 @@ fn path_mutate_lines(method: &str, op: &str) -> Vec<String> {
 
 /// Emit the lines that read a UTF-8 path from linear memory at (`ptr_arg`,
 /// `len_arg`), lexically contain it, and bind the result — resolved against the
-/// instance's preopen root — to a local named `out`. An absolute path or a `..`
-/// escape returns ENOTCAPABLE (76); invalid UTF-8 returns EINVAL (28). The
+/// instance's preopen root — to a local named `out`. An absolute path, a `..`
+/// escape, or a symlink resolving outside the preopen (`wasi_confine`, with
+/// `follow` deciding whether the final component is resolved) returns
+/// ENOTCAPABLE (76); invalid UTF-8 returns EINVAL (28). The
 /// scratch locals are derived from `out`, so two calls in one body (e.g.
 /// `path_rename`) do not collide.
 fn contain_path(out: &str, ptr_arg: &str, len_arg: &str, follow: bool) -> Vec<String> {

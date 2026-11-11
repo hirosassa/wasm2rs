@@ -1428,3 +1428,43 @@ fn main() {
     assert!(!outside.join("new2").exists(), "nothing created outside");
     assert!(std::fs::symlink_metadata(dir.join("abs")).is_err());
 }
+
+// A directory fd keeps only its path, so swapping that path for a symlink after
+// the open must not let fd_readdir list outside the preopen: open "d", remove
+// it, put `d -> ..` in its place, then readdir the still-open fd (ENOTCAPABLE).
+#[test]
+fn fd_readdir_on_a_swapped_directory_fd_cannot_escape() {
+    let wat = fs_module(
+        r#"(import "wasi_snapshot_preview1" "path_create_directory"
+             (func $mk (param i32 i32 i32) (result i32)))
+           (import "wasi_snapshot_preview1" "path_remove_directory"
+             (func $rm (param i32 i32 i32) (result i32)))
+           (import "wasi_snapshot_preview1" "path_symlink"
+             (func $sl (param i32 i32 i32 i32 i32) (result i32)))
+           (import "wasi_snapshot_preview1" "fd_readdir"
+             (func $rd (param i32 i32 i32 i64 i32) (result i32)))
+           (data (i32.const 200) "d")
+           (data (i32.const 210) "..")"#,
+        r#"(func (export "setup") (result i32)
+             (drop (call $mk (i32.const 3) (i32.const 200) (i32.const 1)))
+             (call $po (i32.const 3) (i32.const 0) (i32.const 200) (i32.const 1)
+                       (i32.const 0) (i64.const 2) (i64.const 0) (i32.const 0) (i32.const 400)))
+           (func (export "swap") (result i32)
+             (drop (call $rm (i32.const 3) (i32.const 200) (i32.const 1)))
+             (call $sl (i32.const 210) (i32.const 2) (i32.const 3) (i32.const 200) (i32.const 1)))
+           (func (export "list") (result i32)
+             (call $rd (i32.const 4) (i32.const 500) (i32.const 256) (i64.const 0) (i32.const 404)))"#,
+    );
+    let extra = r#"
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!(i.func5(), 0);
+    assert_eq!(i.func6(), 0);
+    assert_eq!(i.func7(), 76, "readdir through a swapped-in symlink must be ENOTCAPABLE");
+}
+"#;
+    exec("readdir_swap", &wat, extra, |d| {
+        let _ = std::fs::remove_dir(d.join("d"));
+        let _ = std::fs::remove_file(d.join("d"));
+    });
+}
