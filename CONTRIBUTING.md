@@ -71,7 +71,7 @@ cargo test --release --test it <name>
   `expect`, `panic!`, unchecked indexing and lossy `as` casts; propagate errors
   with `Result` instead.
 - **No `unsafe` in the transpiler.** `unsafe_code` is denied. (Generated code may use
-  `unsafe` only in the opt-in `--unsafe-memory` mode.)
+  `unsafe` only in the opt-in `--unsafe-memory` and `--simd-intrinsics` modes.)
 - **Suppressions** need a reason: prefer `#[expect(..., reason = "...")]` at the
   narrowest scope. Test code may use a scoped `#[allow(..., reason = "test code")]`.
 - Keep generated-code changes deliberate: output size and compile time of the
