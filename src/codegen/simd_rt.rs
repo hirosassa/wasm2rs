@@ -374,6 +374,29 @@ const REDUCE: &[Reduce] = &[
     reduce("i64x2_bitmask",  "i64", 8, ReduceKind::Bitmask),
 ];
 
+/// Helpers that are fixed functions rather than table entries (see the end of
+/// [`render_simd_helpers`]).
+const FIXED: &[&str] = &[
+    "i8x16_swizzle",
+    "i8x16_shuffle",
+    "f32x4_relaxed_madd",
+    "f32x4_relaxed_nmadd",
+    "f64x2_relaxed_madd",
+    "f64x2_relaxed_nmadd",
+    "i16x8_relaxed_dot_i8x16_i7x16_s",
+    "i32x4_relaxed_dot_i8x16_i7x16_add_s",
+];
+
+/// Whether `name` is a helper [`render_simd_helpers`] can emit. Operator
+/// classification refers to helpers by name, so this catches a misspelling that
+/// would otherwise emit a call to a function that is never defined.
+pub(super) fn is_helper(name: &str) -> bool {
+    LANE.iter().any(|l| l.name == name)
+        || WIDE.iter().any(|w| w.name == name)
+        || REDUCE.iter().any(|r| r.name == name)
+        || FIXED.contains(&name)
+}
+
 /// Render the used lane helpers as module-scope free functions, in [`LANE`],
 /// [`WIDE`], then [`REDUCE`] order, separated by blank lines. Empty string if
 /// none are used.

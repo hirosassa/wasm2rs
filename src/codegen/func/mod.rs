@@ -9,6 +9,7 @@ use super::{
 use crate::TranspileError;
 
 mod calls;
+mod classify;
 mod cont;
 mod control;
 mod gc;
@@ -514,197 +515,8 @@ impl<'a> FuncGen<'a> {
             Operator::I64Store8 { memarg } => self.store(Helper::Store8I64, memarg)?,
             Operator::I64Store16 { memarg } => self.store(Helper::Store16I64, memarg)?,
             Operator::I64Store32 { memarg } => self.store(Helper::Store32I64, memarg)?,
-            // Threads/atomics proposal. When the instance owns its memory
-            // exclusively (`&mut self`), an atomic access lowers to the same code
-            // as the plain one — atomic loads/stores reuse the ordinary load/store
-            // helpers (narrow atomic loads are always zero-extending). On a shared
-            // memory they are real, alignment-checked atomics.
-            Operator::I32AtomicLoad { memarg } => {
-                self.atomic_load(Helper::LoadI32, ValType::I32, memarg)?
-            }
-            Operator::I32AtomicLoad8U { memarg } => {
-                self.atomic_load(Helper::Load8U, ValType::I32, memarg)?
-            }
-            Operator::I32AtomicLoad16U { memarg } => {
-                self.atomic_load(Helper::Load16U, ValType::I32, memarg)?
-            }
-            Operator::I64AtomicLoad { memarg } => {
-                self.atomic_load(Helper::LoadI64, ValType::I64, memarg)?
-            }
-            Operator::I64AtomicLoad8U { memarg } => {
-                self.atomic_load(Helper::Load8UI64, ValType::I64, memarg)?
-            }
-            Operator::I64AtomicLoad16U { memarg } => {
-                self.atomic_load(Helper::Load16UI64, ValType::I64, memarg)?
-            }
-            Operator::I64AtomicLoad32U { memarg } => {
-                self.atomic_load(Helper::Load32UI64, ValType::I64, memarg)?
-            }
-            Operator::I32AtomicStore { memarg } => self.atomic_store(Helper::StoreI32, memarg)?,
-            Operator::I32AtomicStore8 { memarg } => self.atomic_store(Helper::Store8, memarg)?,
-            Operator::I32AtomicStore16 { memarg } => self.atomic_store(Helper::Store16, memarg)?,
-            Operator::I64AtomicStore { memarg } => self.atomic_store(Helper::StoreI64, memarg)?,
-            Operator::I64AtomicStore8 { memarg } => self.atomic_store(Helper::Store8I64, memarg)?,
-            Operator::I64AtomicStore16 { memarg } => {
-                self.atomic_store(Helper::Store16I64, memarg)?
-            }
-            Operator::I64AtomicStore32 { memarg } => {
-                self.atomic_store(Helper::Store32I64, memarg)?
-            }
-            // Atomic read-modify-write. Each pops (addr, operand), combines the
-            // old value with the operand, stores the result, and pushes the old
-            // value. The `AtomicWidth` fixes the (load, store, type) triple;
-            // narrow variants zero-extend on load and truncate on store.
-            Operator::I32AtomicRmwAdd { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32, RmwOp::Add, memarg)?
-            }
-            Operator::I32AtomicRmwSub { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32, RmwOp::Sub, memarg)?
-            }
-            Operator::I32AtomicRmwAnd { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32, RmwOp::And, memarg)?
-            }
-            Operator::I32AtomicRmwOr { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32, RmwOp::Or, memarg)?
-            }
-            Operator::I32AtomicRmwXor { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32, RmwOp::Xor, memarg)?
-            }
-            Operator::I32AtomicRmwXchg { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32, RmwOp::Xchg, memarg)?
-            }
-            Operator::I32AtomicRmw8AddU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32As8, RmwOp::Add, memarg)?
-            }
-            Operator::I32AtomicRmw8SubU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32As8, RmwOp::Sub, memarg)?
-            }
-            Operator::I32AtomicRmw8AndU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32As8, RmwOp::And, memarg)?
-            }
-            Operator::I32AtomicRmw8OrU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32As8, RmwOp::Or, memarg)?
-            }
-            Operator::I32AtomicRmw8XorU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32As8, RmwOp::Xor, memarg)?
-            }
-            Operator::I32AtomicRmw8XchgU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32As8, RmwOp::Xchg, memarg)?
-            }
-            Operator::I32AtomicRmw16AddU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32As16, RmwOp::Add, memarg)?
-            }
-            Operator::I32AtomicRmw16SubU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32As16, RmwOp::Sub, memarg)?
-            }
-            Operator::I32AtomicRmw16AndU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32As16, RmwOp::And, memarg)?
-            }
-            Operator::I32AtomicRmw16OrU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32As16, RmwOp::Or, memarg)?
-            }
-            Operator::I32AtomicRmw16XorU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32As16, RmwOp::Xor, memarg)?
-            }
-            Operator::I32AtomicRmw16XchgU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I32As16, RmwOp::Xchg, memarg)?
-            }
-            Operator::I64AtomicRmwAdd { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64, RmwOp::Add, memarg)?
-            }
-            Operator::I64AtomicRmwSub { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64, RmwOp::Sub, memarg)?
-            }
-            Operator::I64AtomicRmwAnd { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64, RmwOp::And, memarg)?
-            }
-            Operator::I64AtomicRmwOr { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64, RmwOp::Or, memarg)?
-            }
-            Operator::I64AtomicRmwXor { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64, RmwOp::Xor, memarg)?
-            }
-            Operator::I64AtomicRmwXchg { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64, RmwOp::Xchg, memarg)?
-            }
-            Operator::I64AtomicRmw8AddU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As8, RmwOp::Add, memarg)?
-            }
-            Operator::I64AtomicRmw8SubU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As8, RmwOp::Sub, memarg)?
-            }
-            Operator::I64AtomicRmw8AndU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As8, RmwOp::And, memarg)?
-            }
-            Operator::I64AtomicRmw8OrU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As8, RmwOp::Or, memarg)?
-            }
-            Operator::I64AtomicRmw8XorU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As8, RmwOp::Xor, memarg)?
-            }
-            Operator::I64AtomicRmw8XchgU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As8, RmwOp::Xchg, memarg)?
-            }
-            Operator::I64AtomicRmw16AddU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As16, RmwOp::Add, memarg)?
-            }
-            Operator::I64AtomicRmw16SubU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As16, RmwOp::Sub, memarg)?
-            }
-            Operator::I64AtomicRmw16AndU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As16, RmwOp::And, memarg)?
-            }
-            Operator::I64AtomicRmw16OrU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As16, RmwOp::Or, memarg)?
-            }
-            Operator::I64AtomicRmw16XorU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As16, RmwOp::Xor, memarg)?
-            }
-            Operator::I64AtomicRmw16XchgU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As16, RmwOp::Xchg, memarg)?
-            }
-            Operator::I64AtomicRmw32AddU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As32, RmwOp::Add, memarg)?
-            }
-            Operator::I64AtomicRmw32SubU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As32, RmwOp::Sub, memarg)?
-            }
-            Operator::I64AtomicRmw32AndU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As32, RmwOp::And, memarg)?
-            }
-            Operator::I64AtomicRmw32OrU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As32, RmwOp::Or, memarg)?
-            }
-            Operator::I64AtomicRmw32XorU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As32, RmwOp::Xor, memarg)?
-            }
-            Operator::I64AtomicRmw32XchgU { memarg } => {
-                self.atomic_rmw(AtomicWidth::I64As32, RmwOp::Xchg, memarg)?
-            }
-            // Atomic compare-exchange. The `AtomicWidth` also carries the narrow
-            // mask, so a narrow variant compares the operand at the access width.
-            Operator::I32AtomicRmwCmpxchg { memarg } => {
-                self.atomic_cmpxchg(AtomicWidth::I32, memarg)?
-            }
-            Operator::I32AtomicRmw8CmpxchgU { memarg } => {
-                self.atomic_cmpxchg(AtomicWidth::I32As8, memarg)?
-            }
-            Operator::I32AtomicRmw16CmpxchgU { memarg } => {
-                self.atomic_cmpxchg(AtomicWidth::I32As16, memarg)?
-            }
-            Operator::I64AtomicRmwCmpxchg { memarg } => {
-                self.atomic_cmpxchg(AtomicWidth::I64, memarg)?
-            }
-            Operator::I64AtomicRmw8CmpxchgU { memarg } => {
-                self.atomic_cmpxchg(AtomicWidth::I64As8, memarg)?
-            }
-            Operator::I64AtomicRmw16CmpxchgU { memarg } => {
-                self.atomic_cmpxchg(AtomicWidth::I64As16, memarg)?
-            }
-            Operator::I64AtomicRmw32CmpxchgU { memarg } => {
-                self.atomic_cmpxchg(AtomicWidth::I64As32, memarg)?
-            }
-            // Fence and wait/notify. On a single instance a fence is a no-op,
+            // Threads/atomics proposal (loads, stores, rmw and cmpxchg are in
+            // `emit_classified`). Fence and wait/notify. On a single instance a fence is a no-op,
             // `notify` wakes nobody and `wait` traps (would block) or returns 1;
             // on a shared memory they are a real fence and park/wake threads.
             Operator::AtomicFence { .. } => self.atomic_fence()?,
@@ -938,21 +750,6 @@ impl<'a> FuncGen<'a> {
             Operator::V128AnyTrue => self.v128_any_true()?,
             // Lane-wise integer arithmetic (wrapping), one helper per lane
             // type; see `simd_rt.rs`. There is no `i8x16.mul` in the spec.
-            Operator::I8x16Add => self.call_simd_binop("i8x16_add")?,
-            Operator::I16x8Add => self.call_simd_binop("i16x8_add")?,
-            Operator::I32x4Add => self.call_simd_binop("i32x4_add")?,
-            Operator::I64x2Add => self.call_simd_binop("i64x2_add")?,
-            Operator::I8x16Sub => self.call_simd_binop("i8x16_sub")?,
-            Operator::I16x8Sub => self.call_simd_binop("i16x8_sub")?,
-            Operator::I32x4Sub => self.call_simd_binop("i32x4_sub")?,
-            Operator::I64x2Sub => self.call_simd_binop("i64x2_sub")?,
-            Operator::I16x8Mul => self.call_simd_binop("i16x8_mul")?,
-            Operator::I32x4Mul => self.call_simd_binop("i32x4_mul")?,
-            Operator::I64x2Mul => self.call_simd_binop("i64x2_mul")?,
-            Operator::I8x16Neg => self.call_simd_unop("i8x16_neg")?,
-            Operator::I16x8Neg => self.call_simd_unop("i16x8_neg")?,
-            Operator::I32x4Neg => self.call_simd_unop("i32x4_neg")?,
-            Operator::I64x2Neg => self.call_simd_unop("i64x2_neg")?,
             // Float lane arithmetic (round 3). neg/abs are whole-register
             // sign-bit rewrites (see the helpers); the rest are per-lane helpers
             // (see `simd_rt.rs`).
@@ -960,190 +757,7 @@ impl<'a> FuncGen<'a> {
             Operator::F64x2Neg => self.f64x2_neg()?,
             Operator::F32x4Abs => self.f32x4_abs()?,
             Operator::F64x2Abs => self.f64x2_abs()?,
-            Operator::F32x4Add => self.call_simd_binop("f32x4_add")?,
-            Operator::F64x2Add => self.call_simd_binop("f64x2_add")?,
-            Operator::F32x4Sub => self.call_simd_binop("f32x4_sub")?,
-            Operator::F64x2Sub => self.call_simd_binop("f64x2_sub")?,
-            Operator::F32x4Mul => self.call_simd_binop("f32x4_mul")?,
-            Operator::F64x2Mul => self.call_simd_binop("f64x2_mul")?,
-            Operator::F32x4Div => self.call_simd_binop("f32x4_div")?,
-            Operator::F64x2Div => self.call_simd_binop("f64x2_div")?,
-            Operator::F32x4Min => self.call_simd_binop("f32x4_min")?,
-            Operator::F64x2Min => self.call_simd_binop("f64x2_min")?,
-            Operator::F32x4Max => self.call_simd_binop("f32x4_max")?,
-            Operator::F64x2Max => self.call_simd_binop("f64x2_max")?,
-            Operator::F32x4PMin => self.call_simd_binop("f32x4_pmin")?,
-            Operator::F64x2PMin => self.call_simd_binop("f64x2_pmin")?,
-            Operator::F32x4PMax => self.call_simd_binop("f32x4_pmax")?,
-            Operator::F64x2PMax => self.call_simd_binop("f64x2_pmax")?,
-            Operator::F32x4Sqrt => self.call_simd_unop("f32x4_sqrt")?,
-            Operator::F64x2Sqrt => self.call_simd_unop("f64x2_sqrt")?,
-            Operator::F32x4Ceil => self.call_simd_unop("f32x4_ceil")?,
-            Operator::F64x2Ceil => self.call_simd_unop("f64x2_ceil")?,
-            Operator::F32x4Floor => self.call_simd_unop("f32x4_floor")?,
-            Operator::F64x2Floor => self.call_simd_unop("f64x2_floor")?,
-            Operator::F32x4Trunc => self.call_simd_unop("f32x4_trunc")?,
-            Operator::F64x2Trunc => self.call_simd_unop("f64x2_trunc")?,
-            Operator::F32x4Nearest => self.call_simd_unop("f32x4_nearest")?,
-            Operator::F64x2Nearest => self.call_simd_unop("f64x2_nearest")?,
-            // Lane comparisons (round 4): each yields an all-ones/zero lane mask
-            // (see `simd_rt.rs`). i64x2 has only signed integer forms.
-            Operator::I8x16Eq => self.call_simd_binop("i8x16_eq")?,
-            Operator::I8x16Ne => self.call_simd_binop("i8x16_ne")?,
-            Operator::I8x16LtS => self.call_simd_binop("i8x16_lt_s")?,
-            Operator::I8x16LtU => self.call_simd_binop("i8x16_lt_u")?,
-            Operator::I8x16GtS => self.call_simd_binop("i8x16_gt_s")?,
-            Operator::I8x16GtU => self.call_simd_binop("i8x16_gt_u")?,
-            Operator::I8x16LeS => self.call_simd_binop("i8x16_le_s")?,
-            Operator::I8x16LeU => self.call_simd_binop("i8x16_le_u")?,
-            Operator::I8x16GeS => self.call_simd_binop("i8x16_ge_s")?,
-            Operator::I8x16GeU => self.call_simd_binop("i8x16_ge_u")?,
-            Operator::I16x8Eq => self.call_simd_binop("i16x8_eq")?,
-            Operator::I16x8Ne => self.call_simd_binop("i16x8_ne")?,
-            Operator::I16x8LtS => self.call_simd_binop("i16x8_lt_s")?,
-            Operator::I16x8LtU => self.call_simd_binop("i16x8_lt_u")?,
-            Operator::I16x8GtS => self.call_simd_binop("i16x8_gt_s")?,
-            Operator::I16x8GtU => self.call_simd_binop("i16x8_gt_u")?,
-            Operator::I16x8LeS => self.call_simd_binop("i16x8_le_s")?,
-            Operator::I16x8LeU => self.call_simd_binop("i16x8_le_u")?,
-            Operator::I16x8GeS => self.call_simd_binop("i16x8_ge_s")?,
-            Operator::I16x8GeU => self.call_simd_binop("i16x8_ge_u")?,
-            Operator::I32x4Eq => self.call_simd_binop("i32x4_eq")?,
-            Operator::I32x4Ne => self.call_simd_binop("i32x4_ne")?,
-            Operator::I32x4LtS => self.call_simd_binop("i32x4_lt_s")?,
-            Operator::I32x4LtU => self.call_simd_binop("i32x4_lt_u")?,
-            Operator::I32x4GtS => self.call_simd_binop("i32x4_gt_s")?,
-            Operator::I32x4GtU => self.call_simd_binop("i32x4_gt_u")?,
-            Operator::I32x4LeS => self.call_simd_binop("i32x4_le_s")?,
-            Operator::I32x4LeU => self.call_simd_binop("i32x4_le_u")?,
-            Operator::I32x4GeS => self.call_simd_binop("i32x4_ge_s")?,
-            Operator::I32x4GeU => self.call_simd_binop("i32x4_ge_u")?,
-            Operator::I64x2Eq => self.call_simd_binop("i64x2_eq")?,
-            Operator::I64x2Ne => self.call_simd_binop("i64x2_ne")?,
-            Operator::I64x2LtS => self.call_simd_binop("i64x2_lt_s")?,
-            Operator::I64x2GtS => self.call_simd_binop("i64x2_gt_s")?,
-            Operator::I64x2LeS => self.call_simd_binop("i64x2_le_s")?,
-            Operator::I64x2GeS => self.call_simd_binop("i64x2_ge_s")?,
-            Operator::F32x4Eq => self.call_simd_binop("f32x4_eq")?,
-            Operator::F32x4Ne => self.call_simd_binop("f32x4_ne")?,
-            Operator::F32x4Lt => self.call_simd_binop("f32x4_lt")?,
-            Operator::F32x4Gt => self.call_simd_binop("f32x4_gt")?,
-            Operator::F32x4Le => self.call_simd_binop("f32x4_le")?,
-            Operator::F32x4Ge => self.call_simd_binop("f32x4_ge")?,
-            Operator::F64x2Eq => self.call_simd_binop("f64x2_eq")?,
-            Operator::F64x2Ne => self.call_simd_binop("f64x2_ne")?,
-            Operator::F64x2Lt => self.call_simd_binop("f64x2_lt")?,
-            Operator::F64x2Gt => self.call_simd_binop("f64x2_gt")?,
-            Operator::F64x2Le => self.call_simd_binop("f64x2_le")?,
-            Operator::F64x2Ge => self.call_simd_binop("f64x2_ge")?,
-            // Lane shifts (round 4): shift each lane by an i32 count mod width.
-            Operator::I8x16Shl => self.call_simd_shift("i8x16_shl")?,
-            Operator::I16x8Shl => self.call_simd_shift("i16x8_shl")?,
-            Operator::I32x4Shl => self.call_simd_shift("i32x4_shl")?,
-            Operator::I64x2Shl => self.call_simd_shift("i64x2_shl")?,
-            Operator::I8x16ShrS => self.call_simd_shift("i8x16_shr_s")?,
-            Operator::I16x8ShrS => self.call_simd_shift("i16x8_shr_s")?,
-            Operator::I32x4ShrS => self.call_simd_shift("i32x4_shr_s")?,
-            Operator::I64x2ShrS => self.call_simd_shift("i64x2_shr_s")?,
-            Operator::I8x16ShrU => self.call_simd_shift("i8x16_shr_u")?,
-            Operator::I16x8ShrU => self.call_simd_shift("i16x8_shr_u")?,
-            Operator::I32x4ShrU => self.call_simd_shift("i32x4_shr_u")?,
-            Operator::I64x2ShrU => self.call_simd_shift("i64x2_shr_u")?,
-            // Saturating add/sub (clamp instead of wrap).
-            Operator::I8x16AddSatS => self.call_simd_binop("i8x16_add_sat_s")?,
-            Operator::I8x16AddSatU => self.call_simd_binop("i8x16_add_sat_u")?,
-            Operator::I16x8AddSatS => self.call_simd_binop("i16x8_add_sat_s")?,
-            Operator::I16x8AddSatU => self.call_simd_binop("i16x8_add_sat_u")?,
-            Operator::I8x16SubSatS => self.call_simd_binop("i8x16_sub_sat_s")?,
-            Operator::I8x16SubSatU => self.call_simd_binop("i8x16_sub_sat_u")?,
-            Operator::I16x8SubSatS => self.call_simd_binop("i16x8_sub_sat_s")?,
-            Operator::I16x8SubSatU => self.call_simd_binop("i16x8_sub_sat_u")?,
-            // Widen the low/high half of the lanes to double width.
-            Operator::I16x8ExtendLowI8x16S => self.call_simd_unop("i16x8_extend_low_i8x16_s")?,
-            Operator::I16x8ExtendHighI8x16S => self.call_simd_unop("i16x8_extend_high_i8x16_s")?,
-            Operator::I16x8ExtendLowI8x16U => self.call_simd_unop("i16x8_extend_low_i8x16_u")?,
-            Operator::I16x8ExtendHighI8x16U => self.call_simd_unop("i16x8_extend_high_i8x16_u")?,
-            Operator::I32x4ExtendLowI16x8S => self.call_simd_unop("i32x4_extend_low_i16x8_s")?,
-            Operator::I32x4ExtendHighI16x8S => self.call_simd_unop("i32x4_extend_high_i16x8_s")?,
-            Operator::I32x4ExtendLowI16x8U => self.call_simd_unop("i32x4_extend_low_i16x8_u")?,
-            Operator::I32x4ExtendHighI16x8U => self.call_simd_unop("i32x4_extend_high_i16x8_u")?,
-            Operator::I64x2ExtendLowI32x4S => self.call_simd_unop("i64x2_extend_low_i32x4_s")?,
-            Operator::I64x2ExtendHighI32x4S => self.call_simd_unop("i64x2_extend_high_i32x4_s")?,
-            Operator::I64x2ExtendLowI32x4U => self.call_simd_unop("i64x2_extend_low_i32x4_u")?,
-            Operator::I64x2ExtendHighI32x4U => self.call_simd_unop("i64x2_extend_high_i32x4_u")?,
-            // Saturate two vectors' lanes to half width and concatenate.
-            Operator::I8x16NarrowI16x8S => self.call_simd_binop("i8x16_narrow_i16x8_s")?,
-            Operator::I8x16NarrowI16x8U => self.call_simd_binop("i8x16_narrow_i16x8_u")?,
-            Operator::I16x8NarrowI32x4S => self.call_simd_binop("i16x8_narrow_i32x4_s")?,
-            Operator::I16x8NarrowI32x4U => self.call_simd_binop("i16x8_narrow_i32x4_u")?,
-            // Widening pairwise multiply of the low/high half of both vectors.
-            Operator::I16x8ExtMulLowI8x16S => self.call_simd_binop("i16x8_extmul_low_i8x16_s")?,
-            Operator::I16x8ExtMulHighI8x16S => self.call_simd_binop("i16x8_extmul_high_i8x16_s")?,
-            Operator::I16x8ExtMulLowI8x16U => self.call_simd_binop("i16x8_extmul_low_i8x16_u")?,
-            Operator::I16x8ExtMulHighI8x16U => self.call_simd_binop("i16x8_extmul_high_i8x16_u")?,
-            Operator::I32x4ExtMulLowI16x8S => self.call_simd_binop("i32x4_extmul_low_i16x8_s")?,
-            Operator::I32x4ExtMulHighI16x8S => self.call_simd_binop("i32x4_extmul_high_i16x8_s")?,
-            Operator::I32x4ExtMulLowI16x8U => self.call_simd_binop("i32x4_extmul_low_i16x8_u")?,
-            Operator::I32x4ExtMulHighI16x8U => self.call_simd_binop("i32x4_extmul_high_i16x8_u")?,
-            Operator::I64x2ExtMulLowI32x4S => self.call_simd_binop("i64x2_extmul_low_i32x4_s")?,
-            Operator::I64x2ExtMulHighI32x4S => self.call_simd_binop("i64x2_extmul_high_i32x4_s")?,
-            Operator::I64x2ExtMulLowI32x4U => self.call_simd_binop("i64x2_extmul_low_i32x4_u")?,
-            Operator::I64x2ExtMulHighI32x4U => self.call_simd_binop("i64x2_extmul_high_i32x4_u")?,
-            // Widening add of each adjacent lane pair of one vector.
-            Operator::I16x8ExtAddPairwiseI8x16S => {
-                self.call_simd_unop("i16x8_extadd_pairwise_i8x16_s")?
-            }
-            Operator::I16x8ExtAddPairwiseI8x16U => {
-                self.call_simd_unop("i16x8_extadd_pairwise_i8x16_u")?
-            }
-            Operator::I32x4ExtAddPairwiseI16x8S => {
-                self.call_simd_unop("i32x4_extadd_pairwise_i16x8_s")?
-            }
-            Operator::I32x4ExtAddPairwiseI16x8U => {
-                self.call_simd_unop("i32x4_extadd_pairwise_i16x8_u")?
-            }
-            // Widening dot product (i16 pairs to i32) and Q15 rounding multiply.
-            Operator::I32x4DotI16x8S => self.call_simd_binop("i32x4_dot_i16x8_s")?,
-            Operator::I16x8Q15MulrSatS => self.call_simd_binop("i16x8_q15mulr_sat_s")?,
-
-            // Float <-> integer lane conversions (trunc_sat, convert, demote,
-            // promote). Each is a single-vector width-changing helper.
-            Operator::I32x4TruncSatF32x4S => self.call_simd_unop("i32x4_trunc_sat_f32x4_s")?,
-            Operator::I32x4TruncSatF32x4U => self.call_simd_unop("i32x4_trunc_sat_f32x4_u")?,
-            Operator::I32x4TruncSatF64x2SZero => {
-                self.call_simd_unop("i32x4_trunc_sat_f64x2_s_zero")?
-            }
-            Operator::I32x4TruncSatF64x2UZero => {
-                self.call_simd_unop("i32x4_trunc_sat_f64x2_u_zero")?
-            }
-            Operator::F32x4ConvertI32x4S => self.call_simd_unop("f32x4_convert_i32x4_s")?,
-            Operator::F32x4ConvertI32x4U => self.call_simd_unop("f32x4_convert_i32x4_u")?,
-            Operator::F64x2ConvertLowI32x4S => self.call_simd_unop("f64x2_convert_low_i32x4_s")?,
-            Operator::F64x2ConvertLowI32x4U => self.call_simd_unop("f64x2_convert_low_i32x4_u")?,
-            Operator::F32x4DemoteF64x2Zero => self.call_simd_unop("f32x4_demote_f64x2_zero")?,
-            Operator::F64x2PromoteLowF32x4 => self.call_simd_unop("f64x2_promote_low_f32x4")?,
-
-            // Integer lane abs, unsigned rounding average, and popcount.
-            Operator::I8x16Abs => self.call_simd_unop("i8x16_abs")?,
-            Operator::I16x8Abs => self.call_simd_unop("i16x8_abs")?,
-            Operator::I32x4Abs => self.call_simd_unop("i32x4_abs")?,
-            Operator::I64x2Abs => self.call_simd_unop("i64x2_abs")?,
-            Operator::I8x16AvgrU => self.call_simd_binop("i8x16_avgr_u")?,
-            Operator::I16x8AvgrU => self.call_simd_binop("i16x8_avgr_u")?,
-            Operator::I8x16Popcnt => self.call_simd_unop("i8x16_popcnt")?,
-
-            // Lane-reducing predicates: all_true and bitmask (v128 -> i32).
-            Operator::I8x16AllTrue => self.call_simd_reduce("i8x16_all_true")?,
-            Operator::I16x8AllTrue => self.call_simd_reduce("i16x8_all_true")?,
-            Operator::I32x4AllTrue => self.call_simd_reduce("i32x4_all_true")?,
-            Operator::I64x2AllTrue => self.call_simd_reduce("i64x2_all_true")?,
-            Operator::I8x16Bitmask => self.call_simd_reduce("i8x16_bitmask")?,
-            Operator::I16x8Bitmask => self.call_simd_reduce("i16x8_bitmask")?,
-            Operator::I32x4Bitmask => self.call_simd_reduce("i32x4_bitmask")?,
-            Operator::I64x2Bitmask => self.call_simd_reduce("i64x2_bitmask")?,
-
             // Byte permutes: dynamic swizzle and constant-index shuffle.
-            Operator::I8x16Swizzle => self.call_simd_binop("i8x16_swizzle")?,
             Operator::I8x16Shuffle { lanes } => self.call_simd_shuffle(lanes)?,
 
             // Memory-to-lane loads: splat (broadcast), zero-extend, and single
@@ -1214,42 +828,45 @@ impl<'a> FuncGen<'a> {
             // trunc_sat (Rust's saturating float->int cast), relaxed_min/max ==
             // the plain lane min/max, relaxed_q15mulr == the saturating one, and
             // relaxed_laneselect == bitselect.
-            Operator::I8x16RelaxedSwizzle => self.call_simd_binop("i8x16_swizzle")?,
-            Operator::I32x4RelaxedTruncF32x4S => self.call_simd_unop("i32x4_trunc_sat_f32x4_s")?,
-            Operator::I32x4RelaxedTruncF32x4U => self.call_simd_unop("i32x4_trunc_sat_f32x4_u")?,
-            Operator::I32x4RelaxedTruncF64x2SZero => {
-                self.call_simd_unop("i32x4_trunc_sat_f64x2_s_zero")?
-            }
-            Operator::I32x4RelaxedTruncF64x2UZero => {
-                self.call_simd_unop("i32x4_trunc_sat_f64x2_u_zero")?
-            }
-            Operator::F32x4RelaxedMin => self.call_simd_binop("f32x4_min")?,
-            Operator::F32x4RelaxedMax => self.call_simd_binop("f32x4_max")?,
-            Operator::F64x2RelaxedMin => self.call_simd_binop("f64x2_min")?,
-            Operator::F64x2RelaxedMax => self.call_simd_binop("f64x2_max")?,
-            Operator::I16x8RelaxedQ15mulrS => self.call_simd_binop("i16x8_q15mulr_sat_s")?,
             Operator::I8x16RelaxedLaneselect
             | Operator::I16x8RelaxedLaneselect
             | Operator::I32x4RelaxedLaneselect
             | Operator::I64x2RelaxedLaneselect => self.v128_bitselect()?,
-            // Relaxed fused-multiply-add and dot-product-accumulate: ternary lane
-            // ops (relaxed_dot below is the one binary case). The deterministic
-            // lowering is unfused a*b(+/-)c and a saturating integer dot.
-            Operator::F32x4RelaxedMadd => self.call_simd_ternop("f32x4_relaxed_madd")?,
-            Operator::F32x4RelaxedNmadd => self.call_simd_ternop("f32x4_relaxed_nmadd")?,
-            Operator::F64x2RelaxedMadd => self.call_simd_ternop("f64x2_relaxed_madd")?,
-            Operator::F64x2RelaxedNmadd => self.call_simd_ternop("f64x2_relaxed_nmadd")?,
-            Operator::I16x8RelaxedDotI8x16I7x16S => {
-                self.call_simd_binop("i16x8_relaxed_dot_i8x16_i7x16_s")?
-            }
-            Operator::I32x4RelaxedDotI8x16I7x16AddS => {
-                self.call_simd_ternop("i32x4_relaxed_dot_i8x16_i7x16_add_s")?
-            }
-            other => {
-                return Err(TranspileError::Unsupported(format!("operator {other:?}")));
-            }
+            // SIMD lane helpers and atomic accesses: see `classify.rs`.
+            other => return self.emit_classified(other),
         }
         Ok(())
+    }
+
+    /// The table-like operator families (SIMD lane helpers, atomic accesses),
+    /// each a single dispatch via its classifier in [`classify`].
+    fn emit_classified(&mut self, op: Operator<'_>) -> Result<(), TranspileError> {
+        if let Some((call, name)) = classify::simd_helper(&op) {
+            debug_assert!(
+                super::simd_rt::is_helper(name),
+                "unknown SIMD helper {name}"
+            );
+            return match call {
+                classify::SimdCall::Unop => self.call_simd_unop(name),
+                classify::SimdCall::Binop => self.call_simd_binop(name),
+                classify::SimdCall::Ternop => self.call_simd_ternop(name),
+                classify::SimdCall::Shift => self.call_simd_shift(name),
+                classify::SimdCall::Reduce => self.call_simd_reduce(name),
+            };
+        }
+        if let Some((helper, ty, memarg)) = classify::atomic_load_kind(&op) {
+            return self.atomic_load(helper, ty, memarg);
+        }
+        if let Some((helper, memarg)) = classify::atomic_store_kind(&op) {
+            return self.atomic_store(helper, memarg);
+        }
+        if let Some((width, rmw, memarg)) = classify::atomic_rmw_kind(&op) {
+            return self.atomic_rmw(width, rmw, memarg);
+        }
+        if let Some((width, memarg)) = classify::atomic_cmpxchg_kind(&op) {
+            return self.atomic_cmpxchg(width, memarg);
+        }
+        Err(TranspileError::Unsupported(format!("operator {op:?}")))
     }
 
     /// Skip an operator that appears in unreachable code, tracking region
