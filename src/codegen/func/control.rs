@@ -1305,13 +1305,14 @@ impl<'a> super::FuncGen<'a> {
     }
 
     /// Emit a `throw $tag`: pop the payload operands, bit-encode them, and raise
-    /// the exception as a `panic_any` so an enclosing `try` can catch it.
+    /// the exception as a `resume_unwind` (which skips the panic hook) so an enclosing
+    /// `try` can catch it.
     pub(super) fn emit_throw(&mut self, tag_index: u32) -> Result<(), TranspileError> {
         self.emit_throw_payload(tag_index)
     }
 
     /// Pop tag `tag_index`'s payload off the operand stack (top-first) and raise
-    /// it as a `panic_any` of [`EXC_TYPE`], marking the program point unreachable.
+    /// it via `resume_unwind` of [`EXC_TYPE`], marking the program point unreachable.
     /// Shared by `throw` and `resume_throw` (which first pops and consumes the
     /// continuation it abandons).
     fn emit_throw_payload(&mut self, tag_index: u32) -> Result<(), TranspileError> {
@@ -1330,7 +1331,7 @@ impl<'a> super::FuncGen<'a> {
             encoded[i] = encode_exc_value(params[i], &value.code, self.ctx.type_kinds)?;
         }
         self.term(format!(
-            "::std::panic::panic_any({EXC_TYPE} {{ tag: {tag_index}u32, values: vec![{}] }});",
+            "::std::panic::resume_unwind(Box::new({EXC_TYPE} {{ tag: {tag_index}u32, values: vec![{}] }}));",
             encoded.join(", ")
         ));
         self.reachable = false;
@@ -1343,7 +1344,9 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn emit_throw_ref(&mut self) -> Result<(), TranspileError> {
         self.uses_eh = true;
         let exn = self.pop()?.code;
-        self.term(format!("::std::panic::panic_any(wasm2rs_exn_load({exn}));"));
+        self.term(format!(
+            "::std::panic::resume_unwind(Box::new(wasm2rs_exn_load({exn})));"
+        ));
         self.reachable = false;
         self.dead_nesting = 0;
         Ok(())

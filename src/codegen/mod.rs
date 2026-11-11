@@ -193,9 +193,9 @@ pub(crate) const ALLOW: &str = "#[allow(dead_code, unused_variables, unused_assi
 /// (bit-encoded) payload values.
 const EXC_TYPE: &str = "Wasm2RsException";
 /// The module-scope definition of [`EXC_TYPE`], emitted once when any function
-/// uses exception handling. A thrown exception is `panic_any`-ed as this type;
-/// each payload value is bit-encoded into a `u64` so one field carries any mix
-/// of numeric types.
+/// uses exception handling. A thrown exception is raised with `resume_unwind`
+/// (so the panic hook never runs) as this type; each payload value is
+/// bit-encoded into a `u64` so one field carries any mix of numeric types.
 const EXC_DEF: &str = "\
 #[allow(dead_code)]
 #[derive(Clone)]

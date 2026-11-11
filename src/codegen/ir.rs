@@ -475,7 +475,7 @@ pub(crate) fn render_region_into(
 }
 /// Render a `try` region as a `catch_unwind` over the protected body followed by
 /// a landing pad that dispatches on the caught exception's tag. A thrown wasm
-/// exception is a `panic_any` of [`EXC_TYPE`]; any other payload (a trap, or a
+/// exception is a `resume_unwind` of [`EXC_TYPE`]; any other payload (a trap, or a
 /// foreign panic) is re-raised so only wasm exceptions are caught.
 pub(crate) fn render_try_into(
     node: TryRegionNode,
