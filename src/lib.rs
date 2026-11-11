@@ -204,8 +204,9 @@ pub struct TranspileOptions {
 /// `[profile.release]`: `opt-level = 3` preserves the flattened-dispatch speed,
 /// while thin LTO, a single codegen unit and `strip` shrink the release binary
 /// without trading away speed. Panics deliberately keep unwinding (no
-/// `panic = "abort"`): traps, exception handling and continuations are caught
-/// with `catch_unwind`, which an abort profile would turn into a process abort.
+/// `panic = "abort"`): Wasm exception handling (including exceptions injected
+/// by `resume_throw`) is lowered to `catch_unwind`, and hosts contain traps the
+/// same way, which an abort profile would turn into a process abort.
 /// The `[lib] path` points at the crate-root `lib.rs` this tool writes
 /// (not Cargo's default `src/lib.rs`), and the generated code depends only on
 /// `std`, so there is no `[dependencies]` section.

@@ -54,8 +54,7 @@ fn manifest_release_profile_is_size_optimized_but_fast() {
     let m = cargo_manifest("m");
     // The balanced profile: opt-level 3 keeps the flattened dispatch fast, while
     // thin LTO, a single codegen unit and strip shrink the binary without
-    // trading away speed. Panics must stay unwinding: traps, exceptions and
-    // continuations are caught with `catch_unwind`.
+    // trading away speed.
     for needle in [
         "[profile.release]",
         "opt-level = 3",
@@ -72,8 +71,8 @@ fn manifest_release_profile_is_size_optimized_but_fast() {
 
 #[test]
 fn manifest_keeps_unwinding_so_catch_unwind_works() {
-    // `panic = "abort"` would turn every trap / EH throw / continuation
-    // suspension caught via `catch_unwind` into a process abort.
+    // `panic = "abort"` would turn every Wasm exception (lowered to
+    // `catch_unwind`) and every host-contained trap into a process abort.
     let m = cargo_manifest("m");
     assert!(
         !m.contains("panic = \"abort\""),

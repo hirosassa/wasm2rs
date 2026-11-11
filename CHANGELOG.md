@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The `Cargo.toml` emitted with split output (`cargo_manifest`) no longer sets `panic = "abort"`, which made every Wasm exception and host-caught trap abort the process in release builds.
+
 ### Added
 - `transpile_component_with_exports`: `transpile_component` that also returns the lifted `Vec<WitExport>`, so a caller checking the exports no longer runs a second `wit_exports` pass (`transpile_component` is now a wrapper). `examples/common::transpile_exporting` uses it.
 - `transpile_component` and `ComponentOptions` (#198): a component in, one Rust source out (the program core module picked by the exports' `canon lift`, then the `Glue` for `wasm2rs-wasi` and the typed `Exports`); `named_imports`, `named_exports` and `reentrant_imports` are forced on. The CLI gets `--component` (#200), `wasm2rs::build::transpile_component_to_out_dir` / `transpile_component_to_dir` write `$OUT_DIR/{stem}.rs` for a build script (#201), and `wasm2rs_macros::include_component!("stem")` includes it (a name ending in `.wasm` is a compile error, #203).
