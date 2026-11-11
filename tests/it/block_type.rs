@@ -176,7 +176,10 @@ fn branch_out_of_an_outer_two_result_block() {
               (block
                 (i32.const 3)
                 (i32.const 4)
-                (br 1)))
+                (br 1))
+              ;; dead fallthrough values so the outer block validates
+              (i32.const 0)
+              (i32.const 0))
             (i32.add)))
         "#,
         "assert_eq!(func0(), 7);",

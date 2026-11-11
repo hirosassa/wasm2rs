@@ -77,6 +77,7 @@ const GET_SET_M: &str = r#"
       (type $sig (func (result i32)))
       (table 2 funcref)
       (func $a (type $sig) (i32.const 99))
+      (elem declare func $a)
       (func (param i32) (table.set (local.get 0) (ref.func $a)))
       (func (param i32) (result i32) (ref.is_null (table.get (local.get 0))))
       (func (param i32) (result i32) (call_indirect (type $sig) (local.get 0))))
@@ -140,6 +141,7 @@ const FILL_M: &str = r#"
       (type $sig (func (result i32)))
       (table 4 funcref)
       (func $a (type $sig) (i32.const 7))
+      (elem declare func $a)
       (func (param i32 i32) (table.fill (local.get 0) (ref.func $a) (local.get 1)))
       (func (param i32) (result i32) (call_indirect (type $sig) (local.get 0))))
     "#;

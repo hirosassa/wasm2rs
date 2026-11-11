@@ -94,7 +94,7 @@ fn br_to_the_function_label_from_a_deeply_nested_flattened_function() {
     let close = ")".repeat(depth);
     let wat = format!(
         r#"(module (func (export "f") (param i32) (result i32)
-             {open} (br_if {depth} (i32.const 42) (local.get 0)) {close}
+             {open} (br_if {depth} (i32.const 42) (local.get 0)) drop {close}
              (i32.const 7)))"#
     );
     common::compile_run(
@@ -152,6 +152,7 @@ fn a_resume_handler_label_may_target_the_function_label() {
              (type $ft (func (result i32)))
              (type $ct (cont $ft))
              (tag $yield (param i32))
+             (elem declare func $gen)
              (func $gen (result i32) i32.const 10 suspend $yield i32.const 30)
              (func (export "f") (result i32 (ref null $ct))
                ref.func $gen cont.new $ct

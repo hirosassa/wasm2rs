@@ -276,13 +276,19 @@ fn transpile_err(wat: &str) -> String {
 #[test]
 fn a_global_initializer_with_leftover_operands_is_rejected() {
     let err = transpile_err("(module (global i32 (i32.const 1) (i32.const 2)))");
-    assert!(err.contains("leftover operand"), "{err}");
+    // Input validation (wasmparser) now rejects this before wasm2rs's own check, which is
+    // unreachable for validated input; assert the validation rejection instead.
+    assert!(err.contains("failed to parse wasm"), "{err}");
+    assert!(err.contains("values remaining on stack"), "{err}");
 }
 
 #[test]
 fn a_data_offset_with_leftover_operands_is_rejected() {
     let err = transpile_err(r#"(module (memory 1) (data (offset i32.const 1 i32.const 2) "x"))"#);
-    assert!(err.contains("leftover operand"), "{err}");
+    // Input validation (wasmparser) now rejects this before wasm2rs's own check, which is
+    // unreachable for validated input; assert the validation rejection instead.
+    assert!(err.contains("failed to parse wasm"), "{err}");
+    assert!(err.contains("values remaining on stack"), "{err}");
 }
 
 #[test]
@@ -294,15 +300,21 @@ fn a_mixed_width_constant_operation_is_a_type_mismatch_not_an_underflow() {
 }
 
 #[test]
-fn a_constant_operation_without_operands_is_an_underflow() {
+fn a_constant_operation_without_operands_is_rejected_by_validation() {
     let err = transpile_err(r#"(module (memory 1) (data (i32.add) "x"))"#);
-    assert!(err.contains("underflow"), "{err}");
+    // Input validation (wasmparser) now rejects this before wasm2rs's own check, which is
+    // unreachable for validated input; assert the validation rejection instead.
+    assert!(err.contains("failed to parse wasm"), "{err}");
+    assert!(err.contains("nothing on stack"), "{err}");
 }
 
 #[test]
-fn a_global_constant_operation_without_operands_is_an_underflow() {
+fn a_global_constant_operation_without_operands_is_rejected_by_validation() {
     let err = transpile_err("(module (global i32 (i32.add)))");
-    assert!(err.contains("underflow"), "{err}");
+    // Input validation (wasmparser) now rejects this before wasm2rs's own check, which is
+    // unreachable for validated input; assert the validation rejection instead.
+    assert!(err.contains("failed to parse wasm"), "{err}");
+    assert!(err.contains("nothing on stack"), "{err}");
 }
 
 #[test]

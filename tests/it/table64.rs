@@ -179,7 +179,7 @@ fn a_wide_copy_range_traps() {
 }
 
 #[test]
-fn an_unsupported_elem_offset_operator_is_reported_as_an_element_offset() {
+fn an_unsupported_elem_offset_operator_is_rejected_by_validation() {
     let wasm = wat::parse_str(
         r#"(module (table i64 4 funcref) (func $g)
              (elem (offset i64.const 0 i64.const 1 i64.and) $g))"#,
@@ -188,5 +188,8 @@ fn an_unsupported_elem_offset_operator_is_reported_as_an_element_offset() {
     let err = wasm2rs::transpile(&wasm)
         .expect_err("must be rejected")
         .to_string();
-    assert!(err.contains("element offset"), "{err}");
+    // Input validation (wasmparser) now rejects this before wasm2rs's own check, which is
+    // unreachable for validated input; assert the validation rejection instead.
+    assert!(err.contains("failed to parse wasm"), "{err}");
+    assert!(err.contains("non-constant operator"), "{err}");
 }

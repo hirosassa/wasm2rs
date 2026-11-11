@@ -163,7 +163,7 @@ fn array_new_elem_reads_funcrefs() {
             (type $arr (array (ref $ft)))
             (func $add1 (param i32) (result i32) local.get 0 i32.const 1 i32.add)
             (func $dbl (param i32) (result i32) local.get 0 i32.const 2 i32.mul)
-            (elem $e func $add1 $dbl)
+            (elem $e (ref $ft) (ref.func $add1) (ref.func $dbl))
             (func (export "run") (param i32) (result i32)
               (local $f (ref $ft))
               i32.const 0 i32.const 2 array.new_elem $arr $e
@@ -183,10 +183,10 @@ fn array_init_elem_copies_funcrefs_into_an_array() {
         "gc_array_init_elem",
         r#"(module
             (type $ft (func (param i32) (result i32)))
-            (type $arr (array (ref null $ft)))
+            (type $arr (array (mut (ref null $ft))))
             (func $add1 (param i32) (result i32) local.get 0 i32.const 1 i32.add)
             (func $dbl (param i32) (result i32) local.get 0 i32.const 2 i32.mul)
-            (elem $e func $add1 $dbl)
+            (elem $e (ref null $ft) (ref.func $add1) (ref.func $dbl))
             (func (export "run") (param i32) (result i32)
               (local $a (ref $arr))
               i32.const 2 array.new_default $arr local.set $a

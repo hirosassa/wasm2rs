@@ -473,6 +473,7 @@ fn a_child_can_resume_a_continuation() {
               (type $ft (func (result i32)))
               (type $ct (cont $ft))
               (func $gen (result i32) i32.const 42)
+              (elem declare func $gen)
               (func (export "wasi_thread_start") (param i32 i32)
                 i32.const 0
                 ref.func $gen cont.new $ct resume $ct

@@ -372,7 +372,9 @@ fn wrapped_br_table(depth: usize) -> String {
                  (return (i32.const 20))) (return (i32.const 10))";
     let open = "(block ".repeat(depth);
     let close = ")".repeat(depth);
-    format!("(module (func (export \"sw\") (param i32) (result i32)\n{open}{inner}{close}))")
+    format!(
+        "(module (func (export \"sw\") (param i32) (result i32)\n{open}{inner}{close}\n(unreachable)))"
+    )
 }
 
 #[test]

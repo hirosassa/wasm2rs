@@ -127,6 +127,7 @@ const PURE_HOST_TABLE: &str = r#"
       (type $sig (func (param i32) (result i32)))
       (import "env" "host_fn" (func $host (type $sig)))
       (import "env" "tbl" (table 1 funcref))
+      (elem declare func $host)
       (func $install (table.set (i32.const 0) (ref.func $host)))
       (func $dispatch (param i32 i32) (result i32)
         (call_indirect (type $sig) (local.get 1) (local.get 0))))

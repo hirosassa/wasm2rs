@@ -140,7 +140,7 @@ fn a_global_name_clashing_with_a_function_export_stays_unique() {
     run_named(
         "named_global_clash",
         r#"(module
-            (global (export "x") i32 (i32.const 5))
+            (global (export "X") i32 (i32.const 5))
             (func (export "x") (result i32) i32.const 9))"#,
         "let mut inst = Instance::new();\n \
          assert_eq!(inst.x(), 9);\n \

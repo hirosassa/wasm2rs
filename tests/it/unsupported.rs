@@ -3,8 +3,9 @@
 //! `transpile` must reject wasm modules that parse cleanly but use a feature
 //! wasm2rs does not support yet, and it must do so with a specific
 //! `TranspileError::Unsupported` message rather than silently mistranspiling.
-//! These modules are all valid wasm (the `wat` crate assembles them); the error
-//! therefore comes from wasm2rs' own validation, not from `wasmparser`.
+//! Those modules are valid wasm, so the error comes from wasm2rs' own checks; the
+//! invalid ones (see `assert_invalid`) are instead rejected by `wasmparser`
+//! validation.
 //!
 //! Each test asserts the error *category and message*, not merely `is_err()`, so
 //! that a regression which starts accepting an unsupported feature — or reports
@@ -41,6 +42,18 @@ fn assert_unsupported(wat: &str, needle: &str) {
     }
 }
 
+/// Assemble `wat` (which does not type-check) and assert `transpile` rejects it at
+/// validation (`Parse`). Several of these modules once exercised wasm2rs' own
+/// guards, which ill-typed input can no longer reach past `validate_all`.
+fn assert_invalid(wat: &str) {
+    let wasm = wat::parse_str(wat).expect("wat should assemble");
+    let result = transpile(&wasm);
+    assert!(
+        matches!(result, Err(TranspileError::Parse(_))),
+        "expected validation to reject the module, got {result:?}"
+    );
+}
+
 #[test]
 fn imported_non_zero_memory_is_rejected() {
     // Multiple *defined* memories are now supported (see tests/multi_memory.rs),
@@ -66,9 +79,8 @@ fn shared_memory64_is_rejected() {
 fn a_mutable_imported_global_table_initializer_is_rejected() {
     // An immutable imported global is read from the host when the instance is
     // built (see imports.rs); a mutable one is not a constant.
-    assert_unsupported(
+    assert_invalid(
         r#"(module (import "e" "g" (global $g (mut funcref))) (table 1 1 funcref (global.get $g)))"#,
-        "table initializer reading a mutable, non-reference or non-constant global",
     );
 }
 
@@ -97,23 +109,21 @@ fn an_imported_global_item_in_a_passive_element_segment_is_rejected() {
 fn a_mutable_global_in_a_global_initializer_is_rejected() {
     // Only an immutable global is a constant: a mutable one's value can change, so
     // inlining its initializer would be wrong.
-    assert_unsupported(
+    assert_invalid(
         r#"(module
              (global $a (mut i32) (i32.const 1))
              (global $b i32 (global.get $a)))"#,
-        "mutable or later global",
     );
 }
 
 #[test]
 fn a_mutable_global_element_item_is_rejected() {
-    assert_unsupported(
+    assert_invalid(
         r#"(module
              (func $f)
              (global $g (mut funcref) (ref.func $f))
              (table 1 funcref)
              (elem (i32.const 0) funcref (global.get $g)))"#,
-        "element segment item reading a mutable, non-reference or non-constant global",
     );
 }
 
@@ -146,44 +156,39 @@ fn multi_value_import_result_is_rejected() {
 
 #[test]
 fn a_float_imported_global_offset_is_rejected() {
-    assert_unsupported(
+    assert_invalid(
         r#"(module (import "e" "g" (global f32)) (memory 1) (data (global.get 0) "x"))"#,
-        "offset",
     );
 }
 
 #[test]
 fn an_i64_imported_global_offset_of_a_32_bit_memory_is_rejected() {
     // The offset's width follows the memory's: an i64 one is not an i32 offset.
-    assert_unsupported(
+    assert_invalid(
         r#"(module (import "e" "g" (global i64)) (memory 1) (data (global.get 0) "x"))"#,
-        "offset",
     );
 }
 
 #[test]
 fn an_i32_imported_global_offset_of_a_64_bit_memory_is_rejected() {
-    assert_unsupported(
+    assert_invalid(
         r#"(module (import "e" "g" (global i32)) (memory i64 1) (data (global.get 0) "x"))"#,
-        "offset",
     );
 }
 
 #[test]
 fn a_32_bit_constant_in_a_64_bit_runtime_offset_is_rejected() {
-    assert_unsupported(
+    assert_invalid(
         r#"(module (import "e" "g" (global i64)) (memory i64 1)
              (data (i64.add (global.get 0) (i32.const 1)) "x"))"#,
-        "offset",
     );
 }
 
 #[test]
 fn a_64_bit_constant_in_a_32_bit_runtime_offset_is_rejected() {
-    assert_unsupported(
+    assert_invalid(
         r#"(module (import "e" "g" (global i32)) (memory 1)
              (data (i32.add (global.get 0) (i64.const 1)) "x"))"#,
-        "offset",
     );
 }
 
@@ -191,12 +196,11 @@ fn a_64_bit_constant_in_a_32_bit_runtime_offset_is_rejected() {
 fn a_mutable_imported_global_element_offset_is_rejected() {
     // An immutable imported global is read from the host at instantiation (see
     // imports.rs); a mutable one is not a constant.
-    assert_unsupported(
+    assert_invalid(
         r#"(module
              (import "e" "g" (global (mut i32)))
              (table 1 funcref) (func $f)
              (elem (global.get 0) $f))"#,
-        "mutable or later global",
     );
 }
 
@@ -204,11 +208,10 @@ fn a_mutable_imported_global_element_offset_is_rejected() {
 fn a_mutable_imported_global_in_a_global_initializer_is_rejected() {
     // An immutable imported global is read from the host when the instance is
     // built (see imports.rs); a mutable one is not a constant.
-    assert_unsupported(
+    assert_invalid(
         r#"(module
              (import "e" "g" (global (mut i32)))
              (global i32 (global.get 0)))"#,
-        "mutable or later global",
     );
 }
 
@@ -216,33 +219,21 @@ fn a_mutable_imported_global_in_a_global_initializer_is_rejected() {
 fn memory_instruction_without_a_memory_section_is_rejected() {
     // A body that touches linear memory in a module that declares none must be
     // rejected rather than emitting code that references a non-existent field.
-    assert_unsupported(
-        r#"(module (func (result i32) i32.const 0 i32.load))"#,
-        "memory instruction without a memory section",
-    );
+    assert_invalid(r#"(module (func (result i32) i32.const 0 i32.load))"#);
     // `memory.size` reaches the same guard through a different opcode.
-    assert_unsupported(
-        r#"(module (func (result i32) memory.size))"#,
-        "memory instruction without a memory section",
-    );
+    assert_invalid(r#"(module (func (result i32) memory.size))"#);
 }
 
 #[test]
 fn table_instruction_without_a_table_section_is_rejected() {
-    assert_unsupported(
-        r#"(module (func (result funcref) i32.const 0 table.get 0))"#,
-        "table instruction without a table section",
-    );
+    assert_invalid(r#"(module (func (result funcref) i32.const 0 table.get 0))"#);
 }
 
 #[test]
 fn set_of_an_immutable_global_is_rejected() {
-    // `global.set` on a non-`mut` global is invalid; wasm2rs rejects it with a
-    // specific reason rather than generating an assignment to an immutable field.
-    assert_unsupported(
-        r#"(module (global i32 (i32.const 1)) (func i32.const 2 global.set 0))"#,
-        "set of immutable global",
-    );
+    // `global.set` on a non-`mut` global is invalid, so validation rejects it before
+    // codegen could emit an assignment to an immutable field.
+    assert_invalid(r#"(module (global i32 (i32.const 1)) (func i32.const 2 global.set 0))"#);
 }
 
 #[test]
@@ -275,6 +266,7 @@ fn resume_throw_with_suspend_handlers_is_rejected() {
             (type $ct (cont $ft))
             (tag $yield (param i32))
             (tag $cancel (param i32))
+            (elem declare func $gen)
             (func $gen (result i32)
               i32.const 1 suspend $yield
               i32.const 2)
@@ -311,6 +303,7 @@ fn resume_mixing_switch_and_label_handlers_is_rejected() {
             (type $ca_s (cont $fa_s))
             (type $fb (func (param i32) (param (ref $ca_s)) (result i32)))
             (type $cb (cont $fb))
+            (elem declare func $a $b)
             (func $a (type $fa)
               i32.const 11
               ref.func $b cont.new $cb
@@ -325,7 +318,8 @@ fn resume_mixing_switch_and_label_handlers_is_rejected() {
                 resume $ca (on $y $on_yield) (on $t switch)
                 return)
               local.set $k
-              drop))"#,
+              drop
+              i32.const 0))"#,
         "combining a switch handler with a suspend-to-label handler",
     );
 }
@@ -351,6 +345,7 @@ fn entry_checkpoint_in_a_parameterized_continuation_is_rejected() {
             (type $cc_s (cont $fc_s))
             (type $fb (func (param i32) (param (ref $cc_s)) (result i32)))
             (type $cb (cont $fb))
+            (elem declare func $a $b)
             (func $a (type $fa)
               call $c)
             (func $b (type $fb)
@@ -378,6 +373,7 @@ fn continuation_body_also_called_directly_is_rejected() {
         r#"(module
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
+            (elem declare func $gen)
             (func $gen (result i32) i32.const 1)
             (func (export "run") (result i32)
               ref.func $gen cont.new $ct drop
@@ -403,16 +399,14 @@ fn ref_test_on_a_function_type_is_rejected_when_the_host_may_hand_out_funcrefs()
 #[test]
 fn call_indirect_without_a_table_is_rejected() {
     // `call_indirect` needs a table to resolve the callee. A module that uses it
-    // with no table defined still assembles as valid wasm, but wasm2rs has
-    // nothing to dispatch through, so it rejects rather than emitting a call into
-    // a non-existent table. (The sibling "non-zero table index" guard is instead
+    // with no table defined is invalid, so validation rejects it rather than
+    // codegen emitting a call into a non-existent table. (The sibling "non-zero table index" guard is instead
     // shadowed by the earlier "multiple tables" rejection, so it is unreachable
     // from valid input and left untested by design.)
-    assert_unsupported(
+    assert_invalid(
         r#"(module
              (type $t (func))
              (func (call_indirect (type $t) (i32.const 0))))"#,
-        "call_indirect without a table",
     );
 }
 
@@ -433,14 +427,17 @@ fn a_table_of_a_non_funcref_element_type_is_rejected() {
 #[test]
 fn an_imported_shared_table_is_rejected() {
     assert_unsupported(
-        r#"(module (import "env" "t" (table shared 1 1 funcref)))"#,
+        r#"(module (import "env" "t" (table shared 1 1 (ref null (shared func)))))"#,
         "imported shared table",
     );
 }
 
 #[test]
 fn a_shared_table_is_rejected() {
-    assert_unsupported(r#"(module (table shared 1 1 funcref))"#, "shared table");
+    assert_unsupported(
+        r#"(module (table shared 1 1 (ref null (shared func))))"#,
+        "shared table",
+    );
 }
 
 #[test]
@@ -458,42 +455,39 @@ fn an_imported_shared_64_bit_memory_is_rejected() {
 fn cont_new_on_a_non_continuation_type_is_rejected() {
     // `cont.new $t` reifies a function reference into a continuation. When `$t`
     // names a non-continuation composite type the operator is meaningless;
-    // wasm2rs rejects it by index rather than emitting a bogus handle.
-    assert_unsupported(
+    // validation rejects it rather than codegen emitting a bogus handle.
+    assert_invalid(
         r#"(module
              (type $ft (func))
              (func (param (ref $ft))
                (cont.new $ft (local.get 0))
                (drop)))"#,
-        "is not a continuation type",
     );
 }
 
 #[test]
 fn array_new_data_with_a_reference_element_is_rejected() {
     // `array.new_data` copies raw bytes from a data segment into an array. A
-    // reference element type has no byte image to decode, so wasm2rs rejects it
-    // rather than fabricating references from data bytes.
-    assert_unsupported(
+    // reference element type has no byte image to decode, so validation rejects it
+    // rather than codegen fabricating references from data bytes.
+    assert_invalid(
         r#"(module
              (type $a (array (mut funcref)))
              (data "\00\00\00\00")
              (func (result (ref $a))
                (array.new_data $a 0 (i32.const 0) (i32.const 1))))"#,
-        "array.new_data/init_data with a reference element type",
     );
 }
 
 #[test]
 fn multiple_supertypes_are_rejected() {
-    assert_unsupported(
+    assert_invalid(
         r#"(module
             (rec
               (type $a (sub (struct)))
               (type $b (sub (struct)))
               (type $c (sub $a $b (struct))))
         )"#,
-        "multiple supertypes",
     );
 }
 
@@ -555,6 +549,7 @@ fn cont_body_wat(body: &str) -> String {
             (func $sp (param i32) (result i32)
               i32.const 1 suspend $y
               i32.const 2)
+            (elem declare func $body $s $sp)
             (func $body (result i32) {body})
             (func (export "run") (result i32)
               (block $on (result i32 (ref $ct))
@@ -657,6 +652,7 @@ fn checkpoint_in_a_body_that_branches_to_its_function_label_is_rejected() {
             (tag $y (param i32))
             (func $c (type $ft) i32.const 1 suspend $y i32.const 2)
             (type $ct (cont $ft))
+            (elem declare func $a)
             (func $a (type $ft) call $c br 0)
             (func (export "run") (result i32)
               ref.func $a cont.new $ct
@@ -695,6 +691,7 @@ fn return_call_from_a_continuation_body_with_a_suspend_inside_a_block_is_rejecte
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
+            (elem declare func $gen)
             (func $gen (result i32)
               (block
                 i32.const 1 suspend $yield)
@@ -707,4 +704,17 @@ fn return_call_from_a_continuation_body_with_a_suspend_inside_a_block_is_rejecte
               i32.const 0))"#,
         "return_call across a continuation",
     );
+}
+
+/// Invalid wasm (here a type-mismatched body) must be rejected up front instead of
+/// being transpiled into silently wrong Rust.
+#[test]
+fn invalid_wasm_is_rejected_by_validation() {
+    assert_invalid("(module (func i64.const 1 i64.const 2 i32.add drop))");
+}
+
+/// A function body that leaves an extra value on the stack is also invalid.
+#[test]
+fn leftover_stack_value_is_rejected_by_validation() {
+    assert_invalid("(module (func i32.const 1))");
 }

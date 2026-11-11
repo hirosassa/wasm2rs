@@ -34,7 +34,7 @@ use wasmparser::{
 /// An error that can occur while transpiling a wasm module.
 #[derive(Debug)]
 pub enum TranspileError {
-    /// The wasm binary could not be parsed.
+    /// The wasm binary could not be parsed, or failed validation.
     Parse(wasmparser::BinaryReaderError),
     /// The module used a feature that is not supported yet.
     Unsupported(String),
@@ -308,6 +308,9 @@ fn transpile_split_impl<F>(
 where
     F: FnMut(SourceFile) -> Result<(), TranspileError>,
 {
+    // Reject ill-typed input up front: the code generator assumes a validated module
+    // and would otherwise emit wrong Rust for it (e.g. a mismatched operand stack).
+    wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all()).validate_all(wasm)?;
     let mut signatures: Vec<Signature> = Vec::new();
     // The kind (function / struct / array) of every entry in the type index
     // space, parallel to `signatures` so a concrete reference can resolve its

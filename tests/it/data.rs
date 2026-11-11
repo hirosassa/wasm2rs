@@ -136,5 +136,8 @@ fn a_mutable_imported_global_data_offset_is_rejected() {
             (memory 1)
             (data (global.get $base) "x"))"#,
     );
-    assert!(err.contains("mutable or later global"), "{err}");
+    // Input validation (wasmparser) now rejects this before wasm2rs's own check, which is
+    // unreachable for validated input; assert the validation rejection instead.
+    assert!(err.contains("failed to parse wasm"), "{err}");
+    assert!(err.contains("mutable global"), "{err}");
 }

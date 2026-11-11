@@ -258,6 +258,7 @@ fn continuation_throw_propagates_to_the_resumer() {
           (type $ct (cont $ft))
           (tag $yield (param i32))
           (tag $e (param i32))
+          (elem declare func $gen)
           (func $gen (result i32)
             i32.const 99 throw $e)
           (func (export "run") (result i32)
@@ -292,6 +293,7 @@ fn gc_reference_local_survives_a_suspend() {
           (type $ft (func (result i32)))
           (type $ct (cont $ft))
           (tag $yield (param i32))
+          (elem declare func $gen)
           (func $gen (result i32)
             (local $r (ref $s))
             i32.const 5 struct.new $s local.set $r
