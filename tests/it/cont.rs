@@ -1463,3 +1463,72 @@ fn return_call_ref_to_non_step_function_ends_the_continuation() {
         "let mut inst = Instance::new(); assert_eq!(inst.func2(), 40);",
     );
 }
+
+#[test]
+fn return_call_ref_to_same_typed_function_skips_the_step_function() {
+    // `$gen` (a step function, emitted as `cont_step_func0`) and `$a` share the
+    // type `$ft`. The `call_ref_t{ti}` dispatch for `$ft` must not name `func0`,
+    // which does not exist. Driver: 10 + 30 = 40.
+    compile_run(
+        "cont_dispatch_skips_step_return_call_ref",
+        r#"(module
+            (elem declare func $gen $a)
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (func $gen (result i32)
+              i32.const 10 suspend $yield
+              ref.func $a return_call_ref $ft)
+            (func $a (result i32) i32.const 30)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        // `$gen` is func0, `$a` func1, `run` func2.
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 40);",
+    );
+}
+
+#[test]
+fn call_ref_and_call_indirect_to_same_typed_function_skip_the_step_function() {
+    // Same shape through `call_ref` inside the body and `call_indirect` from the
+    // driver: both dispatch on `$ft`, whose reachable set must exclude `$gen`.
+    // The body yields 10 then returns `$a()` + 5 = 35; the driver adds the
+    // indirect `$a()` = 30: 10 + 35 + 30 = 75.
+    compile_run(
+        "cont_dispatch_skips_step_call_ref",
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (tag $yield (param i32))
+            (table 1 funcref)
+            (elem (i32.const 0) $a)
+            (elem declare func $gen)
+            (func $gen (result i32)
+              i32.const 10 suspend $yield
+              ref.func $a call_ref $ft
+              i32.const 5 i32.add)
+            (func $a (result i32) i32.const 30)
+            (func (export "run") (result i32)
+              (local $acc i32) (local $k (ref null $ct))
+              ref.func $gen cont.new $ct local.set $k
+              (loop $again
+                (block $on_yield (result i32 (ref $ct))
+                  local.get $k resume $ct (on $yield $on_yield)
+                  local.get $acc i32.add
+                  i32.const 0 call_indirect (type $ft) i32.add
+                  return)
+                local.set $k
+                local.get $acc i32.add local.set $acc
+                br $again)
+              unreachable))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func2(), 75);",
+    );
+}

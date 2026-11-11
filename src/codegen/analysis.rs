@@ -455,13 +455,15 @@ pub(crate) fn step_function_locals(
 /// `cont_step_func{N}`, so a direct `call`/`return_call` from a *non-step*
 /// function, a `ref.func` used for anything but the immediately-following
 /// `cont.new`, or an element-segment entry (which feeds `call_indirect`) would
-/// all reference a method that is never emitted. A `call` from *within* another
+/// all reference a method that is never emitted. Likewise a global initialiser or export
+/// (`named_elsewhere`) that names one. A `call` from *within* another
 /// step function is the legitimate cross-call checkpoint and is allowed.
 pub(crate) fn reject_dual_use_continuations(
     funcs: &[FuncInput<'_>],
     elements: &[ElemSegment],
     step_set: &[u32],
     n_imports: usize,
+    named_elsewhere: impl IntoIterator<Item = u32>,
 ) -> Result<(), TranspileError> {
     if step_set.is_empty() {
         return Ok(());
@@ -495,6 +497,12 @@ pub(crate) fn reject_dual_use_continuations(
                 _ => {}
             }
         }
+    }
+    // A global initialiser or export names the function as a plain funcref too.
+    if named_elsewhere.into_iter().any(is_step) {
+        return Err(TranspileError::Unsupported(
+            "continuation step function is exported or used in a global initialiser".into(),
+        ));
     }
     for seg in elements {
         if seg.funcs.iter().any(|f| is_step(*f)) {

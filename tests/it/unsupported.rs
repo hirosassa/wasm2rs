@@ -383,6 +383,37 @@ fn continuation_body_also_called_directly_is_rejected() {
 }
 
 #[test]
+fn continuation_body_also_exported_is_rejected() {
+    // An exported step function would need a `func{N}` wrapper that is never emitted.
+    assert_unsupported(
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (elem declare func $gen)
+            (func $gen (export "gen") (result i32) i32.const 1)
+            (func (export "run") (result i32)
+              ref.func $gen cont.new $ct drop
+              i32.const 0))"#,
+        "exported or used in a global initialiser",
+    );
+}
+
+#[test]
+fn continuation_body_in_a_global_initialiser_is_rejected() {
+    assert_unsupported(
+        r#"(module
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (func $gen (result i32) i32.const 1)
+            (global $g funcref (ref.func $gen))
+            (func (export "run") (result i32)
+              ref.func $gen cont.new $ct drop
+              i32.const 0))"#,
+        "exported or used in a global initialiser",
+    );
+}
+
+#[test]
 fn ref_test_on_a_function_type_is_rejected_when_the_host_may_hand_out_funcrefs() {
     // A funcref the host registered is an external handle with no signature to
     // compare, so a module with a host cannot answer the test.
