@@ -278,10 +278,8 @@ impl super::FuncGen<'_> {
         let shape = self.struct_field_shape(type_index, field_index)?;
         let r = self.pop()?;
         let (read, ty) = shape.read(&format!("&__b[{field_index}]"))?;
-        let inner = format!(
-            "{{ let __g = &({}); let __o = __g.obj(); let __b = __o.borrow(); {read} }}",
-            r.code
-        );
+        let bind = bind_obj("__g", "__o", &r.code);
+        let inner = format!("{{ {bind} let __b = __o.borrow(); {read} }}");
         let (code, ty) = extend_packed(&shape, inner, ty, ext);
         // The read dereferences a managed object; bind it to a stable temp.
         self.materialize(code, ty)
@@ -298,9 +296,9 @@ impl super::FuncGen<'_> {
         let value = self.pop()?;
         let r = self.pop()?;
         let slot = shape.wrap(&value.code)?;
+        let bind = bind_obj("__g", "__o", &r.code);
         self.line(format!(
-            "{{ let __g = &({}); let __o = __g.obj(); __o.borrow_mut()[{field_index}] = {slot}; }}",
-            r.code
+            "{{ {bind} __o.borrow_mut()[{field_index}] = {slot}; }}"
         ));
         Ok(())
     }
@@ -334,9 +332,10 @@ impl super::FuncGen<'_> {
         let index = self.pop()?;
         let r = self.pop()?;
         let (read, ty) = shape.read("&__b[(__i) as usize]")?;
+        let bind = bind_obj("__g", "__o", &r.code);
         let inner = format!(
-            "{{ let __g = &({}); let __o = __g.obj(); let __i = {}; let __b = __o.borrow(); {read} }}",
-            r.code, index.code
+            "{{ {bind} let __i = {}; let __b = __o.borrow(); {read} }}",
+            index.code
         );
         let (code, ty) = extend_packed(&shape, inner, ty, ext);
         self.materialize(code, ty)
@@ -350,9 +349,10 @@ impl super::FuncGen<'_> {
         let index = self.pop()?;
         let r = self.pop()?;
         let slot = shape.wrap(&value.code)?;
+        let bind = bind_obj("__g", "__o", &r.code);
         self.line(format!(
-            "{{ let __g = &({}); let __o = __g.obj(); __o.borrow_mut()[({}) as usize] = {slot}; }}",
-            r.code, index.code
+            "{{ {bind} __o.borrow_mut()[({}) as usize] = {slot}; }}",
+            index.code
         ));
         Ok(())
     }
@@ -432,12 +432,12 @@ impl super::FuncGen<'_> {
         let offset = self.pop()?;
         let r = self.pop()?;
         let slot = shape.wrap(&value.code)?;
+        let bind = bind_obj("__g", "__o", &r.code);
         self.line(format!(
-            "{{ let __g = &({}); let __o = __g.obj(); let mut __b = __o.borrow_mut(); \
+            "{{ {bind} let mut __b = __o.borrow_mut(); \
              let __off = ({}) as u32 as usize; let __n = ({}) as u32 as usize; let __v = {slot}; \
              let __end = {}; \
              for __e in &mut __b[__off..__end] {{ *__e = __v.clone(); }} }}",
-            r.code,
             offset.code,
             size.code,
             range_end("__off", "__n", "__b.len()")
@@ -461,20 +461,20 @@ impl super::FuncGen<'_> {
         let srcref = self.pop()?;
         let dest_offset = self.pop()?;
         let destref = self.pop()?;
+        let bind_src = bind_obj("__sg", "__so", &srcref.code);
+        let bind_dst = bind_obj("__dg", "__do", &destref.code);
         self.line(format!(
-            "{{ let __sg = &({}); let __so = __sg.obj(); let __sb = __so.borrow(); \
+            "{{ {bind_src} let __sb = __so.borrow(); \
              let __si = ({}) as u32 as usize; let __n = ({}) as u32 as usize; \
              let __send = {}; \
              let __seg: Vec<GcSlot> = __sb[__si..__send].to_vec(); drop(__sb); \
-             let __dg = &({}); let __do = __dg.obj(); let mut __db = __do.borrow_mut(); \
+             {bind_dst} let mut __db = __do.borrow_mut(); \
              let __di = ({}) as u32 as usize; \
              let __dend = {}; \
              __db[__di..__dend].clone_from_slice(&__seg); }}",
-            srcref.code,
             src_offset.code,
             size.code,
             range_end("__si", "__n", "__sb.len()"),
-            destref.code,
             dest_offset.code,
             range_end("__di", "__n", "__db.len()")
         ));
@@ -529,15 +529,15 @@ impl super::FuncGen<'_> {
         let src = self.pop()?;
         let dest = self.pop()?;
         let r = self.pop()?;
+        let bind = bind_obj("__g", "__o", &r.code);
         self.line(format!(
-            "{{ let __g = &({}); let __o = __g.obj(); let mut __b = __o.borrow_mut(); \
+            "{{ {bind} let mut __b = __o.borrow_mut(); \
              let __seg = self.data{data_index}; \
              let __d = ({}) as u32 as usize; let __s = ({}) as u32 as usize; \
              let __n = ({}) as u32 as usize; \
              let __bytes = __n.checked_mul({esize}).unwrap_or(usize::MAX); \
              {} {} \
              for __k in 0..__n {{ let __base = __s + __k * {esize}; __b[__d + __k] = {slot}; }} }}",
-            r.code,
             dest.code,
             src.code,
             size.code,
@@ -592,14 +592,14 @@ impl super::FuncGen<'_> {
         let src = self.pop()?;
         let dest = self.pop()?;
         let r = self.pop()?;
+        let bind = bind_obj("__g", "__o", &r.code);
         self.line(format!(
-            "{{ let __g = &({}); let __o = __g.obj(); let mut __b = __o.borrow_mut(); \
+            "{{ {bind} let mut __b = __o.borrow_mut(); \
              let __seg = self.elem{elem_index}; \
              let __d = ({}) as u32 as usize; let __s = ({}) as u32 as usize; \
              let __n = ({}) as u32 as usize; \
              {} {} \
              for __k in 0..__n {{ __b[__d + __k] = GcSlot::Func(__seg[__s + __k]); }} }}",
-            r.code,
             dest.code,
             src.code,
             size.code,
@@ -1153,4 +1153,13 @@ fn range_end(off: &str, n: &str, len: &str) -> String {
 /// index element by element and so need the up-front validation but not the end.
 fn range_check(off: &str, n: &str, len: &str) -> String {
     format!("let _ = {};", range_end(off, n, len))
+}
+
+/// Generated-code statements: bind `obj` to the `&RefCell` slots of the managed
+/// object `r` (trapping on null via `GcRef::obj()`). `r` is first bound by
+/// reference to `guard` because `obj()` borrows from it: a temporary `r` (e.g. a
+/// call result) would otherwise be dropped at the end of the `let` and the
+/// borrow would not compile.
+fn bind_obj(guard: &str, obj: &str, r: &str) -> String {
+    format!("let {guard} = &({r}); let {obj} = {guard}.obj();")
 }
