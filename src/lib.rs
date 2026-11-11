@@ -14,6 +14,7 @@ mod codegen;
 mod component;
 mod dump;
 mod extract;
+mod parse;
 mod wit;
 mod wit_abi;
 
@@ -24,11 +25,6 @@ pub use wit::{
     WitExport, WitFunc, WitNaming, WitOptions, WitRecord, WitResource, WitType, wit_exports,
     wit_functions, wit_host_glue, wit_host_glue_with_options, wit_host_trait,
     wit_host_trait_with_options,
-};
-
-use wasmparser::{
-    CompositeInnerType, DataKind, ElementItems, ElementKind, ExternalKind, FuncType, Parser,
-    Payload, TableInit, TypeRef, ValType,
 };
 
 /// An error that can occur while transpiling a wasm module.
@@ -67,12 +63,6 @@ impl From<std::fmt::Error> for TranspileError {
         // conversion exists only to satisfy `write!`'s `Result` contract.
         Self::Unsupported("string formatting failed".into())
     }
-}
-
-/// The signature of a wasm function: parameter and result value types.
-struct Signature {
-    params: Vec<ValType>,
-    results: Vec<ValType>,
 }
 
 /// One emitted Rust source file of a transpiled module.
@@ -373,548 +363,15 @@ where
     })
 }
 
-/// Validate and parse `wasm`, then hand the resolved module to `generate`.
+/// Parse `wasm`, then hand the resolved module to `generate`.
 fn transpile_impl<R>(
     wasm: &[u8],
     topts: &TranspileOptions,
     generate: impl FnOnce(&codegen::ModuleParts<'_>) -> Result<R, TranspileError>,
 ) -> Result<R, TranspileError> {
-    // Reject ill-typed input up front: the code generator assumes a validated module
-    // and would otherwise emit wrong Rust for it (e.g. a mismatched operand stack).
-    wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all()).validate_all(wasm)?;
-    let mut signatures: Vec<Signature> = Vec::new();
-    // The kind (function / struct / array) of every entry in the type index
-    // space, parallel to `signatures` so a concrete reference can resolve its
-    // lowering. A non-function type still occupies a `signatures` slot (an empty
-    // placeholder) to keep the shared index space aligned for func lookups.
-    let mut type_kinds: Vec<codegen::CompositeKind> = Vec::new();
-    // The declared direct supertype of every type index (`None` when a type
-    // declares no supertype), parallel to `type_kinds`. Drives the runtime
-    // subtype checks emitted for `ref.test`/`ref.cast`/`br_on_cast`.
-    let mut supers: Vec<Option<u32>> = Vec::new();
-    // The type section run through the validator (types only, never the bodies), for
-    // the declared subtype relation behind funcref `ref.test`/`ref.cast`; `None` if
-    // it does not validate.
-    let mut type_validator = Some(wasmparser::Validator::new_with_features(
-        wasmparser::WasmFeatures::all(),
-    ));
-    let mut func_type_indices: Vec<u32> = Vec::new();
-    let mut bodies: Vec<wasmparser::FunctionBody> = Vec::new();
-    let mut globals: Vec<codegen::GlobalInfo> = Vec::new();
-    // Every linear memory, in index order: imported memories occupy the low
-    // indices (like globals/functions), then defined ones. The multi-memory
-    // proposal allows more than one.
-    let mut memories: Vec<codegen::MemInfo> = Vec::new();
-    let mut table: Option<codegen::TableInfo> = None;
-    // Tables 1.. (imported ones first, then defined ones), after table 0.
-    let mut extra_tables: Vec<codegen::TableInfo> = Vec::new();
-    // Table initializer expressions (`None` = the primary table, `Some(i)` = `extra_tables[i]`),
-    // resolved after the loop because the table section precedes the global section.
-    let mut pending_table_inits: Vec<(Option<usize>, wasmparser::ConstExpr<'_>)> = Vec::new();
-    // For each defined global, the table-slot handle of its `ref.func`/`ref.null` initializer.
-    let mut global_handles: Vec<Option<u32>> = Vec::new();
-    // For each defined global, its integer value if it is an immutable integer constant.
-    let mut global_ints: Vec<Option<codegen::ConstInt>> = Vec::new();
-    let mut elements: Vec<codegen::ElemSegment> = Vec::new();
-    let mut data: Vec<codegen::DataSegment> = Vec::new();
-    let mut imports: Vec<codegen::ImportInfo> = Vec::new();
-    let mut imported_globals: Vec<codegen::ImportedGlobalInfo> = Vec::new();
-    // Exception tags, imported ones first (classified alongside other imports)
-    // then locally-defined ones, matching the wasm tag index space.
-    let mut tags: Vec<codegen::TagInfo> = Vec::new();
-    let mut exports: Vec<codegen::ExportInfo> = Vec::new();
-    let mut global_exports: Vec<codegen::GlobalExportInfo> = Vec::new();
-    let mut start: Option<u32> = None;
-    // Functions named by `ref.func` in a global initialiser (roots for `entry_exports`).
-    let mut global_funcs: Vec<u32> = Vec::new();
-
-    for payload in Parser::new(0).parse_all(wasm) {
-        match payload? {
-            Payload::Version {
-                num,
-                encoding,
-                range,
-            } => {
-                reject_component(encoding)?;
-                feed_validator(&mut type_validator, |v| v.version(num, encoding, &range));
-            }
-            Payload::TypeSection(reader) => {
-                feed_validator(&mut type_validator, |v| v.type_section(&reader));
-                for group in reader {
-                    for sub in group?.types() {
-                        // Record the direct supertype (if any) before matching
-                        // the kind, keeping `supers` aligned with the type index
-                        // space so a subtype chain can be walked at codegen time.
-                        if sub.supertype_idxs.len() > 1 {
-                            return Err(TranspileError::Unsupported(
-                                "type with multiple supertypes".into(),
-                            ));
-                        }
-                        supers.push(sub.supertype_idxs.first().and_then(|p| p.as_module_index()));
-                        match &sub.composite_type.inner {
-                            CompositeInnerType::Func(func_ty) => {
-                                signatures.push(signature_from(func_ty));
-                                type_kinds.push(codegen::CompositeKind::Func);
-                            }
-                            CompositeInnerType::Struct(struct_ty) => {
-                                // A struct/array type occupies a type index too;
-                                // record its kind and keep `signatures` aligned
-                                // with an empty placeholder (never read as a
-                                // function signature).
-                                signatures.push(Signature {
-                                    params: Vec::new(),
-                                    results: Vec::new(),
-                                });
-                                let fields = struct_ty
-                                    .fields
-                                    .iter()
-                                    .map(|f| codegen::FieldInfo {
-                                        storage: f.element_type,
-                                    })
-                                    .collect();
-                                type_kinds.push(codegen::CompositeKind::Struct(fields));
-                            }
-                            CompositeInnerType::Array(array_ty) => {
-                                signatures.push(Signature {
-                                    params: Vec::new(),
-                                    results: Vec::new(),
-                                });
-                                type_kinds.push(codegen::CompositeKind::Array(
-                                    codegen::FieldInfo {
-                                        storage: array_ty.0.element_type,
-                                    },
-                                ));
-                            }
-                            CompositeInnerType::Cont(cont_ty) => {
-                                // A continuation type `(cont $ft)` occupies a
-                                // type index too; record the underlying function
-                                // type index and keep `signatures` aligned with
-                                // an empty placeholder (never read as a function
-                                // signature). A `contref` lowers to a `u32`
-                                // handle like a funcref.
-                                signatures.push(Signature {
-                                    params: Vec::new(),
-                                    results: Vec::new(),
-                                });
-                                let func_index = cont_ty.0.as_module_index().ok_or_else(|| {
-                                    TranspileError::Unsupported(
-                                        "continuation over a non-module type index".into(),
-                                    )
-                                })?;
-                                type_kinds.push(codegen::CompositeKind::Cont(func_index));
-                            }
-                        }
-                    }
-                }
-            }
-            Payload::ImportSection(reader) => {
-                // Function imports occupy the low end of the function index
-                // space (dispatched through an injected host trait) and imported
-                // globals the low end of the global index space (host getters/
-                // setters). Imported memory and tables are host-owned (lent
-                // through the trait); imported tags occupy the low tag indices.
-                // Imports may be grouped in the compact encodings, so each group
-                // is expanded.
-                let mut sink = ImportSink {
-                    imports: &mut imports,
-                    imported_globals: &mut imported_globals,
-                    memories: &mut memories,
-                    table: &mut table,
-                    extra_tables: &mut extra_tables,
-                    tags: &mut tags,
-                };
-                for group in reader {
-                    match group? {
-                        wasmparser::Imports::Single(_, import) => {
-                            classify_import(
-                                (import.module, import.name),
-                                import.ty,
-                                &signatures,
-                                &type_kinds,
-                                &mut sink,
-                            )?;
-                        }
-                        wasmparser::Imports::Compact1 { module, items } => {
-                            for item in items {
-                                let item = item?;
-                                classify_import(
-                                    (module, item.name),
-                                    item.ty,
-                                    &signatures,
-                                    &type_kinds,
-                                    &mut sink,
-                                )?;
-                            }
-                        }
-                        wasmparser::Imports::Compact2 { module, ty, names } => {
-                            for name in names {
-                                classify_import(
-                                    (module, name?),
-                                    ty,
-                                    &signatures,
-                                    &type_kinds,
-                                    &mut sink,
-                                )?;
-                            }
-                        }
-                    }
-                }
-            }
-            Payload::FunctionSection(reader) => {
-                for type_index in reader {
-                    func_type_indices.push(type_index?);
-                }
-            }
-            Payload::TagSection(reader) => {
-                // A tag references a function type whose parameters are the
-                // exception's payload; exceptions carry no results.
-                for tag in reader {
-                    tags.push(tag_info(tag?.func_type_idx, &signatures)?);
-                }
-            }
-            Payload::MemorySection(reader) => {
-                for mem in reader {
-                    let mem = mem?;
-                    // `shared` memory (threads proposal) is backed by a
-                    // thread-shareable `SharedMemory` when it is the module's
-                    // single defined memory (see codegen atomic ops). A shared
-                    // memory cannot also be 64-bit: the shared backend is
-                    // addressed by `u32`.
-                    if mem.memory64 && mem.shared {
-                        return Err(TranspileError::Unsupported("shared 64-bit memory".into()));
-                    }
-                    memories.push(codegen::MemInfo {
-                        min_pages: mem.initial,
-                        max_pages: mem.maximum,
-                        // Only memory 0 can be host-owned, and only when nothing
-                        // (an imported memory) comes before it.
-                        imported: topts.import_memory && memories.is_empty() && !mem.shared,
-                        shared: mem.shared,
-                        memory64: mem.memory64,
-                    });
-                }
-            }
-            Payload::TableSection(reader) => {
-                for table_entry in reader {
-                    let table_entry = table_entry?;
-                    let ty = table_entry.ty;
-                    if !is_supported_table_element(ty.element_type, &type_kinds) {
-                        return Err(TranspileError::Unsupported(
-                            "table of a non-funcref/externref type".into(),
-                        ));
-                    }
-                    if ty.shared {
-                        return Err(TranspileError::Unsupported("shared table".into()));
-                    }
-                    // A `ref.null` table starts null (its entries come from active
-                    // element segments); a `ref.func` one starts filled with that function.
-                    // An expression is resolved once the globals it may read are known.
-                    let pending = match &table_entry.init {
-                        TableInit::RefNull => None,
-                        TableInit::Expr(expr) => Some(expr.clone()),
-                    };
-                    let min = u32::try_from(ty.initial)
-                        .map_err(|_| TranspileError::Unsupported("table too large".into()))?;
-                    let info = codegen::TableInfo {
-                        min,
-                        max: ty.maximum.and_then(|m| u32::try_from(m).ok()),
-                        imported: false,
-                        table64: ty.table64,
-                        element: ValType::Ref(ty.element_type),
-                        init: None,
-                    };
-                    let slot = if table.is_none() {
-                        None
-                    } else {
-                        Some(extra_tables.len())
-                    };
-                    if let Some(expr) = pending {
-                        pending_table_inits.push((slot, expr));
-                    }
-                    if table.is_none() {
-                        table = Some(info);
-                    } else {
-                        extra_tables.push(info);
-                    }
-                }
-            }
-            Payload::ElementSection(reader) => {
-                let int_globals = codegen::IntGlobals {
-                    imported: imported_globals.len(),
-                    values: &global_ints,
-                };
-                for element in reader {
-                    let element = element?;
-                    let mut seg_table: u32 = 0;
-                    let offset = match &element.kind {
-                        ElementKind::Active {
-                            table_index,
-                            offset_expr,
-                        } => {
-                            let index = table_index.unwrap_or(0);
-                            let n_tables = usize::from(table.is_some()) + extra_tables.len();
-                            if usize::try_from(index).is_ok_and(|i| i >= n_tables) {
-                                return Err(TranspileError::Unsupported(
-                                    "element segment for an unknown table".into(),
-                                ));
-                            }
-                            seg_table = index;
-                            let is64 = if index == 0 {
-                                table.as_ref().is_some_and(|t| t.table64)
-                            } else {
-                                usize::try_from(index - 1)
-                                    .ok()
-                                    .and_then(|i| extra_tables.get(i))
-                                    .is_some_and(|t| t.table64)
-                            };
-                            let wide = is64;
-                            let constant = if wide {
-                                codegen::const_expr_u64_for(
-                                    offset_expr,
-                                    "element offset",
-                                    int_globals,
-                                )
-                            } else {
-                                codegen::const_expr_u32(offset_expr, int_globals).map(u64::from)
-                            };
-                            Some(segment_offset(
-                                offset_expr,
-                                constant,
-                                wide,
-                                &type_kinds,
-                                &imported_globals,
-                                &globals,
-                            )?)
-                        }
-                        ElementKind::Passive => None,
-                        // A declared segment has no runtime effect (it only
-                        // permits `ref.func`), but still occupies an element
-                        // index, so retain an empty placeholder to keep
-                        // `table.init`/`elem.drop` indices aligned.
-                        ElementKind::Declared => {
-                            elements.push(codegen::ElemSegment {
-                                table: 0,
-                                offset: None,
-                                declared: true,
-                                funcs: Vec::new(),
-                                imported_items: Vec::new(),
-                            });
-                            continue;
-                        }
-                    };
-                    let mut imported_items: Vec<(usize, u32)> = Vec::new();
-                    let funcs = match element.items {
-                        ElementItems::Functions(reader) => {
-                            let mut indices = Vec::new();
-                            for index in reader {
-                                indices.push(index?);
-                            }
-                            indices
-                        }
-                        // Expression items (the form a typed-funcref table uses) are
-                        // supported when each is a plain `ref.func`, `ref.null` or
-                        // `global.get`. An imported global's value is the host's, so
-                        // only an active segment (written at instantiation) may read one.
-                        ElementItems::Expressions(_, reader) => {
-                            let mut indices = Vec::new();
-                            for (k, expr) in reader.into_iter().enumerate() {
-                                match eval_ref_const(
-                                    &expr?,
-                                    "element segment item",
-                                    &imported_globals,
-                                    &global_handles,
-                                )? {
-                                    RefConst::Handle(h) => indices.push(h),
-                                    RefConst::Imported(_) if offset.is_none() => {
-                                        return Err(TranspileError::Unsupported(
-                                            "element segment item reading an imported global in a passive segment"
-                                                .into(),
-                                        ));
-                                    }
-                                    RefConst::Imported(g) => {
-                                        imported_items.push((k, g));
-                                        indices.push(u32::MAX);
-                                    }
-                                }
-                            }
-                            indices
-                        }
-                    };
-                    elements.push(codegen::ElemSegment {
-                        table: seg_table,
-                        offset,
-                        declared: false,
-                        funcs,
-                        imported_items,
-                    });
-                }
-            }
-            Payload::GlobalSection(reader) => {
-                for global in reader {
-                    let global = global?;
-                    for op in global.init_expr.get_operators_reader() {
-                        if let wasmparser::Operator::RefFunc { function_index } = op? {
-                            global_funcs.push(function_index);
-                        }
-                    }
-                    let init = codegen::const_expr_to_rust(
-                        &global.init_expr,
-                        &type_kinds,
-                        &imported_globals,
-                        &globals,
-                    )?;
-                    global_ints.push(
-                        codegen::const_int_value(
-                            &global.init_expr,
-                            codegen::IntGlobals {
-                                imported: imported_globals.len(),
-                                values: &global_ints,
-                            },
-                        )
-                        .filter(|_| !global.ty.mutable),
-                    );
-                    // A mutable global is not a constant, so no handle is recorded for it.
-                    global_handles.push(
-                        eval_ref_const(
-                            &global.init_expr,
-                            "global",
-                            &imported_globals,
-                            &global_handles,
-                        )
-                        .ok()
-                        .and_then(RefConst::handle)
-                        .filter(|_| !global.ty.mutable),
-                    );
-                    globals.push(codegen::GlobalInfo {
-                        ty: global.ty.content_type,
-                        mutable: global.ty.mutable,
-                        init,
-                    });
-                }
-            }
-            Payload::DataSection(reader) => {
-                let int_globals = codegen::IntGlobals {
-                    imported: imported_globals.len(),
-                    values: &global_ints,
-                };
-                for segment in reader {
-                    let segment = segment?;
-                    let (offset, mem_index) = match &segment.kind {
-                        DataKind::Active {
-                            memory_index,
-                            offset_expr,
-                        } => {
-                            let wide = usize::try_from(*memory_index)
-                                .ok()
-                                .and_then(|i| memories.get(i))
-                                .is_some_and(|m| m.memory64);
-                            let constant = codegen::const_expr_u64(offset_expr, int_globals);
-                            (
-                                Some(segment_offset(
-                                    offset_expr,
-                                    constant,
-                                    wide,
-                                    &type_kinds,
-                                    &imported_globals,
-                                    &globals,
-                                )?),
-                                *memory_index,
-                            )
-                        }
-                        DataKind::Passive => (None, 0),
-                    };
-                    data.push(codegen::DataSegment {
-                        offset,
-                        mem_index,
-                        bytes: segment.data.to_vec(),
-                    });
-                }
-            }
-            Payload::ExportSection(reader) => {
-                for export in reader {
-                    let export = export?;
-                    match export.kind {
-                        ExternalKind::Func => exports.push(codegen::ExportInfo {
-                            name: export.name.to_string(),
-                            func_index: export.index,
-                        }),
-                        ExternalKind::Global => global_exports.push(codegen::GlobalExportInfo {
-                            name: export.name.to_string(),
-                            global_index: export.index,
-                        }),
-                        _ => {}
-                    }
-                }
-            }
-            Payload::StartSection { func, .. } => {
-                start = Some(func);
-            }
-            Payload::CodeSectionEntry(body) => {
-                bodies.push(body);
-            }
-            _ => {}
-        }
-    }
-
-    // Resolve each function body against its declared signature.
-    let mut funcs: Vec<codegen::FuncInput> = Vec::with_capacity(bodies.len());
-    for (i, body) in bodies.iter().enumerate() {
-        let type_index = func_type_indices
-            .get(i)
-            .copied()
-            .ok_or_else(|| TranspileError::Unsupported("missing function type".into()))?;
-        let sig = signatures.get(type_index as usize).ok_or_else(|| {
-            TranspileError::Unsupported("function type index out of range".into())
-        })?;
-        funcs.push(codegen::FuncInput {
-            type_index,
-            params: &sig.params,
-            results: &sig.results,
-            body,
-        });
-    }
-
-    // Table initializers, now that every global they may read is known. A
-    // `ref.func` one is reachable even if the table is never read: it is seeded at
-    // instantiation, like a `ref.func` in a global.
-    for (slot, expr) in &pending_table_inits {
-        let init = eval_ref_const(
-            expr,
-            "table initializer",
-            &imported_globals,
-            &global_handles,
-        )?;
-        let target = match slot {
-            None => table.as_mut(),
-            Some(i) => extra_tables.get_mut(*i),
-        };
-        match init {
-            RefConst::Handle(u32::MAX) => {}
-            RefConst::Handle(func) => {
-                global_funcs.push(func);
-                if let Some(target) = target {
-                    target.init = Some(codegen::TableFill::Func(func));
-                }
-            }
-            RefConst::Imported(global) => {
-                if let Some(target) = target {
-                    target.init = Some(codegen::TableFill::ImportedGlobal(global));
-                }
-            }
-        }
-    }
-
-    // The module's function types, so `call_indirect` can resolve its declared
-    // type index back to a signature.
-    let types: Vec<codegen::TypeSig> = signatures
-        .iter()
-        .map(|s| codegen::TypeSig {
-            params: s.params.clone(),
-            results: s.results.clone(),
-        })
-        .collect();
-
+    let mut ir = parse::parse_module(wasm, topts)?;
     if topts.named_imports {
+        let imports = &mut ir.imports;
         let hosted: Vec<usize> = (0..imports.len())
             .filter(|&i| imports.get(i).is_some_and(|im| im.wasi.is_none()))
             .collect();
@@ -933,15 +390,16 @@ fn transpile_impl<R>(
         }
     }
 
+    let funcs = ir.func_inputs()?;
     let live = match &topts.entry_exports {
         Some(entries) => codegen::live_functions(
             &codegen::ReachInput {
                 funcs: &funcs,
-                imports: &imports,
-                exports: &exports,
-                elements: &elements,
-                global_funcs: &global_funcs,
-                start,
+                imports: &ir.imports,
+                exports: &ir.exports,
+                elements: &ir.elements,
+                global_funcs: &ir.global_funcs,
+                start: ir.start,
             },
             entries,
         )?,
@@ -951,17 +409,19 @@ fn transpile_impl<R>(
     // The instance is handed to each host call only when there is a host function
     // import to hand it to; the host is lent out of `imports`, so nothing else may
     // read the host while it runs.
-    let reentrant_imports = topts.reentrant_imports && imports.iter().any(|im| im.wasi.is_none());
+    let reentrant_imports =
+        topts.reentrant_imports && ir.imports.iter().any(|im| im.wasi.is_none());
     if reentrant_imports {
-        let host_owned = memories.iter().any(|m| m.imported)
-            || table.as_ref().is_some_and(|t| t.imported)
-            || !imported_globals.is_empty();
+        let host_owned = ir.memories.iter().any(|m| m.imported)
+            || ir.table.as_ref().is_some_and(|t| t.imported)
+            || !ir.imported_globals.is_empty();
         if host_owned {
             return Err(TranspileError::Unsupported(
                 "reentrant_imports with an imported memory, table or global".into(),
             ));
         }
-        if imports
+        if ir
+            .imports
             .iter()
             .any(|im| im.wasi.is_some_and(codegen::WasiFn::spawns_threads))
         {
@@ -970,27 +430,26 @@ fn transpile_impl<R>(
             ));
         }
     }
-    let type_rel = type_validator.as_ref().and_then(type_relation);
     let parts = codegen::ModuleParts {
-        imports: &imports,
-        imported_globals: &imported_globals,
+        imports: &ir.imports,
+        imported_globals: &ir.imported_globals,
         funcs: &funcs,
         live: &live,
-        types: &types,
-        type_kinds: &type_kinds,
-        supers: &supers,
-        type_rel: type_rel.as_ref(),
-        globals: &globals,
-        memories: &memories,
-        data: &data,
-        table: table.as_ref(),
-        extra_tables: &extra_tables,
-        elements: &elements,
-        global_funcs: &global_funcs,
-        tags: &tags,
-        exports: &exports,
-        global_exports: &global_exports,
-        start,
+        types: &ir.type_sigs,
+        type_kinds: ir.type_kinds(),
+        supers: ir.supers(),
+        type_rel: ir.type_rel.as_ref(),
+        globals: &ir.globals,
+        memories: &ir.memories,
+        data: &ir.data,
+        table: ir.table.as_ref(),
+        extra_tables: &ir.extra_tables,
+        elements: &ir.elements,
+        global_funcs: &ir.global_funcs,
+        tags: &ir.tags,
+        exports: &ir.exports,
+        global_exports: &ir.global_exports,
+        start: ir.start,
         unsafe_memory: topts.unsafe_memory,
         call_depth_limit: topts.call_depth_limit,
         reentrant_imports,
@@ -999,341 +458,6 @@ fn transpile_impl<R>(
         named_exports: topts.named_exports,
     };
     generate(&parts)
-}
-
-/// Resolve a tag's referenced function type into its parameter and result
-/// types (results are empty for an exception tag, non-empty for a
-/// stack-switching control tag).
-fn tag_info(
-    func_type_idx: u32,
-    signatures: &[Signature],
-) -> Result<codegen::TagInfo, TranspileError> {
-    let sig = signatures
-        .get(func_type_idx as usize)
-        .ok_or_else(|| TranspileError::Unsupported("tag type index out of range".into()))?;
-    Ok(codegen::TagInfo {
-        params: sig.params.clone(),
-        results: sig.results.clone(),
-    })
-}
-
-/// The module-level accumulators an import is classified into, bundled so the
-/// classifier takes one sink rather than many out-parameters.
-struct ImportSink<'a> {
-    imports: &'a mut Vec<codegen::ImportInfo>,
-    imported_globals: &'a mut Vec<codegen::ImportedGlobalInfo>,
-    memories: &'a mut Vec<codegen::MemInfo>,
-    table: &'a mut Option<codegen::TableInfo>,
-    extra_tables: &'a mut Vec<codegen::TableInfo>,
-    tags: &'a mut Vec<codegen::TagInfo>,
-}
-
-/// Classify an import by its type: a function import is pushed onto `imports`, a
-/// global onto `imported_globals`, an imported memory recorded in `memory`, an
-/// imported table in `table`, and an imported exception tag onto `tags`.
-/// A table holds `funcref`, `externref`, `exnref`, or a concrete function reference
-/// `(ref null $ft)`; the latter is stored exactly like a `funcref` (a `u32`
-/// function handle), while an `exnref` (or `noexn`) entry is a managed `GcRef`.
-/// An abstract `contref` or bottom type is a `u32` handle too; tables
-/// of GC struct/array or concrete continuation references are unsupported.
-fn is_supported_table_element(
-    element: wasmparser::RefType,
-    type_kinds: &[codegen::CompositeKind],
-) -> bool {
-    if codegen::is_abstract_u32_ref(element) || codegen::is_exn_hierarchy(element.heap_type()) {
-        return true;
-    }
-    let wasmparser::HeapType::Concrete(idx) = element.heap_type() else {
-        return false;
-    };
-    matches!(
-        idx.as_module_index()
-            .and_then(|i| type_kinds.get(i as usize)),
-        Some(codegen::CompositeKind::Func)
-    )
-}
-
-fn classify_import(
-    id: (&str, &str),
-    ty: TypeRef,
-    signatures: &[Signature],
-    type_kinds: &[codegen::CompositeKind],
-    sink: &mut ImportSink<'_>,
-) -> Result<(), TranspileError> {
-    match ty {
-        TypeRef::Func(type_index) | TypeRef::FuncExact(type_index) => {
-            let sig = signatures.get(type_index as usize).ok_or_else(|| {
-                TranspileError::Unsupported("import type index out of range".into())
-            })?;
-            // A recognised WASI function is generated natively; any other import
-            // is dispatched through the injected host trait.
-            let (module, name) = id;
-            let wasi = codegen::WasiFn::recognise(module, name, &sig.params, &sig.results);
-            sink.imports.push(codegen::ImportInfo {
-                type_index,
-                params: sig.params.clone(),
-                results: sig.results.clone(),
-                wasi,
-                module: module.to_string(),
-                field: name.to_string(),
-                ident: None,
-            });
-            Ok(())
-        }
-        TypeRef::Global(global_ty) => {
-            sink.imported_globals.push(codegen::ImportedGlobalInfo {
-                ty: global_ty.content_type,
-                mutable: global_ty.mutable,
-            });
-            Ok(())
-        }
-        TypeRef::Memory(mem_ty) => {
-            // An imported shared memory is a host-created `SharedMemory` handed
-            // to `Instance::new`; like a defined one it is addressed by `u32`.
-            if mem_ty.shared && mem_ty.memory64 {
-                return Err(TranspileError::Unsupported("shared 64-bit memory".into()));
-            }
-            // A host-lent buffer is only wired up for memory 0 (`Imports::memory`);
-            // an imported memory at a higher index (rare, out of scope) is
-            // rejected. Imports precede defined memories, so this is the first
-            // memory when the list is still empty.
-            if !sink.memories.is_empty() {
-                return Err(TranspileError::Unsupported(
-                    "imported non-zero memory".into(),
-                ));
-            }
-            sink.memories.push(codegen::MemInfo {
-                min_pages: mem_ty.initial,
-                max_pages: mem_ty.maximum,
-                imported: true,
-                shared: mem_ty.shared,
-                memory64: mem_ty.memory64,
-            });
-            Ok(())
-        }
-        TypeRef::Table(table_ty) => {
-            if !is_supported_table_element(table_ty.element_type, type_kinds) {
-                return Err(TranspileError::Unsupported(
-                    "table of a non-funcref/externref type".into(),
-                ));
-            }
-            if table_ty.shared {
-                return Err(TranspileError::Unsupported("imported shared table".into()));
-            }
-            let min = u32::try_from(table_ty.initial)
-                .map_err(|_| TranspileError::Unsupported("table too large".into()))?;
-            let info = codegen::TableInfo {
-                min,
-                max: table_ty.maximum.and_then(|m| u32::try_from(m).ok()),
-                imported: true,
-                table64: table_ty.table64,
-                element: ValType::Ref(table_ty.element_type),
-                init: None,
-            };
-            // The first table (imported or not) is table 0; imports come first in
-            // the index space, so any further imported table is `extra_tables[i - 1]`.
-            if sink.table.is_none() {
-                *sink.table = Some(info);
-            } else {
-                sink.extra_tables.push(info);
-            }
-            Ok(())
-        }
-        TypeRef::Tag(tag_ty) => {
-            sink.tags.push(tag_info(tag_ty.func_type_idx, signatures)?);
-            Ok(())
-        }
-    }
-}
-
-fn signature_from(func_ty: &FuncType) -> Signature {
-    Signature {
-        params: func_ty.params().to_vec(),
-        results: func_ty.results().to_vec(),
-    }
-}
-
-/// Whether a constant expression reads an imported global (its value is the host's).
-fn reads_imported_global(
-    expr: &wasmparser::ConstExpr<'_>,
-    imported: usize,
-) -> Result<bool, TranspileError> {
-    for op in expr.get_operators_reader() {
-        if let wasmparser::Operator::GlobalGet { global_index } = op?
-            && usize::try_from(global_index).is_ok_and(|i| i < imported)
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// The transpiler does not run the validator, so a runtime offset's operands are
-/// checked here: every `global.get` and constant must have the offset's width
-/// (`i64` when `wide`, else `i32`), as the constant path insists.
-fn check_offset_width(
-    expr: &wasmparser::ConstExpr<'_>,
-    wide: bool,
-    imported_globals: &[codegen::ImportedGlobalInfo],
-    globals: &[codegen::GlobalInfo],
-) -> Result<(), TranspileError> {
-    use wasmparser::Operator::{
-        GlobalGet, I32Add, I32Const, I32Mul, I32Sub, I64Add, I64Const, I64Mul, I64Sub,
-    };
-    let width = if wide { ValType::I64 } else { ValType::I32 };
-    let mismatch = || {
-        TranspileError::Unsupported(format!(
-            "segment offset: operand type mismatch (expected {width})"
-        ))
-    };
-    for op in expr.get_operators_reader() {
-        match op? {
-            GlobalGet { global_index } => {
-                let index = usize::try_from(global_index).ok();
-                let ty = index.and_then(|i| match i.checked_sub(imported_globals.len()) {
-                    Some(defined) => globals.get(defined).map(|g| g.ty),
-                    None => imported_globals.get(i).map(|g| g.ty),
-                });
-                if ty != Some(width) {
-                    return Err(mismatch());
-                }
-            }
-            I32Const { .. } | I32Add | I32Sub | I32Mul if wide => return Err(mismatch()),
-            I64Const { .. } | I64Add | I64Sub | I64Mul if !wide => return Err(mismatch()),
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// An active segment's offset. `constant` is its value evaluated now; when that
-/// failed because the expression reads an imported global (only the host knows it),
-/// the offset becomes a Rust expression evaluated when the instance is built.
-/// `wide` says whether the offset is an `i64` (a 64-bit memory or table).
-fn segment_offset(
-    expr: &wasmparser::ConstExpr<'_>,
-    constant: Result<u64, TranspileError>,
-    wide: bool,
-    type_kinds: &[codegen::CompositeKind],
-    imported_globals: &[codegen::ImportedGlobalInfo],
-    globals: &[codegen::GlobalInfo],
-) -> Result<codegen::SegOffset, TranspileError> {
-    let err = match constant {
-        Ok(value) => return Ok(codegen::SegOffset::Const(value)),
-        Err(err) => err,
-    };
-    if !reads_imported_global(expr, imported_globals.len())? {
-        return Err(err);
-    }
-    check_offset_width(expr, wide, imported_globals, globals)?;
-    let rust = codegen::const_expr_to_rust(expr, type_kinds, imported_globals, globals)?;
-    Ok(codegen::SegOffset::Runtime(if wide {
-        format!("({rust}) as u64")
-    } else {
-        format!("({rust}) as u32 as u64")
-    }))
-}
-
-/// What a constant reference expression denotes: a function index (`u32::MAX`
-/// for null) known at transpile time, or an immutable imported global whose value
-/// only the host knows.
-enum RefConst {
-    Handle(u32),
-    Imported(u32),
-}
-
-impl RefConst {
-    fn handle(self) -> Option<u32> {
-        match self {
-            RefConst::Handle(h) => Some(h),
-            RefConst::Imported(_) => None,
-        }
-    }
-}
-
-/// Evaluate a constant reference expression: the function index for `ref.func`,
-/// `u32::MAX` (null) for `ref.null`, or, for `global.get`, the handle of an
-/// earlier defined global (`global_handles`, indexed after the imported ones) or
-/// an immutable imported global. Anything else is unsupported.
-fn eval_ref_const(
-    expr: &wasmparser::ConstExpr<'_>,
-    what: &str,
-    imported_globals: &[codegen::ImportedGlobalInfo],
-    global_handles: &[Option<u32>],
-) -> Result<RefConst, TranspileError> {
-    let mut ops = expr.get_operators_reader();
-    match (ops.read()?, ops.read()?) {
-        (wasmparser::Operator::RefFunc { function_index }, wasmparser::Operator::End) => {
-            Ok(RefConst::Handle(function_index))
-        }
-        (wasmparser::Operator::RefNull { .. }, wasmparser::Operator::End) => {
-            Ok(RefConst::Handle(u32::MAX))
-        }
-        (wasmparser::Operator::GlobalGet { global_index }, wasmparser::Operator::End) => {
-            let constant = usize::try_from(global_index).ok().and_then(|i| {
-                match i.checked_sub(imported_globals.len()) {
-                    Some(defined) => global_handles
-                        .get(defined)
-                        .copied()
-                        .flatten()
-                        .map(RefConst::Handle),
-                    // Only an immutable reference global is a constant.
-                    None => imported_globals
-                        .get(i)
-                        .filter(|g| !g.mutable && matches!(g.ty, ValType::Ref(_)))
-                        .map(|_| RefConst::Imported(global_index)),
-                }
-            });
-            constant.ok_or_else(|| {
-                TranspileError::Unsupported(format!(
-                    "{what} reading a mutable, non-reference or non-constant global"
-                ))
-            })
-        }
-        _ => Err(TranspileError::Unsupported(format!(
-            "{what} that is not ref.func, ref.null or global.get"
-        ))),
-    }
-}
-
-/// Run one step on the type validator, dropping it (and with it the type relation) if
-/// the step fails.
-fn feed_validator(
-    validator: &mut Option<wasmparser::Validator>,
-    step: impl FnOnce(&mut wasmparser::Validator) -> wasmparser::Result<()>,
-) {
-    if validator.as_mut().is_some_and(|v| step(v).is_err()) {
-        *validator = None;
-    }
-}
-
-/// The declared type relation of a validator that has read the type section: each type
-/// index's canonical id (a `CoreTypeId`, shared by equivalent types) and each canonical
-/// id's declared direct supertype.
-fn type_relation(validator: &wasmparser::Validator) -> Option<codegen::TypeRel> {
-    let types = validator.types(0)?;
-    let mut ids = std::collections::HashMap::new();
-    let mut canon = Vec::new();
-    let mut canon_super: Vec<Option<wasmparser::types::CoreTypeId>> = Vec::new();
-    for i in 0..types.core_type_count_in_module() {
-        let id = types.core_type_at_in_module(i);
-        let next = u32::try_from(ids.len()).ok()?;
-        let dense = *ids.entry(id).or_insert_with(|| {
-            canon_super.push(
-                types[id]
-                    .supertype_idxs
-                    .first()
-                    .and_then(|p| p.as_core_type_id()),
-            );
-            next
-        });
-        canon.push(dense);
-    }
-    let canon_super = canon_super
-        .into_iter()
-        .map(|sup| sup.and_then(|id| ids.get(&id).copied()))
-        .collect();
-    Some(codegen::TypeRel { canon, canon_super })
 }
 
 #[cfg(test)]
