@@ -115,6 +115,7 @@ fn trap_needles(spec_message: &str) -> &'static [&'static str] {
         "integer overflow" => &["overflow"],
         "invalid conversion to integer" => &["invalid conversion to integer"],
         "unreachable" => &["unreachable"],
+        "call stack exhausted" => &["call stack exhausted"],
         "out of bounds memory access" => &["out of range for slice", "out of bounds", "overflow"],
         "indirect call type mismatch" => &["indirect call type mismatch"],
         "undefined element" | "uninitialized element" => {
@@ -493,7 +494,7 @@ fn start_group(wasm: Vec<u8>) -> Result<Group, String> {
     if (spectest.table || spectest.memory) && grows_imported_spectest(&wasm, &spectest) {
         return Err("grows an imported spectest table or memory: its limit is not enforced".into());
     }
-    let generated = wasm2rs::transpile(&wasm).map_err(|e| format!("transpile failed: {e:?}"))?;
+    let generated = transpile_module(&wasm).map_err(|e| format!("transpile failed: {e:?}"))?;
     let stateful = generated.contains("pub struct Instance");
     let mut body = String::from(TRAP_HELPER);
     body.push_str(NULL_REF_HELPER);
@@ -670,9 +671,20 @@ fn run_wast(name: &str, src: &str) -> Report {
                     None
                 }),
             ),
-            WastDirective::AssertExhaustion { .. } => (
+            // Every module is transpiled with `SPEC_CALL_DEPTH_LIMIT`, so runaway
+            // recursion traps with `call stack exhausted` instead of aborting.
+            WastDirective::AssertExhaustion {
+                call: invoke,
+                message,
+                ..
+            } => (
                 "assert_exhaustion",
-                Err("native stack overflow is not a trap".into()),
+                with_group(&groups, module_ok, |g| {
+                    call_expr(g, invoke).map(|c| {
+                        let needles = format!("{:?}", trap_needles(message));
+                        format!("expect_trap(\"{ctx}\", &{needles}, || {{ let _ = {c}; }});")
+                    })
+                }),
             ),
             WastDirective::Register { .. } => ("register", Err("multi-module linking".into())),
             other => (directive_name(other), Err("unsupported directive".into())),
@@ -728,6 +740,22 @@ fn run_wast(name: &str, src: &str) -> Report {
     report
 }
 
+/// The call-depth limit every spec module is transpiled with, so that
+/// `assert_exhaustion` can observe `call stack exhausted` as a trap. Deep enough for
+/// the spec files' legitimate recursion, shallow enough for the 8 MiB main-thread
+/// stack at opt-level 0.
+const SPEC_CALL_DEPTH_LIMIT: u32 = 2_000;
+
+fn transpile_module(wasm: &[u8]) -> Result<String, wasm2rs::TranspileError> {
+    wasm2rs::transpile_with_options(
+        wasm,
+        &wasm2rs::TranspileOptions {
+            call_depth_limit: Some(SPEC_CALL_DEPTH_LIMIT),
+            ..Default::default()
+        },
+    )
+}
+
 /// `<file>:<line>` of a directive, embedded in assertion messages so a failing
 /// generated program points back at the `.wast` source.
 fn directive_location(directive: &WastDirective<'_>, src: &str, name: &str) -> String {
@@ -739,7 +767,7 @@ fn directive_location(directive: &WastDirective<'_>, src: &str, name: &str) -> S
 /// functions, so the harness (not the generator) tolerates unused code; every
 /// other warning in the generated source is still an error.
 fn run_group(name: &str, group: &Group) {
-    let generated = wasm2rs::transpile(&group.wasm).expect("transpile module");
+    let generated = transpile_module(&group.wasm).expect("transpile module");
     let program = format!(
         "#![allow(dead_code, unused_mut, unused_variables)]\n{generated}\nfn main() {{\n{}\n}}\n",
         group.body
@@ -1172,6 +1200,32 @@ fn a_non_canonical_nan_does_not_satisfy_nan_canonical() {
 }
 
 #[test]
+fn assert_exhaustion_runs_as_a_trap_under_the_call_depth_limit() {
+    let report = run_wast(
+        "spec_assert_exhaustion",
+        r#"
+(module
+  (func $runaway (export "runaway") (call $runaway))
+  (func $down (export "down") (param i32) (result i32)
+    local.get 0
+    if (result i32)
+      local.get 0
+      i32.const 1
+      i32.sub
+      call $down
+    else
+      i32.const 3
+    end))
+(assert_exhaustion (invoke "runaway") "call stack exhausted")
+(assert_return (invoke "down" (i32.const 100)) (i32.const 3))
+(assert_exhaustion (invoke "runaway") "call stack exhausted")
+"#,
+    );
+    assert_eq!(report.executed, 3);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
 fn unsupported_directives_are_skipped_with_a_reason() {
     let report = run_wast(
         "spec_skips",
@@ -1183,7 +1237,6 @@ fn unsupported_directives_are_skipped_with_a_reason() {
 (assert_return (invoke "pair") (i32.const 1) (i32.const 2))
 (assert_return (invoke "v" (v128.const i32x4 1 2 3 4)) (v128.const i32x4 1 2 3 4))
 (assert_invalid (module (func (result i32))) "type mismatch")
-(assert_exhaustion (invoke "id" (i32.const 0)) "call stack exhausted")
 (module $imp (import "env" "g" (func (param i32)))
   (func (export "f") (result i32) i32.const 1))
 (assert_return (invoke "f") (i32.const 1))
@@ -1193,21 +1246,14 @@ fn unsupported_directives_are_skipped_with_a_reason() {
     // The first assertion and the `assert_invalid` (checked by validation) run.
     assert_eq!(report.executed, 2);
     let reasons = report.skipped.join("\n");
-    for needle in [
-        "multi-value",
-        "v128",
-        "assert_exhaustion",
-        "imports",
-        "register",
-    ] {
+    for needle in ["multi-value", "v128", "imports", "register"] {
         assert!(
             reasons.contains(needle),
             "no skip reason {needle:?} in:\n{reasons}"
         );
     }
-    // 2 unsupported assertions + exhaustion + import module + its assertion +
-    // register.
-    assert_eq!(report.skipped.len(), 6, "{reasons}");
+    // 2 unsupported assertions + import module + its assertion + register.
+    assert_eq!(report.skipped.len(), 5, "{reasons}");
 }
 
 /// A spec file that cannot be replayed yet because the transpiler rejects its

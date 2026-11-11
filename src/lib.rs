@@ -152,6 +152,20 @@ pub struct TranspileOptions {
     /// `shared` memory.
     pub unsafe_memory: bool,
 
+    /// Count the activations of the module's defined functions and trap with
+    /// `call stack exhausted` (a `panic!`) when a call would nest deeper than this
+    /// many frames (the `wasm2c` approach). Without it, unbounded guest recursion
+    /// exhausts the native stack and aborts the whole host process, which no
+    /// `catch_unwind` can intercept.
+    ///
+    /// The counter is per thread and unwinds with the stack, so a trap or a caught
+    /// exception leaves it consistent. A `return_call*` does not deepen it: the
+    /// trampoline (or self-loop) keeps a tail-calling chain at one activation.
+    /// Pick a limit your thread's stack can hold (the frame size depends on the
+    /// module and the build profile). Continuation step functions are not counted.
+    /// `Some(0)` traps on the first call. `None` (the default) emits no counter, so existing output is unchanged.
+    pub call_depth_limit: Option<u32>,
+
     /// Split a flattened `loop { match pc { … } }` dispatch whose surviving arm
     /// count exceeds this cap into several sibling *part* functions over a shared
     /// state struct, so a pathologically large flattened function is emitted as
@@ -978,6 +992,7 @@ fn transpile_impl<R>(
         global_exports: &global_exports,
         start,
         unsafe_memory: topts.unsafe_memory,
+        call_depth_limit: topts.call_depth_limit,
         reentrant_imports,
         split_dispatch: topts.split_dispatch,
         jobs: topts.jobs,

@@ -578,6 +578,10 @@ impl<'a> super::FuncGen<'a> {
         if has_tc_variant {
             self.used_rt.insert(Rt::Tc);
         }
+        if ctx.call_depth_limit.is_some() {
+            self.used_rt.insert(Rt::CallDepth);
+            self.used_rt.insert(Rt::TrapCallStackExhausted);
+        }
         // The body of a function with tail calls takes the trampoline slot; its
         // plain-named wrapper (or forwarder, when the body could not use the slot)
         // follows the body.
@@ -694,6 +698,18 @@ impl<'a> super::FuncGen<'a> {
             format!("func{index}")
         };
         out.push_str(&format!("pub fn {body_name}({params_src}){ret} {{\n"));
+        // The guard lives in the body that holds the frame: a trampolined tail call
+        // runs after this body returned (and dropped it), so a `return_call` chain
+        // stays at one activation. The binding is named because `let _ =` would
+        // drop the guard immediately.
+        if let Some(limit) = ctx.call_depth_limit {
+            push_body_line(
+                out,
+                &format!("let __depth = CallDepth::enter({limit});"),
+                0,
+                line_prefix,
+            );
+        }
 
         // Render the deferred body (consuming it line by line so a huge function
         // is never held twice), then the tail expression at the body's level.

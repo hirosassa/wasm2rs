@@ -1,5 +1,5 @@
 //! Command-line entry point:
-//! `wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports]
+//! `wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports]
 //! <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
 //! `wasm2rs --dump <input.wasm>` to summarize a module, or
 //! `wasm2rs --extract-core <component.wasm> <dir>` to write a component's core
@@ -9,7 +9,7 @@
 //! that lowers it to the flat `Imports` trait; with `--external-types=<path>`, only the `Glue`,
 //! naming the `Host` trait and the interface-qualified types of the library at `<path>`).
 //!
-//! `wasm2rs --component [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--external-types=<path>]
+//! `wasm2rs --component [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>]
 //! <component.wasm> [output]` to write a component's program core module plus the typed `Glue`
 //! and `Exports` (like `wasm2rs::transpile_component`).
 //!
@@ -40,7 +40,7 @@ use wasm2rs::{SplitOptions, TranspileOptions, cargo_manifest, transpile_split_wi
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--external-types=<path>] <component.wasm> [output]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] <component.wasm> [output]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -114,12 +114,20 @@ fn run() -> Result<(), String> {
     let mut entry_exports: Option<Vec<String>> = None;
     let mut split_dispatch = 0usize;
     let mut jobs = 0usize;
+    let mut call_depth_limit: Option<u32> = None;
     let mut positional: Vec<String> = Vec::new();
     for arg in std::env::args().skip(1) {
         if let Some(n) = arg.strip_prefix("--split-dispatch=") {
             split_dispatch = n
                 .parse()
                 .map_err(|_| format!("invalid --split-dispatch value: {n}"))?;
+            continue;
+        }
+        if let Some(n) = arg.strip_prefix("--call-depth-limit=") {
+            call_depth_limit = Some(
+                n.parse()
+                    .map_err(|_| format!("invalid --call-depth-limit value: {n}"))?,
+            );
             continue;
         }
         if let Some(n) = arg.strip_prefix("--jobs=") {
@@ -182,6 +190,7 @@ fn run() -> Result<(), String> {
             (reentrant_imports, "--reentrant-imports"),
             (split_dispatch > 0, "--split-dispatch"),
             (jobs > 0, "--jobs"),
+            (call_depth_limit.is_some(), "--call-depth-limit"),
             (entry_exports.is_some(), "--entry-exports"),
             // The one code flag that `--wit-host --glue` itself takes.
             (external_types.is_some() && !wit_host, "--external-types"),
@@ -223,6 +232,7 @@ fn run() -> Result<(), String> {
         let options = wasm2rs::ComponentOptions {
             transpile: TranspileOptions {
                 unsafe_memory,
+                call_depth_limit,
                 split_dispatch,
                 jobs,
                 ..TranspileOptions::default()
@@ -287,6 +297,7 @@ fn run() -> Result<(), String> {
     }
     let topts = TranspileOptions {
         unsafe_memory,
+        call_depth_limit,
         split_dispatch,
         entry_exports,
         jobs,

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Opt-in call-depth limit (`TranspileOptions::call_depth_limit`, CLI `--call-depth-limit=N`): unbounded guest recursion traps with `panic!("call stack exhausted")` instead of exhausting the native stack and aborting the host. A per-thread RAII counter; `return_call*` chains stay at one activation. Off by default, so existing output is byte-identical. The spec harness now replays `assert_exhaustion` as a trap.
+
 ### Fixed
 - The `Cargo.toml` emitted with split output (`cargo_manifest`) no longer sets `panic = "abort"`, which made every Wasm exception and host-caught trap abort the process in release builds.
 

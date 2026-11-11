@@ -273,6 +273,7 @@ mod tests {
             "func0",
             "func12",
             "func0_tc",
+            "trap_call_stack_exhausted",
             "table1_mut",
             "r32",
             "r32_m2",

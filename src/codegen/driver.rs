@@ -144,6 +144,8 @@ pub(crate) struct ModuleCtx<'a> {
     /// default; when set, an out-of-bounds access is undefined behaviour rather
     /// than a wasm trap, so it is only sound for trusted modules.
     pub(crate) unsafe_memory: bool,
+    /// Opt-in call-depth limit (see `TranspileOptions::call_depth_limit`).
+    pub(crate) call_depth_limit: Option<u32>,
     /// Every `Imports` method receives the `Instance` (see
     /// `TranspileOptions::reentrant_imports`); `imports` is then an `Option<H>`
     /// lent out for each host call.
@@ -337,6 +339,8 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) start: Option<u32>,
     /// Opt-in unchecked linear-memory access (see [`ModuleCtx::unsafe_memory`]).
     pub(crate) unsafe_memory: bool,
+    /// See [`ModuleCtx::call_depth_limit`].
+    pub(crate) call_depth_limit: Option<u32>,
     /// See [`ModuleCtx::reentrant_imports`].
     pub(crate) reentrant_imports: bool,
     /// Cap on match arms per flattened-dispatch part function; `0` disables the
@@ -600,6 +604,7 @@ pub(crate) fn build_ctx<'a>(
             casts,
         },
         unsafe_memory: parts.unsafe_memory,
+        call_depth_limit: parts.call_depth_limit,
         reentrant_imports: parts.reentrant_imports,
         split_dispatch: parts.split_dispatch,
     };

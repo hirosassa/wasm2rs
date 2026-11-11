@@ -28,6 +28,8 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::TrapIndirectTypeMismatch => "trap_indirect_type_mismatch",
         Rt::DelegateExc => "Wasm2RsDelegate",
         Rt::Tc => "Tc",
+        Rt::CallDepth => "CallDepth",
+        Rt::TrapCallStackExhausted => "trap_call_stack_exhausted",
     }
 }
 
@@ -38,8 +40,10 @@ pub(super) fn is_rt_name(name: &str) -> bool {
 
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
-const RT_ORDER: [Rt; 24] = [
+const RT_ORDER: [Rt; 26] = [
     Rt::DelegateExc,
+    Rt::CallDepth,
+    Rt::TrapCallStackExhausted,
     Rt::Tc,
     Rt::TrapUnreachable,
     Rt::TrapIndirectTypeMismatch,
@@ -110,6 +114,38 @@ fn rt_lines(rt: Rt) -> Vec<String> {
             "        }".to_string(),
             "        r".to_string(),
             "    }".to_string(),
+            "}".to_string(),
+        ],
+        Rt::CallDepth => vec![
+            // `CALL_DEPTH` is upper-case, which a sanitized export name never is.
+            "thread_local! {".to_string(),
+            "    static CALL_DEPTH: ::std::cell::Cell<u32> = const { ::std::cell::Cell::new(0) };"
+                .to_string(),
+            "}".to_string(),
+            "struct CallDepth;".to_string(),
+            "impl CallDepth {".to_string(),
+            "    #[inline]".to_string(),
+            "    fn enter(limit: u32) -> CallDepth {".to_string(),
+            "        let depth = CALL_DEPTH.get();".to_string(),
+            "        if depth >= limit {".to_string(),
+            "            trap_call_stack_exhausted();".to_string(),
+            "        }".to_string(),
+            "        CALL_DEPTH.set(depth + 1);".to_string(),
+            "        CallDepth".to_string(),
+            "    }".to_string(),
+            "}".to_string(),
+            "impl Drop for CallDepth {".to_string(),
+            "    #[inline]".to_string(),
+            "    fn drop(&mut self) {".to_string(),
+            "        CALL_DEPTH.set(CALL_DEPTH.get() - 1);".to_string(),
+            "    }".to_string(),
+            "}".to_string(),
+        ],
+        Rt::TrapCallStackExhausted => vec![
+            "#[cold]".to_string(),
+            "#[inline(never)]".to_string(),
+            "fn trap_call_stack_exhausted() -> ! {".to_string(),
+            "    panic!(\"call stack exhausted\")".to_string(),
             "}".to_string(),
         ],
         Rt::TrapUnreachable => vec![
