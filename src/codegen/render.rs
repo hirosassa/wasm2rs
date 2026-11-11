@@ -422,102 +422,152 @@ fn instance_field_lines(
     Ok(lines)
 }
 
-/// The `Instance::new` constructor (plus `with_memory`/`shared_memory` for a
-/// shared module): materialise each memory buffer (copying its active data
-/// segments into place), initialise the table (applying active element
-/// segments), the globals, the WASI fd table and the retained passive segments,
-/// and — for host-owned memory/table — copy the active segments into the host
-/// storage after construction. Returns the unindented `impl`-body lines.
-fn constructor_lines(
-    parts: &ModuleParts<'_>,
-    ctx: &ModuleCtx<'_>,
-    layout: &Layout,
-) -> Result<Vec<String>, TranspileError> {
-    let ModuleParts {
-        globals,
-        memories,
-        data,
-        table,
-        elements,
-        ..
-    } = *parts;
-    let has_imports = layout.has_imports;
-    let mem_imported = layout.mem_imported;
-    let table_imported = layout.table_imported;
-    let wasi_files = layout.wasi_files;
-    let wasi_preopen = layout.wasi_preopen;
-    let global_base = layout.global_base;
+/// Open a block that reads a runtime segment offset once, as `off`. `host` names
+/// the host the offset reads (`imports`, the constructor's parameter, or
+/// `instance.imports` once it has been moved into the built instance), bound to
+/// `imports` for the expression. An offset that does not fit in memory saturates
+/// to `usize::MAX`, which is out of bounds in the target. The caller closes the
+/// block.
+fn open_runtime_offset(lines: &mut Vec<String>, expr: &str, host: &str, indent: &str) {
+    lines.push(format!("{indent}{{"));
+    lines.push(format!(
+        "{indent}    let off = usize::try_from({{ let imports = &{host}; {expr} }}).unwrap_or(usize::MAX);"
+    ));
+}
 
-    let mut inner: Vec<String> = Vec::new();
-    let new_param = if has_imports { "imports: H" } else { "" };
-    // Only active segments are copied at instantiation; passive ones are
-    // retained (see the `data{d}` fields) for `memory.init`. Each active data
-    // segment names the memory it initialises.
-    let active: Vec<(usize, &DataSegment)> = data
-        .iter()
-        .enumerate()
-        .filter(|(_, d)| d.offset.is_some())
-        .collect();
-    let active_elem: Vec<&ElemSegment> = elements.iter().filter(|e| e.offset.is_some()).collect();
-    // The active data segments that target a given memory index, in order.
-    let active_for = |mem: u32| -> Vec<(usize, &DataSegment)> {
-        active
+/// A table holds at most `u32::MAX` entries, so any slot at or above that is out
+/// of range: clamping keeps the spelled literal valid on a 32-bit `usize` while
+/// the access still traps.
+fn elem_slot(slot: u64) -> u64 {
+    slot.min(u64::from(u32::MAX))
+}
+
+/// The byte size of `pages` wasm pages.
+fn page_bytes(pages: u64) -> Result<u64, TranspileError> {
+    pages
+        .checked_mul(WASM_PAGE_SIZE)
+        .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))
+}
+
+/// The opening and closing lines of the `Self { .. }` literal: bound to a mutable
+/// `instance` when post-construction steps must run on it, returned directly
+/// otherwise.
+fn struct_literal_delims(bind: bool) -> (&'static str, &'static str) {
+    if bind {
+        ("    let mut instance = Self {", "    };")
+    } else {
+        ("    Self {", "    }")
+    }
+}
+
+/// What the constructors need to know about the module's active segments and
+/// post-construction steps, derived once and shared by the `*_init_lines` helpers.
+struct CtorPlan<'a> {
+    parts: &'a ModuleParts<'a>,
+    ctx: &'a ModuleCtx<'a>,
+    layout: &'a Layout,
+    /// Only active segments are copied at instantiation; passive ones are
+    /// retained (see the `data{d}` fields) for `memory.init`. Each active data
+    /// segment names the memory it initialises.
+    active: Vec<(usize, &'a DataSegment)>,
+    active_elem: Vec<&'a ElemSegment>,
+    /// Imported memory/table are host-owned, so their active data/elements cannot
+    /// be written into a `memory`/`table` field literal; instead the instance is
+    /// bound and the segments are copied into the host storage through
+    /// `mem_mut()`/`table{i}_mut()` after construction. With any imported table, every
+    /// active element segment is applied that way in module order (a trap then leaves
+    /// the earlier segments' writes in the host tables, as the spec says). Only
+    /// memory 0 can be imported, so only its segments need post-construction copying, unless a
+    /// segment also targets a defined memory: then every data segment is applied
+    /// after construction, in module order (a trap leaves the earlier segments'
+    /// writes in the host memory, and the elements are already in place), as for
+    /// tables.
+    data_in_module_order: bool,
+    post_init_data: bool,
+    post_init_elem: bool,
+    /// The start function runs as the last step of every instantiation, on the
+    /// fully built instance.
+    start_call: Option<String>,
+}
+
+impl<'a> CtorPlan<'a> {
+    fn new(parts: &'a ModuleParts<'a>, ctx: &'a ModuleCtx<'a>, layout: &'a Layout) -> Self {
+        let active: Vec<(usize, &DataSegment)> = parts
+            .data
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.offset.is_some())
+            .collect();
+        let active_elem: Vec<&ElemSegment> = parts
+            .elements
+            .iter()
+            .filter(|e| e.offset.is_some())
+            .collect();
+        let data_in_module_order = layout.mem_imported
+            && !ctx.memory_shared
+            && active.iter().any(|(_, d)| d.mem_index > 0);
+        let post_init_data = data_in_module_order
+            || (layout.mem_imported && active.iter().any(|(_, d)| d.mem_index == 0));
+        let post_init_elem = layout.table_imported && !active_elem.is_empty();
+        let start_call = parts.start.map(|f| {
+            ctx.call_expr(f as usize, "")
+                .replacen("self.", "instance.", 1)
+        });
+        Self {
+            parts,
+            ctx,
+            layout,
+            active,
+            active_elem,
+            data_in_module_order,
+            post_init_data,
+            post_init_elem,
+            start_call,
+        }
+    }
+
+    /// Whether the constructor must bind the built instance before returning it.
+    fn post_init(&self) -> bool {
+        self.post_init_data || self.post_init_elem || self.start_call.is_some()
+    }
+
+    /// The active data segments that target a given memory index, in order.
+    fn active_for(&self, mem: u32) -> Vec<(usize, &'a DataSegment)> {
+        self.active
             .iter()
             .copied()
             .filter(|(_, d)| d.mem_index == mem)
             .collect()
-    };
-    // Imported memory/table are host-owned, so their active data/elements cannot
-    // be written into a `memory`/`table` field literal; instead the instance is
-    // bound and the segments are copied into the host storage through
-    // `mem_mut()`/`table{i}_mut()` after construction. With any imported table, every
-    // active element segment is applied that way in module order (a trap then leaves
-    // the earlier segments' writes in the host tables, as the spec says). Only
-    // memory 0 can be imported, so only its segments need post-construction copying, unless a
-    // segment also targets a defined memory: then every data segment is applied
-    // after construction, in module order (a trap leaves the earlier segments'
-    // writes in the host memory, and the elements are already in place), as for
-    // tables below.
-    let data_in_module_order =
-        mem_imported && !ctx.memory_shared && active.iter().any(|(_, d)| d.mem_index > 0);
-    let post_init_data = data_in_module_order || (mem_imported && !active_for(0).is_empty());
-    let post_init_elem = table_imported && !active_elem.is_empty();
-    // The start function runs as the last step of every instantiation, on the
-    // fully built instance.
-    let start_call = parts.start.map(|f| {
-        ctx.call_expr(f as usize, "")
-            .replacen("self.", "instance.", 1)
-    });
-    let post_init = post_init_data || post_init_elem || start_call.is_some();
-    let (open, close) = if post_init {
-        ("    let mut instance = Self {", "    };")
-    } else {
-        ("    Self {", "    }")
-    };
+    }
 
-    // Open a block that reads a runtime segment offset once, as `off`. `host` names
-    // the host the offset reads (`imports`, the constructor's parameter, or
-    // `instance.imports` once it has been moved into the built instance), bound to
-    // `imports` for the expression. An offset that does not fit in memory saturates
-    // to `usize::MAX`, which is out of bounds in the target. The caller closes the
-    // block.
-    let open_runtime_offset = |lines: &mut Vec<String>, expr: &str, host: &str, indent: &str| {
-        lines.push(format!("{indent}{{"));
-        lines.push(format!(
-            "{indent}    let off = usize::try_from({{ let imports = &{host}; {expr} }}).unwrap_or(usize::MAX);"
-        ));
-    };
+    /// Data for a memory the module creates is applied once, to the shared memory,
+    /// so only elements repeat per instance (each sibling has its own host table);
+    /// data for a host-owned shared memory is applied by `new` after the elements.
+    fn data_after_elems(&self) -> bool {
+        self.ctx.memory_shared
+            && self.parts.memories.first().is_some_and(|m| m.imported)
+            && !self.active_for(0).is_empty()
+    }
 
-    // Emit `<target>[off..end].copy_from_slice(&DATA{d});` for the active data
-    // segment `seg`; `target` is a defined buffer (`m`) or a host buffer accessor
-    // (`instance.mem_mut()`), `host` names the host a runtime offset reads, and
-    // `indent` matches the surrounding block.
-    let copy_data_seg = |lines: &mut Vec<String>,
-                         d: usize,
-                         seg: &DataSegment,
-                         target: &str,
-                         host: &str,
-                         indent: &str| {
+    /// Shared-memory constructors bind the struct first when active elements must
+    /// be copied into a host-owned table, data must follow the elements into a
+    /// host-owned memory, or a start function must run on it.
+    fn shared_bind(&self) -> bool {
+        self.start_call.is_some() || self.post_init_elem || self.data_after_elems()
+    }
+
+    /// Emit `<target>[off..end].copy_from_slice(&DATA{d});` for the active data
+    /// segment `seg`; `target` is a defined buffer (`m`) or a host buffer accessor
+    /// (`instance.mem_mut()`), `host` names the host a runtime offset reads, and
+    /// `indent` matches the surrounding block.
+    fn copy_data_seg(
+        lines: &mut Vec<String>,
+        d: usize,
+        seg: &DataSegment,
+        target: &str,
+        host: &str,
+        indent: &str,
+    ) {
         let len = u64::try_from(seg.bytes.len()).unwrap_or(u64::MAX);
         let (base, runtime) = SegOffset::split(seg.offset.as_ref());
         if let Some(expr) = runtime {
@@ -535,98 +585,114 @@ fn constructor_lines(
         lines.push(format!(
             "{indent}{target}[{base}..{end}].copy_from_slice(&DATA{d});"
         ));
-    };
-    // The active data segments targeting memory `mem`, in module order.
-    let copy_active_data =
-        |lines: &mut Vec<String>, mem: u32, target: &str, host: &str, indent: &str| {
-            for (d, seg) in active_for(mem) {
-                copy_data_seg(lines, d, seg, target, host, indent);
-            }
-        };
+    }
 
-    // A table holds at most `u32::MAX` entries, so any slot at or above that is out
-    // of range: clamping keeps the spelled literal valid on a 32-bit `usize` while
-    // the access still traps.
-    let elem_slot = |slot: u64| slot.min(u64::from(u32::MAX));
+    /// The active data segments targeting memory `mem`, in module order.
+    fn copy_active_data(
+        &self,
+        lines: &mut Vec<String>,
+        mem: u32,
+        target: &str,
+        host: &str,
+        indent: &str,
+    ) {
+        for (d, seg) in self.active_for(mem) {
+            Self::copy_data_seg(lines, d, seg, target, host, indent);
+        }
+    }
 
-    // Emit `<target>[idx] = fu32;` for each active element segment entry;
-    // `target` is a defined table (`t`) or the host storage accessor
-    // (`instance.table_mut()`). `imports` names the host an imported-global item or
-    // a runtime offset reads: the constructor's parameter, or the built instance's
-    // field once it has been moved in.
-    let copy_elem_seg =
-        |lines: &mut Vec<String>, seg: &ElemSegment, target: &str, imports: &str, indent: &str| {
-            {
-                // A runtime offset is read once, in a block of its own; a constant
-                // one is spelled into each slot.
-                let (base, runtime) = SegOffset::split(seg.offset.as_ref());
-                let ind = match runtime {
-                    Some(expr) => {
-                        open_runtime_offset(lines, expr, imports, indent);
-                        format!("{indent}    ")
-                    }
-                    None => indent.to_string(),
-                };
-                // An empty segment writes nothing, but an offset past the end of the
-                // table still traps at instantiation: check it with an empty slice.
-                if seg.funcs.is_empty() {
-                    let off = if runtime.is_some() {
-                        "off".to_string()
-                    } else {
-                        elem_slot(base).to_string()
-                    };
-                    lines.push(format!("{ind}let _ = &{target}[{off}..{off}];"));
-                }
-                let gc_table = ctx
-                    .table_elements
-                    .get(seg.table as usize)
-                    .is_some_and(|e| is_gc_table_element(*e));
-                for (k, f) in seg.funcs.iter().enumerate() {
-                    let idx = if runtime.is_some() {
-                        format!("off.saturating_add({k})")
-                    } else {
-                        elem_slot(base.saturating_add(u64::try_from(k).unwrap_or(u64::MAX)))
-                            .to_string()
-                    };
-                    let value = seg
-                        .imported_items
-                        .iter()
-                        .find(|(item, _)| *item == k)
-                        .map_or_else(
-                            // An `exnref` item can only be `ref.null exn`.
-                            || {
-                                if gc_table {
-                                    "GcRef::Null".to_string()
-                                } else {
-                                    format!("{f}u32")
-                                }
-                            },
-                            |(_, global)| format!("{imports}.get_global{global}()"),
-                        );
-                    lines.push(format!("{ind}{target}[{idx}] = {value};"));
-                }
-                if runtime.is_some() {
-                    lines.push(format!("{indent}}}"));
-                }
+    /// Emit `<target>[idx] = fu32;` for each active element segment entry;
+    /// `target` is a defined table (`t`) or the host storage accessor
+    /// (`instance.table_mut()`). `imports` names the host an imported-global item or
+    /// a runtime offset reads: the constructor's parameter, or the built instance's
+    /// field once it has been moved in.
+    fn copy_elem_seg(
+        &self,
+        lines: &mut Vec<String>,
+        seg: &ElemSegment,
+        target: &str,
+        imports: &str,
+        indent: &str,
+    ) {
+        // A runtime offset is read once, in a block of its own; a constant
+        // one is spelled into each slot.
+        let (base, runtime) = SegOffset::split(seg.offset.as_ref());
+        let ind = match runtime {
+            Some(expr) => {
+                open_runtime_offset(lines, expr, imports, indent);
+                format!("{indent}    ")
             }
+            None => indent.to_string(),
         };
-    // The active segments of one defined table, in module order.
-    let copy_active_elems =
-        |lines: &mut Vec<String>, table_idx: u32, target: &str, imports: &str, indent: &str| {
-            for seg in active_elem.iter().filter(|seg| seg.table == table_idx) {
-                copy_elem_seg(lines, seg, target, imports, indent);
-            }
-        };
+        // An empty segment writes nothing, but an offset past the end of the
+        // table still traps at instantiation: check it with an empty slice.
+        if seg.funcs.is_empty() {
+            let off = if runtime.is_some() {
+                "off".to_string()
+            } else {
+                elem_slot(base).to_string()
+            };
+            lines.push(format!("{ind}let _ = &{target}[{off}..{off}];"));
+        }
+        let gc_table = self
+            .ctx
+            .table_elements
+            .get(seg.table as usize)
+            .is_some_and(|e| is_gc_table_element(*e));
+        for (k, f) in seg.funcs.iter().enumerate() {
+            let idx = if runtime.is_some() {
+                format!("off.saturating_add({k})")
+            } else {
+                elem_slot(base.saturating_add(u64::try_from(k).unwrap_or(u64::MAX))).to_string()
+            };
+            let value = seg
+                .imported_items
+                .iter()
+                .find(|(item, _)| *item == k)
+                .map_or_else(
+                    // An `exnref` item can only be `ref.null exn`.
+                    || {
+                        if gc_table {
+                            "GcRef::Null".to_string()
+                        } else {
+                            format!("{f}u32")
+                        }
+                    },
+                    |(_, global)| format!("{imports}.get_global{global}()"),
+                );
+            lines.push(format!("{ind}{target}[{idx}] = {value};"));
+        }
+        if runtime.is_some() {
+            lines.push(format!("{indent}}}"));
+        }
+    }
 
-    // The non-memory field initialisers (table, globals, wasi_fds, the retained
-    // passive segments, and `imports` last), pushed identically by both
-    // `Instance::new` and — for a shared module — `with_memory`. Only the memory
-    // field differs between the two, so factoring the rest keeps them in lock-step.
-    let push_common_fields = |inner: &mut Vec<String>| -> Result<(), TranspileError> {
-        // An imported table is host-owned (see the post-construction elem copy), so
-        // it has no field. Table 0 keeps the `table` field and table `i > 0` is
-        // `table{i}`, numbered by its index in the module's table index space.
-        for (i, t) in table.into_iter().chain(parts.extra_tables).enumerate() {
+    /// The active segments of one defined table, in module order.
+    fn copy_active_elems(
+        &self,
+        lines: &mut Vec<String>,
+        table_idx: u32,
+        target: &str,
+        imports: &str,
+        indent: &str,
+    ) {
+        for seg in self.active_elem.iter().filter(|seg| seg.table == table_idx) {
+            self.copy_elem_seg(lines, seg, target, imports, indent);
+        }
+    }
+
+    /// The table field initialisers. An imported table is host-owned (see the
+    /// post-construction elem copy), so it has no field. Table 0 keeps the `table`
+    /// field and table `i > 0` is `table{i}`, numbered by its index in the module's
+    /// table index space.
+    fn table_init_lines(&self, inner: &mut Vec<String>) -> Result<(), TranspileError> {
+        let parts = self.parts;
+        for (i, t) in parts
+            .table
+            .into_iter()
+            .chain(parts.extra_tables)
+            .enumerate()
+        {
             if t.imported {
                 continue;
             }
@@ -639,7 +705,7 @@ fn constructor_lines(
                 Some(TableFill::Func(f)) => format!("{f}u32"),
                 None => table_null(t.element).to_string(),
             };
-            if post_init_elem || !active_elem.iter().any(|seg| seg.table == i) {
+            if self.post_init_elem || !self.active_elem.iter().any(|seg| seg.table == i) {
                 inner.push(format!("        {field}: vec![{fill}; {}],", t.min));
             } else {
                 // Start every slot at the table's initializer (null unless it is
@@ -650,15 +716,27 @@ fn constructor_lines(
                     table_elem_rust(t.element),
                     t.min
                 ));
-                copy_active_elems(inner, i, "t", "imports", "            ");
+                self.copy_active_elems(inner, i, "t", "imports", "            ");
                 inner.push("            t".to_string());
                 inner.push("        },".to_string());
             }
         }
-        for (i, g) in globals.iter().enumerate() {
-            inner.push(format!("        g{}: {},", global_base + i, g.init));
+        Ok(())
+    }
+
+    fn global_init_lines(&self, inner: &mut Vec<String>) {
+        for (i, g) in self.parts.globals.iter().enumerate() {
+            inner.push(format!(
+                "        g{}: {},",
+                self.layout.global_base + i,
+                g.init
+            ));
         }
-        if wasi_files {
+    }
+
+    fn wasi_init_lines(&self, inner: &mut Vec<String>) {
+        let layout = self.layout;
+        if layout.wasi_files {
             inner.push(
                 if layout.wasi_threads {
                     "        wasi_fds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),"
@@ -668,7 +746,7 @@ fn constructor_lines(
                 .to_string(),
             );
         }
-        if wasi_preopen {
+        if layout.wasi_preopen {
             inner.push("        wasi_preopen: std::path::PathBuf::from(\".\"),".to_string());
         }
         if layout.wasi_threads {
@@ -677,84 +755,87 @@ fn constructor_lines(
                     .to_string(),
             );
         }
-        // Passive segments are retained as `&'static` slices of the module-scope
-        // statics, so `memory.init`/`table.init` can copy from them on demand.
-        for (d, seg) in data.iter().enumerate() {
+    }
+
+    /// Passive segments are retained as `&'static` slices of the module-scope
+    /// statics, so `memory.init`/`table.init` can copy from them on demand.
+    fn passive_init_lines(&self, inner: &mut Vec<String>) {
+        for (d, seg) in self.parts.data.iter().enumerate() {
             if seg.offset.is_none() {
                 inner.push(format!("        data{d}: &DATA{d},"));
             }
         }
-        for (e, seg) in elements.iter().enumerate() {
+        for (e, seg) in self.parts.elements.iter().enumerate() {
             if seg.offset.is_none() && !seg.declared {
                 inner.push(format!("        elem{e}: &ELEM{e},"));
             }
         }
-        if ctx.uses_extern_box {
+    }
+
+    /// The non-memory field initialisers (table, globals, wasi_fds, the retained
+    /// passive segments, and `imports` last), pushed identically by both
+    /// `Instance::new` and — for a shared module — `with_memory`. Only the memory
+    /// field differs between the two, so factoring the rest keeps them in lock-step.
+    fn push_common_fields(&self, inner: &mut Vec<String>) -> Result<(), TranspileError> {
+        self.table_init_lines(inner)?;
+        self.global_init_lines(inner);
+        self.wasi_init_lines(inner);
+        self.passive_init_lines(inner);
+        if self.ctx.uses_extern_box {
             inner.push("        extern_box: Vec::new(),".to_string());
         }
-        if !ctx.cont.bodies.is_empty() {
+        if !self.ctx.cont.bodies.is_empty() {
             inner.push("        conts: Vec::new(),".to_string());
             inner.push("        cont_free: Vec::new(),".to_string());
         }
         // Last, so a global initializer above can still read the host.
-        if has_imports {
-            inner.push(if ctx.reentrant_imports {
+        if self.layout.has_imports {
+            inner.push(if self.ctx.reentrant_imports {
                 "        imports: Some(imports),".to_string()
             } else {
                 "        imports,".to_string()
             });
         }
         Ok(())
-    };
+    }
 
-    // Shared-memory constructors build the struct directly, or bind it first when
-    // active elements must be copied into a host-owned table, data must follow
-    // the elements into a host-owned memory, or a start function must run on it;
-    // `push_bound_elems` and `push_bound_end` append the steps and the returned
-    // instance. Data for a memory the module creates is applied once, to the shared
-    // memory, so only elements repeat per instance (each sibling has its own host
-    // table); data for a host-owned memory is applied by `new` after the elements.
-    let data_after_elems = ctx.memory_shared
-        && memories.first().is_some_and(|m| m.imported)
-        && !active_for(0).is_empty();
-    let shared_bind = start_call.is_some() || post_init_elem || data_after_elems;
-    let (shared_open, shared_close) = if shared_bind {
-        ("    let mut instance = Self {", "    };")
-    } else {
-        ("    Self {", "    }")
-    };
-    // The steps that run on the bound `instance`: copy the active elements into the
-    // host-owned table (`push_bound_elems`), then run the start function and return
-    // the instance (`push_bound_end`). Elements come before data, as in the spec.
-    let push_bound_elems = |lines: &mut Vec<String>| {
-        if post_init_elem {
-            for seg in &active_elem {
+    /// The steps that run on the bound `instance`: copy the active elements into the
+    /// host-owned table. Elements come before data, as in the spec.
+    fn push_bound_elems(&self, lines: &mut Vec<String>) {
+        if self.post_init_elem {
+            for seg in &self.active_elem {
                 let (_, get_mut) = table_accessor(seg.table);
                 let target = format!("instance.{get_mut}()");
-                copy_elem_seg(lines, seg, &target, "instance.imports", "    ");
+                self.copy_elem_seg(lines, seg, &target, "instance.imports", "    ");
             }
         }
-    };
-    let push_bound_end = |lines: &mut Vec<String>| {
-        if let Some(call) = &start_call {
+    }
+
+    /// Run the start function and return the instance.
+    fn push_bound_end(&self, lines: &mut Vec<String>) {
+        if let Some(call) = &self.start_call {
             lines.push(format!("    {call};"));
         }
         lines.push("    instance".to_string());
-    };
+    }
 
-    if ctx.memory_shared {
-        // A single defined shared memory. `new` creates a fresh `SharedMemory`,
-        // applies this module's active data segments into it *once*, and inits
-        // globals/tables; `with_memory` joins an existing handle (sibling
-        // instance on another thread), inits its own globals/tables, and does
-        // NOT re-apply data — the memory is already initialised.
-        let mem0 = memories
+    /// A single defined shared memory. `new` creates a fresh `SharedMemory`,
+    /// applies this module's active data segments into it *once*, and inits
+    /// globals/tables; `with_memory` joins an existing handle (sibling
+    /// instance on another thread), inits its own globals/tables, and does
+    /// NOT re-apply data — the memory is already initialised.
+    fn shared_memory_init_lines(&self, inner: &mut Vec<String>) -> Result<(), TranspileError> {
+        let has_imports = self.layout.has_imports;
+        let new_param = if has_imports { "imports: H" } else { "" };
+        let data_after_elems = self.data_after_elems();
+        let shared_bind = self.shared_bind();
+        let (shared_open, shared_close) = struct_literal_delims(shared_bind);
+        let mem0 = self
+            .parts
+            .memories
             .first()
             .ok_or_else(|| TranspileError::Unsupported("shared memory missing".into()))?;
-        let bytes = mem0
-            .min_pages
-            .checked_mul(WASM_PAGE_SIZE)
-            .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
+        let bytes = page_bytes(mem0.min_pages)?;
 
         if mem0.imported {
             // The host created the memory and hands it in; `new` still owns the
@@ -771,9 +852,7 @@ fn constructor_lines(
             // one); without it, the wasm32 limit that `new` reserves.
             let ctor = match mem0.max_pages {
                 Some(max) => {
-                    let max_bytes = max
-                        .checked_mul(WASM_PAGE_SIZE)
-                        .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
+                    let max_bytes = page_bytes(max)?;
                     format!("SharedMemory::with_max({bytes}, {max_bytes})")
                 }
                 None => format!("SharedMemory::new({bytes})"),
@@ -781,25 +860,25 @@ fn constructor_lines(
             inner.push(format!("    let memory = {ctor};"));
         }
         // Data for a host-owned memory waits until the elements are in place.
-        if !active_for(0).is_empty() && !data_after_elems {
+        if !self.active_for(0).is_empty() && !data_after_elems {
             inner.push("    {".to_string());
             inner.push("        let mut __m = memory.bytes();".to_string());
-            copy_active_data(&mut inner, 0, "__m", "imports", "        ");
+            self.copy_active_data(inner, 0, "__m", "imports", "        ");
             inner.push("    }".to_string());
         }
         inner.push(shared_open.to_string());
         inner.push("        memory,".to_string());
-        push_common_fields(&mut inner)?;
+        self.push_common_fields(inner)?;
         inner.push(shared_close.to_string());
         if shared_bind {
-            push_bound_elems(&mut inner);
+            self.push_bound_elems(inner);
             if data_after_elems {
                 inner.push("    {".to_string());
                 inner.push("        let mut __m = instance.memory.bytes();".to_string());
-                copy_active_data(&mut inner, 0, "__m", "instance.imports", "        ");
+                self.copy_active_data(inner, 0, "__m", "instance.imports", "        ");
                 inner.push("    }".to_string());
             }
-            push_bound_end(&mut inner);
+            self.push_bound_end(inner);
         }
         inner.push("}".to_string());
 
@@ -812,11 +891,11 @@ fn constructor_lines(
         inner.push(format!("pub fn with_memory({with_param}) -> Self {{"));
         inner.push(shared_open.to_string());
         inner.push("        memory: mem,".to_string());
-        push_common_fields(&mut inner)?;
+        self.push_common_fields(inner)?;
         inner.push(shared_close.to_string());
         if shared_bind {
-            push_bound_elems(&mut inner);
-            push_bound_end(&mut inner);
+            self.push_bound_elems(inner);
+            self.push_bound_end(inner);
         }
         inner.push("}".to_string());
 
@@ -824,14 +903,15 @@ fn constructor_lines(
         inner.push(
             "pub fn shared_memory(&self) -> SharedMemory { self.memory.clone() }".to_string(),
         );
-    } else {
-        inner.push(format!("pub fn new({new_param}) -> Self {{"));
-        inner.push(open.to_string());
-        // Each defined memory's field literal: zero-filled, then each active data
-        // segment for that memory copied in. Memory 0 keeps the `memory` field name
-        // and the exact single-memory rendering; memory `i > 0` is `memory{i}`.
-        for (i, m) in memories.iter().enumerate() {
-            if i == 0 && mem_imported {
+        Ok(())
+    }
+
+    /// Each defined memory's field literal: zero-filled, then each active data
+    /// segment for that memory copied in. Memory 0 keeps the `memory` field name
+    /// and the exact single-memory rendering; memory `i > 0` is `memory{i}`.
+    fn memory_init_lines(&self, inner: &mut Vec<String>) -> Result<(), TranspileError> {
+        for (i, m) in self.parts.memories.iter().enumerate() {
+            if i == 0 && self.layout.mem_imported {
                 continue;
             }
             let field = if i == 0 {
@@ -840,11 +920,8 @@ fn constructor_lines(
                 format!("memory{i}")
             };
             let mem_index = index_u32(i)?;
-            let bytes = m
-                .min_pages
-                .checked_mul(WASM_PAGE_SIZE)
-                .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
-            if data_in_module_order || active_for(mem_index).is_empty() {
+            let bytes = page_bytes(m.min_pages)?;
+            if self.data_in_module_order || self.active_for(mem_index).is_empty() {
                 inner.push(format!("        {field}: vec![0u8; {bytes}],"));
             } else {
                 // Zero the memory, then copy each active data segment into place.
@@ -852,46 +929,76 @@ fn constructor_lines(
                 inner.push(format!(
                     "            let mut m: Vec<u8> = vec![0u8; {bytes}];"
                 ));
-                copy_active_data(&mut inner, mem_index, "m", "imports", "            ");
+                self.copy_active_data(inner, mem_index, "m", "imports", "            ");
                 inner.push("            m".to_string());
                 inner.push("        },".to_string());
             }
         }
-        push_common_fields(&mut inner)?;
+        Ok(())
+    }
+
+    /// `Instance::new` for a module without shared memory.
+    fn owned_memory_init_lines(&self, inner: &mut Vec<String>) -> Result<(), TranspileError> {
+        let new_param = if self.layout.has_imports {
+            "imports: H"
+        } else {
+            ""
+        };
+        let post_init = self.post_init();
+        let (open, close) = struct_literal_delims(post_init);
+        inner.push(format!("pub fn new({new_param}) -> Self {{"));
+        inner.push(open.to_string());
+        self.memory_init_lines(inner)?;
+        self.push_common_fields(inner)?;
         inner.push(close.to_string());
         if post_init {
             // Copy the active element segments, then the data segments, into the
             // host-owned storage. An out-of-bounds write panics here, faithfully
             // reproducing a wasm instantiation trap when a segment does not fit.
-            push_bound_elems(&mut inner);
-            if data_in_module_order {
-                for (d, seg) in &active {
+            self.push_bound_elems(inner);
+            if self.data_in_module_order {
+                for (d, seg) in &self.active {
                     let target = if seg.mem_index == 0 {
                         "instance.mem_mut()".to_string()
                     } else {
                         format!("instance.mem{}_mut()", seg.mem_index)
                     };
-                    copy_data_seg(&mut inner, *d, seg, &target, "instance.imports", "    ");
+                    Self::copy_data_seg(inner, *d, seg, &target, "instance.imports", "    ");
                 }
-            } else if post_init_data {
-                copy_active_data(
-                    &mut inner,
-                    0,
-                    "instance.mem_mut()",
-                    "instance.imports",
-                    "    ",
-                );
+            } else if self.post_init_data {
+                self.copy_active_data(inner, 0, "instance.mem_mut()", "instance.imports", "    ");
             }
-            push_bound_end(&mut inner);
+            self.push_bound_end(inner);
         }
         inner.push("}".to_string());
+        Ok(())
+    }
+}
+
+/// The `Instance::new` constructor (plus `with_memory`/`shared_memory` for a
+/// shared module): materialise each memory buffer (copying its active data
+/// segments into place), initialise the table (applying active element
+/// segments), the globals, the WASI fd table and the retained passive segments,
+/// and — for host-owned memory/table — copy the active segments into the host
+/// storage after construction. Returns the unindented `impl`-body lines.
+fn constructor_lines(
+    parts: &ModuleParts<'_>,
+    ctx: &ModuleCtx<'_>,
+    layout: &Layout,
+) -> Result<Vec<String>, TranspileError> {
+    let plan = CtorPlan::new(parts, ctx, layout);
+    let mut inner: Vec<String> = Vec::new();
+    if ctx.memory_shared {
+        plan.shared_memory_init_lines(&mut inner)?;
+    } else {
+        plan.owned_memory_init_lines(&mut inner)?;
     }
     // Re-point the single WASI preopen away from the process CWD. Guest
     // `path_*`/`fd_readdir` calls then resolve within `root`, which is also the
     // name advertised through `fd_prestat_dir_name`; absolute-path and `..`
     // escapes are still refused. Chained after `new`, e.g.
     // `Instance::new(host).with_preopen_root("/usr/share/zoneinfo")`.
-    if wasi_preopen {
+    if layout.wasi_preopen {
         inner.push(String::new());
         inner.push(
             "pub fn with_preopen_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {"
