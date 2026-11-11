@@ -162,12 +162,16 @@ impl<'a> super::FuncGen<'a> {
             .copied()
             .flatten()
             .unwrap_or(u32::MAX);
+        // A failed allocation reports -1 instead of aborting (an allocator that
+        // overcommits can still succeed here and fail later, as for memory).
         // A 64-bit table is still capped at `u32::MAX` entries (an
         // implementation limit), so a larger delta fails with -1.
         self.line(format!(
             "let {name}: {rust_ty} = {{ let n = {}; let old = self.{get}().len(); \
              match old.checked_add(n) {{ \
-             Some(len) if len <= {limit}usize => {{ self.{get_mut}().resize(len, ({}) as u32); old as {rust_ty} }} \
+             Some(len) if len <= {limit}usize => {{ \
+             if self.{get_mut}().try_reserve_exact(n).is_err() {{ -1 }} else {{ \
+             self.{get_mut}().resize(len, ({}) as u32); old as {rust_ty} }} }} \
              _ => -1, }} }};",
             self.table_index_expr(table, &delta.code),
             init.code
