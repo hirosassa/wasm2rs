@@ -203,3 +203,52 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
     }
     lines
 }
+
+// Fragments that construct and propagate a `StepResult`. The arm-split
+// (`func/cont.rs`) and flat (`flatten.rs`) lowerings share them, so a change to
+// a `StepResult` variant is made here only.
+
+/// `save` followed by the assignment parking the resume state `pc` in the frame.
+pub(super) fn park_pc(save: &str, pc: impl std::fmt::Display) -> String {
+    format!("{save}__frame.pc = {pc}u32; ")
+}
+
+/// A `StepResult::Suspend` carrying `tag` and the (already encoded) `payload`.
+pub(super) fn suspend_result(tag: impl std::fmt::Display, payload: &str) -> String {
+    format!("StepResult::Suspend {{ tag: {tag}u32, payload: vec![{payload}] }}")
+}
+
+/// A `StepResult::Switch` transferring to `target`; `ty` identifies the
+/// switching continuation's own type and `args` is the encoded payload.
+pub(super) fn switch_result(
+    tag: impl std::fmt::Display,
+    target: &str,
+    ty: impl std::fmt::Display,
+    args: &str,
+) -> String {
+    format!(
+        "StepResult::Switch {{ tag: {tag}u32, target: {target}, ty: {ty}u32, args: vec![{args}] }}"
+    )
+}
+
+/// The `match` that drives the callee step function `callee` once, forwarding
+/// `__args`. `pass` renders the body of the `Suspend`/`Switch` arms from the
+/// re-raised result expression (the callee's own result, rebuilt from the
+/// bindings); `sep` separates the arms; `on_return` is the `Return` arm's
+/// value, with the callee's results bound to `bind`.
+pub(super) fn drive_callee_match(
+    callee: impl std::fmt::Display,
+    pass: impl Fn(&str) -> String,
+    sep: &str,
+    bind: &str,
+    on_return: &str,
+) -> String {
+    let suspend = pass("StepResult::Suspend { tag: __t, payload: __p }");
+    let switch = pass("StepResult::Switch { tag: __t, target: __tgt, ty: __ty, args: __a }");
+    format!(
+        "match self.cont_step_func{callee}(&mut __frame.sub, __args) {{ \
+         StepResult::Suspend {{ tag: __t, payload: __p }} => {suspend}{sep}\
+         StepResult::Switch {{ tag: __t, target: __tgt, ty: __ty, args: __a }} => {switch}{sep}\
+         StepResult::Return({bind}) => {on_return} }}"
+    )
+}
