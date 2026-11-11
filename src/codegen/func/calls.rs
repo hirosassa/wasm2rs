@@ -54,8 +54,36 @@ impl<'a> super::FuncGen<'a> {
             ))?;
             return self.emit_return();
         }
+        if self.tc_enabled && self.in_try_body() {
+            // A direct call would run inside the `catch_unwind` closure, so the
+            // callee's exception would reach this frame's handler although the
+            // frame is replaced. Park the plain call so it runs after the
+            // return-escape has left every enclosing try.
+            let (params, _) = self
+                .ctx
+                .full_sig(function_index as usize)
+                .ok_or_else(|| TranspileError::Unsupported("call to unknown function".into()))?;
+            let args = self.pop_bound_args(params.len())?;
+            // `call_expr` spells the receiver `self`; inside the parked closure
+            // it is `__s`. `self.` only occurs as that receiver (callees are
+            // followed by `(`), so the textual rewrite is exact.
+            let call = self
+                .ctx
+                .call_expr(function_index as usize, &args)
+                .replace("self.", "__s.");
+            self.park_tail_call(&call)?;
+            return self.emit_return();
+        }
         self.emit_direct_call(function_index, true)?;
         self.emit_return()
+    }
+
+    /// Whether the current point sits in the protected body of a `try`, i.e.
+    /// inside a `catch_unwind` closure that a direct call would run within.
+    fn in_try_body(&self) -> bool {
+        self.try_barriers
+            .iter()
+            .any(|b| b.phase == CatchPhase::Body)
     }
 
     /// A `return_call` to the function itself: reassign the parameters from the
@@ -130,9 +158,14 @@ impl<'a> super::FuncGen<'a> {
         arg_list: &str,
     ) -> Result<(), TranspileError> {
         let sep = if arg_list.is_empty() { "" } else { ", " };
-        self.park_tail_call(&format!(
-            "__s.call_ref_t{type_index}_tc({entry}{sep}{arg_list}, __tc)"
-        ))?;
+        // No target tail-calls: the `_tc` twin does not exist, so park the plain
+        // dispatch (only done to keep a try body's handler out of the callee).
+        let call = if self.ctx.has_tc_dispatch(type_index) {
+            format!("__s.call_ref_t{type_index}_tc({entry}{sep}{arg_list}, __tc)")
+        } else {
+            format!("__s.call_ref_t{type_index}({entry}{sep}{arg_list})")
+        };
+        self.park_tail_call(&call)?;
         self.emit_return()
     }
 
@@ -253,7 +286,8 @@ impl<'a> super::FuncGen<'a> {
             args.push(self.pop()?);
         }
         args.reverse();
-        let use_tc = tail && self.tc_enabled && self.ctx.has_tc_dispatch(type_index);
+        let use_tc =
+            tail && self.tc_enabled && (self.ctx.has_tc_dispatch(type_index) || self.in_try_body());
         let arg_list = if use_tc {
             self.bind_args(args)?
         } else {
@@ -345,7 +379,8 @@ impl<'a> super::FuncGen<'a> {
             args.push(self.pop()?);
         }
         args.reverse();
-        let use_tc = tail && self.tc_enabled && self.ctx.has_tc_dispatch(type_index);
+        let use_tc =
+            tail && self.tc_enabled && (self.ctx.has_tc_dispatch(type_index) || self.in_try_body());
         let arg_list = if use_tc {
             self.bind_args(args)?
         } else {
@@ -443,11 +478,7 @@ impl<'a> super::FuncGen<'a> {
         // each enclosing try's dispatch re-issues. A handler runs in the landing
         // pad, so a `return` there is a plain return unless it sits in an outer
         // try's body.
-        if self
-            .try_barriers
-            .iter()
-            .any(|b| b.phase == CatchPhase::Body)
-        {
+        if self.in_try_body() {
             return self.emit_return_escape();
         }
         self.run_discarded_trapping(self.results.len());

@@ -335,3 +335,76 @@ fn return_call_inside_try_body_still_returns_the_callee_result() {
         "assert_eq!(func1(300_000), 42);",
     );
 }
+
+#[test]
+fn return_call_in_try_body_propagates_callee_exception_regardless_of_callee_tail_calls() {
+    // `return_call` replaces the caller's frame, so an exception thrown by the
+    // callee must not be caught by the handler of the `try_table` the call sits
+    // in. That has to hold whether or not the callee tail-calls itself: `$plain`
+    // has no `_tc` body, `$tailing` has one.
+    compile_run(
+        "tail_in_try_body_throw",
+        r#"(module
+            (tag $e)
+            (func $plain (param i32) (result i32) (throw $e))
+            (func $tailing (param i32) (result i32)
+              local.get 0
+              i32.eqz
+              if (result i32)
+                throw $e
+              else
+                local.get 0
+                i32.const 1
+                i32.sub
+                return_call $tailing
+              end)
+            (func $via_plain (param i32) (result i32)
+              block $h
+                try_table (catch_all $h)
+                  local.get 0
+                  return_call $plain
+                end
+              end
+              i32.const -1)
+            (func $via_tailing (param i32) (result i32)
+              block $h
+                try_table (catch_all $h)
+                  local.get 0
+                  return_call $tailing
+                end
+              end
+              i32.const -1)
+            (export "via_plain" (func $via_plain))
+            (export "via_tailing" (func $via_tailing)))"#,
+        "std::panic::set_hook(Box::new(|_| {}));\n\
+         assert!(std::panic::catch_unwind(|| func2(3)).is_err());\n\
+         assert!(std::panic::catch_unwind(|| func3(3)).is_err());",
+    );
+}
+
+#[test]
+fn return_call_indirect_in_try_body_propagates_callee_exception() {
+    // The indirect form must not let the caller's handler catch the callee's
+    // exception either, even when no table target tail-calls.
+    compile_run(
+        "tail_indirect_in_try_body_throw",
+        r#"(module
+            (tag $e)
+            (type $t (func (param i32) (result i32)))
+            (table 1 funcref)
+            (elem (i32.const 0) $thrower)
+            (func $thrower (param i32) (result i32) (throw $e))
+            (func $via (param i32) (result i32)
+              block $h
+                try_table (catch_all $h)
+                  local.get 0
+                  i32.const 0
+                  return_call_indirect (type $t)
+                end
+              end
+              i32.const -1)
+            (export "via" (func $via)))"#,
+        "std::panic::set_hook(Box::new(|_| {}));\n\
+         assert!(std::panic::catch_unwind(|| Instance::new().func1(3)).is_err());",
+    );
+}
