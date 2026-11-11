@@ -509,3 +509,57 @@ fn a_trapping_wait_does_not_poison_later_waits_and_notifies() {
         }"#,
     );
 }
+
+#[test]
+fn shared_plain_access_reads_len_relaxed() {
+    // A plain access only needs the length as a bounds limit: `len` never
+    // shrinks and the bytes are zeroed up front, so there is nothing to acquire.
+    // An Acquire load would cost a load-acquire on every plain access.
+    let wasm = wat::parse_str(
+        r#"(module (memory 1 2 shared) (func (export "f") (result i32) i32.const 0 i32.load))"#,
+    )
+    .unwrap();
+    let src = wasm2rs::transpile(&wasm).unwrap();
+    let start = src.find("fn bytes(&self)").expect("bytes() emitted");
+    // The load is the first statement of `bytes()`; check just that line.
+    let load = src[start..]
+        .lines()
+        .find(|l| l.contains("self.0.len.load"))
+        .expect("len load in bytes()");
+    assert!(load.contains("Ordering::Relaxed"), "{load}");
+}
+
+#[test]
+fn shared_grow_by_one_thread_is_usable_by_another_after_handshake() {
+    // Thread A grows the memory then publishes a flag with an atomic store;
+    // thread B waits on the flag (SeqCst) and then plain-stores/loads in the
+    // grown page. The handshake orders A's `len` update before B's plain access,
+    // so a Relaxed `len` read in the plain path must still see the new length.
+    // (Documents the happy path; the ordering itself is pinned by the source test.)
+    compile_run_raw(
+        "atomics_threads_grow_handshake_plain",
+        r#"(module
+            (memory 1 2 shared)
+            (func (export "grow_and_flag")
+              i32.const 1 memory.grow drop
+              i32.const 0 i32.const 1 i32.atomic.store)
+            (func (export "flag") (result i32) i32.const 0 i32.atomic.load)
+            (func (export "poke") (result i32)
+              i32.const 65540 i32.const 77 i32.store
+              i32.const 65540 i32.load))"#,
+        r#"fn main() {
+            let first = Instance::new();
+            let handle = first.shared_memory();
+            let h = handle.clone();
+            let a = std::thread::spawn(move || Instance::with_memory(h).func0());
+            let h = handle.clone();
+            let b = std::thread::spawn(move || {
+                let mut inst = Instance::with_memory(h);
+                while inst.func1() == 0 { std::thread::yield_now(); }
+                inst.func2()
+            });
+            a.join().unwrap();
+            assert_eq!(b.join().unwrap(), 77);
+        }"#,
+    );
+}

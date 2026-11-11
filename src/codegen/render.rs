@@ -1640,9 +1640,15 @@ impl SharedMemory {
 
     // The current contents. Callers index it with a bounds check, which is the
     // wasm out-of-bounds trap; the slice is not synchronised (see above).
+    // `len` is read Relaxed: it only bounds the slice, never shrinks, and the
+    // bytes below `cap` are zeroed before any thread sees them, so there is no
+    // data to acquire. A thread that learns of a grow through a synchronising
+    // atomic op on memory it could already reach sees the new `len` via that
+    // happens-before edge; as before, a flag placed inside the freshly grown
+    // page itself gives no such edge. Relaxed avoids a load-acquire per access.
     #[allow(clippy::mut_from_ref)]
     fn bytes(&self) -> &mut [u8] {
-        let len = self.0.len.load(std::sync::atomic::Ordering::Acquire);
+        let len = self.0.len.load(std::sync::atomic::Ordering::Relaxed);
         // SAFETY: `base` is valid for `cap >= len` bytes for the life of `self`.
         unsafe { std::slice::from_raw_parts_mut(self.0.base, len) }
     }
@@ -1650,7 +1656,7 @@ impl SharedMemory {
     // Raises the length by `delta` pages; returns the old page count, or -1 if
     // that would pass the maximum. The new bytes are already zero.
     fn grow(&self, delta: u32) -> i32 {
-        let mut cur = self.0.len.load(std::sync::atomic::Ordering::Acquire);
+        let mut cur = self.0.len.load(std::sync::atomic::Ordering::Relaxed);
         loop {
             let new = match (delta as usize).checked_mul(65536).and_then(|d| cur.checked_add(d)) {
                 Some(n) if n <= self.0.cap => n,
@@ -1660,7 +1666,7 @@ impl SharedMemory {
                 cur,
                 new,
                 std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
+                std::sync::atomic::Ordering::Relaxed,
             ) {
                 Ok(_) => return (cur / 65536) as i32,
                 Err(actual) => cur = actual,
@@ -1671,7 +1677,7 @@ impl SharedMemory {
     // The cell of an atomic access: traps (panics) when out of bounds or not
     // aligned to its width, as the threads proposal requires.
     fn atomic_cell(&self, addr: usize, width: usize) -> *mut u8 {
-        let len = self.0.len.load(std::sync::atomic::Ordering::Acquire);
+        let len = self.0.len.load(std::sync::atomic::Ordering::Relaxed);
         if addr % width != 0 {
             panic!("unaligned atomic access");
         }
