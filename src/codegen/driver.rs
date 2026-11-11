@@ -147,7 +147,7 @@ pub(crate) struct ModuleCtx<'a> {
     /// Opt-in call-depth limit (see `TranspileOptions::call_depth_limit`).
     pub(crate) call_depth_limit: Option<u32>,
     /// Every `Imports` method receives the `Instance` (see
-    /// `TranspileOptions::reentrant_imports`); `imports` is then an `Option<H>`
+    /// `TranspileOptions::reentrant_imports`); `imports` is then an `Option<Box<H>>`
     /// lent out for each host call.
     pub(crate) reentrant_imports: bool,
     /// Cap on match arms per flattened-dispatch *part* function. When a flattened
