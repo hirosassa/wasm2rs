@@ -21,13 +21,9 @@
 //! bounding peak memory (`max_bytes_per_file` caps chunk size, so a few huge
 //! functions cannot balloon one file).
 
-use std::io::Write as _;
 use std::process::ExitCode;
 
-use wasm2rs::{
-    SplitOptions, TranspileOptions, cargo_manifest, transpile_split_with_options,
-    transpile_with_options,
-};
+use wasm2rs::{SplitOptions, TranspileOptions, cargo_manifest, transpile_split_with_options};
 
 // Transpiling a huge module churns roughly a gigabyte of output through
 // countless short-lived `String` allocations. The system allocator keeps the
@@ -85,11 +81,19 @@ fn extract_core_modules(wasm: &[u8], dir: &str) -> Result<(), String> {
 
 /// Write `text` to the `output` file, or to stdout when there is none.
 fn write_output(output: Option<String>, text: &str) -> Result<(), String> {
+    write_with(output, |w| w.write_all(text.as_bytes()))
+}
+
+/// Write to `output` (a file, or stdout when `None`) through `write`.
+fn write_with(
+    output: Option<String>,
+    write: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+) -> Result<(), String> {
     match output {
-        Some(path) => std::fs::write(&path, text).map_err(|e| format!("cannot write {path}: {e}")),
-        None => std::io::stdout()
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("cannot write to stdout: {e}")),
+        Some(path) => std::fs::File::create(&path)
+            .and_then(|mut f| write(&mut f))
+            .map_err(|e| format!("cannot write {path}: {e}")),
+        None => write(&mut std::io::stdout()).map_err(|e| format!("cannot write to stdout: {e}")),
     }
 }
 
@@ -298,8 +302,9 @@ fn run() -> Result<(), String> {
         return write_split(&wasm, &dir, funcs_per_file, max_bytes_per_file, &topts);
     }
 
-    let rust = transpile_with_options(&wasm, &topts).map_err(|e| e.to_string())?;
-    write_output(output, &rust)
+    let pieces =
+        wasm2rs::transpile_pieces_with_options(&wasm, &topts).map_err(|e| e.to_string())?;
+    write_with(output, |w| pieces.write_to(w))
 }
 
 /// Derive a valid Cargo package name from the output directory's final

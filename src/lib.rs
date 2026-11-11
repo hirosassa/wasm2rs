@@ -84,6 +84,33 @@ pub struct SourceFile {
     pub code: String,
 }
 
+/// A single-file output as three consecutive pieces: the text before the
+/// function bodies, the bodies (the bulk), and the text after them.
+pub struct SourcePieces {
+    pub head: String,
+    pub body: String,
+    pub tail: String,
+}
+
+impl SourcePieces {
+    /// Write `head`, `body` and `tail` in order.
+    pub fn write_to(&self, w: &mut (impl std::io::Write + ?Sized)) -> std::io::Result<()> {
+        w.write_all(self.head.as_bytes())?;
+        w.write_all(self.body.as_bytes())?;
+        w.write_all(self.tail.as_bytes())
+    }
+
+    /// Join the pieces into one string.
+    pub fn into_string(self) -> String {
+        // Only for callers that need one string: the join copies the body.
+        let mut out = self.head;
+        out.reserve(self.body.len() + self.tail.len());
+        out.push_str(&self.body);
+        out.push_str(&self.tail);
+        out
+    }
+}
+
 /// How to split a module's generated source across files.
 ///
 /// A chunk file is closed once it reaches `funcs_per_file` functions *or*
@@ -284,6 +311,20 @@ pub fn transpile_with_options(
     code.ok_or_else(|| TranspileError::Unsupported("no source emitted".into()))
 }
 
+/// Transpile a wasm binary into a single Rust source, returned in three
+/// consecutive pieces instead of one joined string.
+///
+/// The concatenation of the pieces is byte-identical to
+/// [`transpile_with_options`]; writing them one after another (see
+/// [`SourcePieces::write_to`]) avoids copying the bulk of a large output into a
+/// second contiguous buffer.
+pub fn transpile_pieces_with_options(
+    wasm: &[u8],
+    opts: &TranspileOptions,
+) -> Result<SourcePieces, TranspileError> {
+    transpile_impl(wasm, opts, codegen::generate_module_pieces)
+}
+
 /// Split-transpile a wasm binary with explicit [`TranspileOptions`], handing each
 /// [`SourceFile`] to `sink` as it completes (see [`transpile_split`]). Use this
 /// when a large module needs both file splitting and codegen options.
@@ -308,6 +349,22 @@ fn transpile_split_impl<F>(
 where
     F: FnMut(SourceFile) -> Result<(), TranspileError>,
 {
+    transpile_impl(wasm, topts, |parts| {
+        codegen::generate_module_split(
+            parts,
+            opts.funcs_per_file,
+            opts.max_bytes_per_file,
+            &mut |name, code| sink(SourceFile { name, code }),
+        )
+    })
+}
+
+/// Validate and parse `wasm`, then hand the resolved module to `generate`.
+fn transpile_impl<R>(
+    wasm: &[u8],
+    topts: &TranspileOptions,
+    generate: impl FnOnce(&codegen::ModuleParts<'_>) -> Result<R, TranspileError>,
+) -> Result<R, TranspileError> {
     // Reject ill-typed input up front: the code generator assumes a validated module
     // and would otherwise emit wrong Rust for it (e.g. a mismatched operand stack).
     wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all()).validate_all(wasm)?;
@@ -926,12 +983,7 @@ where
         jobs: topts.jobs,
         named_exports: topts.named_exports,
     };
-    codegen::generate_module_split(
-        &parts,
-        opts.funcs_per_file,
-        opts.max_bytes_per_file,
-        &mut |name, code| sink(SourceFile { name, code }),
-    )
+    generate(&parts)
 }
 
 /// Resolve a tag's referenced function type into its parameter and result
