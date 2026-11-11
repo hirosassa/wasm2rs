@@ -29,7 +29,9 @@ Also vendored (C9): `float_exprs`, `float_literals`, `float_memory`, `int_exprs`
 Not vendored yet: `memory_grow64`, `type`, `token` and `linking` (nothing would run: only
 `assert_malformed`/`assert_unlinkable`/`register`), `names` (the `wast` parser's confusing-unicode lint
 rejects it), `tag` (the stack-switching proposal allows tag results, so its `assert_invalid`
-"non-empty tag result type" is intentionally accepted), and the `simd_*`, `gc` and threads files. `return_call*`, `switch` and the exception-handling files
+"non-empty tag result type" is intentionally accepted), and the `simd_*`, `gc` and threads files.
+
+`return_call*`, `switch` and the exception-handling files
 (`throw`, `throw_ref`, `try_table`, `unwind`) are vendored. `global`, `elem` and `data` are vendored
 but replay only part of their assertions.
 
