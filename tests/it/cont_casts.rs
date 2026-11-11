@@ -1,6 +1,5 @@
 //! `ref.test` / `ref.cast` / `br_on_cast` against a concrete continuation type. A
-//! continuation handle indexes the instance's `conts` table, which remembers each
-//! handle's current declared type: set by `cont.new`, replaced by `cont.bind` and by
+//! continuation handle encodes its current declared type: set by `cont.new`, replaced by `cont.bind` and by
 //! the continuation type a `resume` handler block gives a suspended continuation. A
 //! test then asks whether that type is the target or a declared subtype of it.
 

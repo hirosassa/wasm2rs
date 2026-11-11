@@ -811,7 +811,7 @@ impl super::FuncGen<'_> {
 
     /// A test of a continuation handle against the concrete continuation type `idx`:
     /// null answers `null_matches`, any other handle matches when its declared type
-    /// (`cont_types`, kept by `cont.new`, `cont.bind`, `resume` handlers and
+    /// (encoded in the handle by `cont.new`, `cont.bind`, `resume` handlers and
     /// `switch`) is `idx` or a declared subtype of it. A `switch` gives the parked
     /// switcher the type of the target's self-reference parameter (see the
     /// `resume` trampoline).
