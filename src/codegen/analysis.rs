@@ -83,6 +83,12 @@ pub(crate) struct BodyScan {
     /// Per defined function (0-based): whether its own body has a `suspend`/
     /// `switch` control transfer. Seeds the `can_suspend` fixpoint.
     pub(crate) suspends: Vec<bool>,
+    /// Per defined function (0-based): whether any branch targets the function's
+    /// own outermost label (see [`FunctionLabelBranch`]), so the body is wrapped
+    /// in a synthetic block frame.
+    pub(crate) branches_to_function_label: Vec<bool>,
+    /// Per defined function (0-based): whether its body contains a `return`.
+    pub(crate) has_return: Vec<bool>,
     /// The concrete type indices that `ref.test`/`ref.cast`/`br_on_cast` target (any
     /// kind; the driver keeps the continuation ones).
     pub(crate) cast_targets: Vec<u32>,
@@ -140,6 +146,72 @@ impl BodyScan {
     }
 }
 
+/// Tracks control depth over one body's operators to find a branch that targets
+/// the function's own outermost label (a relative depth equal to the number of
+/// enclosing regions at that point). Fed by [`scan_bodies`] so the body is not
+/// re-parsed per function.
+#[derive(Default)]
+struct FunctionLabelBranch {
+    depth: u32,
+    found: bool,
+}
+
+impl FunctionLabelBranch {
+    fn observe(&mut self, op: &Operator<'_>) -> Result<(), TranspileError> {
+        let depth = self.depth;
+        match op {
+            // A `try_table` clause's label is counted from outside the region, i.e.
+            // at the depth before this operator opens it.
+            Operator::TryTable { try_table } => {
+                if try_table.catches.iter().any(|catch| match *catch {
+                    wasmparser::Catch::One { label, .. }
+                    | wasmparser::Catch::OneRef { label, .. }
+                    | wasmparser::Catch::All { label }
+                    | wasmparser::Catch::AllRef { label } => label == depth,
+                }) {
+                    self.found = true;
+                }
+                self.depth = depth.saturating_add(1);
+            }
+            Operator::Block { .. }
+            | Operator::Loop { .. }
+            | Operator::If { .. }
+            | Operator::Try { .. } => self.depth = depth.saturating_add(1),
+            Operator::End | Operator::Delegate { .. } => self.depth = depth.saturating_sub(1),
+            Operator::Br { relative_depth }
+            | Operator::BrIf { relative_depth }
+            | Operator::BrOnNull { relative_depth }
+            | Operator::BrOnNonNull { relative_depth }
+            | Operator::BrOnCast { relative_depth, .. }
+            | Operator::BrOnCastFail { relative_depth, .. }
+                if *relative_depth == depth =>
+            {
+                self.found = true;
+            }
+            Operator::BrTable { targets } => {
+                for target in targets.targets() {
+                    if target? == depth {
+                        self.found = true;
+                    }
+                }
+                if targets.default() == depth {
+                    self.found = true;
+                }
+            }
+            // A `(on $tag $label)` handler branches to its label like `br` does.
+            Operator::Resume { resume_table, .. } | Operator::ResumeThrow { resume_table, .. }
+                if resume_table.handlers.iter().any(|handler| {
+                    matches!(handler, wasmparser::Handle::OnLabel { label, .. } if *label == depth)
+                }) =>
+            {
+                self.found = true;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 /// Scan every function body exactly once, collecting all the whole-module
 /// operator facts `build_ctx` needs (see [`BodyScan`]). Each of the flagged
 /// operators forces the module to be emitted as a `struct Instance` because it
@@ -149,6 +221,8 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
         mutated: Vec::with_capacity(funcs.len()),
         cont_bodies: Vec::new(),
         suspends: vec![false; funcs.len()],
+        branches_to_function_label: Vec::with_capacity(funcs.len()),
+        has_return: Vec::with_capacity(funcs.len()),
         calls: vec![Vec::new(); funcs.len()],
         uses_extern_box: false,
         cast_targets: Vec::new(),
@@ -171,8 +245,12 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
         // body; any other operator breaks the adjacency, so every non-matching
         // arm clears `last_ref_func`.
         let mut last_ref_func: Option<u32> = None;
+        let mut label_branch = FunctionLabelBranch::default();
+        let mut has_return = false;
         for op in input.body.get_operators_reader()? {
             let op = op?;
+            label_branch.observe(&op)?;
+            has_return |= matches!(op, Operator::Return);
             if !scan.uses_abstract_gc && creates_abstract_gc(&op) {
                 scan.uses_abstract_gc = true;
             }
@@ -220,6 +298,8 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
             last_ref_func = None;
         }
         scan.mutated.push(mutated);
+        scan.branches_to_function_label.push(label_branch.found);
+        scan.has_return.push(has_return);
     }
     scan.cont_bodies.sort_unstable();
     scan.cont_bodies.dedup();
@@ -691,5 +771,64 @@ mod tests {
                 (func (drop (ref.func $b)) (drop (ref.func $a)) (drop (ref.func $b))))"#,
         );
         assert_eq!(refs, vec![1, 0, 1]);
+    }
+
+    #[test]
+    fn scan_flags_functions_branching_to_their_own_label_or_returning() {
+        let wasm = wat::parse_str(
+            r#"(module
+                (func (block (br 0)))
+                (func (br 0))
+                (func (block (br_if 1 (i32.const 0))))
+                (func (block (br_table 0 1 (i32.const 0))))
+                (func (block (br 0)) (return))
+                (func (loop (br_if 0 (i32.const 0)))))"#,
+        )
+        .unwrap();
+        let bodies = bodies(&wasm);
+        let inputs: Vec<FuncInput<'_>> = bodies
+            .iter()
+            .map(|body| FuncInput {
+                type_index: 0,
+                params: &[],
+                results: &[],
+                body,
+            })
+            .collect();
+
+        let scan = scan_bodies(&inputs).unwrap();
+
+        assert_eq!(
+            scan.branches_to_function_label,
+            vec![false, true, true, true, false, false]
+        );
+        assert_eq!(
+            scan.has_return,
+            vec![false, false, false, false, true, false]
+        );
+    }
+
+    #[test]
+    fn scan_counts_a_try_table_catch_label_from_outside_the_region() {
+        let wasm = wat::parse_str(
+            r#"(module
+                (func (block (try_table (catch_all 1) (nop))))
+                (func (block (try_table (catch_all 0) (nop)))))"#,
+        )
+        .unwrap();
+        let bodies = bodies(&wasm);
+        let inputs: Vec<FuncInput<'_>> = bodies
+            .iter()
+            .map(|body| FuncInput {
+                type_index: 0,
+                params: &[],
+                results: &[],
+                body,
+            })
+            .collect();
+
+        let scan = scan_bodies(&inputs).unwrap();
+
+        assert_eq!(scan.branches_to_function_label, vec![true, false]);
     }
 }

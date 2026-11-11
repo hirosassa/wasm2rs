@@ -153,6 +153,7 @@ impl super::FuncGen<'_> {
         index: usize,
         params: &[ValType],
         body: &FunctionBody<'_>,
+        wrap: bool,
         line_prefix: &str,
         out: &mut String,
     ) -> Result<GenMeta, TranspileError> {
@@ -165,7 +166,6 @@ impl super::FuncGen<'_> {
         // frame (as in `FuncGen::run`), which makes the whole body a region, so it
         // takes the flat path too.
         // `return` is such a branch too: it is lowered to a `br` to that block.
-        let wrap = super::branches_to_function_label(body)? || Self::has_return(body)?;
         if wrap || Self::transfer_crosses_region(body)? {
             return self.emit_cont_step_flat(index, params, body, line_prefix, out, wrap);
         }
@@ -387,16 +387,6 @@ impl super::FuncGen<'_> {
             // split and contribute no shared state structs.
             state_structs: Vec::new(),
         })
-    }
-
-    /// Whether `body` contains a `return`.
-    fn has_return(body: &FunctionBody<'_>) -> Result<bool, TranspileError> {
-        for op in body.get_operators_reader()? {
-            if matches!(op?, Operator::Return) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     /// Whether any control-transfer point (`suspend` or `switch`) in `body` occurs
