@@ -602,3 +602,40 @@ fn delegate_bypassing_several_bodies_counts_each_one() {
         "assert_eq!(func0(), 3);",
     );
 }
+
+#[test]
+fn caught_throw_does_not_run_the_panic_hook() {
+    // A thrown-and-caught exception is control flow, not a failure: it must not
+    // reach the default panic hook, which would print to stderr on every throw.
+    // Covers `throw` (f) and `throw_ref` (g).
+    let wat = r#"(module
+        (tag $e (param i32))
+        (func (export "f") (param i32) (result i32)
+          try (result i32)
+            local.get 0
+            throw $e
+          catch $e
+          end)
+        (func (export "g") (param i32) (result i32)
+          (local $x exnref)
+          (block $h (result exnref)
+            (try_table (catch_all_ref $h) (throw $e (local.get 0)))
+            (unreachable))
+          local.set $x
+          (block $o (result i32)
+            (try_table (result i32) (catch $e $o)
+              (throw_ref (local.get $x))))))"#;
+    let wasm = wat::parse_str(wat).unwrap();
+    let generated = wasm2rs::transpile(&wasm).unwrap();
+    let program = format!(
+        "{generated}\nfn main() {{ for i in 0..3 {{ assert_eq!(func0(i), i); assert_eq!(func1(i), i); }} }}\n"
+    );
+    let bin = common::build("eh_no_panic_hook", &program);
+    let run = std::process::Command::new(&bin).output().unwrap();
+    assert!(run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        !stderr.contains("panicked at"),
+        "throw ran the panic hook:\n{stderr}"
+    );
+}
