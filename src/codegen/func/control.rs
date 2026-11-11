@@ -611,7 +611,6 @@ impl<'a> super::FuncGen<'a> {
             self.line(format!("{dst} = self.cont_retype({src}, {ty});"));
         } else {
             self.line(format!("{dst} = {src};"));
-            self.line(format!("self.cont_types[{src} as usize] = {ty};"));
         }
     }
 
@@ -1383,7 +1382,7 @@ impl<'a> super::FuncGen<'a> {
         let handle = self.pop()?;
         let handle_var = self.fresh_temp();
         self.line(format!("let {handle_var}: u32 = {};", handle.code));
-        self.line(format!("let _ = self.conts[{handle_var} as usize].take();"));
+        self.line(format!("self.cont_discard({handle_var});"));
         self.emit_throw_payload(tag_index)
     }
 

@@ -811,7 +811,7 @@ impl super::FuncGen<'_> {
 
     /// A test of a continuation handle against the concrete continuation type `idx`:
     /// null answers `null_matches`, any other handle matches when its declared type
-    /// (`cont_types`, kept by `cont.new`, `cont.bind`, `resume` handlers and
+    /// (encoded in the handle by `cont.new`, `cont.bind`, `resume` handlers and
     /// `switch`) is `idx` or a declared subtype of it. A `switch` gives the parked
     /// switcher the type of the target's self-reference parameter (see the
     /// `resume` trampoline).
@@ -835,10 +835,7 @@ impl super::FuncGen<'_> {
         let hit = if arms.is_empty() || self.ctx.cont.bodies.is_empty() {
             "false".to_string()
         } else {
-            format!(
-                "matches!(self.cont_types[__c as usize], {})",
-                arms.join(" | ")
-            )
+            format!("matches!(self.cont_type_of(__c), {})", arms.join(" | "))
         };
         Ok(format!(
             "{{ let __c: u32 = ({ref_expr}); if __c == u32::MAX {{ {null_matches} }} else {{ {hit} }} }}"
