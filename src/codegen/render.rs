@@ -1264,7 +1264,7 @@ pub(super) fn entry_point_lines(
             lines.extend(call_start_lines(ctx)?);
         }
     }
-    if parts.named_exports {
+    if parts.opts.named_exports {
         lines.extend(named_export_lines(parts, ctx)?);
     }
     Ok(lines)

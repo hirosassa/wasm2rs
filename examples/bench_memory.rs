@@ -30,11 +30,9 @@ const WORKLOADS: [(&str, &str, i32); 3] = [
 
 fn build(dir: &Path, name: &str, wat: &str, n: i32, unsafe_memory: bool) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
-    let opts = TranspileOptions {
-        named_exports: true,
-        unsafe_memory,
-        ..TranspileOptions::default()
-    };
+    let opts = TranspileOptions::default()
+        .with_named_exports(true)
+        .with_unsafe_memory(unsafe_memory);
     let generated = transpile_with_options(&wasm, &opts).expect("transpile");
     // `drive` is never inlined and the instance is opaque to the optimizer: with
     // the memory's length a visible constant, LLVM proves every access in bounds

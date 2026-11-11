@@ -140,7 +140,7 @@ where
             })
         };
 
-    let jobs = resolve_jobs(parts.jobs, live.len());
+    let jobs = resolve_jobs(parts.opts.jobs, live.len());
     let serial = |consume: &mut F| -> Result<(), TranspileError> {
         let mut scratch = String::new();
         for k in 0..live.len() {

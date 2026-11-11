@@ -17,10 +17,8 @@ use crate::common;
 use wasm2rs::{TranspileOptions, transpile, transpile_with_options};
 
 fn opts(entries: &[&str]) -> TranspileOptions {
-    TranspileOptions {
-        entry_exports: Some(entries.iter().map(|s| (*s).to_string()).collect()),
-        ..TranspileOptions::default()
-    }
+    TranspileOptions::default()
+        .with_entry_exports(Some(entries.iter().map(|s| (*s).to_string()).collect()))
 }
 
 fn generate(wat: &str, entries: &[&str]) -> String {

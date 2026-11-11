@@ -60,12 +60,10 @@ fn build_program_with(
         ..WitOptions::default()
     };
     let glue = wit_host_glue_with_options(component, &options).unwrap();
-    let opts = TranspileOptions {
-        named_imports: true,
-        reentrant_imports: true,
-        named_exports: true,
-        ..TranspileOptions::default()
-    };
+    let opts = TranspileOptions::default()
+        .with_named_imports(true)
+        .with_reentrant_imports(true)
+        .with_named_exports(true);
     let generated = transpile_with_options(&wat::parse_str(core_wat).unwrap(), &opts).unwrap();
     let main = format!("fn main() {{ let mut inst = Instance::new(Glue({host})); {body} }}");
     common::build_with_wasi(

@@ -230,13 +230,11 @@ fn run() -> Result<(), String> {
         let wasm = std::fs::read(&input).map_err(|e| format!("cannot read {input}: {e}"))?;
         let defaults = wasm2rs::ComponentOptions::default();
         let options = wasm2rs::ComponentOptions {
-            transpile: TranspileOptions {
-                unsafe_memory,
-                call_depth_limit,
-                split_dispatch,
-                jobs,
-                ..TranspileOptions::default()
-            },
+            transpile: TranspileOptions::default()
+                .with_unsafe_memory(unsafe_memory)
+                .with_call_depth_limit(call_depth_limit)
+                .with_split_dispatch(split_dispatch)
+                .with_jobs(jobs),
             external_types: external_types.or(defaults.external_types),
             ..defaults
         };
@@ -295,17 +293,16 @@ fn run() -> Result<(), String> {
         print!("{summary}");
         return Ok(());
     }
-    let topts = TranspileOptions {
-        unsafe_memory,
-        call_depth_limit,
-        split_dispatch,
-        entry_exports,
-        jobs,
-        named_exports,
-        named_imports,
-        import_memory,
-        reentrant_imports,
-    };
+    let topts = TranspileOptions::default()
+        .with_unsafe_memory(unsafe_memory)
+        .with_call_depth_limit(call_depth_limit)
+        .with_split_dispatch(split_dispatch)
+        .with_entry_exports(entry_exports)
+        .with_jobs(jobs)
+        .with_named_exports(named_exports)
+        .with_named_imports(named_imports)
+        .with_import_memory(import_memory)
+        .with_reentrant_imports(reentrant_imports);
 
     // Splitting into files requires a target directory to write them into.
     if funcs_per_file > 0 || max_bytes_per_file > 0 {

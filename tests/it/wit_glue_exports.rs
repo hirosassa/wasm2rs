@@ -55,12 +55,10 @@ fn exports_on() -> WitOptions {
 fn build_and_run(name: &str, wit: &str, core: &str, body: &str) -> std::process::Output {
     let component = encoded(wit, core);
     let glue = wit_host_glue_with_options(&component, &exports_on()).unwrap();
-    let opts = TranspileOptions {
-        named_imports: true,
-        reentrant_imports: true,
-        named_exports: true,
-        ..TranspileOptions::default()
-    };
+    let opts = TranspileOptions::default()
+        .with_named_imports(true)
+        .with_reentrant_imports(true)
+        .with_named_exports(true);
     let core = wat::parse_str(with_host_import(core)).unwrap();
     let generated = transpile_with_options(&core, &opts).unwrap();
     let program = format!(
@@ -359,11 +357,9 @@ fn a_module_transpiled_without_named_exports_fails_to_build_instead_of_recursing
     let core = r#"(module (func (export "top") ))"#;
     let wit = "package t:p; world w { export top: func(); }";
     let glue = wit_host_glue_with_options(&encoded(wit, core), &exports_on()).unwrap();
-    let opts = TranspileOptions {
-        named_imports: true,
-        reentrant_imports: true,
-        ..TranspileOptions::default()
-    };
+    let opts = TranspileOptions::default()
+        .with_named_imports(true)
+        .with_reentrant_imports(true);
     let core = wat::parse_str(with_host_import(core)).unwrap();
     let generated = transpile_with_options(&core, &opts).unwrap();
     let program = format!(

@@ -338,10 +338,7 @@ fn unsafe_memory_mode_reproduces_the_safe_result_on_a_64bit_memory() {
     let wasm = wat::parse_str(wat).unwrap();
     let unsafe_src = wasm2rs::transpile_with_options(
         &wasm,
-        &wasm2rs::TranspileOptions {
-            unsafe_memory: true,
-            ..Default::default()
-        },
+        &wasm2rs::TranspileOptions::default().with_unsafe_memory(true),
     )
     .expect("transpile ok");
     assert!(unsafe_src.contains("get_unchecked"), "{unsafe_src}");

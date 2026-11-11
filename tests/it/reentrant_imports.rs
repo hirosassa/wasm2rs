@@ -23,10 +23,7 @@ use std::process::Command;
 use crate::common;
 
 fn options() -> wasm2rs::TranspileOptions {
-    wasm2rs::TranspileOptions {
-        reentrant_imports: true,
-        ..wasm2rs::TranspileOptions::default()
-    }
+    wasm2rs::TranspileOptions::default().with_reentrant_imports(true)
 }
 
 fn compile(test: &str, wat: &str, extra: &str) -> std::path::PathBuf {
@@ -221,10 +218,7 @@ fn an_export_named_like_the_host_helper_does_not_clash() {
           (func (export "with_host") (param i32) (result i32) (call $imp (local.get 0))))
         "#;
     let wasm = wat::parse_str(wat).expect("valid wat");
-    let opts = wasm2rs::TranspileOptions {
-        named_exports: true,
-        ..options()
-    };
+    let opts = options().with_named_exports(true);
     let generated = wasm2rs::transpile_with_options(&wasm, &opts).expect("transpile ok");
     let extra = r#"
         struct Host;

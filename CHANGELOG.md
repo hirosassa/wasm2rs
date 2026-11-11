@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `Cargo.toml` emitted with split output (`cargo_manifest`) no longer sets `panic = "abort"`, which made every Wasm exception and host-caught trap abort the process in release builds.
 
 ### Changed
+- **Breaking:** `TranspileOptions` is now `#[non_exhaustive]`, so adding an option no longer breaks callers (same release as the `TranspileError` change below). A struct literal (even with `..Default::default()`) no longer compiles outside the crate: start from `TranspileOptions::default()` and assign fields or chain the new `with_*` methods (`TranspileOptions::default().with_named_exports(true)`). Generated code is byte-identical. Internally, the `reentrant_imports` contradiction checks run right after parsing, before any function body is generated (a module that is wrong both that way and in `entry_exports` now reports the `reentrant_imports` error first), and codegen reads the options directly instead of a hand-copied subset. The `transpile*`/`*_with_options` entry points are kept as they are; folding them together is left for a later breaking release.
 - **Breaking:** `TranspileError` is now `#[non_exhaustive]` and gained `InvalidOptions` (contradictory
   options, e.g. `reentrant_imports` with an imported memory, or an unknown `entry_exports` name),
   `InvalidInput` (a component given to `transpile`, or a component with no usable core module) and

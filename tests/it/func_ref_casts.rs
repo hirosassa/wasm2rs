@@ -156,10 +156,7 @@ fn a_function_only_an_element_segment_array_reaches_is_still_a_cast_target() {
             (ref.test (ref $a)
               (array.get $arr (array.new_elem $arr $e (i32.const 0) (i32.const 1)) (i32.const 0)))))"#;
     let wasm = wat::parse_str(wat).expect("valid wat");
-    let opts = wasm2rs::TranspileOptions {
-        entry_exports: Some(vec!["t".to_string()]),
-        ..Default::default()
-    };
+    let opts = wasm2rs::TranspileOptions::default().with_entry_exports(Some(vec!["t".to_string()]));
     let out = wasm2rs::transpile_with_options(&wasm, &opts).expect("transpile ok");
     assert!(out.contains("matches!(__f, 0u32)"), "{out}");
 }

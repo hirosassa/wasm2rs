@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use wasmparser::{FunctionBody, Operator, ValType};
 
-use crate::TranspileError;
+use crate::{TranspileError, TranspileOptions};
 
 /// The typed-continuations analysis for one module, grouped so the four tightly
 /// coupled tables travel together and the call sites read `ctx.cont.bodies` etc.
@@ -337,21 +337,12 @@ pub(crate) struct ModuleParts<'a> {
     pub(crate) global_exports: &'a [GlobalExportInfo],
     /// The module's `start` function index, run at the end of every instantiation.
     pub(crate) start: Option<u32>,
-    /// Opt-in unchecked linear-memory access (see [`ModuleCtx::unsafe_memory`]).
-    pub(crate) unsafe_memory: bool,
-    /// See [`ModuleCtx::call_depth_limit`].
-    pub(crate) call_depth_limit: Option<u32>,
-    /// See [`ModuleCtx::reentrant_imports`].
+    /// The caller's options; codegen reads option fields from here, so a new
+    /// option needs no copy into this struct.
+    pub(crate) opts: &'a TranspileOptions,
+    /// Whether `reentrant_imports` takes effect: the option, and the module has a
+    /// host function import (see [`ModuleCtx::reentrant_imports`]).
     pub(crate) reentrant_imports: bool,
-    /// Cap on match arms per flattened-dispatch part function; `0` disables the
-    /// split (see [`ModuleCtx::split_dispatch`]).
-    pub(crate) split_dispatch: usize,
-    /// Threads generating function bodies (`0` = auto; see
-    /// `TranspileOptions::jobs`).
-    pub(crate) jobs: usize,
-    /// Emit a by-name wrapper for every exported function (see
-    /// `TranspileOptions::named_exports`).
-    pub(crate) named_exports: bool,
 }
 /// Derive the translation context from a module's raw parts.
 ///
@@ -453,7 +444,7 @@ pub(crate) fn build_ctx<'a>(
     // A single pass over every body collects the statefulness-forcing operator
     // flags and the continuation suspend/call tables together, instead of five
     // independent full scans.
-    let scan = scan_bodies(funcs, parts.jobs)?;
+    let scan = scan_bodies(funcs, parts.opts.jobs)?;
     let uses_extern_box = scan.uses_extern_box;
     let casts = scan
         .cast_targets
@@ -622,10 +613,10 @@ pub(crate) fn build_ctx<'a>(
             step_locals,
             casts,
         },
-        unsafe_memory: parts.unsafe_memory,
-        call_depth_limit: parts.call_depth_limit,
+        unsafe_memory: parts.opts.unsafe_memory,
+        call_depth_limit: parts.opts.call_depth_limit,
         reentrant_imports: parts.reentrant_imports,
-        split_dispatch: parts.split_dispatch,
+        split_dispatch: parts.opts.split_dispatch,
     };
     Ok((ctx, stateful))
 }
