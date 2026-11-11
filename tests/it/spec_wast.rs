@@ -116,7 +116,12 @@ fn trap_needles(spec_message: &str) -> &'static [&'static str] {
         "invalid conversion to integer" => &["invalid conversion to integer"],
         "unreachable" => &["unreachable"],
         "call stack exhausted" => &["call stack exhausted"],
-        "out of bounds memory access" => &["out of range for slice", "out of bounds", "overflow"],
+        // An overflowing `offset + len` bulk range panics in the index arithmetic.
+        "out of bounds memory access" => &[
+            "out of range for slice",
+            "out of bounds",
+            "add with overflow",
+        ],
         "indirect call type mismatch" => &["indirect call type mismatch"],
         "undefined element" | "uninitialized element" => {
             &["indirect call type mismatch", "out of bounds"]
@@ -1392,6 +1397,25 @@ spec_test! {
     spec_throw => "throw",
     spec_throw_ref => "throw_ref",
     spec_try_table => "try_table",
+    spec_float_literals => "float_literals",
+    spec_float_memory => "float_memory",
+    spec_int_exprs => "int_exprs",
+    spec_local_init => "local_init",
+    spec_func => "func",
+    spec_memory_size => "memory_size",
+    spec_unreached_invalid => "unreached-invalid",
+    spec_comments => "comments",
+    spec_binary => "binary",
+    spec_binary_leb128 => "binary-leb128",
+    spec_custom => "custom",
+    spec_exports => "exports",
+    spec_call_ref => "call_ref",
+    spec_return_call_ref => "return_call_ref",
+    spec_br_on_null => "br_on_null",
+    spec_br_on_non_null => "br_on_non_null",
+    spec_ref_func => "ref_func",
+    spec_imports => "imports",
+    spec_table => "table",
 }
 
 #[test]
