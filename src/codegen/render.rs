@@ -7,7 +7,8 @@ use super::wasi::{WasiAccess, confine_lines};
 use super::{
     ALLOW, DataSegment, ElemSegment, ExportInfo, GlobalExportInfo, Helper, ImportInfo,
     ImportedGlobalInfo, ModuleCtx, ModuleParts, SegOffset, TableFill, WASM_PAGE_SIZE, WasiFn,
-    data_static_line, indent, index_u32, rust_type, rust_types,
+    data_static_line, indent, index_u32, is_gc_table_element, rust_type, rust_types,
+    table_elem_rust, table_null,
 };
 use crate::TranspileError;
 use wasmparser::ValType;
@@ -352,9 +353,10 @@ fn instance_field_lines(
         if t.imported {
             continue;
         }
-        // A table entry is a function index; `u32::MAX` marks a null funcref.
+        // A table entry is a function index; `u32::MAX` marks a null funcref. An
+        // `exnref` table holds managed `GcRef`s instead.
         let (field, _) = table_accessor(index_u32(i)?);
-        lines.push(format!("    {field}: Vec<u32>,"));
+        lines.push(format!("    {field}: Vec<{}>,", table_elem_rust(t.element)));
     }
     for (i, g) in globals.iter().enumerate() {
         lines.push(format!(
@@ -575,6 +577,10 @@ fn constructor_lines(
                     };
                     lines.push(format!("{ind}let _ = &{target}[{off}..{off}];"));
                 }
+                let gc_table = ctx
+                    .table_elements
+                    .get(seg.table as usize)
+                    .is_some_and(|e| is_gc_table_element(*e));
                 for (k, f) in seg.funcs.iter().enumerate() {
                     let idx = if runtime.is_some() {
                         format!("off.saturating_add({k})")
@@ -587,7 +593,14 @@ fn constructor_lines(
                         .iter()
                         .find(|(item, _)| *item == k)
                         .map_or_else(
-                            || format!("{f}u32"),
+                            // An `exnref` item can only be `ref.null exn`.
+                            || {
+                                if gc_table {
+                                    "GcRef::Null".to_string()
+                                } else {
+                                    format!("{f}u32")
+                                }
+                            },
                             |(_, global)| format!("{imports}.get_global{global}()"),
                         );
                     lines.push(format!("{ind}{target}[{idx}] = {value};"));
@@ -624,7 +637,7 @@ fn constructor_lines(
                     format!("imports.get_global{global}()")
                 }
                 Some(TableFill::Func(f)) => format!("{f}u32"),
-                None => "u32::MAX".to_string(),
+                None => table_null(t.element).to_string(),
             };
             if post_init_elem || !active_elem.iter().any(|seg| seg.table == i) {
                 inner.push(format!("        {field}: vec![{fill}; {}],", t.min));
@@ -633,7 +646,8 @@ fn constructor_lines(
                 // `ref.func`), then apply each active element segment.
                 inner.push(format!("        {field}: {{"));
                 inner.push(format!(
-                    "            let mut t: Vec<u32> = vec![{fill}; {}];",
+                    "            let mut t: Vec<{}> = vec![{fill}; {}];",
+                    table_elem_rust(t.element),
                     t.min
                 ));
                 copy_active_elems(inner, i, "t", "imports", "            ");
@@ -986,9 +1000,10 @@ fn table_accessor_lines(parts: &ModuleParts<'_>) -> Result<Vec<String>, Transpil
             (format!("&self.{get}"), format!("&mut self.{get}"))
         };
         inner.push(String::new());
-        inner.push(format!("fn {get}(&self) -> &[u32] {{ {borrow} }}"));
+        let elem = table_elem_rust(t.element);
+        inner.push(format!("fn {get}(&self) -> &[{elem}] {{ {borrow} }}"));
         inner.push(format!(
-            "fn {get_mut}(&mut self) -> &mut Vec<u32> {{ {borrow_mut} }}"
+            "fn {get_mut}(&mut self) -> &mut Vec<{elem}> {{ {borrow_mut} }}"
         ));
     }
     Ok(inner)
@@ -2104,13 +2119,20 @@ fn import_trait_lines(
         lines.push("    fn memory(&self) -> &[u8];".to_string());
         lines.push("    fn memory_mut(&mut self) -> &mut Vec<u8>;".to_string());
     }
-    // Imported tables: the host lends each `Vec<u32>` for get/set/size/grow and
-    // for indirect-call dispatch (each entry is a function index). Imports come
+    // Imported tables: the host lends each `Vec<u32>` (`Vec<GcRef>` for an
+    // `exnref` table) for get/set/size/grow and for indirect-call dispatch (each
+    // `u32` entry is a function index). Imports come
     // first in the index space, so they are tables `0..imported_tables`.
     for i in 0..imported_tables {
         let (get, get_mut) = table_accessor(index_u32(i)?);
-        lines.push(format!("    fn {get}(&self) -> &[u32];"));
-        lines.push(format!("    fn {get_mut}(&mut self) -> &mut Vec<u32>;"));
+        let elem = table_elem_rust(
+            ctx.table_elements
+                .get(i)
+                .copied()
+                .unwrap_or(ValType::FUNCREF),
+        );
+        lines.push(format!("    fn {get}(&self) -> &[{elem}];"));
+        lines.push(format!("    fn {get_mut}(&mut self) -> &mut Vec<{elem}>;"));
     }
     for (j, im) in imports.iter().enumerate() {
         // A recognised WASI import is a native inherent method, not a host

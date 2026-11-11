@@ -1018,13 +1018,14 @@ struct ImportSink<'a> {
 /// imported table in `table`, and an imported exception tag onto `tags`.
 /// A table holds `funcref`, `externref`, `exnref`, or a concrete function reference
 /// `(ref null $ft)`; the latter is stored exactly like a `funcref` (a `u32`
-/// function handle). An abstract `contref` or bottom type is a `u32` handle too; tables
+/// function handle), while an `exnref` (or `noexn`) entry is a managed `GcRef`.
+/// An abstract `contref` or bottom type is a `u32` handle too; tables
 /// of GC struct/array or concrete continuation references are unsupported.
 fn is_supported_table_element(
     element: wasmparser::RefType,
     type_kinds: &[codegen::CompositeKind],
 ) -> bool {
-    if codegen::is_abstract_u32_ref(element) {
+    if codegen::is_abstract_u32_ref(element) || codegen::is_exn_hierarchy(element.heap_type()) {
         return true;
     }
     let wasmparser::HeapType::Concrete(idx) = element.heap_type() else {

@@ -270,3 +270,105 @@ fn a_caught_exnref_payload_can_be_thrown_again() {
         "assert_eq!(func0(11), 11);",
     );
 }
+
+// A caught exnref that is dropped must release its exception: repeating
+// `catch_ref` in a long loop may not grow the live heap. The counting allocator
+// measures that independently of how the generated code stores exceptions.
+#[test]
+fn repeated_catch_ref_does_not_grow_the_heap() {
+    compile_run(
+        "exn_no_leak",
+        r#"(module
+            (tag $e (param i32))
+            (func (export "f") (param i32)
+              (local $i i32)
+              (loop $l
+                (drop
+                  (block $h (result i32 exnref)
+                    (try_table (catch_ref $e $h) (throw $e (local.get $i)))
+                    (unreachable)))
+                (drop)
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br_if $l (i32.lt_u (local.get $i) (local.get 0))))))"#,
+        r#"
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
+struct Counting;
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 { LIVE.fetch_add(l.size(), Ordering::Relaxed); unsafe { System.alloc(l) } }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) { LIVE.fetch_sub(l.size(), Ordering::Relaxed); unsafe { System.dealloc(p, l) } }
+}
+#[global_allocator]
+static A: Counting = Counting;
+func0(10);
+let before = LIVE.load(Ordering::Relaxed);
+func0(200_000);
+let grown = LIVE.load(Ordering::Relaxed).saturating_sub(before);
+assert!(grown < 64 * 1024, "heap grew by {grown} bytes");
+"#,
+    );
+}
+
+const EXN_PRELUDE: &str = r#"(tag $e (param i32)) (tag $w (param exnref))
+  (func $mk (param i32) (result exnref)
+    (block $h (result exnref) (try_table (catch_all_ref $h) (throw $e (local.get 0))) (unreachable)))
+  (func $rt (param exnref) (result i32)
+    (block $o (result i32) (try_table (result i32) (catch $e $o) (throw_ref (local.get 0)))))"#;
+
+fn exn_module(body: &str) -> String {
+    format!("(module (table $t 2 exnref) {EXN_PRELUDE} {body})")
+}
+
+// A caught exnref is not `Copy`: using it as a throw payload must not move it
+// out of the local that later code reads again.
+#[test]
+fn an_exnref_local_can_be_thrown_as_a_payload_and_used_again() {
+    compile_run(
+        "exn_throw_local",
+        &exn_module(
+            r#"(func (export "f") (param i32) (result i32) (local $x exnref)
+              (local.set $x (call $mk (local.get 0)))
+              (block $c (try_table (catch_all $c) (throw $w (local.get $x))))
+              (call $rt (local.get $x)))"#,
+        ),
+        "let mut i = Instance::new(); assert_eq!(i.func2(3), 3);",
+    );
+}
+
+#[test]
+fn ref_test_and_ref_cast_work_on_an_exnref() {
+    compile_run(
+        "exn_ref_test",
+        &exn_module(
+            r#"(func (export "f") (param i32) (result i32) (local $x exnref)
+              (local.set $x (call $mk (local.get 0)))
+              (i32.add (ref.test (ref exn) (local.get $x))
+                (i32.add (i32.mul (i32.const 10) (ref.test (ref exn) (ref.null exn)))
+                  (call $rt (ref.cast (ref exn) (local.get $x))))))"#,
+        ),
+        "let mut i = Instance::new(); assert_eq!(i.func2(5), 6);",
+    );
+}
+
+// Spilling a still-live (mutable) exnref operand must clone it, not move it.
+#[test]
+fn a_spilled_mutable_exnref_local_stays_usable() {
+    compile_run(
+        "exn_spill",
+        &exn_module(
+            r#"(func (export "f") (param i32) (result i32) (local $x exnref) (local $y exnref)
+              (local.set $x (call $mk (local.get 0)))
+              (local.get $x)
+              (local.set $y (local.get $x))
+              (local.set $x (ref.null exn))
+              (call $rt)
+              (call $rt (local.get $y)) (i32.add))
+            (func (export "g") (param i32) (result i32) (local $x exnref)
+              (local.set $x (call $mk (local.get 0)))
+              (table.set $t (i32.const 0) (local.get $x))
+              (i32.add (call $rt (local.get $x)) (call $rt (table.get $t (i32.const 0)))))"#,
+        ),
+        "let mut i = Instance::new(); assert_eq!(i.func2(3), 6); assert_eq!(i.func3(3), 6);",
+    );
+}

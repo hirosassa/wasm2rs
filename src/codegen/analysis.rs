@@ -517,31 +517,27 @@ pub(crate) fn rust_type(
     }
 }
 /// Whether `ty` is a reference lowered to a `u32` handle (`funcref`, `externref`,
-/// `exnref`, a function or continuation reference) rather than a managed `GcRef`.
+/// a function or continuation reference) rather than a managed `GcRef`.
 pub(crate) fn is_u32_ref(ty: ValType, kinds: &[CompositeKind]) -> Result<bool, TranspileError> {
     Ok(matches!(ty, ValType::Ref(_)) && rust_type(ty, kinds)? == "u32")
 }
-/// Whether a heap type is one of the bottom types `nofunc`/`noextern`/`noexn`: a
+/// Whether a heap type is one of the bottom types `nofunc`/`noextern`/`nocont`: a
 /// reference of that type can only be null, and lowers like its top type (a `u32`
 /// handle, `u32::MAX` null).
 pub(crate) fn is_bottom_u32_heap(hty: HeapType) -> bool {
     matches!(
         hty,
         HeapType::Abstract {
-            ty: AbstractHeapType::NoFunc
-                | AbstractHeapType::NoExtern
-                | AbstractHeapType::NoExn
-                | AbstractHeapType::NoCont,
+            ty: AbstractHeapType::NoFunc | AbstractHeapType::NoExtern | AbstractHeapType::NoCont,
             ..
         }
     )
 }
 /// Whether a reference type lowers to a plain `u32` handle (`u32::MAX` is null): a
-/// `funcref`, `externref`, `exnref` or one of their bottom types.
+/// `funcref`, `externref`, `contref` or one of their bottom types.
 pub(crate) fn is_abstract_u32_ref(rt: wasmparser::RefType) -> bool {
     rt.is_func_ref()
         || rt.is_extern_ref()
-        || is_exn_heap(rt.heap_type())
         || is_cont_heap(rt.heap_type())
         || is_bottom_u32_heap(rt.heap_type())
 }
@@ -557,13 +553,14 @@ pub(crate) fn is_cont_heap(hty: HeapType) -> bool {
         }
     )
 }
-/// Whether a heap type is the abstract `exn` type: an `exnref` is a `u32` handle
-/// into the exception store.
-pub(crate) fn is_exn_heap(hty: HeapType) -> bool {
+
+/// Whether a heap type is `exn` or its bottom `noexn`: an `exnref` is a managed
+/// `GcRef::Exn` sharing the caught exception.
+pub(crate) fn is_exn_hierarchy(hty: HeapType) -> bool {
     matches!(
         hty,
         HeapType::Abstract {
-            ty: AbstractHeapType::Exn,
+            ty: AbstractHeapType::Exn | AbstractHeapType::NoExn,
             ..
         }
     )
@@ -585,7 +582,7 @@ pub(crate) fn abstract_is_gc(hty: HeapType) -> bool {
                 | AbstractHeapType::None,
             ..
         }
-    )
+    ) || is_exn_hierarchy(hty)
 }
 /// Whether a concrete heap type names a struct or array type (a managed `GcRef`)
 /// rather than a function type (a `u32` funcref). Unknown or non-module indices
@@ -674,7 +671,6 @@ mod tests {
         for handle in [
             ValType::FUNCREF,
             ValType::EXTERNREF,
-            ValType::EXNREF,
             concrete(0),
             concrete(2),
         ] {
@@ -686,6 +682,8 @@ mod tests {
             ValType::V128,
             concrete(1),
             ValType::Ref(RefType::ANYREF),
+            // An `exnref` is a managed `GcRef::Exn`, not a handle.
+            ValType::EXNREF,
         ] {
             assert!(!is_u32_ref(other, &kinds).unwrap(), "{other:?}");
         }

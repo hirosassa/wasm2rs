@@ -10,7 +10,7 @@
 
 use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, StorageType, ValType};
 
-use super::super::{CompositeKind, FieldInfo, Val, is_bottom_u32_heap};
+use super::super::{CompositeKind, FieldInfo, Val, is_bottom_u32_heap, is_exn_hierarchy};
 use crate::TranspileError;
 
 /// Which slot variant backs a storage type, and how to wrap/unwrap it.
@@ -680,6 +680,18 @@ impl super::FuncGen<'_> {
         // The func/extern/exn hierarchies are `u32` handles (`u32::MAX` is null):
         // a top type holds every non-null value and a bottom type only null, so
         // the test needs nothing but the null check.
+        // The exn hierarchy is managed (`GcRef::Null` is null) but equally needs
+        // only the null check.
+        if is_exn_hierarchy(hty) {
+            let is_null = format!("matches!(&({ref_expr}), GcRef::Null)");
+            return Ok(if top_of_exn(hty) {
+                format!("(!{is_null} || {null_matches})")
+            } else if null_matches {
+                is_null
+            } else {
+                "false".to_string()
+            });
+        }
         if let Some(top) = u32_hierarchy_top(hty) {
             return Ok(if top {
                 format!("(({ref_expr}) != u32::MAX || {null_matches})")
@@ -738,7 +750,7 @@ impl super::FuncGen<'_> {
         };
         Ok(format!(
             "match &({ref_expr}) {{ GcRef::Null => {null_matches}, \
-             GcRef::I31(_) => {i31_arm}, GcRef::Obj {{ ty, .. }} => {obj_arm} }}"
+             GcRef::I31(_) => {i31_arm}, GcRef::Exn(_) => false, GcRef::Obj {{ ty, .. }} => {obj_arm} }}"
         ))
     }
 
@@ -1105,18 +1117,29 @@ fn extend_packed(
     }
 }
 
-/// For a heap type of a `u32`-handle hierarchy (func, extern, exn), whether it is
+/// For a heap type of a `u32`-handle hierarchy (func, extern), whether it is
 /// the hierarchy's top (`Some(true)`) or bottom (`Some(false)`) type; `None` for
 /// anything else.
 fn u32_hierarchy_top(hty: HeapType) -> Option<bool> {
     match hty {
         HeapType::Abstract {
-            ty: AbstractHeapType::Func | AbstractHeapType::Extern | AbstractHeapType::Exn,
+            ty: AbstractHeapType::Func | AbstractHeapType::Extern,
             ..
         } => Some(true),
         hty if is_bottom_u32_heap(hty) => Some(false),
         _ => None,
     }
+}
+
+/// Whether an exn-hierarchy heap type is the top (`exn`) rather than `noexn`.
+fn top_of_exn(hty: HeapType) -> bool {
+    matches!(
+        hty,
+        HeapType::Abstract {
+            ty: AbstractHeapType::Exn,
+            ..
+        }
+    )
 }
 
 /// Generated-code expression: the end `off + n` of a `n`-unit range starting at

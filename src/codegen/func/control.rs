@@ -1161,7 +1161,12 @@ impl<'a> super::FuncGen<'a> {
                     binds.push(format!(
                         "let {var}: {} = {};",
                         rust_type(*ty, self.ctx.type_kinds)?,
-                        decode_exc_value(*ty, &source, self.ctx.type_kinds)?
+                        decode_exc_value(
+                            *ty,
+                            &source,
+                            &format!("{exc}.exns"),
+                            self.ctx.type_kinds
+                        )?
                     ));
                     pushed.push(Val {
                         code: var,
@@ -1175,9 +1180,9 @@ impl<'a> super::FuncGen<'a> {
             None => (CatchKind::All, Vec::new(), Vec::new()),
         };
         if capture {
-            // The exception lives on in the store; the handler holds its handle.
+            // The handler holds a reference-counted `GcRef::Exn` sharing the exception.
             let var = format!("__hx{label}");
-            binds.push(format!("let {var}: u32 = wasm2rs_exn_store({exc});"));
+            binds.push(format!("let {var}: GcRef = wasm2rs_exn_new({exc});"));
             pushed.push(Val {
                 code: var,
                 ty: ValType::EXNREF,
@@ -1331,7 +1336,7 @@ impl<'a> super::FuncGen<'a> {
             encoded[i] = encode_exc_value(params[i], &value.code, self.ctx.type_kinds)?;
         }
         self.term(format!(
-            "::std::panic::resume_unwind(Box::new({EXC_TYPE} {{ tag: {tag_index}u32, values: vec![{}] }}));",
+            "{{ let mut __exns = Vec::new(); ::std::panic::resume_unwind(Box::new({EXC_TYPE} {{ tag: {tag_index}u32, values: vec![{}], exns: __exns }})); }}",
             encoded.join(", ")
         ));
         self.reachable = false;
@@ -1345,7 +1350,7 @@ impl<'a> super::FuncGen<'a> {
         self.uses_eh = true;
         let exn = self.pop()?.code;
         self.term(format!(
-            "::std::panic::resume_unwind(Box::new(wasm2rs_exn_load({exn})));"
+            "::std::panic::resume_unwind(Box::new(wasm2rs_exn_load(&{exn})));"
         ));
         self.reachable = false;
         self.dead_nesting = 0;
