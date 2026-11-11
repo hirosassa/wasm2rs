@@ -453,7 +453,7 @@ pub(crate) fn build_ctx<'a>(
     // A single pass over every body collects the statefulness-forcing operator
     // flags and the continuation suspend/call tables together, instead of five
     // independent full scans.
-    let scan = scan_bodies(funcs)?;
+    let scan = scan_bodies(funcs, parts.jobs)?;
     let uses_extern_box = scan.uses_extern_box;
     let casts = scan
         .cast_targets

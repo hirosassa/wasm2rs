@@ -1,9 +1,11 @@
 use super::*;
 
 use std::collections::{HashMap, HashSet};
+use std::thread;
 
 use wasmparser::{AbstractHeapType, BlockType, HeapType, Operator, ValType};
 
+use super::parallel::resolve_jobs;
 use crate::TranspileError;
 
 /// Whether the module declares at least one struct or array type, so the
@@ -148,17 +150,6 @@ impl LocalFlags {
     }
 }
 
-impl BodyScan {
-    /// Records the type index a cast or test names, if it is a concrete one.
-    fn note_cast_target(&mut self, hty: HeapType) {
-        if let HeapType::Concrete(idx) = hty
-            && let Some(i) = idx.as_module_index()
-        {
-            self.cast_targets.push(i);
-        }
-    }
-}
-
 /// Tracks control depth over one body's operators to find a branch that targets
 /// the function's own outermost label (a relative depth equal to the number of
 /// enclosing regions at that point). Fed by [`scan_bodies`] so the body is not
@@ -225,19 +216,165 @@ impl FunctionLabelBranch {
     }
 }
 
+/// One function's contribution to a [`BodyScan`], computed independently of every
+/// other function so the scan can run on several threads and be merged in index
+/// order.
+#[derive(Default)]
+struct FuncScan {
+    mutated: LocalFlags,
+    cont_bodies: Vec<u32>,
+    suspends: bool,
+    branches_to_function_label: bool,
+    has_return: bool,
+    has_tail_call: bool,
+    cast_targets: Vec<u32>,
+    calls: Vec<u32>,
+    uses_extern_box: bool,
+    uses_call_ref: bool,
+    uses_array_segment_ops: bool,
+    uses_abstract_gc: bool,
+    ref_funcs: Vec<u32>,
+}
+
+/// Records the type index a cast or test names, if it is a concrete one.
+fn note_cast_target(targets: &mut Vec<u32>, hty: HeapType) {
+    if let HeapType::Concrete(idx) = hty
+        && let Some(i) = idx.as_module_index()
+    {
+        targets.push(i);
+    }
+}
+
+fn scan_function(input: &FuncInput<'_>) -> Result<FuncScan, TranspileError> {
+    let mut scan = FuncScan::default();
+    let mut n_locals = input.params.len();
+    for local in input.body.get_locals_reader()? {
+        let (count, ty) = local?;
+        if matches!(ty, ValType::Ref(rt) if abstract_is_gc(rt.heap_type())) {
+            scan.uses_abstract_gc = true;
+        }
+        n_locals = n_locals.saturating_add(count as usize);
+    }
+    scan.mutated = LocalFlags::with_len(n_locals);
+    // `ref.func` immediately followed by `cont.new` names a continuation
+    // body; any other operator breaks the adjacency, so every non-matching
+    // arm clears `last_ref_func`.
+    let mut last_ref_func: Option<u32> = None;
+    let mut label_branch = FunctionLabelBranch::default();
+    for op in input.body.get_operators_reader()? {
+        let op = op?;
+        label_branch.observe(&op)?;
+        scan.has_return |= matches!(op, Operator::Return);
+        scan.has_tail_call |= matches!(
+            op,
+            Operator::ReturnCall { .. }
+                | Operator::ReturnCallIndirect { .. }
+                | Operator::ReturnCallRef { .. }
+        );
+        if !scan.uses_abstract_gc && creates_abstract_gc(&op) {
+            scan.uses_abstract_gc = true;
+        }
+        match op {
+            Operator::RefFunc { function_index } => {
+                scan.ref_funcs.push(function_index);
+                last_ref_func = Some(function_index);
+                continue;
+            }
+            Operator::ContNew { .. } => {
+                if let Some(f) = last_ref_func {
+                    scan.cont_bodies.push(f);
+                }
+            }
+            Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
+                scan.mutated.insert(local_index);
+            }
+            Operator::RefTestNonNull { hty }
+            | Operator::RefTestNullable { hty }
+            | Operator::RefCastNonNull { hty }
+            | Operator::RefCastNullable { hty } => {
+                note_cast_target(&mut scan.cast_targets, hty);
+            }
+            Operator::BrOnCast { to_ref_type, .. } | Operator::BrOnCastFail { to_ref_type, .. } => {
+                note_cast_target(&mut scan.cast_targets, to_ref_type.heap_type());
+            }
+            Operator::Suspend { .. } | Operator::Switch { .. } => scan.suspends = true,
+            Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
+                scan.calls.push(function_index);
+            }
+            Operator::AnyConvertExtern | Operator::ExternConvertAny => {
+                scan.uses_extern_box = true;
+            }
+            Operator::CallRef { .. } | Operator::ReturnCallRef { .. } => {
+                scan.uses_call_ref = true;
+            }
+            Operator::ArrayNewData { .. }
+            | Operator::ArrayInitData { .. }
+            | Operator::ArrayNewElem { .. }
+            | Operator::ArrayInitElem { .. } => scan.uses_array_segment_ops = true,
+            _ => {}
+        }
+        last_ref_func = None;
+    }
+    scan.branches_to_function_label = label_branch.found;
+    Ok(scan)
+}
+
+/// Scans `funcs` in order, stopping at the first failing function.
+fn scan_chunk(funcs: &[FuncInput<'_>]) -> Result<Vec<FuncScan>, TranspileError> {
+    funcs.iter().map(scan_function).collect()
+}
+
 /// Scan every function body exactly once, collecting all the whole-module
 /// operator facts `build_ctx` needs (see [`BodyScan`]). Each of the flagged
 /// operators forces the module to be emitted as a `struct Instance` because it
 /// reaches per-instance state that free functions cannot.
-pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, TranspileError> {
+///
+/// Functions are scanned independently on up to `jobs` threads (see
+/// [`resolve_jobs`]) and merged in index order, so the result, and which error
+/// surfaces first, match a serial scan.
+pub(crate) fn scan_bodies(
+    funcs: &[FuncInput<'_>],
+    jobs: usize,
+) -> Result<BodyScan, TranspileError> {
+    let jobs = resolve_jobs(jobs, funcs.len());
+    let per_func = if jobs <= 1 {
+        scan_chunk(funcs)?
+    } else {
+        let chunk_len = funcs.len().div_ceil(jobs);
+        let chunks: Vec<Result<Vec<FuncScan>, TranspileError>> = thread::scope(|scope| {
+            let pending: Vec<_> = funcs
+                .chunks(chunk_len)
+                .map(|chunk| {
+                    // A thread that cannot be started leaves its chunk to this one.
+                    thread::Builder::new()
+                        .spawn_scoped(scope, move || scan_chunk(chunk))
+                        .map_err(|_| chunk)
+                })
+                .collect();
+            pending
+                .into_iter()
+                .map(|spawned| match spawned {
+                    Ok(handle) => handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                    Err(chunk) => scan_chunk(chunk),
+                })
+                .collect()
+        });
+        let mut all = Vec::with_capacity(funcs.len());
+        for chunk in chunks {
+            all.extend(chunk?);
+        }
+        all
+    };
     let mut scan = BodyScan {
         mutated: Vec::with_capacity(funcs.len()),
         cont_bodies: Vec::new(),
-        suspends: vec![false; funcs.len()],
+        suspends: Vec::with_capacity(funcs.len()),
         branches_to_function_label: Vec::with_capacity(funcs.len()),
         has_return: Vec::with_capacity(funcs.len()),
         has_tail_call: Vec::with_capacity(funcs.len()),
-        calls: vec![Vec::new(); funcs.len()],
+        calls: Vec::with_capacity(funcs.len()),
         uses_extern_box: false,
         cast_targets: Vec::new(),
         uses_call_ref: false,
@@ -245,83 +382,21 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
         uses_abstract_gc: false,
         ref_funcs: Vec::new(),
     };
-    for (i, input) in funcs.iter().enumerate() {
-        let mut n_locals = input.params.len();
-        for local in input.body.get_locals_reader()? {
-            let (count, ty) = local?;
-            if matches!(ty, ValType::Ref(rt) if abstract_is_gc(rt.heap_type())) {
-                scan.uses_abstract_gc = true;
-            }
-            n_locals = n_locals.saturating_add(count as usize);
-        }
-        let mut mutated = LocalFlags::with_len(n_locals);
-        // `ref.func` immediately followed by `cont.new` names a continuation
-        // body; any other operator breaks the adjacency, so every non-matching
-        // arm clears `last_ref_func`.
-        let mut last_ref_func: Option<u32> = None;
-        let mut label_branch = FunctionLabelBranch::default();
-        let mut has_return = false;
-        let mut has_tail_call = false;
-        for op in input.body.get_operators_reader()? {
-            let op = op?;
-            label_branch.observe(&op)?;
-            has_return |= matches!(op, Operator::Return);
-            has_tail_call |= matches!(
-                op,
-                Operator::ReturnCall { .. }
-                    | Operator::ReturnCallIndirect { .. }
-                    | Operator::ReturnCallRef { .. }
-            );
-            if !scan.uses_abstract_gc && creates_abstract_gc(&op) {
-                scan.uses_abstract_gc = true;
-            }
-            match op {
-                Operator::RefFunc { function_index } => {
-                    scan.ref_funcs.push(function_index);
-                    last_ref_func = Some(function_index);
-                    continue;
-                }
-                Operator::ContNew { .. } => {
-                    if let Some(f) = last_ref_func {
-                        scan.cont_bodies.push(f);
-                    }
-                }
-                Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
-                    mutated.insert(local_index);
-                }
-                Operator::RefTestNonNull { hty } | Operator::RefTestNullable { hty } => {
-                    scan.note_cast_target(hty);
-                }
-                Operator::RefCastNonNull { hty } | Operator::RefCastNullable { hty } => {
-                    scan.note_cast_target(hty);
-                }
-                Operator::BrOnCast { to_ref_type, .. }
-                | Operator::BrOnCastFail { to_ref_type, .. } => {
-                    scan.note_cast_target(to_ref_type.heap_type());
-                }
-                Operator::Suspend { .. } => scan.suspends[i] = true,
-                Operator::Switch { .. } => scan.suspends[i] = true,
-                Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
-                    scan.calls[i].push(function_index);
-                }
-                Operator::AnyConvertExtern | Operator::ExternConvertAny => {
-                    scan.uses_extern_box = true;
-                }
-                Operator::CallRef { .. } | Operator::ReturnCallRef { .. } => {
-                    scan.uses_call_ref = true;
-                }
-                Operator::ArrayNewData { .. }
-                | Operator::ArrayInitData { .. }
-                | Operator::ArrayNewElem { .. }
-                | Operator::ArrayInitElem { .. } => scan.uses_array_segment_ops = true,
-                _ => {}
-            }
-            last_ref_func = None;
-        }
-        scan.mutated.push(mutated);
-        scan.branches_to_function_label.push(label_branch.found);
-        scan.has_return.push(has_return);
-        scan.has_tail_call.push(has_tail_call);
+    for f in per_func {
+        scan.mutated.push(f.mutated);
+        scan.cont_bodies.extend(f.cont_bodies);
+        scan.suspends.push(f.suspends);
+        scan.branches_to_function_label
+            .push(f.branches_to_function_label);
+        scan.has_return.push(f.has_return);
+        scan.has_tail_call.push(f.has_tail_call);
+        scan.cast_targets.extend(f.cast_targets);
+        scan.calls.push(f.calls);
+        scan.uses_extern_box |= f.uses_extern_box;
+        scan.uses_call_ref |= f.uses_call_ref;
+        scan.uses_array_segment_ops |= f.uses_array_segment_ops;
+        scan.uses_abstract_gc |= f.uses_abstract_gc;
+        scan.ref_funcs.extend(f.ref_funcs);
     }
     scan.cont_bodies.sort_unstable();
     scan.cont_bodies.dedup();
@@ -743,7 +818,7 @@ mod tests {
             })
             .collect();
 
-        let scan = scan_bodies(&inputs).unwrap();
+        let scan = scan_bodies(&inputs, 1).unwrap();
 
         let written =
             |f: usize| -> Vec<u32> { (0..8).filter(|&l| scan.mutated[f].contains(l)).collect() };
@@ -752,6 +827,50 @@ mod tests {
         assert_eq!(written(2), vec![2]);
         // A local index past anything the function writes is simply not mutated.
         assert!(!scan.mutated[2].contains(1_000_000));
+    }
+
+    #[test]
+    fn a_threaded_scan_matches_a_serial_one_in_function_order() {
+        // Per-function facts differ across functions (and `ref_funcs`/`calls`
+        // order matters), so a merge that reordered chunks would show.
+        let funcs: String = (0..10)
+            .map(|i| {
+                format!(
+                    "(func (local i32) (local.set 0 (i32.const {i})) (drop (ref.func {i})) \
+                     (call {next}) {ret})",
+                    next = (i + 1) % 10,
+                    ret = if i % 3 == 0 { "return" } else { "" },
+                )
+            })
+            .collect();
+        let wasm = wat::parse_str(format!(
+            "(module (elem declare func 0 1 2 3 4 5 6 7 8 9) {funcs})"
+        ))
+        .unwrap();
+        let bodies = bodies(&wasm);
+        let inputs: Vec<FuncInput<'_>> = bodies
+            .iter()
+            .map(|body| FuncInput {
+                type_index: 0,
+                params: &[],
+                results: &[],
+                body,
+            })
+            .collect();
+
+        let serial = scan_bodies(&inputs, 1).unwrap();
+        for jobs in [2, 3, 7, 64] {
+            let threaded = scan_bodies(&inputs, jobs).unwrap();
+            assert_eq!(threaded.ref_funcs, serial.ref_funcs, "jobs={jobs}");
+            assert_eq!(threaded.calls, serial.calls, "jobs={jobs}");
+            assert_eq!(threaded.has_return, serial.has_return, "jobs={jobs}");
+            assert_eq!(threaded.mutated.len(), serial.mutated.len(), "jobs={jobs}");
+        }
+        assert_eq!(serial.ref_funcs, (0..10).collect::<Vec<u32>>());
+        assert_eq!(
+            serial.has_return,
+            (0..10).map(|i| i % 3 == 0).collect::<Vec<_>>()
+        );
     }
 
     /// Scans `wat`'s bodies and returns `(uses_abstract_gc, ref_funcs)`.
@@ -767,7 +886,7 @@ mod tests {
                 body,
             })
             .collect();
-        let scan = scan_bodies(&inputs).unwrap();
+        let scan = scan_bodies(&inputs, 1).unwrap();
         (scan.uses_abstract_gc, scan.ref_funcs)
     }
 
@@ -824,7 +943,7 @@ mod tests {
             })
             .collect();
 
-        let scan = scan_bodies(&inputs).unwrap();
+        let scan = scan_bodies(&inputs, 1).unwrap();
 
         assert_eq!(
             scan.branches_to_function_label,
@@ -855,7 +974,7 @@ mod tests {
             })
             .collect();
 
-        let scan = scan_bodies(&inputs).unwrap();
+        let scan = scan_bodies(&inputs, 1).unwrap();
 
         assert_eq!(scan.branches_to_function_label, vec![true, false]);
     }
