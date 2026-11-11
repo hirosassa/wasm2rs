@@ -288,10 +288,10 @@ fn scan_function(input: &FuncInput<'_>) -> Result<FuncScan, TranspileError> {
             Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
                 scan.mutated.insert(local_index);
             }
-            Operator::RefTestNonNull { hty } | Operator::RefTestNullable { hty } => {
-                note_cast_target(&mut scan.cast_targets, hty);
-            }
-            Operator::RefCastNonNull { hty } | Operator::RefCastNullable { hty } => {
+            Operator::RefTestNonNull { hty }
+            | Operator::RefTestNullable { hty }
+            | Operator::RefCastNonNull { hty }
+            | Operator::RefCastNullable { hty } => {
                 note_cast_target(&mut scan.cast_targets, hty);
             }
             Operator::BrOnCast { to_ref_type, .. } | Operator::BrOnCastFail { to_ref_type, .. } => {
