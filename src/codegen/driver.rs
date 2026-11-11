@@ -1,6 +1,6 @@
 use super::*;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use wasmparser::ValType;
 
@@ -77,9 +77,14 @@ pub(crate) struct ModuleCtx<'a> {
     descendants: Vec<Vec<u32>>,
     /// See [`ModuleParts::type_rel`].
     type_rel: Option<&'a TypeRel>,
-    /// The declared function type of every function in the index space, `None` for a
-    /// dead function (never a `ref.func` target).
-    func_decl_types: Vec<Option<u32>>,
+    /// Per type index, the full indices of the functions a `call_indirect`/`call_ref`
+    /// or function-type `ref.test` of that type can reach, ascending (empty for a
+    /// non-function type). Built once by [`index_func_targets`] so no call site
+    /// rescans the function space.
+    func_targets: Vec<Vec<usize>>,
+    /// Whether the managed value model (`GcRef`) must be emitted
+    /// ([`needs_gc_types`]); decided once here so the drivers do not rescan.
+    pub(crate) needs_gc_types: bool,
     /// Per-imported-global `(type, mutable)`, occupying the low global indices.
     pub(crate) imported_globals: Vec<(ValType, bool)>,
     /// Per-defined-global `(type, mutable)`, indexed after the imported globals.
@@ -191,34 +196,24 @@ impl ModuleCtx<'_> {
         )
     }
 
-    /// The full indices of every live function whose declared type is `target` or a
+    /// The full indices of every function that can be a funcref value (see
+    /// [`ModuleParts::global_funcs`]) and whose declared type is `target` or a
     /// declared subtype of it, ascending: the funcrefs a test against the function
     /// type `target` accepts. `None` when the type relation is unavailable.
-    pub(crate) fn funcs_of_subtype(&self, target: u32) -> Option<Vec<usize>> {
-        let rel = self.type_rel?;
-        Some(
-            self.func_decl_types
-                .iter()
-                .enumerate()
-                .filter(|(_, ty)| ty.is_some_and(|t| rel.is_subtype(t, target)))
-                .map(|(f, _)| f)
-                .collect(),
-        )
+    pub(crate) fn funcs_of_subtype(&self, target: u32) -> Option<&[usize]> {
+        self.type_rel?;
+        Some(self.dispatch_targets(target))
     }
 
     /// The full indices of the functions a `call_indirect`/`call_ref` of function type
-    /// `type_index` can reach, ascending: those whose declared type is that type or a
-    /// declared subtype of it, or, if the type relation is unavailable, those of exactly
-    /// its signature.
-    pub(crate) fn dispatch_targets(&self, type_index: u32) -> Vec<usize> {
-        if let Some(funcs) = self.funcs_of_subtype(type_index) {
-            return funcs;
-        }
-        self.types
+    /// `type_index` can reach, ascending: the functions that can be a funcref value
+    /// (named by an element segment, `ref.func`, global/table initialiser or export)
+    /// whose declared type is that type or a declared subtype of it, or, if the type
+    /// relation is unavailable, whose signature is exactly its signature.
+    pub(crate) fn dispatch_targets(&self, type_index: u32) -> &[usize] {
+        self.func_targets
             .get(type_index as usize)
-            .map_or_else(Vec::new, |sig| {
-                self.funcs_with_sig(&sig.params, &sig.results).to_vec()
-            })
+            .map_or(&[], Vec::as_slice)
     }
 
     /// A call to host method `name`. A re-entrant host also gets the instance; the
@@ -290,6 +285,8 @@ pub(crate) struct ModuleParts<'a> {
     /// `table` is itself a defined (not imported) table.
     pub(crate) extra_tables: &'a [TableInfo],
     pub(crate) elements: &'a [ElemSegment],
+    /// Functions named by `ref.func` in a global or table initialiser.
+    pub(crate) global_funcs: &'a [u32],
     pub(crate) tags: &'a [TagInfo],
     /// The module's function exports, in declaration order.
     pub(crate) exports: &'a [ExportInfo],
@@ -462,16 +459,51 @@ pub(crate) fn build_ctx<'a>(
                     .map(|(f, live)| live.then_some((f.params, f.results))),
             ),
     );
-    let func_decl_types: Vec<Option<u32>> = imports
+    // A function is a possible `call_indirect` target only if some funcref value
+    // can name it: an element segment, a `ref.func`, a global/table initialiser or
+    // an export (the host can hand an exported function's funcref back).
+    //
+    // A host can also mint a funcref naming any local function (it knows the
+    // indices): through a host-owned table, an imported global, an imported
+    // function's funcref result or an exported function's funcref parameter. A
+    // module with such a source keeps every function a possible target.
+    let is_ref = |ty: &ValType| matches!(ty, ValType::Ref(_));
+    let host_funcrefs = table.is_some_and(|t| t.imported)
+        || imported_globals.iter().any(|g| is_ref(&g.ty))
+        || imports.iter().any(|im| im.results.iter().any(is_ref))
+        || parts.exports.iter().any(|e| {
+            (e.func_index as usize)
+                .checked_sub(n_imports)
+                .and_then(|i| funcs.get(i))
+                .is_some_and(|f| f.params.iter().any(is_ref))
+        });
+    let mut referenced = vec![host_funcrefs; n_imports + funcs.len()];
+    let named = elements
         .iter()
-        .map(|im| Some(im.type_index))
-        .chain(
-            funcs
-                .iter()
-                .zip(parts.live)
-                .map(|(f, live)| live.then_some(f.type_index)),
-        )
-        .collect();
+        .flat_map(|e| e.funcs.iter())
+        .chain(parts.global_funcs)
+        .chain(&scan.ref_funcs)
+        .chain(parts.exports.iter().map(|e| &e.func_index));
+    for &f in named {
+        if let Some(slot) = referenced.get_mut(f as usize) {
+            *slot = true;
+        }
+    }
+    let func_decl_types = imports.iter().map(|im| Some(im.type_index)).chain(
+        funcs
+            .iter()
+            .zip(parts.live)
+            .map(|(f, live)| live.then_some(f.type_index)),
+    );
+    let func_targets = index_func_targets(
+        types,
+        type_kinds,
+        type_rel,
+        &funcs_by_sig,
+        func_decl_types,
+        &referenced,
+    );
+    let needs_gc_types = needs_gc_types(parts, scan.uses_abstract_gc);
     let ctx = ModuleCtx {
         imports,
         funcs,
@@ -481,7 +513,8 @@ pub(crate) fn build_ctx<'a>(
         type_kinds,
         descendants: index_descendants(type_kinds, supers),
         type_rel,
-        func_decl_types,
+        func_targets,
+        needs_gc_types,
         imported_globals: imported_globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         has_memory,
@@ -599,7 +632,7 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
         out.push_str(EXC_DEF);
         out.push('\n');
     }
-    if needs_gc_types(parts)? {
+    if ctx.needs_gc_types {
         out.push_str(GCREF_DEF);
         out.push('\n');
     }
@@ -782,7 +815,7 @@ pub(crate) fn generate_module_split(
         prefix.push_str(EXC_DEF);
         prefix.push('\n');
     }
-    if needs_gc_types(parts)? {
+    if ctx.needs_gc_types {
         prefix.push_str(GCREF_DEF);
         prefix.push('\n');
     }
@@ -851,6 +884,69 @@ fn index_by_signature<'a>(
 /// full-hierarchy scan per query. The walk is bounded by the type count, so a
 /// cycle (which a validated module cannot contain) still terminates; the
 /// `last()` check keeps a cycle from registering a type twice.
+/// Per type index, the functions a `call_indirect`/`call_ref` of that function type
+/// can reach (see [`ModuleCtx::dispatch_targets`]): the `referenced` functions whose
+/// declared type is the type or a declared subtype of it (the type relation, when
+/// available), else those of exactly its signature. `func_decl_types` is the declared
+/// type of every function in the index space, `None` for a dead one.
+///
+/// Functions are grouped by declared type first, so the subtype relation is
+/// evaluated once per (function type, distinct declared type) pair rather than once
+/// per function.
+fn index_func_targets(
+    types: &[TypeSig],
+    type_kinds: &[CompositeKind],
+    type_rel: Option<&TypeRel>,
+    funcs_by_sig: &SigIndex,
+    func_decl_types: impl Iterator<Item = Option<u32>>,
+    referenced: &[bool],
+) -> Vec<Vec<usize>> {
+    let is_referenced = |f: usize| referenced.get(f).copied().unwrap_or(false);
+    let mut by_decl: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    if type_rel.is_some() {
+        for (f, ty) in func_decl_types.enumerate() {
+            if let Some(ty) = ty
+                && is_referenced(f)
+            {
+                by_decl.entry(ty).or_default().push(f);
+            }
+        }
+    }
+    type_kinds
+        .iter()
+        .enumerate()
+        .map(|(t, kind)| {
+            if !matches!(kind, CompositeKind::Func) {
+                return Vec::new();
+            }
+            let Ok(t) = u32::try_from(t) else {
+                return Vec::new();
+            };
+            if let Some(rel) = type_rel {
+                let mut targets: Vec<usize> = by_decl
+                    .iter()
+                    .filter(|&(&decl, _)| rel.is_subtype(decl, t))
+                    .flat_map(|(_, funcs)| funcs.iter().copied())
+                    .collect();
+                targets.sort_unstable();
+                targets
+            } else {
+                types.get(t as usize).map_or_else(Vec::new, |sig| {
+                    funcs_by_sig
+                        .get(&(sig.params.clone(), sig.results.clone()))
+                        .map_or_else(Vec::new, |funcs| {
+                            funcs
+                                .iter()
+                                .copied()
+                                .filter(|&f| is_referenced(f))
+                                .collect()
+                        })
+                })
+            }
+        })
+        .collect()
+}
+
 fn index_descendants(type_kinds: &[CompositeKind], supers: &[Option<u32>]) -> Vec<Vec<u32>> {
     let n = type_kinds.len();
     let mut index = vec![Vec::new(); n];

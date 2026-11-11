@@ -15,20 +15,19 @@ pub(crate) fn declares_gc_types(type_kinds: &[CompositeKind]) -> bool {
 }
 /// Whether the managed value model ([`GCREF_DEF`]) must be emitted: either the
 /// module declares a struct/array type, a body introduces an abstract GC
-/// reference (e.g. `ref.null any`), or one appears only in a type (a global,
-/// signature, table element or local: [`abstract_gc_in_types`]); the last two
-/// also lower to a `GcRef` even without any concrete GC type declared.
-pub(crate) fn needs_gc_types(parts: &ModuleParts<'_>) -> Result<bool, TranspileError> {
-    Ok(declares_gc_types(parts.type_kinds)
-        || abstract_gc_in_types(parts)?
-        || uses_abstract_gc(parts.funcs)?)
+/// reference (e.g. `ref.null any`) or declares a local of one (both found by
+/// [`scan_bodies`], `bodies_use_gc`), or one appears only in a type (a global,
+/// signature or table element: [`abstract_gc_in_types`]); the last two also
+/// lower to a `GcRef` even without any concrete GC type declared.
+pub(crate) fn needs_gc_types(parts: &ModuleParts<'_>, bodies_use_gc: bool) -> bool {
+    declares_gc_types(parts.type_kinds) || bodies_use_gc || abstract_gc_in_types(parts)
 }
 /// Whether an abstract GC reference type (`anyref`, `nullref`, ...) appears in a
-/// signature, a global, a table element or a local, so a value of it exists even
-/// when no body creates one.
-fn abstract_gc_in_types(parts: &ModuleParts<'_>) -> Result<bool, TranspileError> {
+/// signature, a global or a table element, so a value of it exists even when no
+/// body creates one. (A local's type is checked during [`scan_bodies`].)
+fn abstract_gc_in_types(parts: &ModuleParts<'_>) -> bool {
     let is_gc = |ty: &ValType| matches!(ty, ValType::Ref(rt) if abstract_is_gc(rt.heap_type()));
-    if parts.globals.iter().any(|g| is_gc(&g.ty))
+    parts.globals.iter().any(|g| is_gc(&g.ty))
         || parts.imported_globals.iter().any(|g| is_gc(&g.ty))
         // Every function signature (defined or imported, and the one behind a
         // `call_ref`) is in the type section.
@@ -41,59 +40,28 @@ fn abstract_gc_in_types(parts: &ModuleParts<'_>) -> Result<bool, TranspileError>
             .into_iter()
             .chain(parts.extra_tables)
             .any(|t| is_gc(&t.element))
-    {
-        return Ok(true);
-    }
-    for input in parts.funcs {
-        for local in input.body.get_locals_reader()? {
-            if is_gc(&local?.1) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
 }
-/// Whether any function body contains an operator matching `pred`.
-///
-/// Reads a fresh operator reader per body (`get_operators_reader` yields an
-/// independent reader, so this does not disturb the real codegen walk later),
-/// short-circuiting on the first match.
-pub(crate) fn any_body_op(
-    funcs: &[FuncInput<'_>],
-    pred: impl Fn(&Operator<'_>) -> bool,
-) -> Result<bool, TranspileError> {
-    for input in funcs {
-        for op in input.body.get_operators_reader()? {
-            if pred(&op?) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-/// Whether any function body creates an abstract GC reference without a concrete
-/// struct/array type being declared: either `ref.null` of an abstract GC heap
-/// type (`any`/`eq`/`i31`/`struct`/`array`/`none`), `ref.i31` (which produces a
-/// `GcRef::I31`), or a convert op (which produces/consumes a managed `anyref`).
-/// All force the managed value model to be emitted even with no struct/array
-/// type declared.
-pub(crate) fn uses_abstract_gc(funcs: &[FuncInput<'_>]) -> Result<bool, TranspileError> {
-    any_body_op(funcs, |op| {
-        matches!(op, Operator::RefNull { hty } if abstract_is_gc(*hty))
-            // A single-value block result (`(block (result anyref) ..)`).
-            || matches!(
-                op,
-                Operator::Block { blockty: BlockType::Type(ValType::Ref(rt)) }
-                    | Operator::Loop { blockty: BlockType::Type(ValType::Ref(rt)) }
-                    | Operator::If { blockty: BlockType::Type(ValType::Ref(rt)) }
-                    | Operator::TryTable { try_table: wasmparser::TryTable { ty: BlockType::Type(ValType::Ref(rt)), .. } }
-                    if abstract_is_gc(rt.heap_type())
-            )
-            || matches!(
-                op,
-                Operator::RefI31 | Operator::AnyConvertExtern | Operator::ExternConvertAny
-            )
-    })
+/// Whether `op` creates an abstract GC reference without a concrete struct/array
+/// type being declared: either `ref.null` of an abstract GC heap type
+/// (`any`/`eq`/`i31`/`struct`/`array`/`none`), `ref.i31` (which produces a
+/// `GcRef::I31`), a convert op (which produces/consumes a managed `anyref`), or a
+/// block whose single result is one. All force the managed value model to be
+/// emitted even with no struct/array type declared.
+fn creates_abstract_gc(op: &Operator<'_>) -> bool {
+    matches!(op, Operator::RefNull { hty } if abstract_is_gc(*hty))
+        // A single-value block result (`(block (result anyref) ..)`).
+        || matches!(
+            op,
+            Operator::Block { blockty: BlockType::Type(ValType::Ref(rt)) }
+                | Operator::Loop { blockty: BlockType::Type(ValType::Ref(rt)) }
+                | Operator::If { blockty: BlockType::Type(ValType::Ref(rt)) }
+                | Operator::TryTable { try_table: wasmparser::TryTable { ty: BlockType::Type(ValType::Ref(rt)), .. } }
+                if abstract_is_gc(rt.heap_type())
+        )
+        || matches!(
+            op,
+            Operator::RefI31 | Operator::AnyConvertExtern | Operator::ExternConvertAny
+        )
 }
 /// Everything `build_ctx` needs from a single pass over every function body.
 ///
@@ -131,6 +99,12 @@ pub(crate) struct BodyScan {
     /// Any body uses an array segment operator (`array.new_data`/`init_data`/
     /// `new_elem`/`init_elem`, which read the retained passive segments).
     pub(crate) uses_array_segment_ops: bool,
+    /// Any body creates an abstract GC reference ([`creates_abstract_gc`]) or
+    /// declares a local of one, so the managed value model must be emitted.
+    pub(crate) uses_abstract_gc: bool,
+    /// Every function named by a `ref.func` in a body (unsorted, may repeat):
+    /// each can become a funcref value, so a `call_indirect` may reach it.
+    pub(crate) ref_funcs: Vec<u32>,
 }
 
 /// A per-function flag for each local index, a dense replacement for a
@@ -180,11 +154,16 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
         cast_targets: Vec::new(),
         uses_call_ref: false,
         uses_array_segment_ops: false,
+        uses_abstract_gc: false,
+        ref_funcs: Vec::new(),
     };
     for (i, input) in funcs.iter().enumerate() {
         let mut n_locals = input.params.len();
         for local in input.body.get_locals_reader()? {
-            let (count, _) = local?;
+            let (count, ty) = local?;
+            if matches!(ty, ValType::Ref(rt) if abstract_is_gc(rt.heap_type())) {
+                scan.uses_abstract_gc = true;
+            }
             n_locals = n_locals.saturating_add(count as usize);
         }
         let mut mutated = LocalFlags::with_len(n_locals);
@@ -193,8 +172,13 @@ pub(crate) fn scan_bodies(funcs: &[FuncInput<'_>]) -> Result<BodyScan, Transpile
         // arm clears `last_ref_func`.
         let mut last_ref_func: Option<u32> = None;
         for op in input.body.get_operators_reader()? {
-            match op? {
+            let op = op?;
+            if !scan.uses_abstract_gc && creates_abstract_gc(&op) {
+                scan.uses_abstract_gc = true;
+            }
+            match op {
                 Operator::RefFunc { function_index } => {
+                    scan.ref_funcs.push(function_index);
                     last_ref_func = Some(function_index);
                     continue;
                 }
@@ -660,5 +644,52 @@ mod tests {
         assert_eq!(written(2), vec![2]);
         // A local index past anything the function writes is simply not mutated.
         assert!(!scan.mutated[2].contains(1_000_000));
+    }
+
+    /// Scans `wat`'s bodies and returns `(uses_abstract_gc, ref_funcs)`.
+    fn scan_gc_and_ref_funcs(wat: &str) -> (bool, Vec<u32>) {
+        let wasm = wat::parse_str(wat).unwrap();
+        let bodies = bodies(&wasm);
+        let inputs: Vec<FuncInput<'_>> = bodies
+            .iter()
+            .map(|body| FuncInput {
+                type_index: 0,
+                params: &[],
+                results: &[],
+                body,
+            })
+            .collect();
+        let scan = scan_bodies(&inputs).unwrap();
+        (scan.uses_abstract_gc, scan.ref_funcs)
+    }
+
+    #[test]
+    fn scan_flags_a_body_that_creates_or_declares_an_abstract_gc_reference() {
+        for wat in [
+            "(module (func (drop (ref.null any))))",
+            "(module (func (drop (ref.i31 (i32.const 1)))))",
+            "(module (func (result anyref) (block (result anyref) (ref.null any))))",
+            // Only a local's type mentions the abstract reference.
+            "(module (func (local anyref)))",
+        ] {
+            assert!(scan_gc_and_ref_funcs(wat).0, "{wat}");
+        }
+        for wat in [
+            "(module (func (drop (ref.null func))))",
+            "(module (func (local funcref i32)))",
+        ] {
+            assert!(!scan_gc_and_ref_funcs(wat).0, "{wat}");
+        }
+    }
+
+    #[test]
+    fn scan_collects_every_ref_func_target() {
+        let (_, refs) = scan_gc_and_ref_funcs(
+            r#"(module
+                (func $a) (func $b)
+                (elem declare func $a $b)
+                (func (drop (ref.func $b)) (drop (ref.func $a)) (drop (ref.func $b))))"#,
+        );
+        assert_eq!(refs, vec![1, 0, 1]);
     }
 }

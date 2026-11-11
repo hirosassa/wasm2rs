@@ -915,6 +915,7 @@ where
         table: table.as_ref(),
         extra_tables: &extra_tables,
         elements: &elements,
+        global_funcs: &global_funcs,
         tags: &tags,
         exports: &exports,
         global_exports: &global_exports,
