@@ -35,12 +35,12 @@ moves the examples, the CLI and the build-script story onto it.
    1. If the component exports functions, the module is the one `wit_exports` names
       (`core_module`). Any other core module (shim, fixup, adapter) is ignored: the glue reaches
       the program through the lifted exports, and the lowered imports are bound by name.
-      Exports from more than one module are `Unsupported`.
+      Exports from more than one module are `InvalidInput`.
    2. Otherwise the module is the one instantiated with the core functions the component lowers
       (`canon lower`, resource drops, aliased shim functions). A module that exports no function
       and has no start function is wiring (the fixup module of `wit-component`) and is not a
       candidate. A component with exactly one core module needs no analysis.
-   3. If no single module results, the error is `Unsupported` and says why (how many candidates, or
+   3. If no single module results, the error is `InvalidInput` and says why (how many candidates, or
       that there is no core module at all).
 5. **Out of scope (`Unsupported`, with a message):**
    - components that link several core modules through a shim or adapter *and* export nothing, so
@@ -106,6 +106,6 @@ candidates ambiguous, and the error then names the module positions.
 
 - **Selection by wiring is a heuristic for export-less components.** It is exact for what
   `wit-component` emits (the program receives lowered and aliased functions, the fixup does not),
-  and fails loudly (`Unsupported`) when it cannot decide, rather than guessing.
+  and fails loudly (`InvalidInput`) when it cannot decide, rather than guessing.
 - **Forced options change the module's API** relative to a plain `transpile`. That is the point;
   callers who want a different shape use the lower-level functions.

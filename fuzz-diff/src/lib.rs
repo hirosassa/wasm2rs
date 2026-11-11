@@ -340,8 +340,11 @@ pub fn run_wasm2rs(
 ) -> Result<String, Verdict> {
     let generated = match wasm2rs::transpile(wasm) {
         Ok(g) => g,
-        Err(wasm2rs::TranspileError::Unsupported(m)) => return Err(Verdict::Unsupported(m)),
-        Err(e) => return Err(Verdict::Broken(format!("transpile: {e}"))),
+        // A function-body rejection arrives wrapped in `InFunction`.
+        Err(e) => match e.root() {
+            wasm2rs::TranspileError::Unsupported(m) => return Err(Verdict::Unsupported(m.clone())),
+            _ => return Err(Verdict::Broken(format!("transpile: {e}"))),
+        },
     };
     let program = rust_program(&generated, exports, has_memory);
     std::fs::create_dir_all(work).map_err(|e| Verdict::Skip(e.to_string()))?;
