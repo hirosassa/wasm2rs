@@ -938,18 +938,18 @@ pub(crate) fn generate_function_into(
     line_prefix: &str,
     out: &mut String,
 ) -> Result<GenMeta, TranspileError> {
+    let no_scanned_body =
+        || TranspileError::Internal(format!("function {index} has no scanned body"));
     let mutated = index
         .checked_sub(ctx.imports.len())
         .and_then(|defined| ctx.mutated_locals.get(defined))
-        .ok_or_else(|| TranspileError::Internal(format!("function {index} has no scanned body")))?;
+        .ok_or_else(no_scanned_body)?;
     let flag = |flags: &[bool]| -> Result<bool, TranspileError> {
         index
             .checked_sub(ctx.imports.len())
             .and_then(|defined| flags.get(defined))
             .copied()
-            .ok_or_else(|| {
-                TranspileError::Internal(format!("function {index} has no scanned body"))
-            })
+            .ok_or_else(no_scanned_body)
     };
     let branches_to_label = flag(&ctx.branches_to_function_label)?;
     // A function that tail-calls itself loops instead of trampolining: its
