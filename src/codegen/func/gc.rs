@@ -279,7 +279,7 @@ impl super::FuncGen<'_> {
         let r = self.pop()?;
         let (read, ty) = shape.read(&format!("&__b[{field_index}]"))?;
         let inner = format!(
-            "{{ let __o = ({}).obj(); let __b = __o.borrow(); {read} }}",
+            "{{ let __g = &({}); let __o = __g.obj(); let __b = __o.borrow(); {read} }}",
             r.code
         );
         let (code, ty) = extend_packed(&shape, inner, ty, ext);
@@ -299,7 +299,7 @@ impl super::FuncGen<'_> {
         let r = self.pop()?;
         let slot = shape.wrap(&value.code)?;
         self.line(format!(
-            "{{ let __o = ({}).obj(); __o.borrow_mut()[{field_index}] = {slot}; }}",
+            "{{ let __g = &({}); let __o = __g.obj(); __o.borrow_mut()[{field_index}] = {slot}; }}",
             r.code
         ));
         Ok(())
@@ -335,7 +335,7 @@ impl super::FuncGen<'_> {
         let r = self.pop()?;
         let (read, ty) = shape.read("&__b[(__i) as usize]")?;
         let inner = format!(
-            "{{ let __o = ({}).obj(); let __i = {}; let __b = __o.borrow(); {read} }}",
+            "{{ let __g = &({}); let __o = __g.obj(); let __i = {}; let __b = __o.borrow(); {read} }}",
             r.code, index.code
         );
         let (code, ty) = extend_packed(&shape, inner, ty, ext);
@@ -351,7 +351,7 @@ impl super::FuncGen<'_> {
         let r = self.pop()?;
         let slot = shape.wrap(&value.code)?;
         self.line(format!(
-            "{{ let __o = ({}).obj(); __o.borrow_mut()[({}) as usize] = {slot}; }}",
+            "{{ let __g = &({}); let __o = __g.obj(); __o.borrow_mut()[({}) as usize] = {slot}; }}",
             r.code, index.code
         ));
         Ok(())
@@ -433,7 +433,7 @@ impl super::FuncGen<'_> {
         let r = self.pop()?;
         let slot = shape.wrap(&value.code)?;
         self.line(format!(
-            "{{ let __o = ({}).obj(); let mut __b = __o.borrow_mut(); \
+            "{{ let __g = &({}); let __o = __g.obj(); let mut __b = __o.borrow_mut(); \
              let __off = ({}) as u32 as usize; let __n = ({}) as u32 as usize; let __v = {slot}; \
              let __end = {}; \
              for __e in &mut __b[__off..__end] {{ *__e = __v.clone(); }} }}",
@@ -462,11 +462,11 @@ impl super::FuncGen<'_> {
         let dest_offset = self.pop()?;
         let destref = self.pop()?;
         self.line(format!(
-            "{{ let __so = ({}).obj(); let __sb = __so.borrow(); \
+            "{{ let __sg = &({}); let __so = __sg.obj(); let __sb = __so.borrow(); \
              let __si = ({}) as u32 as usize; let __n = ({}) as u32 as usize; \
              let __send = {}; \
              let __seg: Vec<GcSlot> = __sb[__si..__send].to_vec(); drop(__sb); \
-             let __do = ({}).obj(); let mut __db = __do.borrow_mut(); \
+             let __dg = &({}); let __do = __dg.obj(); let mut __db = __do.borrow_mut(); \
              let __di = ({}) as u32 as usize; \
              let __dend = {}; \
              __db[__di..__dend].clone_from_slice(&__seg); }}",
@@ -530,7 +530,7 @@ impl super::FuncGen<'_> {
         let dest = self.pop()?;
         let r = self.pop()?;
         self.line(format!(
-            "{{ let __o = ({}).obj(); let mut __b = __o.borrow_mut(); \
+            "{{ let __g = &({}); let __o = __g.obj(); let mut __b = __o.borrow_mut(); \
              let __seg = self.data{data_index}; \
              let __d = ({}) as u32 as usize; let __s = ({}) as u32 as usize; \
              let __n = ({}) as u32 as usize; \
@@ -593,7 +593,7 @@ impl super::FuncGen<'_> {
         let dest = self.pop()?;
         let r = self.pop()?;
         self.line(format!(
-            "{{ let __o = ({}).obj(); let mut __b = __o.borrow_mut(); \
+            "{{ let __g = &({}); let __o = __g.obj(); let mut __b = __o.borrow_mut(); \
              let __seg = self.elem{elem_index}; \
              let __d = ({}) as u32 as usize; let __s = ({}) as u32 as usize; \
              let __n = ({}) as u32 as usize; \

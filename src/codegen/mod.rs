@@ -285,9 +285,9 @@ pub enum GcSlot {
 
 #[allow(dead_code)]
 impl GcRef {
-    fn obj(&self) -> std::rc::Rc<std::cell::RefCell<Vec<GcSlot>>> {
+    fn obj(&self) -> &std::cell::RefCell<Vec<GcSlot>> {
         match self {
-            GcRef::Obj { slots, .. } => slots.clone(),
+            GcRef::Obj { slots, .. } => slots,
             GcRef::Null | GcRef::I31(_) | GcRef::Exn(_) => panic!(\"null reference\"),
         }
     }
