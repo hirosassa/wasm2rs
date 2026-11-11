@@ -159,7 +159,7 @@ struct AccessCtx {
 
 impl AccessCtx {
     /// Render one template line. In unchecked mode every `@R[EXPR]` / `@W[EXPR]`
-    /// slice access becomes a bounds-check-free `(*unsafe {{ ACCESSOR.get_unchecked[_mut](EXPR) }})`.
+    /// slice access becomes a bounds-check-free `(*unsafe { ACCESSOR.get_unchecked[_mut](EXPR) })`.
     ///
     /// Wrapping the dereferenced `get_unchecked` result in parentheses reproduces
     /// the original indexing *place* expression, so the surrounding syntax — a
@@ -189,11 +189,10 @@ impl AccessCtx {
 ///
 /// The method is built from a placeholder template (see [`base_helper_lines`]),
 /// widened for a 64-bit memory and made unchecked for `unsafe_memory` before the
-/// placeholders are rendered. For memory 0 the emitted text is the historic
-/// single-memory form (`self.mem()`/`self.mem_mut()` body); for memory `i > 0`
-/// the method name gains an `_m{i}` suffix and the body borrows
-/// `self.mem{i}()`/`self.mem{i}_mut()`, so each memory owns an independent
-/// helper set.
+/// placeholders are rendered with [`AccessCtx`]. Memory 0 keeps the historic
+/// method name and `self.mem()`/`self.mem_mut()` accessors; memory `i > 0`
+/// appends `_m{i}` to the name and uses `self.mem{i}()`/`self.mem{i}_mut()`, so
+/// each memory owns an independent helper set.
 pub(super) fn helper_lines(
     helper: Helper,
     mem: u32,
@@ -202,6 +201,8 @@ pub(super) fn helper_lines(
     memory64: bool,
 ) -> Vec<String> {
     let base = base_helper_lines(helper, max_pages);
+    // Order matters: widening rewrites the safe template, and the unchecked form
+    // is derived from the (possibly widened) template.
     let base = if memory64 {
         widen_helper_lines(helper, max_pages, base)
     } else {
@@ -355,7 +356,7 @@ fn widen_helper_lines(helper: Helper, max_pages: Option<u64>, base: Vec<String>)
 }
 
 /// Replace each `{placeholder}[EXPR]` in `line` with
-/// `(*unsafe {{ {accessor}.{method}(EXPR) }})`. A helper-template index never
+/// `(*unsafe { ACCESSOR.METHOD(EXPR) })`. A helper-template index never
 /// contains `[`/`]`, so the matching `]` is simply the next one.
 fn rewrite_index_unchecked(line: &str, placeholder: &str, accessor: &str, method: &str) -> String {
     let mut out = String::with_capacity(line.len());
@@ -400,7 +401,7 @@ pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
     // The length is shared state raised atomically, bounded by the reservation.
     if helper == Helper::Grow {
         return vec![
-            "fn memory_grow(&mut self, delta: i32) -> i32 {".to_string(),
+            ctx.render("fn @NAME(&mut self, delta: i32) -> i32 {"),
             "    self.memory.grow(delta as u32)".to_string(),
             "}".to_string(),
         ];
@@ -845,5 +846,33 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "    self.table_mut()[d..d + len as usize].fill(val);",
             "}",
         ]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rendered_helpers_never_leak_a_placeholder() {
+        for helper in HELPER_ORDER {
+            let mut rendered = shared_helper_lines(helper);
+            for mem in [0, 1] {
+                for unsafe_memory in [false, true] {
+                    for memory64 in [false, true] {
+                        rendered.extend(helper_lines(
+                            helper,
+                            mem,
+                            Some(5),
+                            unsafe_memory,
+                            memory64,
+                        ));
+                    }
+                }
+            }
+            for line in rendered {
+                assert!(!line.contains('@'), "{}: {line}", helper_name(helper));
+            }
+        }
     }
 }
