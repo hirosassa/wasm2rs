@@ -27,7 +27,7 @@ method of `wasi:http` 0.2.0 is implemented:
   `response-outparam.set` or after `handle` returns is streamed. Trailers: `IncomingRequestParts::trailers`
   reach `future-trailers.get`; a response body's `finish` trailers come back from `ServedBody::trailers`.
 - **Serving over TCP:** `cargo run --release --example wasip2_serve -- component.wasm --listen 127.0.0.1:8080`
-  (details in "Serving over TCP" below).
+  (details in [Serving over TCP](#serving-over-tcp-exampleswasip2_servers)).
 
 ## Starting point
 
