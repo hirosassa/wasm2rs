@@ -84,3 +84,9 @@ wasm2rs --dump module.wasm
   cd out_dir
   cargo build --release
   ```
+
+## Notes
+
+- The binary uses `mimalloc` to keep peak RSS down while transpiling gigabyte-scale output (the `cli` feature; see [library-api.md](library-api.md)).
+- The WASI preopen root is configurable in the generated code (default: the current directory).
+- A core module given to `--component`, or a component given without it, is rejected with a clear error.
