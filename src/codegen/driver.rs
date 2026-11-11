@@ -595,6 +595,18 @@ impl ModuleDeps {
 /// `&mut self` methods. A stateless module keeps its functions as free
 /// `pub fn`s, matching the earlier phases exactly.
 pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, TranspileError> {
+    generate_module_pieces(parts).map(crate::SourcePieces::into_string)
+}
+
+/// Rough output bytes per code-section byte (x2, i.e. 8.5), measured on a large module; only
+/// sizes the up-front reservation, so an underestimate costs a regrow at worst.
+const OUTPUT_PER_CODE_BYTE_X2: u64 = 17;
+
+/// [`generate_module`] without the final join: the module as head, function
+/// bodies and tail.
+pub(crate) fn generate_module_pieces(
+    parts: &ModuleParts<'_>,
+) -> Result<crate::SourcePieces, TranspileError> {
     let (ctx, stateful) = build_ctx(parts)?;
 
     // Every function is rendered back to back into one buffer; `ends` marks
@@ -603,7 +615,17 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
     // they are indented as they are generated (a blank line before each, as in
     // the split output) and the buffer then becomes the module body as is.
     let line_prefix = if stateful { "    " } else { "" };
-    let mut funcs_buf = String::new();
+    // Reserved up front so growing it never doubles through old+new copies.
+    let code_bytes = parts
+        .funcs
+        .iter()
+        .zip(parts.live)
+        .filter(|(_, live)| **live)
+        .map(|(f, _)| f.body.range().end.saturating_sub(f.body.range().start))
+        .fold(0u64, u64::saturating_add);
+    let reserve =
+        usize::try_from(code_bytes.saturating_mul(OUTPUT_PER_CODE_BYTE_X2) / 2).unwrap_or(0);
+    let mut funcs_buf = String::with_capacity(reserve);
     let mut ends = Vec::with_capacity(parts.funcs.len());
     let mut deps = ModuleDeps::default();
     super::parallel::for_each_function(parts, &ctx, line_prefix, |src, meta| {
@@ -664,18 +686,23 @@ pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, Transpi
             out.push('\n');
             out.push_str(&line);
         }
-        Ok(out)
+        Ok(crate::SourcePieces {
+            head: out,
+            body: String::new(),
+            tail: String::new(),
+        })
     } else {
-        // Everything before the methods goes in front of the already-rendered
-        // method bodies and the tail after them, in place: the bodies (the bulk
-        // of the output) are never copied into a second module-sized buffer.
+        // The bodies (the bulk of the output) stay in their own buffer between
+        // the head and the tail, so they are never copied into a second
+        // module-sized buffer.
         render::render_module_head(&mut out, parts, &ctx, &deps.helpers, &deps.dispatch_sigs)?;
         let mut tail = String::new();
         render::render_module_tail(&mut tail, parts, &ctx, &deps.dispatch_sigs)?;
-        funcs_buf.reserve(out.len() + tail.len());
-        funcs_buf.insert_str(0, &out);
-        funcs_buf.push_str(&tail);
-        Ok(funcs_buf)
+        Ok(crate::SourcePieces {
+            head: out,
+            body: funcs_buf,
+            tail,
+        })
     }
 }
 
