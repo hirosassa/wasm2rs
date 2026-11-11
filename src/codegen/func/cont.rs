@@ -497,8 +497,10 @@ impl super::FuncGen<'_> {
                 }
                 // A `return_call*` to a non-step callee replaces this body's frame,
                 // so the callee's results are the continuation's results: an
-                // ordinary call followed by a `return` (callees that suspend are
-                // rejected above). `wrap` is set for any body containing one.
+                // ordinary call followed by a `return` (a direct callee that is a
+                // step function is rejected above; a step function reached
+                // through `call_ref`/`call_indirect` is a separate, unsupported case).
+                // `wrap` is set for any body containing one.
                 Operator::ReturnCall { function_index } => {
                     self.emit_op(Operator::Call { function_index })?;
                     self.branch_to_outermost()?;
