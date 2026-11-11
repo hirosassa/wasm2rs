@@ -162,6 +162,10 @@ pub(crate) enum Rt {
     /// The tail-call trampoline slot: a `return_call*` parks the callee here and
     /// returns, and the caller's wrapper runs it so the stack stays constant.
     Tc,
+    /// The per-thread activation counter behind `TranspileOptions::call_depth_limit`:
+    /// `CallDepth::enter()` bumps it (panicking with `call stack exhausted` past the
+    /// limit) and its `Drop` restores it, so unwinding keeps the count exact.
+    CallDepth,
     /// The wrapper a `delegate` raises when it must bypass enclosing `try`
     /// bodies: the exception plus how many more bodies to skip.
     DelegateExc,
