@@ -500,14 +500,14 @@ impl super::FuncGen<'_> {
             "{{ let __seg = self.data{data_index}; \
              let __off = ({}) as u32 as usize; let __n = ({}) as u32 as usize; \
              let __bytes = __n.checked_mul({esize}).unwrap_or(usize::MAX); \
-             let _ = {}; \
+             {} \
              let mut __v: Vec<GcSlot> = Vec::with_capacity(__n); \
              for __k in 0..__n {{ let __base = __off + __k * {esize}; __v.push({slot}); }} \
              GcRef::Obj {{ ty: {type_index}u32, \
              slots: std::rc::Rc::new(std::cell::RefCell::new(__v)) }} }}",
             offset.code,
             size.code,
-            range_end("__off", "__bytes", "__seg.len()")
+            range_check("__off", "__bytes", "__seg.len()")
         );
         self.materialize(code, Self::concrete_ref_ty(type_index)?)
     }
@@ -535,14 +535,14 @@ impl super::FuncGen<'_> {
              let __d = ({}) as u32 as usize; let __s = ({}) as u32 as usize; \
              let __n = ({}) as u32 as usize; \
              let __bytes = __n.checked_mul({esize}).unwrap_or(usize::MAX); \
-             let _ = {}; let _ = {}; \
+             {} {} \
              for __k in 0..__n {{ let __base = __s + __k * {esize}; __b[__d + __k] = {slot}; }} }}",
             r.code,
             dest.code,
             src.code,
             size.code,
-            range_end("__d", "__n", "__b.len()"),
-            range_end("__s", "__bytes", "__seg.len()")
+            range_check("__d", "__n", "__b.len()"),
+            range_check("__s", "__bytes", "__seg.len()")
         ));
         Ok(())
     }
@@ -564,14 +564,14 @@ impl super::FuncGen<'_> {
         let code = format!(
             "{{ let __seg = self.elem{elem_index}; \
              let __off = ({}) as u32 as usize; let __n = ({}) as u32 as usize; \
-             let _ = {}; \
+             {} \
              let mut __v: Vec<GcSlot> = Vec::with_capacity(__n); \
              for __k in 0..__n {{ __v.push(GcSlot::Func(__seg[__off + __k])); }} \
              GcRef::Obj {{ ty: {type_index}u32, \
              slots: std::rc::Rc::new(std::cell::RefCell::new(__v)) }} }}",
             offset.code,
             size.code,
-            range_end("__off", "__n", "__seg.len()")
+            range_check("__off", "__n", "__seg.len()")
         );
         self.materialize(code, Self::concrete_ref_ty(type_index)?)
     }
@@ -597,14 +597,14 @@ impl super::FuncGen<'_> {
              let __seg = self.elem{elem_index}; \
              let __d = ({}) as u32 as usize; let __s = ({}) as u32 as usize; \
              let __n = ({}) as u32 as usize; \
-             let _ = {}; let _ = {}; \
+             {} {} \
              for __k in 0..__n {{ __b[__d + __k] = GcSlot::Func(__seg[__s + __k]); }} }}",
             r.code,
             dest.code,
             src.code,
             size.code,
-            range_end("__d", "__n", "__b.len()"),
-            range_end("__s", "__n", "__seg.len()")
+            range_check("__d", "__n", "__b.len()"),
+            range_check("__s", "__n", "__seg.len()")
         ));
         Ok(())
     }
@@ -1127,4 +1127,10 @@ fn range_end(off: &str, n: &str, len: &str) -> String {
     format!(
         "{off}.checked_add({n}).filter(|__e| *__e <= {len}).unwrap_or_else(|| panic!(\"out of bounds array access\"))"
     )
+}
+
+/// Generated-code statement: the [`range_end`] trap check alone, for ops that
+/// index element by element and so need the up-front validation but not the end.
+fn range_check(off: &str, n: &str, len: &str) -> String {
+    format!("let _ = {};", range_end(off, n, len))
 }

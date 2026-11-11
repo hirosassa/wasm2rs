@@ -128,7 +128,7 @@ fn array_fill_zero_length_out_of_range_offset_traps() {
 }
 
 #[test]
-fn array_fill_partial_range_traps_without_writing() {
+fn array_fill_partial_range_traps() {
     common::expect_trap_with(
         "gc_array_fill_partial",
         r#"(module
