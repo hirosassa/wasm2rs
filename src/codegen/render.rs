@@ -1517,6 +1517,10 @@ fn call_start_lines(ctx: &ModuleCtx<'_>) -> Result<Vec<String>, TranspileError> 
         "    match self.table().get(f as usize).copied().unwrap_or(u32::MAX) {".to_string(),
     ];
     for &fidx in ctx.funcs_with_sig(&[ValType::I32], &[ValType::I32]) {
+        // A continuation step function is `cont_step_func{N}`, not `func{N}`.
+        if u32::try_from(fidx).is_ok_and(|f| ctx.cont.step_set.binary_search(&f).is_ok()) {
+            continue;
+        }
         lines.push(format!(
             "        {fidx}u32 => {},",
             ctx.call_expr(fidx, "a0")

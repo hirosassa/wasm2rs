@@ -476,7 +476,17 @@ pub(crate) fn build_ctx<'a>(
             ));
         }
     }
-    reject_dual_use_continuations(funcs, elements, &step_set, n_imports)?;
+    reject_dual_use_continuations(
+        funcs,
+        elements,
+        &step_set,
+        n_imports,
+        parts
+            .global_funcs
+            .iter()
+            .copied()
+            .chain(parts.exports.iter().map(|e| e.func_index)),
+    )?;
     let step_locals = step_function_locals(funcs, n_imports, &step_set)?;
     let stateful = has_memory
         || has_table
@@ -535,7 +545,7 @@ pub(crate) fn build_ctx<'a>(
     }
     // A step function is emitted as `cont_step_func{N}`, never `func{N}`, and
     // `reject_dual_use_continuations` already forbids it as a plain funcref
-    // (its only `ref.func` feeds `cont.new`), so no dispatch can legitimately
+    // (its only `ref.func` feeds `cont.new`; globals and exports are rejected too), so no dispatch can legitimately
     // reach it; listing it would name a method that does not exist.
     for &f in &step_set {
         if let Some(slot) = referenced.get_mut(f as usize) {
