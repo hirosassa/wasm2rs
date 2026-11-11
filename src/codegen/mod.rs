@@ -166,6 +166,8 @@ pub(crate) enum Rt {
     /// `CallDepth::enter()` bumps it (panicking with `call stack exhausted` past the
     /// limit) and its `Drop` restores it, so unwinding keeps the count exact.
     CallDepth,
+    /// The out-of-line `call stack exhausted` trap `CallDepth::enter` raises.
+    TrapCallStackExhausted,
     /// The wrapper a `delegate` raises when it must bypass enclosing `try`
     /// bodies: the exception plus how many more bodies to skip.
     DelegateExc,

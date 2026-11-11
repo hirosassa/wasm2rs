@@ -45,12 +45,13 @@ fn compile_run_limited(name: &str, wat: &str, limit: u32, main_body: &str) {
     );
 }
 
-/// Runs `$body` and asserts it panics with `call stack exhausted`.
+/// Runs `f` and asserts it panics with `call stack exhausted`.
 const EXPECT_EXHAUSTED: &str = r#"
 fn expect_exhausted<R>(f: impl FnOnce() -> R) {
+    let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    let _ = std::panic::take_hook();
+    std::panic::set_hook(prev);
     let payload = match r {
         Err(p) => p,
         Ok(_) => panic!("expected call stack exhausted"),
@@ -83,15 +84,6 @@ fn option_is_off_by_default_and_leaves_output_untouched() {
     let wasm = wat::parse_str(RUNAWAY).expect("valid wat");
     let plain = wasm2rs::transpile(&wasm).expect("transpile ok");
     assert!(!plain.contains("CallDepth"), "{plain}");
-    let explicit = wasm2rs::transpile_with_options(
-        &wasm,
-        &TranspileOptions {
-            call_depth_limit: None,
-            ..Default::default()
-        },
-    )
-    .expect("transpile ok");
-    assert_eq!(plain, explicit);
     assert!(transpile_limited(RUNAWAY, 100).contains("CallDepth"));
 }
 

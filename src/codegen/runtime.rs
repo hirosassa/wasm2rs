@@ -29,6 +29,7 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::DelegateExc => "Wasm2RsDelegate",
         Rt::Tc => "Tc",
         Rt::CallDepth => "CallDepth",
+        Rt::TrapCallStackExhausted => "trap_call_stack_exhausted",
     }
 }
 
@@ -39,9 +40,10 @@ pub(super) fn is_rt_name(name: &str) -> bool {
 
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
-const RT_ORDER: [Rt; 25] = [
+const RT_ORDER: [Rt; 26] = [
     Rt::DelegateExc,
     Rt::CallDepth,
+    Rt::TrapCallStackExhausted,
     Rt::Tc,
     Rt::TrapUnreachable,
     Rt::TrapIndirectTypeMismatch,
@@ -115,6 +117,7 @@ fn rt_lines(rt: Rt) -> Vec<String> {
             "}".to_string(),
         ],
         Rt::CallDepth => vec![
+            // `CALL_DEPTH` is upper-case, which a sanitized export name never is.
             "thread_local! {".to_string(),
             "    static CALL_DEPTH: ::std::cell::Cell<u32> = const { ::std::cell::Cell::new(0) };"
                 .to_string(),
@@ -137,6 +140,8 @@ fn rt_lines(rt: Rt) -> Vec<String> {
             "        CALL_DEPTH.set(CALL_DEPTH.get() - 1);".to_string(),
             "    }".to_string(),
             "}".to_string(),
+        ],
+        Rt::TrapCallStackExhausted => vec![
             "#[cold]".to_string(),
             "#[inline(never)]".to_string(),
             "fn trap_call_stack_exhausted() -> ! {".to_string(),

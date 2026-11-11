@@ -163,7 +163,7 @@ pub struct TranspileOptions {
     /// trampoline (or self-loop) keeps a tail-calling chain at one activation.
     /// Pick a limit your thread's stack can hold (the frame size depends on the
     /// module and the build profile). Continuation step functions are not counted.
-    /// `None` (the default) emits no counter, so existing output is unchanged.
+    /// `Some(0)` traps on the first call. `None` (the default) emits no counter, so existing output is unchanged.
     pub call_depth_limit: Option<u32>,
 
     /// Split a flattened `loop { match pc { … } }` dispatch whose surviving arm
