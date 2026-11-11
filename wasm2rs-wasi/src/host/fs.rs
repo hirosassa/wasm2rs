@@ -326,8 +326,8 @@ pub(super) fn file_identity(meta: &Stat, path: &Path) -> (u64, u64, String) {
     }
     #[cfg(not(unix))]
     {
-        let _ = meta;
-        (0u64, 0u64, path.to_string_lossy().into_owned())
+        // `meta.id` is zero here, so the path alone tells files apart.
+        (meta.id.0, meta.id.1, path.to_string_lossy().into_owned())
     }
 }
 
