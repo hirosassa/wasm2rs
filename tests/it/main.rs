@@ -36,6 +36,7 @@ mod cont;
 mod control_flow;
 mod convert;
 mod data;
+mod dispatch_targets;
 mod dump;
 mod elem_exprs;
 mod emscripten_pthread;

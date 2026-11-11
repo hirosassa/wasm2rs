@@ -1984,7 +1984,7 @@ fn dispatch_method_lines(
         format!("pub fn call_ref_t{type_index}({params}){ret} {{"),
         "    match f {".to_string(),
     ];
-    for fidx in targets {
+    for &fidx in targets {
         let expr = ctx.call_expr(fidx, &arg_list);
         lines.push(format!("        {fidx}u32 => {expr},"));
     }
