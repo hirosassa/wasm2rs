@@ -442,6 +442,24 @@ fn elem_slot(slot: u64) -> u64 {
     slot.min(u64::from(u32::MAX))
 }
 
+/// The byte size of `pages` wasm pages.
+fn page_bytes(pages: u64) -> Result<u64, TranspileError> {
+    pages
+        .checked_mul(WASM_PAGE_SIZE)
+        .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))
+}
+
+/// The opening and closing lines of the `Self { .. }` literal: bound to a mutable
+/// `instance` when post-construction steps must run on it, returned directly
+/// otherwise.
+fn struct_literal_delims(bind: bool) -> (&'static str, &'static str) {
+    if bind {
+        ("    let mut instance = Self {", "    };")
+    } else {
+        ("    Self {", "    }")
+    }
+}
+
 /// What the constructors need to know about the module's active segments and
 /// post-construction steps, derived once and shared by the `*_init_lines` helpers.
 struct CtorPlan<'a> {
@@ -463,7 +481,7 @@ struct CtorPlan<'a> {
     /// segment also targets a defined memory: then every data segment is applied
     /// after construction, in module order (a trap leaves the earlier segments'
     /// writes in the host memory, and the elements are already in place), as for
-    /// tables below.
+    /// tables.
     data_in_module_order: bool,
     post_init_data: bool,
     post_init_elem: bool,
@@ -522,15 +540,18 @@ impl<'a> CtorPlan<'a> {
             .collect()
     }
 
-    /// Shared-memory constructors bind the struct first when active elements must
-    /// be copied into a host-owned table, data must follow the elements into a
-    /// host-owned memory, or a start function must run on it.
+    /// Data for a memory the module creates is applied once, to the shared memory,
+    /// so only elements repeat per instance (each sibling has its own host table);
+    /// data for a host-owned shared memory is applied by `new` after the elements.
     fn data_after_elems(&self) -> bool {
         self.ctx.memory_shared
             && self.parts.memories.first().is_some_and(|m| m.imported)
             && !self.active_for(0).is_empty()
     }
 
+    /// Shared-memory constructors bind the struct first when active elements must
+    /// be copied into a host-owned table, data must follow the elements into a
+    /// host-owned memory, or a start function must run on it.
     fn shared_bind(&self) -> bool {
         self.start_call.is_some() || self.post_init_elem || self.data_after_elems()
     }
@@ -808,20 +829,13 @@ impl<'a> CtorPlan<'a> {
         let new_param = if has_imports { "imports: H" } else { "" };
         let data_after_elems = self.data_after_elems();
         let shared_bind = self.shared_bind();
-        let (shared_open, shared_close) = if shared_bind {
-            ("    let mut instance = Self {", "    };")
-        } else {
-            ("    Self {", "    }")
-        };
+        let (shared_open, shared_close) = struct_literal_delims(shared_bind);
         let mem0 = self
             .parts
             .memories
             .first()
             .ok_or_else(|| TranspileError::Unsupported("shared memory missing".into()))?;
-        let bytes = mem0
-            .min_pages
-            .checked_mul(WASM_PAGE_SIZE)
-            .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
+        let bytes = page_bytes(mem0.min_pages)?;
 
         if mem0.imported {
             // The host created the memory and hands it in; `new` still owns the
@@ -838,9 +852,7 @@ impl<'a> CtorPlan<'a> {
             // one); without it, the wasm32 limit that `new` reserves.
             let ctor = match mem0.max_pages {
                 Some(max) => {
-                    let max_bytes = max
-                        .checked_mul(WASM_PAGE_SIZE)
-                        .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
+                    let max_bytes = page_bytes(max)?;
                     format!("SharedMemory::with_max({bytes}, {max_bytes})")
                 }
                 None => format!("SharedMemory::new({bytes})"),
@@ -908,10 +920,7 @@ impl<'a> CtorPlan<'a> {
                 format!("memory{i}")
             };
             let mem_index = index_u32(i)?;
-            let bytes = m
-                .min_pages
-                .checked_mul(WASM_PAGE_SIZE)
-                .ok_or_else(|| TranspileError::Unsupported("memory too large".into()))?;
+            let bytes = page_bytes(m.min_pages)?;
             if self.data_in_module_order || self.active_for(mem_index).is_empty() {
                 inner.push(format!("        {field}: vec![0u8; {bytes}],"));
             } else {
@@ -936,11 +945,7 @@ impl<'a> CtorPlan<'a> {
             ""
         };
         let post_init = self.post_init();
-        let (open, close) = if post_init {
-            ("    let mut instance = Self {", "    };")
-        } else {
-            ("    Self {", "    }")
-        };
+        let (open, close) = struct_literal_delims(post_init);
         inner.push(format!("pub fn new({new_param}) -> Self {{"));
         inner.push(open.to_string());
         self.memory_init_lines(inner)?;
