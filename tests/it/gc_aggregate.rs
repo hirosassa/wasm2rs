@@ -110,3 +110,75 @@ fn array_copy_moves_a_range_between_arrays() {
         "assert_eq!(func0(), 20);",
     );
 }
+
+// Range traps: spec says the whole range is validated up front, so a zero-length
+// operation still traps on an out-of-range offset, and a partly out-of-range
+// operation writes nothing before trapping.
+
+#[test]
+fn array_fill_zero_length_out_of_range_offset_traps() {
+    common::expect_trap(
+        "gc_array_fill_n0_oob",
+        r#"(module
+            (type $arr (array (mut i32)))
+            (func (export "f")
+              i32.const 0 i32.const 10 array.new $arr i32.const 100 i32.const 7 i32.const 0 array.fill $arr))"#,
+        "func0();",
+    );
+}
+
+#[test]
+fn array_fill_partial_range_traps_without_writing() {
+    common::expect_trap_with(
+        "gc_array_fill_partial",
+        r#"(module
+            (type $arr (array (mut i32)))
+            (func (export "f")
+              i32.const 0 i32.const 4 array.new $arr i32.const 2 i32.const 9 i32.const 5 array.fill $arr))"#,
+        "func0();",
+        "out of bounds array access",
+    );
+}
+
+#[test]
+fn array_copy_zero_length_out_of_range_traps() {
+    common::expect_trap(
+        "gc_array_copy_n0_oob",
+        r#"(module
+            (type $arr (array (mut i32)))
+            (func (export "f")
+              i32.const 0 i32.const 4 array.new $arr i32.const 0
+              i32.const 0 i32.const 4 array.new $arr i32.const 9
+              i32.const 0 array.copy $arr $arr))"#,
+        "func0();",
+    );
+}
+
+#[test]
+fn array_init_data_zero_length_out_of_range_traps() {
+    common::expect_trap(
+        "gc_array_init_data_n0_oob",
+        r#"(module
+            (type $arr (array (mut i32)))
+            (data $d "\01\00\00\00")
+            (func (export "f")
+              i32.const 0 i32.const 2 array.new $arr i32.const 50 i32.const 0 i32.const 0
+              array.init_data $arr $d))"#,
+        "Instance::new().func0();",
+    );
+}
+
+#[test]
+fn array_init_elem_zero_length_out_of_range_traps() {
+    common::expect_trap(
+        "gc_array_init_elem_n0_oob",
+        r#"(module
+            (type $arr (array (mut funcref)))
+            (func $a)
+            (elem $e func $a)
+            (func (export "f")
+              ref.null func i32.const 2 array.new $arr i32.const 0 i32.const 50 i32.const 0
+              array.init_elem $arr $e))"#,
+        "Instance::new().func1();",
+    );
+}

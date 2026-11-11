@@ -434,9 +434,13 @@ impl super::FuncGen<'_> {
         let slot = shape.wrap(&value.code)?;
         self.line(format!(
             "{{ let __o = ({}).obj(); let mut __b = __o.borrow_mut(); \
-             let __off = ({}) as usize; let __n = ({}) as usize; let __v = {slot}; \
-             for __k in 0..__n {{ __b[__off + __k] = __v.clone(); }} }}",
-            r.code, offset.code, size.code
+             let __off = ({}) as u32 as usize; let __n = ({}) as u32 as usize; let __v = {slot}; \
+             let __end = {}; \
+             for __e in &mut __b[__off..__end] {{ *__e = __v.clone(); }} }}",
+            r.code,
+            offset.code,
+            size.code,
+            range_end("__off", "__n", "__b.len()")
         ));
         Ok(())
     }
@@ -459,12 +463,20 @@ impl super::FuncGen<'_> {
         let destref = self.pop()?;
         self.line(format!(
             "{{ let __so = ({}).obj(); let __sb = __so.borrow(); \
-             let __si = ({}) as usize; let __n = ({}) as usize; \
-             let __seg: Vec<GcSlot> = __sb[__si .. __si + __n].to_vec(); drop(__sb); \
+             let __si = ({}) as u32 as usize; let __n = ({}) as u32 as usize; \
+             let __send = {}; \
+             let __seg: Vec<GcSlot> = __sb[__si..__send].to_vec(); drop(__sb); \
              let __do = ({}).obj(); let mut __db = __do.borrow_mut(); \
-             let __di = ({}) as usize; \
-             for (__k, __e) in __seg.into_iter().enumerate() {{ __db[__di + __k] = __e; }} }}",
-            srcref.code, src_offset.code, size.code, destref.code, dest_offset.code
+             let __di = ({}) as u32 as usize; \
+             let __dend = {}; \
+             __db[__di..__dend].clone_from_slice(&__seg); }}",
+            srcref.code,
+            src_offset.code,
+            size.code,
+            range_end("__si", "__n", "__sb.len()"),
+            destref.code,
+            dest_offset.code,
+            range_end("__di", "__n", "__db.len()")
         ));
         Ok(())
     }
@@ -486,12 +498,16 @@ impl super::FuncGen<'_> {
         let offset = self.pop()?;
         let code = format!(
             "{{ let __seg = self.data{data_index}; \
-             let __off = ({}) as usize; let __n = ({}) as usize; \
+             let __off = ({}) as u32 as usize; let __n = ({}) as u32 as usize; \
+             let __bytes = __n.checked_mul({esize}).unwrap_or(usize::MAX); \
+             let _ = {}; \
              let mut __v: Vec<GcSlot> = Vec::with_capacity(__n); \
              for __k in 0..__n {{ let __base = __off + __k * {esize}; __v.push({slot}); }} \
              GcRef::Obj {{ ty: {type_index}u32, \
              slots: std::rc::Rc::new(std::cell::RefCell::new(__v)) }} }}",
-            offset.code, size.code
+            offset.code,
+            size.code,
+            range_end("__off", "__bytes", "__seg.len()")
         );
         self.materialize(code, Self::concrete_ref_ty(type_index)?)
     }
@@ -516,9 +532,17 @@ impl super::FuncGen<'_> {
         self.line(format!(
             "{{ let __o = ({}).obj(); let mut __b = __o.borrow_mut(); \
              let __seg = self.data{data_index}; \
-             let __d = ({}) as usize; let __s = ({}) as usize; let __n = ({}) as usize; \
+             let __d = ({}) as u32 as usize; let __s = ({}) as u32 as usize; \
+             let __n = ({}) as u32 as usize; \
+             let __bytes = __n.checked_mul({esize}).unwrap_or(usize::MAX); \
+             let _ = {}; let _ = {}; \
              for __k in 0..__n {{ let __base = __s + __k * {esize}; __b[__d + __k] = {slot}; }} }}",
-            r.code, dest.code, src.code, size.code
+            r.code,
+            dest.code,
+            src.code,
+            size.code,
+            range_end("__d", "__n", "__b.len()"),
+            range_end("__s", "__bytes", "__seg.len()")
         ));
         Ok(())
     }
@@ -539,12 +563,15 @@ impl super::FuncGen<'_> {
         let offset = self.pop()?;
         let code = format!(
             "{{ let __seg = self.elem{elem_index}; \
-             let __off = ({}) as usize; let __n = ({}) as usize; \
+             let __off = ({}) as u32 as usize; let __n = ({}) as u32 as usize; \
+             let _ = {}; \
              let mut __v: Vec<GcSlot> = Vec::with_capacity(__n); \
              for __k in 0..__n {{ __v.push(GcSlot::Func(__seg[__off + __k])); }} \
              GcRef::Obj {{ ty: {type_index}u32, \
              slots: std::rc::Rc::new(std::cell::RefCell::new(__v)) }} }}",
-            offset.code, size.code
+            offset.code,
+            size.code,
+            range_end("__off", "__n", "__seg.len()")
         );
         self.materialize(code, Self::concrete_ref_ty(type_index)?)
     }
@@ -568,9 +595,16 @@ impl super::FuncGen<'_> {
         self.line(format!(
             "{{ let __o = ({}).obj(); let mut __b = __o.borrow_mut(); \
              let __seg = self.elem{elem_index}; \
-             let __d = ({}) as usize; let __s = ({}) as usize; let __n = ({}) as usize; \
+             let __d = ({}) as u32 as usize; let __s = ({}) as u32 as usize; \
+             let __n = ({}) as u32 as usize; \
+             let _ = {}; let _ = {}; \
              for __k in 0..__n {{ __b[__d + __k] = GcSlot::Func(__seg[__s + __k]); }} }}",
-            r.code, dest.code, src.code, size.code
+            r.code,
+            dest.code,
+            src.code,
+            size.code,
+            range_end("__d", "__n", "__b.len()"),
+            range_end("__s", "__n", "__seg.len()")
         ));
         Ok(())
     }
@@ -1083,4 +1117,14 @@ fn u32_hierarchy_top(hty: HeapType) -> Option<bool> {
         hty if is_bottom_u32_heap(hty) => Some(false),
         _ => None,
     }
+}
+
+/// Generated-code expression: the end `off + n` of a `n`-unit range starting at
+/// `off`, trapping unless it lies within `len`. All operands are `usize`
+/// (already zero-extended from the wasm `i32`), so the sum cannot wrap on
+/// 64-bit hosts and the check also rejects `n == 0` with `off > len`.
+fn range_end(off: &str, n: &str, len: &str) -> String {
+    format!(
+        "{off}.checked_add({n}).filter(|__e| *__e <= {len}).unwrap_or_else(|| panic!(\"out of bounds array access\"))"
+    )
 }
