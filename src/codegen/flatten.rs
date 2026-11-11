@@ -296,7 +296,6 @@ impl Flattener {
                                         )
                                     },
                                     " ",
-                                    "__cret",
                                     &format!("{{ __frame.ostack = __cret; pc = {resume}; }}"),
                                 ),
                             )],

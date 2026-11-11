@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::helpers::{HELPER_ORDER, helper_lines, shared_helper_lines, table_accessor};
 use super::render_cont::{continuation_method_lines, continuation_runtime_lines};
 use super::runtime::render_rt_helpers;
-use super::wasi::{confine_lines, share_fd_table};
+use super::wasi::{WasiAccess, confine_lines};
 use super::{
     ALLOW, DataSegment, ElemSegment, ExportInfo, GlobalExportInfo, Helper, ImportInfo,
     ImportedGlobalInfo, ModuleCtx, ModuleParts, SegOffset, TableFill, WASM_PAGE_SIZE, WasiFn,
@@ -1012,23 +1012,21 @@ fn wasi_method_lines(imports: &[ImportInfo], layout: &Layout, shared: bool) -> V
         {
             wasi_emitted.push(w);
             inner.push(String::new());
+            // `thread_spawn_lines` clones the `Arc` itself rather than locking it.
             let body = if w == WasiFn::ThreadSpawn {
                 thread_spawn_lines(layout)
             } else if w == WasiFn::PthreadCreateJs {
                 pthread_create_js_lines(layout)
-            } else if shared {
-                w.lines_shared(wasi_files)
             } else {
-                w.lines(wasi_files)
+                w.lines(
+                    wasi_files,
+                    WasiAccess {
+                        shared_memory: shared,
+                        locked_fds: layout.wasi_threads && wasi_files,
+                    },
+                )
             };
-            // `thread_spawn_lines` clones the `Arc` itself rather than locking it.
-            inner.extend(
-                if layout.wasi_threads && wasi_files && !w.spawns_threads() {
-                    share_fd_table(body)
-                } else {
-                    body
-                },
-            );
+            inner.extend(body);
         }
     }
     inner
