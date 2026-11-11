@@ -1180,7 +1180,7 @@ impl<'a> super::FuncGen<'a> {
             None => (CatchKind::All, Vec::new(), Vec::new()),
         };
         if capture {
-            // The exception lives on in the store; the handler holds its handle.
+            // The handler holds a reference-counted `GcRef::Exn` sharing the exception.
             let var = format!("__hx{label}");
             binds.push(format!("let {var}: GcRef = wasm2rs_exn_new({exc});"));
             pushed.push(Val {

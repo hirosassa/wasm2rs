@@ -1383,7 +1383,9 @@ impl<'a> FuncGen<'a> {
                 continue;
             }
             let ty = self.stack[i].ty;
-            let code = self.stack[i].code.clone();
+            // The operand may still be read from its place (a local or global), so
+            // a non-`Copy` `GcRef` is cloned rather than moved.
+            let code = self.move_val(&self.stack[i])?;
             let name = self.fresh_temp();
             self.line(format!(
                 "let {name}: {} = {code};",
@@ -1420,7 +1422,9 @@ impl<'a> FuncGen<'a> {
                 continue;
             }
             let ty = self.stack[i].ty;
-            let code = self.stack[i].code.clone();
+            // The operand may still be read from its place (a local or global), so
+            // a non-`Copy` `GcRef` is cloned rather than moved.
+            let code = self.move_val(&self.stack[i])?;
             let name = self.fresh_temp();
             self.line(format!(
                 "let {name}: {} = {code};",

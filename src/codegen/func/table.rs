@@ -1,7 +1,10 @@
 use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, ValType};
 
 use super::super::helpers::{mem_accessor, table_accessor};
-use super::super::{CompositeKind, Helper, Val, is_bottom_u32_heap, is_cont_heap};
+use super::super::{
+    CompositeKind, Helper, Val, is_bottom_u32_heap, is_cont_heap, is_gc_table_element,
+    table_elem_rust,
+};
 use crate::TranspileError;
 
 impl<'a> super::FuncGen<'a> {
@@ -33,20 +36,29 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
-    /// Whether `table` holds managed `GcRef` entries (an `exnref` table) rather
-    /// than `u32` handles.
-    fn table_elem_rust(&self, table: u32) -> &'static str {
-        let element = self
-            .ctx
+    /// The declared element type of `table` (a `funcref` when unknown).
+    fn table_element(&self, table: u32) -> ValType {
+        self.ctx
             .table_elements
             .get(table as usize)
             .copied()
-            .unwrap_or(ValType::FUNCREF);
-        super::super::table_elem_rust(element)
+            .unwrap_or(ValType::FUNCREF)
     }
 
+    /// Whether `table` holds managed `GcRef` entries (an `exnref` table) rather
+    /// than `u32` handles.
     fn is_gc_table(&self, table: u32) -> bool {
-        self.table_elem_rust(table) == "GcRef"
+        is_gc_table_element(self.table_element(table))
+    }
+
+    /// The expression storing `value` into an entry of `table`: a managed entry
+    /// takes the value by move (cloning a shared one), a `u32` handle by cast.
+    fn table_entry_expr(&self, table: u32, value: &Val) -> Result<String, TranspileError> {
+        if self.is_gc_table(table) {
+            self.move_val(value)
+        } else {
+            Ok(format!("({}) as u32", value.code))
+        }
     }
 
     pub(super) fn table_copy(
@@ -84,7 +96,7 @@ impl<'a> super::FuncGen<'a> {
         };
         let src_expr = self.table_index_expr(src_table, &src.code);
         let dest_expr = self.table_index_expr(dst_table, &dest.code);
-        let elem = self.table_elem_rust(dst_table);
+        let elem = table_elem_rust(self.table_element(dst_table));
         let body = if dst_table == src_table && !gc {
             format!("self.{dst_mut}().copy_within(s..s + n, d);")
         } else {
@@ -107,14 +119,9 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn table_get(&mut self, table: u32) -> Result<(), TranspileError> {
         let table = self.require_table_index(table)?;
         let index = self.pop()?;
-        let element = self
-            .ctx
-            .table_elements
-            .get(table as usize)
-            .copied()
-            .unwrap_or(ValType::FUNCREF);
+        let element = self.table_element(table);
         let (get, _) = table_accessor(table);
-        let clone = if self.is_gc_table(table) {
+        let clone = if is_gc_table_element(element) {
             ".clone()"
         } else {
             ""
@@ -136,11 +143,7 @@ impl<'a> super::FuncGen<'a> {
         let value = self.pop()?;
         let index = self.pop()?;
         let (_, get_mut) = table_accessor(table);
-        let stored = if self.is_gc_table(table) {
-            self.move_val(&value)?
-        } else {
-            format!("({}) as u32", value.code)
-        };
+        let stored = self.table_entry_expr(table, &value)?;
         self.line(format!(
             "self.{get_mut}()[{}] = {stored};",
             self.table_index_expr(table, &index.code),
@@ -191,11 +194,7 @@ impl<'a> super::FuncGen<'a> {
             .copied()
             .flatten()
             .unwrap_or(u32::MAX);
-        let init_value = if self.is_gc_table(table) {
-            self.move_val(&init)?
-        } else {
-            format!("({}) as u32", init.code)
-        };
+        let init_value = self.table_entry_expr(table, &init)?;
         // A failed allocation reports -1 instead of aborting (an allocator that
         // overcommits can still succeed here and fail later, as for memory).
         // A 64-bit table is still capped at `u32::MAX` entries (an
@@ -223,8 +222,7 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn table_fill(&mut self, table: u32) -> Result<(), TranspileError> {
         let table = self.require_table_index(table)?;
         let (dest, val, len) = self.pop_bulk_operands()?;
-        let gc = self.is_gc_table(table);
-        if table == 0 && !self.is_table64(table) && !gc {
+        if table == 0 && !self.is_table64(table) && !self.is_gc_table(table) {
             self.used_helpers.insert((Helper::TableFill, 0));
             self.line(format!(
                 "self.table_fill(({}) as u32, ({}) as u32, ({}) as u32);",
@@ -233,11 +231,7 @@ impl<'a> super::FuncGen<'a> {
             return Ok(());
         }
         let (_, get_mut) = table_accessor(table);
-        let value = if gc {
-            self.move_val(&val)?
-        } else {
-            format!("({}) as u32", val.code)
-        };
+        let value = self.table_entry_expr(table, &val)?;
         self.line(format!(
             "{{ let d = {}; let v = {value}; let n = {}; self.{get_mut}()[d..d + n].fill(v); }}",
             self.table_index_expr(table, &dest.code),
@@ -348,14 +342,15 @@ impl<'a> super::FuncGen<'a> {
         let table = self.require_table_index(table)?;
         let (dest, src, len) = self.pop_bulk_operands()?;
         let (_, get_mut) = table_accessor(table);
+        // An active or declared segment is already dropped: an empty slice.
+        let seg = if self.is_passive(&self.ctx.elem_passive, elem_index, "elem")? {
+            format!("self.elem{elem_index}")
+        } else {
+            "{ let empty: &[u32] = &[]; empty }".to_string()
+        };
         if self.is_gc_table(table) {
             // A managed table's segment holds only `ref.null` items, so initialising
             // it writes nulls; the range is still checked against the segment.
-            let seg = if self.is_passive(&self.ctx.elem_passive, elem_index, "elem")? {
-                format!("self.elem{elem_index}")
-            } else {
-                "{ let empty: &[u32] = &[]; empty }".to_string()
-            };
             self.line(format!(
                 "{{ let seg = {seg}; let n = ({}) as usize; let s = ({}) as usize; \
                  let d = ({}) as usize; let _ = &seg[s..s + n]; \
@@ -364,12 +359,6 @@ impl<'a> super::FuncGen<'a> {
             ));
             return Ok(());
         }
-        // An active or declared segment is already dropped: an empty slice.
-        let seg = if self.is_passive(&self.ctx.elem_passive, elem_index, "elem")? {
-            format!("self.elem{elem_index}")
-        } else {
-            "{ let empty: &[u32] = &[]; empty }".to_string()
-        };
         self.emit_bulk_init(
             &format!("self.{get_mut}()"),
             &seg,

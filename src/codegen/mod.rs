@@ -53,7 +53,8 @@ pub(crate) use self::export_names::{
 pub(crate) use self::info::{
     CompositeKind, DataSegment, ElemSegment, ExportInfo, FieldInfo, FuncInput, GlobalExportInfo,
     GlobalInfo, ImportInfo, ImportedGlobalInfo, MemInfo, SegOffset, TableFill, TableInfo, TagInfo,
-    TypeRel, TypeSig, WASM_MAX_PAGES, WASM_PAGE_SIZE, table_elem_rust, table_null,
+    TypeRel, TypeSig, WASM_MAX_PAGES, WASM_PAGE_SIZE, is_gc_table_element, table_elem_rust,
+    table_null,
 };
 pub(crate) use self::reach::{ReachInput, live_functions};
 pub(crate) use self::wasi::WasiFn;
@@ -300,7 +301,7 @@ fn encode_exc_value(
         // An `exnref` rides as an index into the exception's `exns` side vector
         // (`__exns`, declared by the throw site).
         ValType::Ref(rt) if is_exn_hierarchy(rt.heap_type()) => {
-            format!("wasm2rs_exn_pack(&mut __exns, {expr})")
+            format!("wasm2rs_exn_pack(&mut __exns, ({expr}).clone())")
         }
         ValType::Ref(_) => {
             return Err(TranspileError::Unsupported(
@@ -315,7 +316,9 @@ fn encode_exc_value(
     })
 }
 /// The Rust expression decoding a `u64` (given as `expr`) from an exception's
-/// `values` (with `exns` the expression for its `exns` vector) back into an operand of type `ty`, inverting [`encode_exc_value`].
+/// `values` back into an operand of type `ty`, inverting [`encode_exc_value`].
+/// `exns` is the expression for the exception's `exns` vector, which an `exnref`
+/// value indexes.
 fn decode_exc_value(
     ty: ValType,
     expr: &str,

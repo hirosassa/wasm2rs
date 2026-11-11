@@ -7,7 +7,8 @@ use super::wasi::{confine_lines, share_fd_table};
 use super::{
     ALLOW, DataSegment, ElemSegment, ExportInfo, GlobalExportInfo, Helper, ImportInfo,
     ImportedGlobalInfo, ModuleCtx, ModuleParts, SegOffset, TableFill, WASM_PAGE_SIZE, WasiFn,
-    data_static_line, indent, index_u32, rust_type, rust_types, table_elem_rust, table_null,
+    data_static_line, indent, index_u32, is_gc_table_element, rust_type, rust_types,
+    table_elem_rust, table_null,
 };
 use crate::TranspileError;
 use wasmparser::ValType;
@@ -576,6 +577,10 @@ fn constructor_lines(
                     };
                     lines.push(format!("{ind}let _ = &{target}[{off}..{off}];"));
                 }
+                let gc_table = ctx
+                    .table_elements
+                    .get(seg.table as usize)
+                    .is_some_and(|e| is_gc_table_element(*e));
                 for (k, f) in seg.funcs.iter().enumerate() {
                     let idx = if runtime.is_some() {
                         format!("off.saturating_add({k})")
@@ -583,10 +588,6 @@ fn constructor_lines(
                         elem_slot(base.saturating_add(u64::try_from(k).unwrap_or(u64::MAX)))
                             .to_string()
                     };
-                    let gc_table = ctx
-                        .table_elements
-                        .get(seg.table as usize)
-                        .is_some_and(|e| table_elem_rust(*e) == "GcRef");
                     let value = seg
                         .imported_items
                         .iter()
@@ -2120,8 +2121,9 @@ fn import_trait_lines(
         lines.push("    fn memory(&self) -> &[u8];".to_string());
         lines.push("    fn memory_mut(&mut self) -> &mut Vec<u8>;".to_string());
     }
-    // Imported tables: the host lends each `Vec<u32>` for get/set/size/grow and
-    // for indirect-call dispatch (each entry is a function index). Imports come
+    // Imported tables: the host lends each `Vec<u32>` (`Vec<GcRef>` for an
+    // `exnref` table) for get/set/size/grow and for indirect-call dispatch (each
+    // `u32` entry is a function index). Imports come
     // first in the index space, so they are tables `0..imported_tables`.
     for i in 0..imported_tables {
         let (get, get_mut) = table_accessor(index_u32(i)?);

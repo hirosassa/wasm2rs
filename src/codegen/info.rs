@@ -49,8 +49,9 @@ pub(crate) struct TableInfo {
     /// Whether the table is declared `i64` (memory64's table counterpart): its
     /// indices, sizes and lengths are `i64` instead of `i32`.
     pub table64: bool,
-    /// The table's element type (`funcref`, `externref` or `exnref`). All are stored as a
-    /// `u32`, but `table.get` pushes an operand of this type.
+    /// The table's element type (`funcref`, `externref` or `exnref`). An `exnref`
+    /// table stores managed `GcRef`s, the others `u32` handles (see
+    /// [`table_elem_rust`]); `table.get` pushes an operand of this type.
     pub element: ValType,
     /// The value every initial entry holds; `None` starts them null.
     pub init: Option<TableFill>,
@@ -235,18 +236,25 @@ impl TypeRel {
     }
 }
 
+/// Whether a table of `element` references holds managed `GcRef` entries (an
+/// `exnref` table) rather than `u32` handles.
+pub(crate) fn is_gc_table_element(element: ValType) -> bool {
+    matches!(element, ValType::Ref(rt) if is_exn_hierarchy(rt.heap_type()))
+}
+
 /// The Rust element type of a table holding `element` references: a managed
 /// `GcRef` for an `exnref` table, a `u32` handle (`u32::MAX` is null) otherwise.
 pub(crate) fn table_elem_rust(element: ValType) -> &'static str {
-    match element {
-        ValType::Ref(rt) if is_exn_hierarchy(rt.heap_type()) => "GcRef",
-        _ => "u32",
+    if is_gc_table_element(element) {
+        "GcRef"
+    } else {
+        "u32"
     }
 }
 
 /// The Rust expression for a null entry of a table of `element` references.
 pub(crate) fn table_null(element: ValType) -> &'static str {
-    if table_elem_rust(element) == "GcRef" {
+    if is_gc_table_element(element) {
         "GcRef::Null"
     } else {
         "u32::MAX"

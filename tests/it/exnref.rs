@@ -309,3 +309,66 @@ assert!(grown < 64 * 1024, "heap grew by {grown} bytes");
 "#,
     );
 }
+
+const EXN_PRELUDE: &str = r#"(tag $e (param i32)) (tag $w (param exnref))
+  (func $mk (param i32) (result exnref)
+    (block $h (result exnref) (try_table (catch_all_ref $h) (throw $e (local.get 0))) (unreachable)))
+  (func $rt (param exnref) (result i32)
+    (block $o (result i32) (try_table (result i32) (catch $e $o) (throw_ref (local.get 0)))))"#;
+
+fn exn_module(body: &str) -> String {
+    format!("(module (table $t 2 exnref) {EXN_PRELUDE} {body})")
+}
+
+// A caught exnref is not `Copy`: using it as a throw payload must not move it
+// out of the local that later code reads again.
+#[test]
+fn an_exnref_local_can_be_thrown_as_a_payload_and_used_again() {
+    compile_run(
+        "exn_throw_local",
+        &exn_module(
+            r#"(func (export "f") (param i32) (result i32) (local $x exnref)
+              (local.set $x (call $mk (local.get 0)))
+              (block $c (try_table (catch_all $c) (throw $w (local.get $x))))
+              (call $rt (local.get $x)))"#,
+        ),
+        "let mut i = Instance::new(); assert_eq!(i.func2(3), 3);",
+    );
+}
+
+#[test]
+fn ref_test_and_ref_cast_work_on_an_exnref() {
+    compile_run(
+        "exn_ref_test",
+        &exn_module(
+            r#"(func (export "f") (param i32) (result i32) (local $x exnref)
+              (local.set $x (call $mk (local.get 0)))
+              (i32.add (ref.test (ref exn) (local.get $x))
+                (i32.add (i32.mul (i32.const 10) (ref.test (ref exn) (ref.null exn)))
+                  (call $rt (ref.cast (ref exn) (local.get $x))))))"#,
+        ),
+        "let mut i = Instance::new(); assert_eq!(i.func2(5), 6);",
+    );
+}
+
+// Spilling a still-live (mutable) exnref operand must clone it, not move it.
+#[test]
+fn a_spilled_mutable_exnref_local_stays_usable() {
+    compile_run(
+        "exn_spill",
+        &exn_module(
+            r#"(func (export "f") (param i32) (result i32) (local $x exnref) (local $y exnref)
+              (local.set $x (call $mk (local.get 0)))
+              (local.get $x)
+              (local.set $y (local.get $x))
+              (local.set $x (ref.null exn))
+              (call $rt)
+              (call $rt (local.get $y)) (i32.add))
+            (func (export "g") (param i32) (result i32) (local $x exnref)
+              (local.set $x (call $mk (local.get 0)))
+              (table.set $t (i32.const 0) (local.get $x))
+              (i32.add (call $rt (local.get $x)) (call $rt (table.get $t (i32.const 0)))))"#,
+        ),
+        "let mut i = Instance::new(); assert_eq!(i.func2(3), 6); assert_eq!(i.func3(3), 6);",
+    );
+}
