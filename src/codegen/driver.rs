@@ -533,6 +533,15 @@ pub(crate) fn build_ctx<'a>(
             *slot = true;
         }
     }
+    // A step function is emitted as `cont_step_func{N}`, never `func{N}`, and
+    // `reject_dual_use_continuations` already forbids it as a plain funcref
+    // (its only `ref.func` feeds `cont.new`), so no dispatch can legitimately
+    // reach it; listing it would name a method that does not exist.
+    for &f in &step_set {
+        if let Some(slot) = referenced.get_mut(f as usize) {
+            *slot = false;
+        }
+    }
     let func_decl_types = imports.iter().map(|im| Some(im.type_index)).chain(
         funcs
             .iter()
