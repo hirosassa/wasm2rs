@@ -409,14 +409,14 @@ fn instance_field_lines(
     if ctx.uses_extern_box {
         lines.push("    extern_box: Vec<GcRef>,".to_string());
     }
-    // The continuation handle table: a `cont.new` pushes a fresh resumable
-    // object here and returns its index; `None` marks a slot whose continuation
-    // has run to completion (a one-shot continuation, consumed on return).
+    // The continuation handle table: a `cont.new` stores a fresh resumable
+    // object in a free slot and returns a generation-tagged handle to it; a slot
+    // whose continuation has run to completion (one-shot, consumed on return) is
+    // recycled.
     if !ctx.cont.bodies.is_empty() {
-        lines.push("    conts: Vec<Option<ContObj>>,".to_string());
-        // The declared type (a type index) of each handle's continuation, in step with
-        // `conts`: what `ref.test`/`ref.cast` to a continuation type compare.
-        lines.push("    cont_types: Vec<u32>,".to_string());
+        lines.push("    conts: Vec<ContSlot>,".to_string());
+        // Indices of slots whose continuation has returned, ready for reuse.
+        lines.push("    cont_free: Vec<u32>,".to_string());
     }
     lines.push("}".to_string());
     Ok(lines)
@@ -694,7 +694,7 @@ fn constructor_lines(
         }
         if !ctx.cont.bodies.is_empty() {
             inner.push("        conts: Vec::new(),".to_string());
-            inner.push("        cont_types: Vec::new(),".to_string());
+            inner.push("        cont_free: Vec::new(),".to_string());
         }
         // Last, so a global initializer above can still read the host.
         if has_imports {

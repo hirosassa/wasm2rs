@@ -835,10 +835,7 @@ impl super::FuncGen<'_> {
         let hit = if arms.is_empty() || self.ctx.cont.bodies.is_empty() {
             "false".to_string()
         } else {
-            format!(
-                "matches!(self.cont_types[__c as usize], {})",
-                arms.join(" | ")
-            )
+            format!("matches!(self.cont_type_of(__c), {})", arms.join(" | "))
         };
         Ok(format!(
             "{{ let __c: u32 = ({ref_expr}); if __c == u32::MAX {{ {null_matches} }} else {{ {hit} }} }}"

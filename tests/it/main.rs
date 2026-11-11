@@ -10,6 +10,7 @@
 mod bottom_ref_types;
 mod common;
 mod cont_casts;
+mod cont_handles;
 mod func_ref_casts;
 mod single_file_pieces;
 
