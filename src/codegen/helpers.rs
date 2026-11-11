@@ -801,7 +801,18 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             ),
             "        return -1;".to_string(),
             "    }".to_string(),
-            format!("    self.mem_mut().resize((new_pages as usize) * {WASM_PAGE_SIZE}, 0);"),
+            // `new_pages * 65536` can reach 2^32, which wraps a 32-bit `usize`; a
+            // length the host cannot index reports -1. A failed allocation also
+            // reports -1 (as the spec allows) instead of aborting the process; an
+            // overcommitting allocator can still accept the reservation.
+            format!("    let Ok(new_len) = usize::try_from(new_pages * {WASM_PAGE_SIZE}) else {{"),
+            "        return -1;".to_string(),
+            "    };".to_string(),
+            "    let extra = new_len - self.mem().len();".to_string(),
+            "    if self.mem_mut().try_reserve_exact(extra).is_err() {".to_string(),
+            "        return -1;".to_string(),
+            "    }".to_string(),
+            "    self.mem_mut().resize(new_len, 0);".to_string(),
             "    old_pages as i32".to_string(),
             "}".to_string(),
         ],

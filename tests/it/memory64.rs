@@ -398,3 +398,57 @@ fn atomic_offset_above_4gib_is_accepted() {
         "let mut inst = Instance::new(); inst.func0(0, 1);",
     );
 }
+
+#[test]
+fn memory32_grow_allocation_failure_returns_minus_one_instead_of_aborting() {
+    // No declared maximum: growing by 65535 pages asks for ~4 GiB. A global
+    // allocator that refuses allocations over 1 GiB makes the refusal
+    // deterministic; it must surface as -1, not an abort.
+    compile_run(
+        "mem32_grow_oom",
+        r#"(module
+            (memory 1)
+            (func (export "grow") (param i32) (result i32)
+              local.get 0 memory.grow))"#,
+        "use std::alloc::{GlobalAlloc, Layout, System}; \
+         struct Capped; \
+         unsafe impl GlobalAlloc for Capped { \
+             unsafe fn alloc(&self, l: Layout) -> *mut u8 { \
+                 if l.size() > (1 << 30) { std::ptr::null_mut() } else { unsafe { System.alloc(l) } } } \
+             unsafe fn dealloc(&self, p: *mut u8, l: Layout) { unsafe { System.dealloc(p, l) } } \
+             unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 { \
+                 if n > (1 << 30) { std::ptr::null_mut() } else { unsafe { System.realloc(p, l, n) } } } } \
+         #[global_allocator] static A: Capped = Capped; \
+         let mut inst = Instance::new(); \
+         assert_eq!(inst.func0(65535), -1); \
+         assert_eq!(inst.func0(65536), -1); \
+         assert_eq!(inst.func0(1), 1);",
+    );
+}
+
+#[test]
+fn memory64_grow_allocation_failure_returns_minus_one_instead_of_aborting() {
+    // No declared maximum: growing by 0x40000 pages asks for ~16 GiB. A global
+    // allocator that refuses allocations over 1 GiB makes the refusal
+    // deterministic; it must surface as -1, not an abort.
+    compile_run(
+        "mem64_grow_oom",
+        r#"(module
+            (memory i64 1)
+            (func (export "grow") (param i64) (result i64)
+              local.get 0 memory.grow))"#,
+        "use std::alloc::{GlobalAlloc, Layout, System}; \
+         struct Capped; \
+         unsafe impl GlobalAlloc for Capped { \
+             unsafe fn alloc(&self, l: Layout) -> *mut u8 { \
+                 if l.size() > (1 << 30) { std::ptr::null_mut() } else { unsafe { System.alloc(l) } } } \
+             unsafe fn dealloc(&self, p: *mut u8, l: Layout) { unsafe { System.dealloc(p, l) } } \
+             unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 { \
+                 if n > (1 << 30) { std::ptr::null_mut() } else { unsafe { System.realloc(p, l, n) } } } } \
+         #[global_allocator] static A: Capped = Capped; \
+         let mut inst = Instance::new(); \
+         assert_eq!(inst.func0(0x40000), -1); \
+         assert_eq!(inst.func0(i64::MAX), -1); \
+         assert_eq!(inst.func0(1), 1);",
+    );
+}
