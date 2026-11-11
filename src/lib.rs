@@ -202,9 +202,12 @@ pub struct TranspileOptions {
 /// build --release` would compile at Cargo's defaults and get an inflated
 /// binary. This manifest supplies a size-optimized-but-still-fast
 /// `[profile.release]`: `opt-level = 3` preserves the flattened-dispatch speed,
-/// while thin LTO, a single codegen unit, abort-on-panic (which drops the
-/// unwinding tables) and `strip` shrink the release binary without trading away
-/// speed. The `[lib] path` points at the crate-root `lib.rs` this tool writes
+/// while thin LTO, a single codegen unit and `strip` shrink the release binary
+/// without trading away speed. Panics deliberately keep unwinding (no
+/// `panic = "abort"`): Wasm exception handling (including exceptions injected
+/// by `resume_throw`) is lowered to `catch_unwind`, and hosts contain traps the
+/// same way, which an abort profile would turn into a process abort.
+/// The `[lib] path` points at the crate-root `lib.rs` this tool writes
 /// (not Cargo's default `src/lib.rs`), and the generated code depends only on
 /// `std`, so there is no `[dependencies]` section.
 #[must_use]
@@ -222,7 +225,6 @@ pub fn cargo_manifest(package_name: &str) -> String {
          opt-level = 3\n\
          lto = \"thin\"\n\
          codegen-units = 1\n\
-         panic = \"abort\"\n\
          strip = true\n"
     )
 }

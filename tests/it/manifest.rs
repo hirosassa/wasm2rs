@@ -6,7 +6,7 @@
 //! would compile it at Cargo's defaults (`opt-level = 0`, unwinding, unstripped)
 //! and get a needlessly large, slow binary. `cargo_manifest` supplies a
 //! size-optimized-but-still-fast `[profile.release]` (opt-level 3 + thin LTO +
-//! one codegen unit + abort-on-panic + strip) so the generated crate builds to a
+//! one codegen unit + strip, keeping unwinding) so the generated crate builds to a
 //! compact release binary out of the box. These tests pin the profile keys and
 //! the crate wiring (`[lib] path = "lib.rs"`) so a regression that dropped a
 //! setting — silently inflating every consumer's binary — fails here.
@@ -53,14 +53,13 @@ fn manifest_names_the_package_and_points_lib_at_lib_rs() {
 fn manifest_release_profile_is_size_optimized_but_fast() {
     let m = cargo_manifest("m");
     // The balanced profile: opt-level 3 keeps the flattened dispatch fast, while
-    // thin LTO, a single codegen unit, abort-on-panic (drops the unwinding
-    // tables) and strip shrink the binary without trading away speed.
+    // thin LTO, a single codegen unit and strip shrink the binary without
+    // trading away speed.
     for needle in [
         "[profile.release]",
         "opt-level = 3",
         "lto = \"thin\"",
         "codegen-units = 1",
-        "panic = \"abort\"",
         "strip = true",
     ] {
         assert!(
@@ -68,6 +67,17 @@ fn manifest_release_profile_is_size_optimized_but_fast() {
             "release profile missing {needle:?}:\n{m}"
         );
     }
+}
+
+#[test]
+fn manifest_keeps_unwinding_so_catch_unwind_works() {
+    // `panic = "abort"` would turn every Wasm exception (lowered to
+    // `catch_unwind`) and every host-contained trap into a process abort.
+    let m = cargo_manifest("m");
+    assert!(
+        !m.contains("panic = \"abort\""),
+        "release profile must not abort on panic:\n{m}"
+    );
 }
 
 #[test]
