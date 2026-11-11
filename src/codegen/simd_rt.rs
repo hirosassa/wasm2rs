@@ -451,6 +451,10 @@ fn combine_expr(lane: &Lane) -> String {
             }
         }
         Combine::QuietMethod(m) => {
+            debug_assert!(
+                matches!(lane.shape, Shape::Unary),
+                "QuietMethod is unary-only"
+            );
             format!("{{ let r = x.{m}(); if r.is_nan() {{ r + r }} else {{ r }} }}")
         }
         Combine::MinMax { equal, order } => format!(

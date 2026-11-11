@@ -1514,6 +1514,11 @@ const SNAN_ROUND_OPS: &[(&str, &str)] = &[
     ("f32x4.trunc", "f32x4_trunc"),
     ("f32x4.nearest", "f32x4_nearest"),
     ("f32x4.sqrt", "f32x4_sqrt"),
+    ("f64x2.ceil", "f64x2_ceil"),
+    ("f64x2.floor", "f64x2_floor"),
+    ("f64x2.trunc", "f64x2_trunc"),
+    ("f64x2.nearest", "f64x2_nearest"),
+    ("f64x2.sqrt", "f64x2_sqrt"),
 ];
 
 #[test]
@@ -1540,14 +1545,7 @@ fn float_lane_rounding_quiets_signaling_nan_in_source() {
 
 #[test]
 fn float_lane_rounding_signaling_nan_result_is_quiet() {
-    let ops = [
-        ("f32x4.ceil", "f32x4"),
-        ("f32x4.floor", "f32x4"),
-        ("f32x4.trunc", "f32x4"),
-        ("f32x4.nearest", "f32x4"),
-        ("f32x4.sqrt", "f32x4"),
-    ];
-    let funcs: String = ops
+    let funcs: String = SNAN_ROUND_OPS
         .iter()
         .map(|(op, _)| {
             format!(
@@ -1557,7 +1555,7 @@ fn float_lane_rounding_signaling_nan_result_is_quiet() {
         })
         .collect();
     // The quiet bit (bit 22) of the f32 result must be set for every op.
-    let checks: String = (0..ops.len())
+    let checks: String = (0..SNAN_ROUND_OPS.len())
         .map(|i| format!("assert_ne!(func{i}() as u32 & 0x0040_0000, 0, \"op {i}\");\n"))
         .collect();
     expect_ok(
