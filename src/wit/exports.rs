@@ -10,7 +10,8 @@ use wasmparser::{
     ComponentOuterAliasKind, ComponentTypeRef, ExternalKind, Instance as CoreInstanceDef, Payload,
 };
 
-use super::{Def, Scope, Sig, WitFunc, def_at, innermost, read_component, unsupported};
+use super::WitFunc;
+use super::read::{Def, Scope, Sig, Soft, def_at, innermost, read_component, unsupported};
 use crate::TranspileError;
 
 /// A function the component exports, and the core module export it is lifted from.
@@ -64,7 +65,7 @@ impl Default for Func {
 
 #[derive(Clone)]
 struct Lift {
-    sig: Result<Sig, String>,
+    sig: Soft<Sig>,
     core_func: u32,
     options: Vec<CanonicalOption>,
 }
@@ -341,7 +342,7 @@ impl Reader {
             } => {
                 let sig = match def_at(innermost(stack)?, type_index) {
                     Ok(Def::Func(sig)) => (**sig).clone(),
-                    Ok(_) => Err("a lift whose type is not a function type".to_string()),
+                    Ok(_) => Err("a lift whose type is not a function type".into()),
                     Err(e) => Err(e),
                 };
                 self.funcs.push(Func::Lift(Lift {
