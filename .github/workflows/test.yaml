@@ -70,6 +70,27 @@ jobs:
         if: matrix.rust != 'stable'
         run: cargo test --release --workspace --no-run
 
+  # wasm2rs-wasi's preopen confinement (cap-std) has Unix-only code paths and tests; this
+  # job verifies the rest on Windows (#205). Only the wasm2rs-wasi crate: the transpiler's
+  # E2E tests need Unix toolchains.
+  wasi-windows:
+    name: wasm2rs-wasi on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: wasi-windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Test wasm2rs-wasi
+        run: cargo test -p wasm2rs-wasi
+
   # The wasi-sdk E2E tests need a ~190MB toolchain, so they live in their own job
   # (cached) instead of slowing down every toolchain of the build matrix.
   e2e-wasi-sdk:
