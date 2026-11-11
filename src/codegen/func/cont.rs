@@ -27,6 +27,7 @@
 
 use wasmparser::{FunctionBody, HeapType, Operator, ValType};
 
+use super::super::render_cont;
 use super::super::{
     ALLOW, CompositeKind, FrameKind, GenMeta, Node, TypeSig, Val, flatten_cont_body, index_u32,
     is_u32_ref, render_body_into, render_nodes_into, rust_type,
@@ -203,8 +204,9 @@ impl super::FuncGen<'_> {
                     let save = self.save_mutated_locals()?;
                     let next = pc + 1;
                     arms.push(format!(
-                        "{stmts}{save}__frame.pc = {next}u32; StepResult::Suspend {{ \
-                         tag: {tag_index}u32, payload: vec![{payload}] }}"
+                        "{stmts}{}{}",
+                        render_cont::park_pc(&save, next),
+                        render_cont::suspend_result(tag_index, &payload)
                     ));
                     pc = next;
                     // `suspend $t : [p*] -> [r*]`: the results `r*` are the
@@ -298,14 +300,12 @@ impl super::FuncGen<'_> {
                             // switch-back or suspend-resume the callee — parked at a
                             // transfer point below this frame — is the one that
                             // consumes the injected values.
-                            format!(
-                                "match self.cont_step_func{g}(&mut __frame.sub, __args) {{ \
-                                 StepResult::Suspend {{ tag: __t, payload: __p }} => {{ \
-                                 {save}StepResult::Suspend {{ tag: __t, payload: __p }} }}, \
-                                 StepResult::Switch {{ tag: __t, target: __tgt, ty: __ty, args: __a }} => {{ \
-                                 {save}StepResult::Switch {{ tag: __t, target: __tgt, ty: __ty, args: __a }} \
-                                 }}, \
-                                 StepResult::Return({bind}) => StepResult::Return(vec![{payload}]) }}"
+                            render_cont::drive_callee_match(
+                                g,
+                                |result| format!("{{ {save}{result} }}"),
+                                ", ",
+                                bind,
+                                &format!("StepResult::Return(vec![{payload}])"),
                             )
                         }
                         None => {
@@ -339,9 +339,9 @@ impl super::FuncGen<'_> {
                     let save = self.save_mutated_locals()?;
                     let next = pc + 1;
                     arms.push(format!(
-                        "{stmts}{save}__frame.pc = {next}u32; StepResult::Switch {{ \
-                         tag: {tag_index}u32, target: {}, ty: {self_cont}u32, args: vec![{payload}] }}",
-                        target.code
+                        "{stmts}{}{}",
+                        render_cont::park_pc(&save, next),
+                        render_cont::switch_result(tag_index, &target.code, self_cont, &payload)
                     ));
                     pc = next;
                     // Control switches back here carrying `t2*` — the

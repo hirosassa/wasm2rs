@@ -1,3 +1,4 @@
+use super::render_cont;
 use super::*;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -219,8 +220,9 @@ impl Flattener {
                         stmts.push((
                             0,
                             format!(
-                                "{save}__frame.pc = {resume}u32; return StepResult::Suspend {{ \
-                                 tag: {tag}u32, payload: vec![{payload}] }};"
+                                "{}return {};",
+                                render_cont::park_pc(&save, resume),
+                                render_cont::suspend_result(tag, &payload)
                             ),
                         ));
                         // The suspend `return`s out of the whole step function (the
@@ -248,8 +250,9 @@ impl Flattener {
                         stmts.push((
                             0,
                             format!(
-                                "{save}__frame.pc = {resume}u32; return StepResult::Switch {{ \
-                                 tag: {tag}u32, target: {target}, ty: {ty}u32, args: vec![{payload}] }};"
+                                "{}return {};",
+                                render_cont::park_pc(&save, resume),
+                                render_cont::switch_result(tag, &target, ty, &payload)
                             ),
                         ));
                         self.arms.push((state, std::mem::take(&mut stmts)));
@@ -284,17 +287,17 @@ impl Flattener {
                             call,
                             vec![(
                                 0,
-                                format!(
-                                    "match self.cont_step_func{callee}(&mut __frame.sub, __args) {{ \
-                                     StepResult::Suspend {{ tag: __t, payload: __p }} => {{ \
-                                     {save}__frame.pc = {call}u32; \
-                                     return StepResult::Suspend {{ tag: __t, payload: __p }}; }} \
-                                     StepResult::Switch {{ tag: __t, target: __tgt, ty: __ty, args: __a }} => \
-                                     {{ {save}__frame.pc = {call}u32; \
-                                     return StepResult::Switch {{ tag: __t, target: __tgt, ty: __ty, args: __a \
-                                     }}; }} \
-                                     StepResult::Return(__cret) => {{ __frame.ostack = __cret; \
-                                     pc = {resume}; }} }}"
+                                render_cont::drive_callee_match(
+                                    callee,
+                                    |result| {
+                                        format!(
+                                            "{{ {}return {result}; }}",
+                                            render_cont::park_pc(&save, call)
+                                        )
+                                    },
+                                    " ",
+                                    "__cret",
+                                    &format!("{{ __frame.ostack = __cret; pc = {resume}; }}"),
                                 ),
                             )],
                         ));
