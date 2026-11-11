@@ -12,6 +12,7 @@ mod common;
 mod cont_casts;
 mod cont_handles;
 mod func_ref_casts;
+mod golden;
 mod single_file_pieces;
 
 mod active_segment_init;
