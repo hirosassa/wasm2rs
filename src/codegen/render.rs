@@ -316,7 +316,7 @@ fn instance_field_lines(
     if layout.has_imports {
         // A re-entrant host is lent out for the duration of each import call.
         let ty = if ctx.reentrant_imports {
-            "Option<H>"
+            "Option<Box<H>>"
         } else {
             "H"
         };
@@ -791,7 +791,7 @@ impl<'a> CtorPlan<'a> {
         // Last, so a global initializer above can still read the host.
         if self.layout.has_imports {
             inner.push(if self.ctx.reentrant_imports {
-                "        imports: Some(imports),".to_string()
+                "        imports: Some(Box::new(imports)),".to_string()
             } else {
                 "        imports,".to_string()
             });
@@ -1014,7 +1014,8 @@ fn constructor_lines(
 /// `with_host`: lend the host out of `imports` for one call, handing it the
 /// instance, and put it back, also when the call unwinds (a wasm exception thrown
 /// through the host, or a trap the embedder catches). A host call reached from
-/// inside another one finds no host and traps.
+/// inside another one finds no host and traps. The host is boxed so lending it
+/// moves a pointer, not the whole `H`.
 fn with_host_lines() -> Vec<String> {
     [
         "fn with_host<R>(&mut self, f: impl FnOnce(&mut H, &mut Self) -> R) -> R {",
