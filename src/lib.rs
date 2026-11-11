@@ -174,7 +174,13 @@ impl SplitOptions {
 ///
 /// The default is the safe, portable output produced by [`transpile`]; set a
 /// field to opt into a faster-but-less-safe lowering.
+///
+/// The struct is `#[non_exhaustive]`, so a new option is not a breaking change:
+/// start from [`TranspileOptions::default`] and either assign fields or chain the
+/// `with_*` methods (`TranspileOptions::default().with_named_exports(true)`).
+/// A struct literal, even with `..Default::default()`, only works inside this crate.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct TranspileOptions {
     /// Emit unchecked (`unsafe`) linear-memory access: every load/store and bulk
     /// `memory.*` drops its Rust slice bounds check and reads/writes through
@@ -266,6 +272,71 @@ pub struct TranspileOptions {
     /// `wasi::thread-spawn`. Has no effect on a module without a host function
     /// import. Off by default, since it changes every `Imports` method signature.
     pub reentrant_imports: bool,
+}
+
+impl TranspileOptions {
+    /// Set [`TranspileOptions::unsafe_memory`].
+    #[must_use]
+    pub fn with_unsafe_memory(mut self, unsafe_memory: bool) -> Self {
+        self.unsafe_memory = unsafe_memory;
+        self
+    }
+
+    /// Set [`TranspileOptions::call_depth_limit`].
+    #[must_use]
+    pub fn with_call_depth_limit(mut self, call_depth_limit: Option<u32>) -> Self {
+        self.call_depth_limit = call_depth_limit;
+        self
+    }
+
+    /// Set [`TranspileOptions::split_dispatch`].
+    #[must_use]
+    pub fn with_split_dispatch(mut self, split_dispatch: usize) -> Self {
+        self.split_dispatch = split_dispatch;
+        self
+    }
+
+    /// Set [`TranspileOptions::entry_exports`].
+    #[must_use]
+    pub fn with_entry_exports(mut self, entry_exports: Option<Vec<String>>) -> Self {
+        self.entry_exports = entry_exports;
+        self
+    }
+
+    /// Set [`TranspileOptions::jobs`].
+    #[must_use]
+    pub fn with_jobs(mut self, jobs: usize) -> Self {
+        self.jobs = jobs;
+        self
+    }
+
+    /// Set [`TranspileOptions::named_exports`].
+    #[must_use]
+    pub fn with_named_exports(mut self, named_exports: bool) -> Self {
+        self.named_exports = named_exports;
+        self
+    }
+
+    /// Set [`TranspileOptions::named_imports`].
+    #[must_use]
+    pub fn with_named_imports(mut self, named_imports: bool) -> Self {
+        self.named_imports = named_imports;
+        self
+    }
+
+    /// Set [`TranspileOptions::import_memory`].
+    #[must_use]
+    pub fn with_import_memory(mut self, import_memory: bool) -> Self {
+        self.import_memory = import_memory;
+        self
+    }
+
+    /// Set [`TranspileOptions::reentrant_imports`].
+    #[must_use]
+    pub fn with_reentrant_imports(mut self, reentrant_imports: bool) -> Self {
+        self.reentrant_imports = reentrant_imports;
+        self
+    }
 }
 
 /// The recommended `Cargo.toml` for a split crate, named `package_name`.
@@ -405,6 +476,42 @@ where
     })
 }
 
+/// Reject option combinations the module contradicts, and report whether
+/// `reentrant_imports` takes effect.
+///
+/// The instance is handed to each host call only when there is a host function
+/// import to hand it to; the host is lent out of `imports`, so nothing else may
+/// read the host while it runs. These checks need the parsed module (an imported
+/// memory only exists once the module is read), so they run right after parsing
+/// and before any function body is generated.
+fn resolve_reentrant_imports(
+    topts: &TranspileOptions,
+    ir: &parse::ModuleIr<'_>,
+) -> Result<bool, TranspileError> {
+    let reentrant_imports =
+        topts.reentrant_imports && ir.imports.iter().any(|im| im.wasi.is_none());
+    if reentrant_imports {
+        let host_owned = ir.memories.iter().any(|m| m.imported)
+            || ir.table.as_ref().is_some_and(|t| t.imported)
+            || !ir.imported_globals.is_empty();
+        if host_owned {
+            return Err(TranspileError::InvalidOptions(
+                "reentrant_imports with an imported memory, table or global".into(),
+            ));
+        }
+        if ir
+            .imports
+            .iter()
+            .any(|im| im.wasi.is_some_and(codegen::WasiFn::spawns_threads))
+        {
+            return Err(TranspileError::InvalidOptions(
+                "reentrant_imports with wasi thread-spawn".into(),
+            ));
+        }
+    }
+    Ok(reentrant_imports)
+}
+
 /// Parse `wasm`, then hand the resolved module to `generate`.
 fn transpile_impl<R>(
     wasm: &[u8],
@@ -432,6 +539,8 @@ fn transpile_impl<R>(
         }
     }
 
+    let reentrant_imports = resolve_reentrant_imports(topts, &ir)?;
+
     let funcs = ir.func_inputs()?;
     let live = match &topts.entry_exports {
         Some(entries) => codegen::live_functions(
@@ -448,30 +557,6 @@ fn transpile_impl<R>(
         None => vec![true; funcs.len()],
     };
 
-    // The instance is handed to each host call only when there is a host function
-    // import to hand it to; the host is lent out of `imports`, so nothing else may
-    // read the host while it runs.
-    let reentrant_imports =
-        topts.reentrant_imports && ir.imports.iter().any(|im| im.wasi.is_none());
-    if reentrant_imports {
-        let host_owned = ir.memories.iter().any(|m| m.imported)
-            || ir.table.as_ref().is_some_and(|t| t.imported)
-            || !ir.imported_globals.is_empty();
-        if host_owned {
-            return Err(TranspileError::InvalidOptions(
-                "reentrant_imports with an imported memory, table or global".into(),
-            ));
-        }
-        if ir
-            .imports
-            .iter()
-            .any(|im| im.wasi.is_some_and(codegen::WasiFn::spawns_threads))
-        {
-            return Err(TranspileError::InvalidOptions(
-                "reentrant_imports with wasi thread-spawn".into(),
-            ));
-        }
-    }
     let parts = codegen::ModuleParts {
         imports: &ir.imports,
         imported_globals: &ir.imported_globals,
@@ -492,12 +577,8 @@ fn transpile_impl<R>(
         exports: &ir.exports,
         global_exports: &ir.global_exports,
         start: ir.start,
-        unsafe_memory: topts.unsafe_memory,
-        call_depth_limit: topts.call_depth_limit,
+        opts: topts,
         reentrant_imports,
-        split_dispatch: topts.split_dispatch,
-        jobs: topts.jobs,
-        named_exports: topts.named_exports,
     };
     generate(&parts)
 }

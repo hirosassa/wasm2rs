@@ -24,12 +24,10 @@ pub(crate) fn build_and_run(
 ) -> std::process::Output {
     let glue = wit_host_glue(&component(body)).unwrap();
     let core = wat::parse_str(core_wat).unwrap();
-    let opts = TranspileOptions {
-        named_imports: true,
-        reentrant_imports: true,
-        named_exports: true,
-        ..TranspileOptions::default()
-    };
+    let opts = TranspileOptions::default()
+        .with_named_imports(true)
+        .with_reentrant_imports(true)
+        .with_named_exports(true);
     let generated = transpile_with_options(&core, &opts).unwrap();
     let program = format!("{generated}\n{glue}\n{rest}\n");
     let bin = common::build(&format!("wit_glue_{name}"), &program);

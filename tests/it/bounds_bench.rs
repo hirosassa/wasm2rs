@@ -15,11 +15,9 @@ const RANDOM: &str = include_str!("../../benches/memory/random.wat");
 /// Build `wat` with the given memory mode and return what `run(n)` prints.
 fn run_checksum(name: &str, wat: &str, unsafe_memory: bool, n: u32) -> (String, String) {
     let wasm = wat::parse_str(wat).unwrap();
-    let opts = TranspileOptions {
-        named_exports: true,
-        unsafe_memory,
-        ..TranspileOptions::default()
-    };
+    let opts = TranspileOptions::default()
+        .with_named_exports(true)
+        .with_unsafe_memory(unsafe_memory);
     let generated = transpile_with_options(&wasm, &opts).unwrap();
     let program = format!(
         "{generated}\nfn main() {{ let mut m = Instance::new(); println!(\"{{}}\", m.run({n})); }}\n"

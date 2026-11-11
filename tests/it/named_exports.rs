@@ -7,10 +7,7 @@ use crate::common;
 use wasm2rs::{TranspileOptions, transpile, transpile_with_options};
 
 fn named() -> TranspileOptions {
-    TranspileOptions {
-        named_exports: true,
-        ..TranspileOptions::default()
-    }
+    TranspileOptions::default().with_named_exports(true)
 }
 
 /// Transpile `wat` with `named_exports`, append `main_body`, run it, assert exit 0.

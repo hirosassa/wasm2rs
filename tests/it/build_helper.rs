@@ -37,10 +37,7 @@ fn writes_the_transpiled_source_into_the_directory() {
 #[test]
 fn options_are_applied() {
     let (dir, wasm_path, wasm) = scratch("opts");
-    let opts = TranspileOptions {
-        named_exports: true,
-        ..TranspileOptions::default()
-    };
+    let opts = TranspileOptions::default().with_named_exports(true);
     let out = transpile_to_dir_with_options(&dir, &wasm_path, "foo.rs", &opts).unwrap();
     let got = std::fs::read_to_string(out).unwrap();
     assert_eq!(got, transpile_with_options(&wasm, &opts).unwrap());

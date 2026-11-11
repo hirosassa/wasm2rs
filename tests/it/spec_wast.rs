@@ -754,10 +754,7 @@ const SPEC_CALL_DEPTH_LIMIT: u32 = 2_000;
 fn transpile_module(wasm: &[u8]) -> Result<String, wasm2rs::TranspileError> {
     wasm2rs::transpile_with_options(
         wasm,
-        &wasm2rs::TranspileOptions {
-            call_depth_limit: Some(SPEC_CALL_DEPTH_LIMIT),
-            ..Default::default()
-        },
+        &wasm2rs::TranspileOptions::default().with_call_depth_limit(Some(SPEC_CALL_DEPTH_LIMIT)),
     )
 }
 

@@ -36,10 +36,7 @@ fn many_functions(n: usize, stateful: bool) -> Vec<u8> {
 }
 
 fn with_jobs(jobs: usize) -> TranspileOptions {
-    TranspileOptions {
-        jobs,
-        ..TranspileOptions::default()
-    }
+    TranspileOptions::default().with_jobs(jobs)
 }
 
 fn split_files(wasm: &[u8], per_file: usize, jobs: usize) -> Vec<(String, String)> {

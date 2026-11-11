@@ -261,10 +261,7 @@ fn import_memory_option_keeps_the_defined_memorys_maximum() {
 }
 
 fn import_memory() -> wasm2rs::TranspileOptions {
-    wasm2rs::TranspileOptions {
-        import_memory: true,
-        ..wasm2rs::TranspileOptions::default()
-    }
+    wasm2rs::TranspileOptions::default().with_import_memory(true)
 }
 
 #[test]

@@ -77,10 +77,7 @@ fn stateful_switch(cases: usize) -> String {
 /// Transpile `wat` with a `split_dispatch` cap of `max_arms_per_part`.
 fn transpile_split(wat: &str, max_arms_per_part: usize) -> String {
     let wasm = wat::parse_str(wat).expect("valid wat");
-    let opts = wasm2rs::TranspileOptions {
-        split_dispatch: max_arms_per_part,
-        ..Default::default()
-    };
+    let opts = wasm2rs::TranspileOptions::default().with_split_dispatch(max_arms_per_part);
     wasm2rs::transpile_with_options(&wasm, &opts).expect("transpile ok")
 }
 

@@ -1,6 +1,6 @@
 //! Integration tests for the opt-in `unsafe_memory` codegen mode.
 //!
-//! With `TranspileOptions { unsafe_memory: true }` the memory-access helpers
+//! With `TranspileOptions::default().with_unsafe_memory(true)` the memory-access helpers
 //! (`r*`/`w*`, `memory.fill`/`memory.copy`, `memory.init`) drop their Rust
 //! slice bounds checks and read/write through `get_unchecked`(`_mut`) in an
 //! `unsafe` block, gaining speed at the cost of turning an out-of-bounds access
@@ -29,14 +29,8 @@ use wasm2rs::TranspileOptions;
 /// Transpile `wat` with `unsafe_memory` enabled and return the generated Rust.
 fn transpile_unsafe(wat: &str) -> String {
     let wasm = wat::parse_str(wat).expect("valid wat");
-    wasm2rs::transpile_with_options(
-        &wasm,
-        &TranspileOptions {
-            unsafe_memory: true,
-            ..Default::default()
-        },
-    )
-    .expect("transpile ok")
+    wasm2rs::transpile_with_options(&wasm, &TranspileOptions::default().with_unsafe_memory(true))
+        .expect("transpile ok")
 }
 
 /// Compile `generated` (wrapped in a `main` running `main_body`) with `rustc -D

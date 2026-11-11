@@ -122,12 +122,10 @@ pub(crate) fn build_and_run(code: &str, name: &str, arg: &str) -> std::process::
 #[test]
 fn the_options_the_glue_needs_are_forced_on() {
     let options = ComponentOptions {
-        transpile: TranspileOptions {
-            named_imports: false,
-            named_exports: false,
-            reentrant_imports: false,
-            ..TranspileOptions::default()
-        },
+        transpile: TranspileOptions::default()
+            .with_named_imports(false)
+            .with_named_exports(false)
+            .with_reentrant_imports(false),
         ..ComponentOptions::default()
     };
     let code = transpile_component(&component_of(WORLD, CORE), &options).unwrap();

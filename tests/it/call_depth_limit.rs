@@ -25,10 +25,7 @@ fn transpile_limited(wat: &str, limit: u32) -> String {
     let wasm = wat::parse_str(wat).expect("valid wat");
     wasm2rs::transpile_with_options(
         &wasm,
-        &TranspileOptions {
-            call_depth_limit: Some(limit),
-            ..Default::default()
-        },
+        &TranspileOptions::default().with_call_depth_limit(Some(limit)),
     )
     .expect("transpile ok")
 }

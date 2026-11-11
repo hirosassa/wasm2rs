@@ -40,10 +40,7 @@ fn the_method_name_matches_the_named_imports_name_of_a_core_import() {
         r#"(module (import "wasi:cli/environment@0.2.0" "get-arguments" (func (result i32))))"#,
     )
     .unwrap();
-    let opts = TranspileOptions {
-        named_imports: true,
-        ..TranspileOptions::default()
-    };
+    let opts = TranspileOptions::default().with_named_imports(true);
     let imports = transpile_with_options(&wasm, &opts).unwrap();
     let comp = component(
         "",
@@ -546,10 +543,7 @@ fn resource_method_names_match_the_named_imports_of_a_core_module() {
           (import "wasi:io/poll@0.2.0" "[static]pollable.never" (func (result i32))))"#,
     )
     .unwrap();
-    let opts = TranspileOptions {
-        named_imports: true,
-        ..TranspileOptions::default()
-    };
+    let opts = TranspileOptions::default().with_named_imports(true);
     let imports = transpile_with_options(&core, &opts).unwrap();
     let rust = host(&component("", "wasi:io/poll@0.2.0", POLL));
     for name in [
@@ -1156,11 +1150,9 @@ fn a_resource_drop_the_component_lowers_is_declared() {
 fn glue_builds_with(core: &str, host_impl: &str) {
     let component = component_around(core);
     let glue = wasm2rs::wit_host_glue(&component).unwrap();
-    let opts = TranspileOptions {
-        named_imports: true,
-        reentrant_imports: true,
-        ..TranspileOptions::default()
-    };
+    let opts = TranspileOptions::default()
+        .with_named_imports(true)
+        .with_reentrant_imports(true);
     let generated = transpile_with_options(&wat::parse_str(core).unwrap(), &opts).unwrap();
     let program = format!(
         "{generated}\n{glue}\n{host_impl}\nfn main() {{ let _inst = Instance::new(Glue(H)); }}\n"

@@ -276,12 +276,10 @@ fn the_external_glue_runs_against_a_library_that_declares_the_types() {
     assert!(!glue.contains("pub enum Color"), "{glue}");
     assert!(glue.contains("use host_lib::Host;"), "{glue}");
 
-    let opts = wasm2rs::TranspileOptions {
-        named_imports: true,
-        reentrant_imports: true,
-        named_exports: true,
-        ..wasm2rs::TranspileOptions::default()
-    };
+    let opts = wasm2rs::TranspileOptions::default()
+        .with_named_imports(true)
+        .with_reentrant_imports(true)
+        .with_named_exports(true);
     let generated =
         wasm2rs::transpile_with_options(&wat::parse_str(OPS_CORE).unwrap(), &opts).unwrap();
     let program = format!("{generated}\nmod host_lib {{\n{surface}\n}}\n{glue}\n{OPS_HOST}\n");
