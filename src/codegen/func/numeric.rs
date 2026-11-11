@@ -59,7 +59,8 @@ impl<'a> super::FuncGen<'a> {
         // `-2i32` would otherwise bind as `-(2i32.method(..))`, because a method
         // call has higher precedence than unary minus in Rust.
         self.push_combined(
-            format!("({}).{method}({})", lhs.code, rhs.code),
+            // `concat` sizes the buffer exactly up front, unlike `format!`.
+            ["(", &lhs.code, ").", method, "(", &rhs.code, ")"].concat(),
             lhs.ty,
             &[&lhs, &rhs],
         )
@@ -69,7 +70,7 @@ impl<'a> super::FuncGen<'a> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
         self.push_combined(
-            format!("({} {op} {})", lhs.code, rhs.code),
+            ["(", &lhs.code, " ", op, " ", &rhs.code, ")"].concat(),
             lhs.ty,
             &[&lhs, &rhs],
         )

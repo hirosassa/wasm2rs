@@ -1017,20 +1017,24 @@ impl<'a> FuncGen<'a> {
                 continue;
             }
             let ty = self.stack[i].ty;
-            // The operand may still be read from its place (a local or global), so
-            // a non-`Copy` `GcRef` is cloned rather than moved.
-            let code = self.move_val(&self.stack[i])?;
             let name = self.fresh_temp();
+            // The slot is overwritten by the temporary below, so a `Copy`
+            // operand's code is moved out; a non-`Copy` `GcRef` may still be
+            // read from its place (a local or global) and is cloned instead.
+            let old = std::mem::replace(
+                &mut self.stack[i],
+                Val {
+                    code: name.clone(),
+                    ty,
+                    stable: true,
+                    may_trap: false,
+                },
+            );
+            let code = self.move_val_owned(old)?;
             self.line(format!(
                 "let {name}: {} = {code};",
                 rust_type(ty, self.ctx.type_kinds)?
             ));
-            self.stack[i] = Val {
-                code: name,
-                ty,
-                stable: true,
-                may_trap: false,
-            };
         }
         Ok(())
     }
