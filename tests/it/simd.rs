@@ -1545,7 +1545,12 @@ fn float_lane_rounding_quiets_signaling_nan_in_source() {
 
 #[test]
 fn float_lane_rounding_signaling_nan_result_is_quiet() {
-    let funcs: String = SNAN_ROUND_OPS
+    // f32 lanes only: the bit check below reads the low f32 lane.
+    let f32_ops: Vec<_> = SNAN_ROUND_OPS
+        .iter()
+        .filter(|(op, _)| op.starts_with("f32x4"))
+        .collect();
+    let funcs: String = f32_ops
         .iter()
         .map(|(op, _)| {
             format!(
@@ -1555,7 +1560,7 @@ fn float_lane_rounding_signaling_nan_result_is_quiet() {
         })
         .collect();
     // The quiet bit (bit 22) of the f32 result must be set for every op.
-    let checks: String = (0..SNAN_ROUND_OPS.len())
+    let checks: String = (0..f32_ops.len())
         .map(|i| format!("assert_ne!(func{i}() as u32 & 0x0040_0000, 0, \"op {i}\");\n"))
         .collect();
     expect_ok(
