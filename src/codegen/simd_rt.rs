@@ -731,6 +731,19 @@ fn scalar_body(lane: &Lane) -> Vec<String> {
     lines
 }
 
+/// The per-lane cast `x as out`. A float->float cast (`demote`/`promote`) also
+/// quiets a NaN result: the hardware conversion does, but LLVM can fold a
+/// promote/demote pair to the identity and leak a signaling NaN (see the scalar
+/// `quiet_f32`).
+fn lane_cast(in_elem: &str, out_elem: &str) -> String {
+    let is_float = |t: &str| t.starts_with('f');
+    if is_float(in_elem) && is_float(out_elem) {
+        format!("{{ let c = x as {out_elem}; if c.is_nan() {{ c + c }} else {{ c }} }}")
+    } else {
+        format!("x as {out_elem}")
+    }
+}
+
 /// The source lines of one width-changing helper. All but `Narrow` are output
 /// driven (iterate output lanes, widen source lane(s), write). `Extend` casts
 /// each source lane at offset `off` up to `out_elem`. `ExtMul` reads a matching
@@ -766,7 +779,8 @@ fn wide_lines(w: &Wide) -> Vec<String> {
                 "        let x = {in_elem}::from_le_bytes(a[s..s + {in_bytes}].try_into().unwrap());"
             ),
             format!(
-                "        r[o..o + {out_bytes}].copy_from_slice(&(x as {out_elem}).to_le_bytes());"
+                "        r[o..o + {out_bytes}].copy_from_slice(&({}).to_le_bytes());",
+                lane_cast(in_elem, out_elem)
             ),
             format!("        o += {out_bytes};"),
             format!("        s += {in_bytes};"),
@@ -813,7 +827,8 @@ fn wide_lines(w: &Wide) -> Vec<String> {
                 "        let x = {in_elem}::from_le_bytes(a[s..s + {in_bytes}].try_into().unwrap());"
             ),
             format!(
-                "        r[o..o + {out_bytes}].copy_from_slice(&(x as {out_elem}).to_le_bytes());"
+                "        r[o..o + {out_bytes}].copy_from_slice(&({}).to_le_bytes());",
+                lane_cast(in_elem, out_elem)
             ),
             format!("        o += {out_bytes};"),
             format!("        s += {in_bytes};"),
