@@ -1544,7 +1544,11 @@ fn dispatch_method_block(
     let mut inner: Vec<String> = Vec::new();
     for ti in ordered {
         inner.push(String::new());
-        inner.extend(dispatch_method_lines(ctx, ti, has_imports)?);
+        inner.extend(dispatch_method_lines(ctx, ti, has_imports, false)?);
+        if ctx.has_tc_dispatch(ti) {
+            inner.push(String::new());
+            inner.extend(dispatch_method_lines(ctx, ti, has_imports, true)?);
+        }
     }
     Ok(inner)
 }
@@ -1977,6 +1981,7 @@ fn dispatch_method_lines(
     ctx: &ModuleCtx<'_>,
     type_index: u32,
     has_imports: bool,
+    tc: bool,
 ) -> Result<Vec<String>, TranspileError> {
     let sig = ctx
         .types
@@ -1988,6 +1993,14 @@ fn dispatch_method_lines(
     for (k, ty) in sig.params.iter().enumerate() {
         params.push_str(&format!(", a{k}: {}", rust_type(*ty, ctx.type_kinds)?));
     }
+    if tc {
+        params.push_str(&format!(", __tc: &mut {}", ctx.tc_type(&sig.results)?));
+    }
+    let name = if tc {
+        format!("call_ref_t{type_index}_tc")
+    } else {
+        format!("call_ref_t{type_index}")
+    };
     let ret = match sig.results.as_slice() {
         [] => String::new(),
         [ty] => format!(" -> {}", rust_type(*ty, ctx.type_kinds)?),
@@ -2000,11 +2013,15 @@ fn dispatch_method_lines(
     let sep = if arg_list.is_empty() { "" } else { ", " };
 
     let mut lines = vec![
-        format!("pub fn call_ref_t{type_index}({params}){ret} {{"),
+        format!("pub fn {name}({params}){ret} {{"),
         "    match f {".to_string(),
     ];
     for &fidx in targets {
-        let expr = ctx.call_expr(fidx, &arg_list);
+        let expr = if tc && ctx.has_tc_variant(fidx) {
+            format!("self.func{fidx}_tc({arg_list}{sep}__tc)")
+        } else {
+            ctx.call_expr(fidx, &arg_list)
+        };
         lines.push(format!("        {fidx}u32 => {expr},"));
     }
     // The high bit tags an external handle the host resolves (see the trait's

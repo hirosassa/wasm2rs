@@ -2,9 +2,9 @@ use wasmparser::ValType;
 
 use super::super::helpers::table_accessor;
 use super::super::{
-    ALLOW, FLATTEN_DEPTH_THRESHOLD, GenMeta, Node, Rt, SplitPlan, Val, can_flatten, default_value,
-    estimate_body_len, flatten_body, index_u32, push_body_line, render_body_into, rust_type,
-    rust_types,
+    ALLOW, FLATTEN_DEPTH_THRESHOLD, GenMeta, ModuleCtx, Node, Rt, SplitPlan, Val, can_flatten,
+    default_value, estimate_body_len, flatten_body, index_u32, push_body_line, render_body_into,
+    rust_type, rust_types,
 };
 use super::CatchPhase;
 use crate::TranspileError;
@@ -29,13 +29,127 @@ impl<'a> super::FuncGen<'a> {
     /// `return_call`: a tail call. The callee is invoked in tail position and
     /// its result(s) become this function's result, so — unlike a plain `call`
     /// — the operand stack below the arguments is discarded (control does not
-    /// return here) and the call is emitted as a `return`. This lowers to an
-    /// ordinary Rust call in tail position: exact in semantics, but without a
-    /// constant-stack guarantee (Rust has no guaranteed TCO), matching wasm2c's
-    /// default lowering.
+    /// return here) and the call is emitted as a `return`.
+    ///
+    /// Rust has no guaranteed TCO, so a callee that itself tail-calls (it has a
+    /// `func{N}_tc` body, see [`ModuleCtx::has_tc_variant`]) is not called
+    /// directly: the call is parked in the caller's trampoline slot and the
+    /// caller's wrapper runs it after this frame is gone, keeping the stack
+    /// constant across any chain of tail calls. A callee without tail calls cannot
+    /// extend the chain, so it stays an ordinary call in tail position.
     pub(super) fn return_call(&mut self, function_index: u32) -> Result<(), TranspileError> {
+        if self.self_loop == Some(function_index) {
+            return self.emit_self_tail_loop();
+        }
+        if self.tc_enabled && self.ctx.has_tc_variant(function_index as usize) {
+            let (params, _) = self
+                .ctx
+                .full_sig(function_index as usize)
+                .ok_or_else(|| TranspileError::Unsupported("call to unknown function".into()))?;
+            let args = self.pop_bound_args(params.len())?;
+            let sep = if args.is_empty() { "" } else { ", " };
+            let receiver = if self.ctx.is_method { "__s." } else { "" };
+            self.park_tail_call(&format!(
+                "{receiver}func{function_index}_tc({args}{sep}__tc)"
+            ))?;
+            return self.emit_return();
+        }
         self.emit_direct_call(function_index, true)?;
         self.emit_return()
+    }
+
+    /// A `return_call` to the function itself: reassign the parameters from the
+    /// arguments (`local.set`, last first, so the usual spill-before-mutation
+    /// freezing keeps `(l1, l0)`-style swaps correct), reset every other mutated
+    /// local to its zero value (a tail call starts a fresh frame), and branch back
+    /// to the synthetic `loop` frame that wraps the body. Constant stack with no
+    /// allocation, unlike a parked call.
+    fn emit_self_tail_loop(&mut self) -> Result<(), TranspileError> {
+        let param_count = self.own_param_count()?;
+        for i in (0..param_count).rev() {
+            self.local_store(index_u32(i)?, false)?;
+        }
+        for i in param_count..self.local_types.len() {
+            let local = index_u32(i)?;
+            if self.mutable_locals.contains(local) {
+                let ty = self.local_ty(local)?;
+                self.line(format!(
+                    "l{i} = {};",
+                    default_value(ty, self.ctx.type_kinds)
+                ));
+            }
+        }
+        // The synthetic loop frame is the outermost one.
+        let depth = index_u32(self.frames.len().saturating_sub(1))?;
+        self.branch(depth, None)
+    }
+
+    /// The parameter count of the self-looping function.
+    fn own_param_count(&self) -> Result<usize, TranspileError> {
+        let own = self
+            .self_loop
+            .ok_or_else(|| TranspileError::Unsupported("self tail call outside a loop".into()))?;
+        self.ctx
+            .full_sig(own as usize)
+            .map(|(params, _)| params.len())
+            .ok_or_else(|| TranspileError::Unsupported("call to unknown function".into()))
+    }
+
+    /// Pop `n` call arguments (in source order), bind each to a fresh `let` so
+    /// it is evaluated here rather than when a parked call finally runs, and
+    /// return them as a comma-separated list of the bound names.
+    fn pop_bound_args(&mut self, n: usize) -> Result<String, TranspileError> {
+        let mut args = Vec::with_capacity(n);
+        for _ in 0..n {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+        self.bind_args(args)
+    }
+
+    /// Bind already-popped `args` (source order) to fresh `let`s; see
+    /// [`Self::pop_bound_args`].
+    fn bind_args(&mut self, args: Vec<Val>) -> Result<String, TranspileError> {
+        let mut names = Vec::with_capacity(args.len());
+        for a in args {
+            let name = self.fresh_temp();
+            let ty = rust_type(a.ty, self.ctx.type_kinds)?;
+            let code = self.move_val(&a)?;
+            self.line(format!("let {name}: {ty} = {code};"));
+            names.push(name);
+        }
+        Ok(names.join(", "))
+    }
+
+    /// Park a `call_ref_t{ti}_tc` dispatch of `entry` with `arg_list` and return
+    /// from the function.
+    fn park_dispatch(
+        &mut self,
+        type_index: u32,
+        entry: &str,
+        arg_list: &str,
+    ) -> Result<(), TranspileError> {
+        let sep = if arg_list.is_empty() { "" } else { ", " };
+        self.park_tail_call(&format!(
+            "__s.call_ref_t{type_index}_tc({entry}{sep}{arg_list}, __tc)"
+        ))?;
+        self.emit_return()
+    }
+
+    /// Park `call` (an expression over `__s` and `__tc`) in the trampoline slot
+    /// and push placeholder results: the caller's wrapper discards them and runs
+    /// the parked call instead. [`Self::emit_return`] then leaves the function.
+    fn park_tail_call(&mut self, call: &str) -> Result<(), TranspileError> {
+        self.line(format!("__tc.set(move |__s, __tc| {call});"));
+        for ty in self.results.clone() {
+            self.push(Val {
+                code: default_value(ty, self.ctx.type_kinds).to_string(),
+                ty,
+                stable: true,
+                may_trap: false,
+            });
+        }
+        Ok(())
     }
 
     /// Shared lowering for `call` and `return_call`. Consumes the arguments,
@@ -87,8 +201,8 @@ impl<'a> super::FuncGen<'a> {
     }
 
     /// `return_call_indirect`: the tail-call form of `call_indirect`. See
-    /// [`Self::return_call`] for the tail-call semantics and their (absent)
-    /// constant-stack guarantee.
+    /// [`Self::return_call`] for the tail-call semantics; a table whose targets
+    /// tail-call is dispatched through the parked `call_ref_t{ti}_tc` twin.
     pub(super) fn return_call_indirect(
         &mut self,
         type_index: u32,
@@ -139,7 +253,12 @@ impl<'a> super::FuncGen<'a> {
             args.push(self.pop()?);
         }
         args.reverse();
-        let arg_list = self.join_call_args(args)?;
+        let use_tc = tail && self.tc_enabled && self.ctx.has_tc_dispatch(type_index);
+        let arg_list = if use_tc {
+            self.bind_args(args)?
+        } else {
+            self.join_call_args(args)?
+        };
 
         // No local function has the requested type. Without a host, every entry
         // mismatches, so the call always traps and control cannot continue past
@@ -164,12 +283,15 @@ impl<'a> super::FuncGen<'a> {
             "let {entry} = self.{table_get}()[{}];",
             self.table_index_expr(table_index, &index.code)
         ));
+        self.dispatch_sigs.insert(type_index);
+        if use_tc {
+            return self.park_dispatch(type_index, &entry, &arg_list);
+        }
 
         // Dispatch through the shared `call_ref_t{ti}` method (see
         // `dispatch_method_lines`): it holds the `match` on the funcref and is
         // also the public entry point the host uses to invoke a funcref the
         // module handed out. A null or wrong-type entry traps inside it.
-        self.dispatch_sigs.insert(type_index);
         let (prefix, temps) = self.result_binding(&results)?;
         let sep = if arg_list.is_empty() { "" } else { ", " };
         self.line(format!(
@@ -187,8 +309,8 @@ impl<'a> super::FuncGen<'a> {
     }
 
     /// `return_call_ref`: the tail-call form of `call_ref`. See
-    /// [`Self::return_call`] for the tail-call semantics and their (absent)
-    /// constant-stack guarantee.
+    /// [`Self::return_call`] for the tail-call semantics; targets that tail-call
+    /// are reached through the parked `call_ref_t{ti}_tc` twin.
     pub(super) fn return_call_ref(&mut self, type_index: u32) -> Result<(), TranspileError> {
         self.emit_call_ref(type_index, true)
     }
@@ -223,17 +345,25 @@ impl<'a> super::FuncGen<'a> {
             args.push(self.pop()?);
         }
         args.reverse();
-        let arg_list = self.join_call_args(args)?;
+        let use_tc = tail && self.tc_enabled && self.ctx.has_tc_dispatch(type_index);
+        let arg_list = if use_tc {
+            self.bind_args(args)?
+        } else {
+            self.join_call_args(args)?
+        };
 
         // Bind the funcref to a local first for borrow-safety: passing the
         // expression straight into the `&mut self` dispatch call could keep an
         // earlier borrow live across it. Copying out the `u32` releases it.
         let entry = self.fresh_temp();
         self.line(format!("let {entry} = ({}) as u32;", funcref.code));
+        self.dispatch_sigs.insert(type_index);
+        if use_tc {
+            return self.park_dispatch(type_index, &entry, &arg_list);
+        }
 
         // Dispatch through the shared `call_ref_t{ti}` method (see
         // `dispatch_method_lines`): it holds the `match` on the funcref.
-        self.dispatch_sigs.insert(type_index);
         let (prefix, temps) = self.result_binding(&results)?;
         let sep = if arg_list.is_empty() { "" } else { ", " };
         self.line(format!(
@@ -330,6 +460,76 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    /// Whether [`Self::finish`] will lower this body as a flattened state machine.
+    pub(in crate::codegen) fn would_flatten(&self) -> bool {
+        self.max_depth > FLATTEN_DEPTH_THRESHOLD && can_flatten(&self.cur)
+    }
+
+    /// Emit the second function of a tail-calling function's pair. With a
+    /// trampolined body (`tc_body`) it is the plain-named wrapper that runs the
+    /// body and then every call it parked, so callers (and the host) see the
+    /// ordinary signature. Without one (a flattened body cannot reach the slot) it
+    /// is the `_tc` forwarder other functions' parked calls resolve to.
+    #[expect(clippy::too_many_arguments, reason = "one-shot emission helper")]
+    fn push_tc_companion(
+        ctx: &ModuleCtx<'_>,
+        index: usize,
+        params: &[ValType],
+        results: &[ValType],
+        ret: &str,
+        tc_body: bool,
+        line_prefix: &str,
+        out: &mut String,
+    ) -> Result<(), TranspileError> {
+        let receiver = if ctx.is_method { "self." } else { "" };
+        // The plain parameter names, without the `mut` keyword the body may use.
+        let args = (0..params.len())
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let plain_params = Self::plain_params_src(ctx, params)?;
+        let mut lines = Vec::new();
+        if !ctx.is_method {
+            lines.push(ALLOW.to_string());
+        }
+        if tc_body {
+            lines.push(format!("pub fn func{index}({plain_params}){ret} {{"));
+            lines.push("    let mut __tc = Tc::new();".to_string());
+            let sep = if args.is_empty() { "" } else { ", " };
+            lines.push(format!(
+                "    let __r = {receiver}func{index}_tc({args}{sep}&mut __tc);"
+            ));
+            let state = if ctx.is_method { "self" } else { "&mut ()" };
+            lines.push(format!("    __tc.run({state}, __r)"));
+        } else {
+            let sep = if plain_params.is_empty() { "" } else { ", " };
+            let tc_ty = ctx.tc_type(results)?;
+            let head =
+                format!("pub fn func{index}_tc({plain_params}{sep}__tc: &mut {tc_ty}){ret} {{");
+            lines.push(head);
+            lines.push(format!("    {receiver}func{index}({args})"));
+        }
+        lines.push("}".to_string());
+        for line in lines {
+            out.push_str(line_prefix);
+            out.push_str(&line);
+            out.push('\n');
+        }
+        Ok(())
+    }
+
+    /// The `[&mut self, ]l0: T0, …` parameter list without `mut` keywords.
+    fn plain_params_src(ctx: &ModuleCtx<'_>, params: &[ValType]) -> Result<String, TranspileError> {
+        let mut parts = Vec::with_capacity(params.len().saturating_add(1));
+        if ctx.is_method {
+            parts.push("&mut self".to_string());
+        }
+        for (i, ty) in params.iter().enumerate() {
+            parts.push(format!("l{i}: {}", rust_type(*ty, ctx.type_kinds)?));
+        }
+        Ok(parts.join(", "))
+    }
+
     pub(super) fn end_function(&mut self) -> Result<(), TranspileError> {
         // If control falls off the end, the remaining stack values are the
         // results; otherwise a `return`/`br`/`unreachable` already produced them.
@@ -373,6 +573,15 @@ impl<'a> super::FuncGen<'a> {
             decls.append(&mut self.cur);
             self.cur = decls;
         }
+        let ctx = self.ctx;
+        let has_tc_variant = ctx.has_tc_variant(index);
+        if has_tc_variant {
+            self.used_rt.insert(Rt::Tc);
+        }
+        // The body of a function with tail calls takes the trampoline slot; its
+        // plain-named wrapper (or forwarder, when the body could not use the slot)
+        // follows the body.
+        let tc_body = has_tc_variant && self.tc_enabled;
         let mut params_src = String::new();
         // Stateful modules pass their memory/globals through `&mut self`.
         if self.ctx.is_method {
@@ -391,6 +600,13 @@ impl<'a> super::FuncGen<'a> {
                 "{keyword}l{i}: {}",
                 rust_type(*ty, self.ctx.type_kinds)?
             ));
+        }
+
+        if tc_body {
+            if !params_src.is_empty() {
+                params_src.push_str(", ");
+            }
+            params_src.push_str(&format!("__tc: &mut {}", self.ctx.tc_type(results)?));
         }
 
         let ret = match results {
@@ -472,7 +688,12 @@ impl<'a> super::FuncGen<'a> {
             out.push('\n');
         }
         out.push_str(line_prefix);
-        out.push_str(&format!("pub fn func{index}({params_src}){ret} {{\n"));
+        let body_name = if tc_body {
+            format!("func{index}_tc")
+        } else {
+            format!("func{index}")
+        };
+        out.push_str(&format!("pub fn {body_name}({params_src}){ret} {{\n"));
 
         // Render the deferred body (consuming it line by line so a huge function
         // is never held twice), then the tail expression at the body's level.
@@ -483,6 +704,10 @@ impl<'a> super::FuncGen<'a> {
 
         out.push_str(line_prefix);
         out.push_str("}\n");
+
+        if has_tc_variant {
+            Self::push_tc_companion(ctx, index, params, results, &ret, tc_body, line_prefix, out)?;
+        }
 
         // The sibling part functions follow the driver, at the same scope.
         for line in siblings {

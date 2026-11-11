@@ -97,6 +97,11 @@ pub(super) fn is_reserved(name: &str) -> bool {
     let numbered = |prefix: &str| {
         name.strip_prefix(prefix).is_some_and(|rest| {
             let rest = rest.strip_suffix("_mut").unwrap_or(rest);
+            // `func{N}_tc` is the trampolined body of a tail-calling function.
+            let rest = match rest.strip_suffix("_tc") {
+                Some(index) if prefix == "func" => index,
+                _ => rest,
+            };
             let rest = match rest.split_once("_part") {
                 Some((index, part)) if prefix == "func" && all_digits(part) => index,
                 _ => rest,
@@ -267,6 +272,7 @@ mod tests {
             "memory",
             "func0",
             "func12",
+            "func0_tc",
             "table1_mut",
             "r32",
             "r32_m2",
