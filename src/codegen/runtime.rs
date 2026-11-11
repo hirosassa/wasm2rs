@@ -263,7 +263,8 @@ fn trunc_lines(name: &str, ft: &str, it: &str, range: &str, cast: &str) -> Vec<S
     ]
 }
 
-/// A NaN result of `floor`/`ceil`/`trunc`/`nearest` must be quiet, but a host
+/// A NaN result of `floor`/`ceil`/`trunc`/`nearest` (and of `demote`/`promote`,
+/// which LLVM can fold to the identity) must be quiet, but a host
 /// without hardware rounding instructions (baseline x86_64) returns a signaling
 /// NaN input unchanged. `r + r` quiets a NaN (keeping sign and payload) and only
 /// runs for NaN, so ordinary results are untouched.

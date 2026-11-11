@@ -450,8 +450,8 @@ impl<'a> FuncGen<'a> {
             Operator::F32ConvertI64U => self.cast_through(ValType::F32, "u64", "f32")?,
             Operator::F64ConvertI32U => self.cast_through(ValType::F64, "u32", "f64")?,
             Operator::F64ConvertI64U => self.cast_through(ValType::F64, "u64", "f64")?,
-            Operator::F32DemoteF64 => self.cast_as(ValType::F32, "f32")?,
-            Operator::F64PromoteF32 => self.cast_as(ValType::F64, "f64")?,
+            Operator::F32DemoteF64 => self.cast_quieted(ValType::F32, "f32")?,
+            Operator::F64PromoteF32 => self.cast_quieted(ValType::F64, "f64")?,
             Operator::I32ReinterpretF32 => self.reinterpret(ValType::I32, "i32")?,
             Operator::I64ReinterpretF64 => self.reinterpret(ValType::I64, "i64")?,
             Operator::F32ReinterpretI32 => {

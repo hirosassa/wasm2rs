@@ -240,11 +240,7 @@ impl<'a> super::FuncGen<'a> {
     /// quiet regardless of the host's rounding implementation.
     pub(super) fn unop_round(&mut self, method: &str) -> Result<(), TranspileError> {
         let a = self.pop()?;
-        let rt = if a.ty == ValType::F32 {
-            Rt::QuietF32
-        } else {
-            Rt::QuietF64
-        };
+        let rt = quiet_rt(a.ty);
         self.used_rt.insert(rt);
         self.push_combined(
             format!("{}(({}).{method}())", rt_name(rt), a.code),
@@ -299,6 +295,20 @@ impl<'a> super::FuncGen<'a> {
         target: &str,
     ) -> Result<(), TranspileError> {
         self.convert(result_ty, |x| format!("({x} as {target})"))
+    }
+
+    /// A float->float cast (`demote`/`promote`) whose NaN result is quieted. The
+    /// hardware conversion quiets a signaling NaN, but LLVM folds
+    /// `(x as f64) as f32` to `x`, leaking the signaling NaN (seen on x86_64), so
+    /// the quiet bit is set explicitly. Non-NaN results are untouched.
+    pub(super) fn cast_quieted(
+        &mut self,
+        result_ty: ValType,
+        target: &str,
+    ) -> Result<(), TranspileError> {
+        let rt = quiet_rt(result_ty);
+        self.used_rt.insert(rt);
+        self.convert(result_ty, |x| format!("{}(({x} as {target}))", rt_name(rt)))
     }
 
     /// A cast that first reinterprets `operand as via` and then casts the result
@@ -356,5 +366,14 @@ impl<'a> super::FuncGen<'a> {
             a.ty,
             &[&cond, &a, &b],
         )
+    }
+}
+
+/// The NaN-quieting runtime helper for a float type.
+fn quiet_rt(ty: ValType) -> Rt {
+    if ty == ValType::F32 {
+        Rt::QuietF32
+    } else {
+        Rt::QuietF64
     }
 }
