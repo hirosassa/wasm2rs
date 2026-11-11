@@ -15,11 +15,14 @@ impl<'a> super::FuncGen<'a> {
     /// Join call arguments into a comma-separated list, cloning any argument
     /// that lowers to the non-`Copy` `GcRef` (see [`Self::move_val`]).
     fn join_call_args(&self, args: Vec<Val>) -> Result<String, TranspileError> {
-        let mut parts = Vec::with_capacity(args.len());
-        for a in args {
-            parts.push(self.move_val(&a)?);
+        let mut out = String::with_capacity(args.iter().map(|a| a.code.len() + 2).sum());
+        for (i, a) in args.into_iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&self.move_val_owned(a)?);
         }
-        Ok(parts.join(", "))
+        Ok(out)
     }
 
     pub(super) fn call(&mut self, function_index: u32) -> Result<(), TranspileError> {
@@ -220,7 +223,7 @@ impl<'a> super::FuncGen<'a> {
         // the function's `return`.
         let call_expr = self.ctx.call_expr(function_index as usize, &arg_list);
         let (prefix, temps) = self.result_binding(&results)?;
-        self.line(format!("{prefix}{call_expr};"));
+        self.line([prefix.as_str(), &call_expr, ";"].concat());
         self.push_temps(temps);
         Ok(())
     }

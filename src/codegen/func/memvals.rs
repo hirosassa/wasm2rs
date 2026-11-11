@@ -30,6 +30,16 @@ impl<'a> super::FuncGen<'a> {
         })
     }
 
+    /// Like [`move_val`](Self::move_val), but consumes the value so a `Copy`
+    /// operand's code is moved out rather than cloned.
+    pub(super) fn move_val_owned(&self, v: Val) -> Result<String, TranspileError> {
+        Ok(if rust_type(v.ty, self.ctx.type_kinds)? == "GcRef" {
+            format!("({}).clone()", v.code)
+        } else {
+            v.code
+        })
+    }
+
     // ----- locals ----------------------------------------------------------
 
     /// `local.get`: push the local's expression. A local that is never mutated
