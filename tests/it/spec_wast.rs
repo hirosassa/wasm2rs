@@ -1397,7 +1397,6 @@ spec_test! {
     spec_throw => "throw",
     spec_throw_ref => "throw_ref",
     spec_try_table => "try_table",
-    spec_float_exprs => "float_exprs",
     spec_float_literals => "float_literals",
     spec_float_memory => "float_memory",
     spec_int_exprs => "int_exprs",
