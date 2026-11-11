@@ -7,6 +7,28 @@ Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library),
 [component-exports-design.md](component-exports-design.md) (the export side that `incoming-handler`
 needs).
 
+## At a glance
+
+The typed WASI preview2 host is the `wasm2rs-wasi` crate (`WasiHost` and the `Host` trait for the whole
+WASI 0.2.0 surface; `examples/wasip2_run.rs` runs a component with it). Its general design (streams, the
+TCP send queue, error reporting, limitations) is in [typed-host-design.md](typed-host-design.md). Every
+method of `wasi:http` 0.2.0 is implemented:
+
+- **Outgoing side:** `fields`, `request-options`, `outgoing-request` with its `outgoing-body` (buffered,
+  1 MiB by default, `max_request_body`; request trailers go to `HttpRequest::trailers`),
+  `outgoing-handler.handle`, the receive side (`future-incoming-response`, `incoming-response`,
+  `incoming-body`) and `future-trailers`, on top of an `HttpClient` set on the builder.
+- **`UreqClient`**, an `ureq` client behind the `http-client` feature: no redirects, `ureq`'s default
+  TLS, no trailers either way (a request with trailers is refused).
+- **Incoming side** (a guest exporting `incoming-handler#handle`: `incoming-request`,
+  `outgoing-response`, `response-outparam`), driven by the embedder through
+  `WasiHost::new_incoming_request`, `new_response_outparam` and `take_response`. `ServedResponse::body`
+  is a `ServedBody`, an `io::Read` that follows the guest's `outgoing-body`, so a body written after
+  `response-outparam.set` or after `handle` returns is streamed. Trailers: `IncomingRequestParts::trailers`
+  reach `future-trailers.get`; a response body's `finish` trailers come back from `ServedBody::trailers`.
+- **Serving over TCP:** `cargo run --release --example wasip2_serve -- component.wasm --listen 127.0.0.1:8080`
+  (details in "Serving over TCP" below).
+
 ## Starting point
 
 - Every resource handle is a `u32` newtype (`Fields`, `OutgoingRequest`, `IncomingBody`, ...); own and
