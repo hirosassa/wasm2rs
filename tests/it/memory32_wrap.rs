@@ -43,6 +43,20 @@ fn helpers_do_not_add_in_usize() {
     );
 }
 
+#[test]
+fn atomics_do_not_add_in_usize() {
+    let wat = r#"(module (memory 1 1 shared)
+      (func (export "run") (param i32) (result i32)
+        local.get 0 i32.atomic.load offset=8
+        local.get 0 i32.const 1 i32.atomic.rmw.add offset=8 i32.add))"#;
+    let generated = wasm2rs::transpile(&wat::parse_str(wat).unwrap()).unwrap();
+    assert!(generated.contains("atomic_load("), "{generated}");
+    assert!(
+        !generated.contains("as u32 as usize +"),
+        "atomic address computed in usize can wrap on 32-bit hosts:\n{generated}"
+    );
+}
+
 /// Run the generated code with a real 32-bit `usize` (wasm32 under node's
 /// WASI). Skipped when the target or node is not installed.
 #[test]
@@ -62,7 +76,8 @@ fn effective_address_overflow_traps_with_32bit_usize() {
     let program = format!(
         "{generated}\nfn main() {{ let mut m = Instance::new(); println!(\"RESULT {{}}\", m.func0()); }}\n"
     );
-    let dir = std::env::temp_dir().join("wasm2rs_memory32_wrap_w32");
+    let dir =
+        std::env::temp_dir().join(format!("wasm2rs_memory32_wrap_w32_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let (src, wasm, js) = (dir.join("m.rs"), dir.join("m.wasm"), dir.join("run.mjs"));
     std::fs::write(&src, program).unwrap();
