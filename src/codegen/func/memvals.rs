@@ -325,7 +325,7 @@ impl<'a> super::FuncGen<'a> {
         let addr = self.pop()?;
         let name = self.fresh_temp();
         self.line(format!(
-            "let {name} = self.memory.atomic_load(({}) as u32 as usize + {offset}usize, {}) as {};",
+            "let {name} = self.memory.atomic_load(usize::try_from(({}) as u32 as u64 + {offset}u64).unwrap_or(usize::MAX), {}) as {};",
             addr.code,
             Self::atomic_access_width(helper),
             shared_result_ty(ty)
@@ -355,7 +355,7 @@ impl<'a> super::FuncGen<'a> {
         let value = self.pop()?;
         let addr = self.pop()?;
         self.line(format!(
-            "self.memory.atomic_store(({}) as u32 as usize + {offset}usize, {}, ({}) as u64);",
+            "self.memory.atomic_store(usize::try_from(({}) as u32 as u64 + {offset}u64).unwrap_or(usize::MAX), {}, ({}) as u64);",
             addr.code,
             Self::atomic_access_width(helper),
             value.code
@@ -458,7 +458,7 @@ impl<'a> super::FuncGen<'a> {
             let rust_ty = shared_result_ty(ty);
             let old = self.fresh_temp();
             self.line(format!(
-                "let {old} = self.memory.atomic_rmw(({}) as u32 as usize + {offset}usize, {byte}, {code}, ({}) as u64) as {rust_ty};",
+                "let {old} = self.memory.atomic_rmw(usize::try_from(({}) as u32 as u64 + {offset}u64).unwrap_or(usize::MAX), {byte}, {code}, ({}) as u64) as {rust_ty};",
                 addr.code, value.code
             ));
             self.push(Val {
@@ -523,7 +523,7 @@ impl<'a> super::FuncGen<'a> {
             let rust_ty = shared_result_ty(ty);
             let old = self.fresh_temp();
             self.line(format!(
-                "let {old} = self.memory.atomic_cmpxchg(({}) as u32 as usize + {offset}usize, {byte}, ({}) as u64, ({}) as u64) as {rust_ty};",
+                "let {old} = self.memory.atomic_cmpxchg(usize::try_from(({}) as u32 as u64 + {offset}u64).unwrap_or(usize::MAX), {byte}, ({}) as u64, ({}) as u64) as {rust_ty};",
                 addr.code, expected.code, replacement.code
             ));
             self.push(Val {

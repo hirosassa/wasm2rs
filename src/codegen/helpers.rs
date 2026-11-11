@@ -313,7 +313,7 @@ fn widen_helper_lines(helper: Helper, max_pages: Option<u64>, base: Vec<String>)
                 line.replace("addr: i32", "addr: i64")
                     .replace("offset: u32", "offset: u64")
                     .replace(
-                        "addr as u32 as usize + offset as usize",
+                        "usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX)",
                         "(addr as u64).saturating_add(offset).min(isize::MAX as u64) as usize",
                     )
             })
@@ -425,139 +425,139 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
     match helper {
         Helper::LoadI32 => owned(&[
             "fn r32(&self, addr: i32, offset: u32) -> i32 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    i32::from_le_bytes(self.mem()[a..a + 4].try_into().unwrap())",
             "}",
         ]),
         Helper::Load8U => owned(&[
             "fn r8u(&self, addr: i32, offset: u32) -> i32 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem()[a] as i32",
             "}",
         ]),
         Helper::Load8S => owned(&[
             "fn r8s(&self, addr: i32, offset: u32) -> i32 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem()[a] as i8 as i32",
             "}",
         ]),
         Helper::Load16U => owned(&[
             "fn r16u(&self, addr: i32, offset: u32) -> i32 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    u16::from_le_bytes(self.mem()[a..a + 2].try_into().unwrap()) as i32",
             "}",
         ]),
         Helper::Load16S => owned(&[
             "fn r16s(&self, addr: i32, offset: u32) -> i32 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    i16::from_le_bytes(self.mem()[a..a + 2].try_into().unwrap()) as i32",
             "}",
         ]),
         Helper::StoreI32 => owned(&[
             "fn w32(&mut self, addr: i32, offset: u32, value: i32) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem_mut()[a..a + 4].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::Store8 => owned(&[
             "fn w8(&mut self, addr: i32, offset: u32, value: i32) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem_mut()[a] = value as u8;",
             "}",
         ]),
         Helper::Store16 => owned(&[
             "fn w16(&mut self, addr: i32, offset: u32, value: i32) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem_mut()[a..a + 2].copy_from_slice(&(value as u16).to_le_bytes());",
             "}",
         ]),
         Helper::LoadI64 => owned(&[
             "fn r64(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    i64::from_le_bytes(self.mem()[a..a + 8].try_into().unwrap())",
             "}",
         ]),
         Helper::LoadF32 => owned(&[
             "fn rf32(&self, addr: i32, offset: u32) -> f32 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    f32::from_le_bytes(self.mem()[a..a + 4].try_into().unwrap())",
             "}",
         ]),
         Helper::LoadF64 => owned(&[
             "fn rf64(&self, addr: i32, offset: u32) -> f64 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    f64::from_le_bytes(self.mem()[a..a + 8].try_into().unwrap())",
             "}",
         ]),
         Helper::Load8UI64 => owned(&[
             "fn r8u64(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem()[a] as i64",
             "}",
         ]),
         Helper::Load8SI64 => owned(&[
             "fn r8s64(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem()[a] as i8 as i64",
             "}",
         ]),
         Helper::Load16UI64 => owned(&[
             "fn r16u64(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    u16::from_le_bytes(self.mem()[a..a + 2].try_into().unwrap()) as i64",
             "}",
         ]),
         Helper::Load16SI64 => owned(&[
             "fn r16s64(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    i16::from_le_bytes(self.mem()[a..a + 2].try_into().unwrap()) as i64",
             "}",
         ]),
         Helper::Load32UI64 => owned(&[
             "fn r32u64(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    u32::from_le_bytes(self.mem()[a..a + 4].try_into().unwrap()) as i64",
             "}",
         ]),
         Helper::Load32SI64 => owned(&[
             "fn r32s64(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    i32::from_le_bytes(self.mem()[a..a + 4].try_into().unwrap()) as i64",
             "}",
         ]),
         Helper::StoreI64 => owned(&[
             "fn w64(&mut self, addr: i32, offset: u32, value: i64) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem_mut()[a..a + 8].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::StoreF32 => owned(&[
             "fn wf32(&mut self, addr: i32, offset: u32, value: f32) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem_mut()[a..a + 4].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::StoreF64 => owned(&[
             "fn wf64(&mut self, addr: i32, offset: u32, value: f64) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem_mut()[a..a + 8].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::Store8I64 => owned(&[
             "fn w8_64(&mut self, addr: i32, offset: u32, value: i64) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem_mut()[a] = value as u8;",
             "}",
         ]),
         Helper::Store16I64 => owned(&[
             "fn w16_64(&mut self, addr: i32, offset: u32, value: i64) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem_mut()[a..a + 2].copy_from_slice(&(value as u16).to_le_bytes());",
             "}",
         ]),
         Helper::Store32I64 => owned(&[
             "fn w32_64(&mut self, addr: i32, offset: u32, value: i64) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem_mut()[a..a + 4].copy_from_slice(&(value as u32).to_le_bytes());",
             "}",
         ]),
@@ -566,7 +566,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         // panics (a wasm trap).
         Helper::LoadV128 => owned(&[
             "fn rv128(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let mut b = [0u8; 16];",
             "    b.copy_from_slice(&self.mem()[a..a + 16]);",
             "    u128::from_le_bytes(b)",
@@ -574,7 +574,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::StoreV128 => owned(&[
             "fn wv128(&mut self, addr: i32, offset: u32, value: u128) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem_mut()[a..a + 16].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
@@ -583,13 +583,13 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         // access is bounds-checked, so an out-of-range read traps.
         Helper::Load8Splat => owned(&[
             "fn load8_splat(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    u128::from_le_bytes([self.mem()[a]; 16])",
             "}",
         ]),
         Helper::Load16Splat => owned(&[
             "fn load16_splat(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let lane = [self.mem()[a], self.mem()[a + 1]];",
             "    let mut b = [0u8; 16];",
             "    let mut i = 0;",
@@ -602,7 +602,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Load32Splat => owned(&[
             "fn load32_splat(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let lane = [self.mem()[a], self.mem()[a + 1], self.mem()[a + 2], self.mem()[a + 3]];",
             "    let mut b = [0u8; 16];",
             "    let mut i = 0;",
@@ -615,7 +615,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Load64Splat => owned(&[
             "fn load64_splat(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let mut b = [0u8; 16];",
             "    b[0..8].copy_from_slice(&self.mem()[a..a + 8]);",
             "    b.copy_within(0..8, 8);",
@@ -624,7 +624,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Load32Zero => owned(&[
             "fn load32_zero(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let mut b = [0u8; 16];",
             "    b[0..4].copy_from_slice(&self.mem()[a..a + 4]);",
             "    u128::from_le_bytes(b)",
@@ -632,7 +632,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Load64Zero => owned(&[
             "fn load64_zero(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let mut b = [0u8; 16];",
             "    b[0..8].copy_from_slice(&self.mem()[a..a + 8]);",
             "    u128::from_le_bytes(b)",
@@ -643,7 +643,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         // bytes are bounds-checked, so an out-of-range read traps.
         Helper::Load8x8S => owned(&[
             "fn load8x8_s(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let mut r = [0u8; 16];",
             "    let mut i = 0;",
             "    while i < 8 {",
@@ -656,7 +656,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Load8x8U => owned(&[
             "fn load8x8_u(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let mut r = [0u8; 16];",
             "    let mut i = 0;",
             "    while i < 8 {",
@@ -669,7 +669,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Load16x4S => owned(&[
             "fn load16x4_s(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let mut r = [0u8; 16];",
             "    let mut i = 0;",
             "    while i < 4 {",
@@ -683,7 +683,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Load16x4U => owned(&[
             "fn load16x4_u(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let mut r = [0u8; 16];",
             "    let mut i = 0;",
             "    while i < 4 {",
@@ -697,7 +697,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Load32x2S => owned(&[
             "fn load32x2_s(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let mut r = [0u8; 16];",
             "    let mut i = 0;",
             "    while i < 2 {",
@@ -711,7 +711,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Load32x2U => owned(&[
             "fn load32x2_u(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let mut r = [0u8; 16];",
             "    let mut i = 0;",
             "    while i < 2 {",
@@ -728,7 +728,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         // is a validated lane index, so the byte range is always in bounds.
         Helper::Load8Lane => owned(&[
             "fn load8_lane(&self, addr: i32, offset: u32, value: u128, lane: usize) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let mut b = value.to_le_bytes();",
             "    b[lane] = self.mem()[a];",
             "    u128::from_le_bytes(b)",
@@ -736,7 +736,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Load16Lane => owned(&[
             "fn load16_lane(&self, addr: i32, offset: u32, value: u128, lane: usize) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let o = lane * 2;",
             "    let mut b = value.to_le_bytes();",
             "    b[o..o + 2].copy_from_slice(&self.mem()[a..a + 2]);",
@@ -745,7 +745,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Load32Lane => owned(&[
             "fn load32_lane(&self, addr: i32, offset: u32, value: u128, lane: usize) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let o = lane * 4;",
             "    let mut b = value.to_le_bytes();",
             "    b[o..o + 4].copy_from_slice(&self.mem()[a..a + 4]);",
@@ -754,7 +754,7 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Load64Lane => owned(&[
             "fn load64_lane(&self, addr: i32, offset: u32, value: u128, lane: usize) -> u128 {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let o = lane * 8;",
             "    let mut b = value.to_le_bytes();",
             "    b[o..o + 8].copy_from_slice(&self.mem()[a..a + 8]);",
@@ -763,27 +763,27 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         ]),
         Helper::Store8Lane => owned(&[
             "fn store8_lane(&mut self, addr: i32, offset: u32, value: u128, lane: usize) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    self.mem_mut()[a] = value.to_le_bytes()[lane];",
             "}",
         ]),
         Helper::Store16Lane => owned(&[
             "fn store16_lane(&mut self, addr: i32, offset: u32, value: u128, lane: usize) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let o = lane * 2;",
             "    self.mem_mut()[a..a + 2].copy_from_slice(&value.to_le_bytes()[o..o + 2]);",
             "}",
         ]),
         Helper::Store32Lane => owned(&[
             "fn store32_lane(&mut self, addr: i32, offset: u32, value: u128, lane: usize) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let o = lane * 4;",
             "    self.mem_mut()[a..a + 4].copy_from_slice(&value.to_le_bytes()[o..o + 4]);",
             "}",
         ]),
         Helper::Store64Lane => owned(&[
             "fn store64_lane(&mut self, addr: i32, offset: u32, value: u128, lane: usize) {",
-            "    let a = addr as u32 as usize + offset as usize;",
+            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
             "    let o = lane * 8;",
             "    self.mem_mut()[a..a + 8].copy_from_slice(&value.to_le_bytes()[o..o + 8]);",
             "}",
