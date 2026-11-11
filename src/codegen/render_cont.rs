@@ -11,9 +11,9 @@ use crate::TranspileError;
 
 /// The module-scope typed-continuations runtime: the `StepResult` a step
 /// function returns, one `ContFrame{N}` per continuation-bodied function
-/// (holding its resumable program counter), and the `ContObj` union the handle
-/// table stores. Phase 4 continuation bodies have no parameters or locals, so a
-/// frame is just its `pc`.
+/// (holding its resumable state: `pc`, locals, surviving operands, `cont.bind`
+/// arguments and any nested checkpoint callee frame), and the `ContObj`
+/// union the handle table stores.
 pub(super) fn continuation_runtime_lines(
     ctx: &ModuleCtx<'_>,
 ) -> Result<Vec<String>, TranspileError> {
