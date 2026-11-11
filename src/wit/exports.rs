@@ -115,6 +115,16 @@ struct Shim {
     opaque: bool,
 }
 
+impl Shim {
+    /// A component whose contents are not read (an import or an alias).
+    fn opaque() -> Self {
+        Self {
+            opaque: true,
+            ..Self::default()
+        }
+    }
+}
+
 /// The component func index space of a shim being read.
 #[derive(Default)]
 struct ShimBuilder {
@@ -254,6 +264,8 @@ impl Reader {
                         ComponentTypeRef::Instance(_) => self.instances.push(Instance::Other),
                         // Counted as in `transpile_component`.
                         ComponentTypeRef::Module(_) => self.modules.push(None),
+                        // An opaque shim, as for an alias of a component.
+                        ComponentTypeRef::Component(_) => self.components.push(Shim::opaque()),
                         _ => {}
                     }
                 }
@@ -300,10 +312,7 @@ impl Reader {
                     .push(Func::Other("an alias of an export of an instance")),
                 ComponentExternalKind::Instance => self.instances.push(Instance::Other),
                 ComponentExternalKind::Module => self.modules.push(None),
-                ComponentExternalKind::Component => self.components.push(Shim {
-                    opaque: true,
-                    ..Shim::default()
-                }),
+                ComponentExternalKind::Component => self.components.push(Shim::opaque()),
                 _ => {}
             },
             ComponentAlias::CoreInstanceExport {
@@ -707,5 +716,18 @@ mod tests {
   (core module $a (func (export "f"))))"#,
         );
         assert_eq!(space, [None, Some(0)]);
+    }
+
+    #[test]
+    fn an_imported_component_takes_a_slot_in_the_component_index_space() {
+        let reader = read(
+            r#"(component
+  (import "c" (component $ic))
+  (component $inner))"#,
+        );
+        assert_eq!(reader.components.len(), 2);
+        assert!(reader.components[0].opaque);
+        // `$inner` lands at index 1, so an `Instantiated` index resolves to it.
+        assert!(!reader.components[1].opaque);
     }
 }
