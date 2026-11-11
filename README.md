@@ -56,6 +56,7 @@ Main flags (all of them are described in [docs/cli-reference.md](docs/cli-refere
 
 | Flag | Description |
 |---|---|
+| `--simd-intrinsics` | Emit `core::arch` (NEON/SSE2) bodies for the integer SIMD lane ops (add/sub/mul/neg/abs, saturating add/sub, `avgr_u`, integer compares); other targets keep the scalar loop. Bit-identical results, but the generated code contains `unsafe`. Off by default. |
 | `--unsafe-memory` | Emit linear-memory accesses without bounds checks. Faster, but an out-of-bounds access becomes undefined behavior. Off by default. |
 | `--jobs=N` | Threads used to generate function bodies; output is byte-identical for every value. `0` (default) = automatic. |
 | `--entry-exports=a,b` | Emit only the functions reachable from the listed exports (plus the start function). |

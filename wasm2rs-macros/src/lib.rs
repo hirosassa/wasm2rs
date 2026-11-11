@@ -9,7 +9,7 @@
 //! The path is a plain or raw string literal, relative to the crate's `CARGO_MANIFEST_DIR`; a leading
 //! `$OUT_DIR/` is replaced by the `OUT_DIR` of the crate being compiled, for a
 //! wasm file a build script produced. The options are `named_exports`,
-//! `unsafe_memory`, `named_imports`, `import_memory` and `reentrant_imports` (see
+//! `unsafe_memory`, `simd_intrinsics`, `named_imports`, `import_memory` and `reentrant_imports` (see
 //! `wasm2rs::TranspileOptions`). The invocation expands to
 //! the generated items, so wrap it in a `mod` to scope them.
 //!
@@ -160,8 +160,8 @@ fn resolve_path(path: &str, manifest_dir: &Path, out_dir: Option<&str>) -> Resul
 
 /// The option names `include_wasm!` accepts, for the error message (keep in step with
 /// the `match` in `generate` and the crate docs).
-const OPTIONS: &str = "`named_exports`, `unsafe_memory`, `named_imports`, `import_memory` or \
-                       `reentrant_imports`";
+const OPTIONS: &str = "`named_exports`, `unsafe_memory`, `simd_intrinsics`, `named_imports`, \
+                       `import_memory` or `reentrant_imports`";
 
 /// Read and transpile the wasm file at `path` with the named options.
 fn generate(path: &Path, options: &[String]) -> Result<String, String> {
@@ -170,6 +170,7 @@ fn generate(path: &Path, options: &[String]) -> Result<String, String> {
         match name.as_str() {
             "named_exports" => opts.named_exports = true,
             "unsafe_memory" => opts.unsafe_memory = true,
+            "simd_intrinsics" => opts.simd_intrinsics = true,
             "named_imports" => opts.named_imports = true,
             "import_memory" => opts.import_memory = true,
             "reentrant_imports" => opts.reentrant_imports = true,

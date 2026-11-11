@@ -144,6 +144,11 @@ pub(crate) struct ModuleCtx<'a> {
     /// default; when set, an out-of-bounds access is undefined behaviour rather
     /// than a wasm trap, so it is only sound for trusted modules.
     pub(crate) unsafe_memory: bool,
+    /// Opt-in: emit `core::arch` (NEON/SSE2) bodies for the integer SIMD lane
+    /// helpers that map to a bit-identical intrinsic, keeping the scalar loop as
+    /// the fallback. Adds `unsafe` (a same-size `transmute` and the intrinsic
+    /// calls) to the generated code, so it is off by default.
+    pub(crate) simd_intrinsics: bool,
     /// Opt-in call-depth limit (see `TranspileOptions::call_depth_limit`).
     pub(crate) call_depth_limit: Option<u32>,
     /// Every `Imports` method receives the `Instance` (see
@@ -614,6 +619,7 @@ pub(crate) fn build_ctx<'a>(
             casts,
         },
         unsafe_memory: parts.opts.unsafe_memory,
+        simd_intrinsics: parts.opts.simd_intrinsics,
         call_depth_limit: parts.opts.call_depth_limit,
         reentrant_imports: parts.reentrant_imports,
         split_dispatch: parts.opts.split_dispatch,
@@ -704,7 +710,7 @@ pub(crate) fn generate_module_pieces(
     // Free-function runtime helpers live at module scope, above the functions
     // (or the `struct Instance`) that call them, in both module shapes.
     let rt_helpers = render_rt_helpers(&deps.rt);
-    let simd_helpers = render_simd_helpers(&deps.simd);
+    let simd_helpers = render_simd_helpers(&deps.simd, ctx.simd_intrinsics);
 
     // The exception type, then the runtime helpers, precede the module body.
     let mut out = String::new();

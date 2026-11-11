@@ -190,6 +190,15 @@ pub struct TranspileOptions {
     /// `shared` memory.
     pub unsafe_memory: bool,
 
+    /// Emit `core::arch` (NEON on aarch64, SSE2 on x86_64) bodies for the
+    /// integer SIMD lane helpers (add/sub/mul/neg/abs, saturating add/sub,
+    /// `avgr_u`, integer compares) instead of the scalar per-lane loop, which
+    /// stays as the fallback on every other target. Results are bit-identical;
+    /// the generated code gains `unsafe` blocks (a same-size `transmute` and
+    /// intrinsic calls whose target feature the `cfg` guarantees), so it is off
+    /// by default. Float, shift and widening lane ops are unchanged.
+    pub simd_intrinsics: bool,
+
     /// Count the activations of the module's defined functions and trap with
     /// `call stack exhausted` (a `panic!`) when a call would nest deeper than this
     /// many frames (the `wasm2c` approach). Without it, unbounded guest recursion
@@ -279,6 +288,13 @@ impl TranspileOptions {
     #[must_use]
     pub fn with_unsafe_memory(mut self, unsafe_memory: bool) -> Self {
         self.unsafe_memory = unsafe_memory;
+        self
+    }
+
+    /// Set [`TranspileOptions::simd_intrinsics`].
+    #[must_use]
+    pub fn with_simd_intrinsics(mut self, simd_intrinsics: bool) -> Self {
+        self.simd_intrinsics = simd_intrinsics;
         self
     }
 

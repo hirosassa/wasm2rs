@@ -101,6 +101,7 @@ mod scenarios;
 mod select_op;
 mod simd;
 mod simd_coverage;
+mod simd_intrinsics;
 mod spec_wast;
 mod split;
 mod split_dispatch;

@@ -400,11 +400,11 @@ pub(super) fn is_helper(name: &str) -> bool {
 /// Render the used lane helpers as module-scope free functions, in [`LANE`],
 /// [`WIDE`], then [`REDUCE`] order, separated by blank lines. Empty string if
 /// none are used.
-pub(super) fn render_simd_helpers(used: &HashSet<&'static str>) -> String {
+pub(super) fn render_simd_helpers(used: &HashSet<&'static str>, intrinsics: bool) -> String {
     let mut blocks: Vec<String> = Vec::new();
     for lane in LANE {
         if used.contains(lane.name) {
-            blocks.push(lane_lines(lane).join("\n"));
+            blocks.push(lane_lines(lane, intrinsics).join("\n"));
         }
     }
     for w in WIDE {
@@ -496,23 +496,215 @@ fn combine_expr(lane: &Lane) -> String {
 
 /// The source lines of one lane helper: read each lane as `elem`, combine, and
 /// write the result back, iterating over the 16 bytes in `bytes`-wide steps.
-fn lane_lines(lane: &Lane) -> Vec<String> {
-    let &Lane {
-        name,
-        elem,
-        bytes,
-        shape,
-        ..
-    } = lane;
-    let sig = match shape {
+fn lane_lines(lane: &Lane, intrinsics: bool) -> Vec<String> {
+    let sig = match lane.shape {
         Shape::Unary => "a: u128",
         Shape::Binary => "a: u128, b: u128",
         Shape::Shift => "a: u128, s: i32",
     };
-    let mut lines = vec![
-        format!("fn {name}({sig}) -> u128 {{"),
-        "    let a = a.to_le_bytes();".to_string(),
-    ];
+    let mut lines = vec![format!("fn {}({sig}) -> u128 {{", lane.name)];
+    let arch = if intrinsics {
+        arch_blocks(lane)
+    } else {
+        Vec::new()
+    };
+    if arch.is_empty() {
+        lines.extend(scalar_body(lane));
+    } else {
+        // The scalar loop stays as the fallback for every target without an
+        // intrinsic path, so the helper compiles (and behaves identically)
+        // anywhere.
+        for (cfg, body) in &arch {
+            lines.push(format!("    #[cfg({cfg})]"));
+            lines.push("    {".to_string());
+            lines.extend(body.iter().map(|l| format!("        {l}")));
+            lines.push("    }".to_string());
+        }
+        let cfgs = arch
+            .iter()
+            .map(|(cfg, _)| *cfg)
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("    #[cfg(not(any({cfgs})))]"));
+        lines.push("    {".to_string());
+        lines.extend(scalar_body(lane).into_iter().map(|l| format!("    {l}")));
+        lines.push("    }".to_string());
+    }
+    lines.push("}".to_string());
+    lines
+}
+
+/// The `cfg` predicates under which the intrinsic paths are emitted. Both name
+/// the vector feature explicitly, so a soft-float target without it keeps the
+/// scalar fallback.
+const CFG_AARCH64: &str = "all(target_arch = \"aarch64\", target_feature = \"neon\")";
+const CFG_X86_64: &str = "all(target_arch = \"x86_64\", target_feature = \"sse2\")";
+
+/// An intrinsic path for one lane helper on one architecture: `prelude` binds
+/// the operands as vectors (empty when `expr` converts them inline), `expr` is
+/// the intrinsic call, and `invert` flips the result's bits (`!=`, `<=`, `>=`
+/// derived from the opposite compare).
+struct ArchOp {
+    prelude: String,
+    expr: String,
+    invert: bool,
+}
+
+/// The `core::arch` bodies of a lane helper, each with the `cfg` it applies
+/// under; empty when the op has no intrinsic mapping (floats, shifts, ...).
+///
+/// The only `unsafe` is `transmute` between `u128` and a 128-bit vector plus the
+/// intrinsic calls. It is sound because the `cfg` guarantees the target feature
+/// (so the intrinsics exist and are not UB), both sides are plain 16-byte
+/// integer data (every bit pattern is valid), and the mapped ops are those whose
+/// lane semantics are bit-identical to the scalar loop.
+fn arch_blocks(lane: &Lane) -> Vec<(&'static str, Vec<String>)> {
+    let mut blocks = Vec::new();
+    // Floats have per-lane NaN/sign rules the intrinsics do not reproduce.
+    if !(lane.elem.starts_with('i') || lane.elem.starts_with('u')) {
+        return blocks;
+    }
+    if let Some(op) = neon_op(lane) {
+        blocks.push((CFG_AARCH64, arch_body("aarch64", &op)));
+    }
+    if let Some(op) = sse2_op(lane) {
+        blocks.push((CFG_X86_64, arch_body("x86_64", &op)));
+    }
+    blocks
+}
+
+fn arch_body(arch: &str, op: &ArchOp) -> Vec<String> {
+    let (not, turbofish) = if op.invert {
+        ("!", "::<_, u128>")
+    } else {
+        ("", "")
+    };
+    vec![
+        format!("use core::arch::{arch}::*;"),
+        "use core::mem::transmute as t;".to_string(),
+        "// SAFETY: the cfg guarantees the vector feature, and `t` only reinterprets".to_string(),
+        "// 16 bytes of plain integer data.".to_string(),
+        format!(
+            "return {not}unsafe {{ {}{}t{turbofish}({}) }};",
+            op.prelude,
+            if op.prelude.is_empty() { "" } else { " " },
+            op.expr
+        ),
+    ]
+}
+
+/// A lane's NEON type suffix: `i8` -> `s8`, `u8` -> `u8`.
+fn neon_suffix(elem: &str) -> String {
+    elem.replacen('i', "s", 1)
+}
+
+/// The NEON intrinsic for `lane`, or `None` when it is not a bit-identical
+/// integer op (floats, shifts, i64 multiply, popcount, ...).
+fn neon_op(lane: &Lane) -> Option<ArchOp> {
+    let sfx = neon_suffix(lane.elem);
+    let ab = "t(a), t(b)";
+    let (name, args, invert) = match (&lane.combine, lane.shape) {
+        (Combine::Method("wrapping_add"), _) => ("vaddq", ab, false),
+        (Combine::Method("wrapping_sub"), _) => ("vsubq", ab, false),
+        // NEON has no 64-bit lane multiply.
+        (Combine::Method("wrapping_mul"), _) if lane.bytes < 8 => ("vmulq", ab, false),
+        (Combine::Method("wrapping_neg"), _) => ("vnegq", "t(a)", false),
+        (Combine::Method("wrapping_abs"), _) => ("vabsq", "t(a)", false),
+        (Combine::Method("saturating_add"), _) => ("vqaddq", ab, false),
+        (Combine::Method("saturating_sub"), _) => ("vqsubq", ab, false),
+        (Combine::Avgr, _) => ("vrhaddq", ab, false),
+        (Combine::Compare("=="), _) => ("vceqq", ab, false),
+        (Combine::Compare("!="), _) => ("vceqq", ab, true),
+        // NEON has no unsigned 64-bit ordering compare (wasm has none either).
+        (Combine::Compare("<"), _) => ("vcltq", ab, false),
+        (Combine::Compare(">"), _) => ("vcgtq", ab, false),
+        (Combine::Compare("<="), _) => ("vcleq", ab, false),
+        (Combine::Compare(">="), _) => ("vcgeq", ab, false),
+        _ => return None,
+    };
+    Some(ArchOp {
+        prelude: String::new(),
+        expr: format!("{name}_{sfx}({args})"),
+        invert,
+    })
+}
+
+/// The SSE2 intrinsic for `lane`, or `None` when SSE2 lacks it (64-bit
+/// compares, 32-bit multiply, abs, ...), in which case x86_64 keeps the scalar
+/// loop.
+fn sse2_op(lane: &Lane) -> Option<ArchOp> {
+    let bits = lane.bytes * 8;
+    let signed = lane.elem.starts_with('i');
+    let sfx = if signed { "epi" } else { "epu" };
+    let unary = matches!(lane.shape, Shape::Unary);
+    let bind = if unary {
+        "let a: __m128i = t(a);"
+    } else {
+        "let (a, b): (__m128i, __m128i) = (t(a), t(b));"
+    };
+    let plain = |expr: String, invert: bool| ArchOp {
+        prelude: bind.to_string(),
+        expr,
+        invert,
+    };
+    match &lane.combine {
+        Combine::Method("wrapping_add") => Some(plain(format!("_mm_add_epi{bits}(a, b)"), false)),
+        Combine::Method("wrapping_sub") => Some(plain(format!("_mm_sub_epi{bits}(a, b)"), false)),
+        Combine::Method("wrapping_mul") if lane.bytes == 2 => {
+            Some(plain("_mm_mullo_epi16(a, b)".to_string(), false))
+        }
+        Combine::Method("wrapping_neg") => Some(plain(
+            format!("_mm_sub_epi{bits}(_mm_setzero_si128(), a)"),
+            false,
+        )),
+        // SSE2 saturating add/sub exist for 8- and 16-bit lanes only.
+        Combine::Method("saturating_add") => {
+            Some(plain(format!("_mm_adds_{sfx}{bits}(a, b)"), false))
+        }
+        Combine::Method("saturating_sub") => {
+            Some(plain(format!("_mm_subs_{sfx}{bits}(a, b)"), false))
+        }
+        Combine::Avgr => Some(plain(format!("_mm_avg_epu{bits}(a, b)"), false)),
+        // SSE2 has no 64-bit compare (`pcmpeqq`/`pcmpgtq` are SSE4).
+        Combine::Compare(_) if lane.bytes == 8 => None,
+        Combine::Compare("==") => Some(plain(format!("_mm_cmpeq_epi{bits}(a, b)"), false)),
+        Combine::Compare("!=") => Some(plain(format!("_mm_cmpeq_epi{bits}(a, b)"), true)),
+        Combine::Compare(op @ ("<" | ">" | "<=" | ">=")) => {
+            // Only a signed greater-than exists: swap operands for `<`/`>=`,
+            // invert for `<=`/`>=`, and bias unsigned lanes by the sign bit so
+            // the signed compare orders them as unsigned.
+            let (x, y) = if matches!(*op, ">" | "<=") {
+                ("a", "b")
+            } else {
+                ("b", "a")
+            };
+            let invert = matches!(*op, "<=" | ">=");
+            let prelude = if signed {
+                bind.to_string()
+            } else {
+                format!(
+                    "{bind} let bias = _mm_set1_epi{bits}(i{bits}::MIN); \
+                     let (a, b) = (_mm_xor_si128(a, bias), _mm_xor_si128(b, bias));"
+                )
+            };
+            Some(ArchOp {
+                prelude,
+                expr: format!("_mm_cmpgt_epi{bits}({x}, {y})"),
+                invert,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The scalar per-lane loop (the body of a helper without intrinsics, or the
+/// fallback beside them): read each lane as `elem`, combine, and write the
+/// result back, iterating over the 16 bytes in `bytes`-wide steps.
+fn scalar_body(lane: &Lane) -> Vec<String> {
+    let &Lane {
+        elem, bytes, shape, ..
+    } = lane;
+    let mut lines = vec!["    let a = a.to_le_bytes();".to_string()];
     match shape {
         Shape::Binary => lines.push("    let b = b.to_le_bytes();".to_string()),
         Shape::Shift => lines.push(format!("    let k = (s as u32) % {};", bytes * 8)),
@@ -536,7 +728,6 @@ fn lane_lines(lane: &Lane) -> Vec<String> {
     lines.push(format!("        i += {bytes};"));
     lines.push("    }".to_string());
     lines.push("    u128::from_le_bytes(r)".to_string());
-    lines.push("}".to_string());
     lines
 }
 

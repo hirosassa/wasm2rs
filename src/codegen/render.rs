@@ -1774,7 +1774,7 @@ pub(super) fn render_lib_root(
         out.push_str(&rt_helpers);
         out.push('\n');
     }
-    let simd_helpers = super::render_simd_helpers(deps.simd);
+    let simd_helpers = super::render_simd_helpers(deps.simd, ctx.simd_intrinsics);
     if !simd_helpers.is_empty() {
         out.push_str(&simd_helpers);
         out.push('\n');
