@@ -14,13 +14,16 @@
 //! A continuation body may have locals (kept in the frame across suspends) and
 //! numeric parameters (injected by the first `resume` and decoded into their
 //! parameter locals at `pc == 0`). It may also contain nested structured
-//! control flow (`block`/`loop`/`if` and the branches into them), provided no
-//! `suspend` (nor a cross-call checkpoint) occurs *inside* a region — such a
-//! region uses Rust's own control flow and renders as a single straight-line
-//! chunk within one `pc` state. A `suspend` that crosses a region boundary
-//! would have to weave the `pc` machine through the nested structure and is
-//! rejected for now. The operand stack must still be empty at every suspend
-//! point. Anything else is rejected as `Unsupported` and revisited later.
+//! control flow (`block`/`loop`/`if` and the branches into them). A region with
+//! no `suspend`/`switch` inside it uses Rust's own control flow and renders as a
+//! single straight-line chunk within one `pc` state (the arm-splitting path,
+//! `emit_cont_step`). A `suspend` or `switch` that crosses a region
+//! boundary instead takes the flat path (`emit_cont_step_flat`), which
+//! weaves the `pc` machine through the nested structure and keeps any operands
+//! that outlive the suspend in the frame's `ostack`. At the top level of the
+//! arm-splitting path the operand stack must be empty at every suspend point.
+//! Anything unsupported (e.g. `try`/`try_table`, or `resume` inside a
+//! continuation body) is rejected as `Unsupported`.
 
 use wasmparser::{FunctionBody, HeapType, Operator, ValType};
 
