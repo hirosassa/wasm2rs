@@ -27,6 +27,11 @@ jobs:
           rustup default ${{ matrix.rust }}
           rustup target add wasm32-wasip1-threads
 
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: build-${{ matrix.rust }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Run cargo check
         run: cargo check
 
@@ -53,11 +58,17 @@ jobs:
 
       # The Rust wasi-threads E2E test must run here, not skip (see
       # docs/wasi-threads-e2e.md). The wasi-sdk tests skip here; the
-      # e2e-wasi-sdk job runs them.
+      # e2e-wasi-sdk job runs them. The full suite runs on stable only; beta and
+      # nightly just have to compile it.
       - name: Run cargo test
+        if: matrix.rust == 'stable'
         run: cargo test --release --workspace
         env:
           WASM2RS_REQUIRE_E2E: rust
+
+      - name: Build the tests (compile compatibility only)
+        if: matrix.rust != 'stable'
+        run: cargo test --release --workspace --no-run
 
   # The wasi-sdk E2E tests need a ~190MB toolchain, so they live in their own job
   # (cached) instead of slowing down every toolchain of the build matrix.
@@ -76,6 +87,11 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add wasm32-wasip1-threads
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: e2e-wasi-sdk
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cache wasi-sdk
         id: wasi-sdk-cache
@@ -118,6 +134,11 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add wasm32-wasip1-threads
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: e2e-emsdk
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cache emsdk
         id: emsdk-cache
@@ -183,6 +204,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust
         run: rustup toolchain install stable --component llvm-tools-preview
+      # Own key: --all-features and llvm-cov instrumentation differ from the other jobs.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
