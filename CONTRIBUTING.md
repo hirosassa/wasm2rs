@@ -98,7 +98,7 @@ make it pass, then refactor.
 [WebAssembly spec testsuite](https://github.com/WebAssembly/testsuite) (`.wast`),
 replayed by `tests/it/spec_wast.rs`: each `module` and the `assert_return` /
 `assert_trap` directives after it become one generated program. Directives the
-harness cannot express yet (imports, `register`, `assert_invalid`, multi-value,
+harness cannot express yet (imports, `register`, multi-value,
 v128/ref values, ...) are **skipped with a reason**, never dropped; run
 `cargo test --release --test it spec_wast -- --nocapture` to see the counts.
 

@@ -526,6 +526,26 @@ fn start_group(wasm: Vec<u8>) -> Result<Group, String> {
 /// A group for `(assert_trap (module ...) msg)`: the generated `main` only checks
 /// that building the instance traps. A module without an `Instance` (stateless) has
 /// no instantiation to trap, so it is skipped.
+/// Assert `transpile` rejects `module` (`what` is "invalid" or "malformed").
+/// Validation happens in `transpile` itself, so no generated program is needed; a
+/// module the text format cannot even encode is an `Err` (skipped).
+fn assert_rejected(
+    module: &mut QuoteWat<'_>,
+    message: &str,
+    what: &str,
+    ctx: &str,
+) -> Result<(), String> {
+    let wasm = encode_module(module)?;
+    assert!(
+        matches!(
+            wasm2rs::transpile(&wasm),
+            Err(wasm2rs::TranspileError::Parse(_))
+        ),
+        "{ctx}: {what} module was not rejected by validation (expected {message:?})"
+    );
+    Ok(())
+}
+
 fn trapping_instantiation(wasm: Vec<u8>, message: &str, ctx: &str) -> Result<Group, String> {
     let mut group = start_group(wasm)?;
     let ctor = group
@@ -630,8 +650,26 @@ fn run_wast(name: &str, src: &str) -> Report {
                     call_expr(g, invoke).map(|c| format!("let _ = {c};"))
                 }),
             ),
-            WastDirective::AssertInvalid { .. } => ("assert_invalid", Err("not run".into())),
-            WastDirective::AssertMalformed { .. } => ("assert_malformed", Err("not run".into())),
+            WastDirective::AssertInvalid {
+                module, message, ..
+            } => (
+                "assert_invalid",
+                assert_rejected(module, message, "invalid", &ctx).map(|()| {
+                    report.executed += 1;
+                    None
+                }),
+            ),
+            // A malformed *text* module is rejected by the wast parser before it reaches
+            // us (skipped); a malformed *binary* module must be rejected by `transpile`.
+            WastDirective::AssertMalformed {
+                module, message, ..
+            } => (
+                "assert_malformed",
+                assert_rejected(module, message, "malformed", &ctx).map(|()| {
+                    report.executed += 1;
+                    None
+                }),
+            ),
             WastDirective::AssertExhaustion { .. } => (
                 "assert_exhaustion",
                 Err("native stack overflow is not a trap".into()),
@@ -1165,13 +1203,12 @@ fn unsupported_directives_are_skipped_with_a_reason() {
 (register "imp" $imp)
 "#,
     );
-    // Only the first assertion is expressible.
-    assert_eq!(report.executed, 1);
+    // The first assertion and the `assert_invalid` (checked by validation) run.
+    assert_eq!(report.executed, 2);
     let reasons = report.skipped.join("\n");
     for needle in [
         "multi-value",
         "v128",
-        "assert_invalid",
         "assert_exhaustion",
         "imports",
         "register",
@@ -1181,9 +1218,9 @@ fn unsupported_directives_are_skipped_with_a_reason() {
             "no skip reason {needle:?} in:\n{reasons}"
         );
     }
-    // 2 unsupported assertions + invalid + exhaustion + import module + its
-    // assertion + register.
-    assert_eq!(report.skipped.len(), 7, "{reasons}");
+    // 2 unsupported assertions + exhaustion + import module + its assertion +
+    // register.
+    assert_eq!(report.skipped.len(), 6, "{reasons}");
 }
 
 /// A spec file that cannot be replayed yet because the transpiler rejects its

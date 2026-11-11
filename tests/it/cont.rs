@@ -50,6 +50,7 @@ fn cont_new_produces_non_null_handle() {
     compile_run(
         "cont_new_non_null",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (func $gen (result i32) i32.const 42)
@@ -69,6 +70,7 @@ fn generator_single_suspend() {
     compile_run(
         "cont_gen_single",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -98,6 +100,7 @@ fn generator_two_suspends() {
     compile_run(
         "cont_gen_two",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -130,6 +133,7 @@ fn generator_split_across_files() {
     compile_run_split(
         "cont_gen_split",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -163,6 +167,7 @@ fn suspend_propagates_across_a_call() {
     compile_run(
         "cont_call_propagate",
         r#"(module
+            (elem declare func $f)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -199,6 +204,7 @@ fn checkpoint_result_may_be_discarded() {
     compile_run(
         "cont_call_discard",
         r#"(module
+            (elem declare func $f)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -237,6 +243,7 @@ fn checkpoint_combined_with_a_region_suspend() {
     compile_run(
         "cont_checkpoint_in_region_body",
         r#"(module
+            (elem declare func $outer)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -276,6 +283,7 @@ fn statement_before_a_flat_checkpoint_runs_once() {
     compile_run(
         "cont_stmt_before_checkpoint",
         r#"(module
+            (elem declare func $outer)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -316,6 +324,7 @@ fn checkpoint_result_survives_a_later_region_suspend() {
     compile_run(
         "cont_checkpoint_then_region_suspend",
         r#"(module
+            (elem declare func $outer)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -353,6 +362,7 @@ fn local_survives_a_suspend() {
     compile_run(
         "cont_local_state",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -387,6 +397,7 @@ fn local_survives_a_cross_call_suspend() {
     compile_run(
         "cont_local_cross_call",
         r#"(module
+            (elem declare func $f)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -424,6 +435,7 @@ fn continuation_body_parameter_is_delivered_at_first_resume() {
     compile_run(
         "cont_param_first_resume",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (param i32) (result i32)))
             (type $ct (cont $ft))
             (func $gen (param $n i32) (result i32)
@@ -447,6 +459,7 @@ fn continuation_parameter_survives_a_suspend() {
     compile_run(
         "cont_param_suspend",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (param i32) (result i32)))
             (type $ct (cont $ft))
             (type $ft0 (func (result i32)))
@@ -485,6 +498,7 @@ fn resume_throw_raises_the_exception_at_the_suspend_point() {
     compile_run(
         "cont_resume_throw",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (type $ft0 (func (result i32)))
@@ -524,6 +538,7 @@ fn cont_bind_supplies_a_leading_parameter() {
     compile_run(
         "cont_bind_leading_param",
         r#"(module
+            (elem declare func $add)
             (type $ft (func (param i32 i32) (result i32)))
             (type $ct (cont $ft))
             (type $ft1 (func (param i32) (result i32)))
@@ -554,6 +569,7 @@ fn cont_bind_argument_survives_a_suspend() {
     compile_run(
         "cont_bind_suspend",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (param i32 i32) (result i32)))
             (type $ct (cont $ft))
             (type $ft1 (func (param i32) (result i32)))
@@ -604,6 +620,7 @@ fn resume_sends_a_value_back_into_a_suspend() {
     compile_run(
         "cont_resume_send",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (type $ft2 (func (param i32) (result i32)))
@@ -638,6 +655,7 @@ fn nested_if_in_a_continuation_body_without_suspend() {
     compile_run(
         "cont_nested_if_no_suspend",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (func $gen (result i32)
@@ -665,6 +683,7 @@ fn nested_block_after_a_suspend_in_a_continuation_body() {
     compile_run(
         "cont_block_after_suspend",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -700,12 +719,13 @@ fn diverging_tail_after_a_suspend_compiles() {
     compile_run(
         "cont_diverging_tail",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
             (func $gen (result i32)
               i32.const 42 suspend $yield
-              (loop $l br $l))
+              (loop $l (result i32) br $l))
             (func (export "run") (result i32)
               (local $k (ref null $ct))
               ref.func $gen cont.new $ct local.set $k
@@ -729,6 +749,7 @@ fn suspend_inside_a_block() {
     compile_run(
         "cont_suspend_in_block",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -763,6 +784,7 @@ fn suspend_inside_a_loop() {
     compile_run(
         "cont_suspend_in_loop",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -801,6 +823,7 @@ fn suspend_inside_an_if() {
     compile_run(
         "cont_suspend_in_if",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -837,6 +860,7 @@ fn block_param_survives_suspend() {
     compile_run(
         "cont_block_param",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -871,6 +895,7 @@ fn two_block_params_survive_suspend_in_order() {
     compile_run(
         "cont_two_block_params",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -910,6 +935,7 @@ fn loop_param_survives_suspend() {
     compile_run(
         "cont_loop_param",
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))
@@ -951,6 +977,7 @@ fn switch_transfers_control_to_another_continuation() {
     compile_run(
         "cont_switch_oneway",
         r#"(module
+            (elem declare func $b $a)
             (type $ht (func (result i32)))
             (tag $t (type $ht))
             (type $fa (func (result i32)))
@@ -991,6 +1018,7 @@ fn switch_round_trips_between_two_continuations() {
     compile_run(
         "cont_switch_round_trip",
         r#"(module
+            (elem declare func $b $a)
             (type $ht (func (result i32)))
             (tag $t (type $ht))
             (type $fa (func (result i32)))
@@ -1030,6 +1058,7 @@ fn switch_inside_a_region_transfers_control() {
     compile_run(
         "cont_switch_in_block",
         r#"(module
+            (elem declare func $b $a)
             (type $ht (func (result i32)))
             (tag $t (type $ht))
             (type $fa (func (result i32)))
@@ -1067,6 +1096,7 @@ fn switch_in_a_region_resumes_mid_region_on_switch_back() {
     compile_run(
         "cont_switch_in_region_round_trip",
         r#"(module
+            (elem declare func $b $a)
             (type $ht (func (result i32)))
             (tag $t (type $ht))
             (type $fa (func (result i32)))
@@ -1114,6 +1144,7 @@ fn switch_propagates_across_a_cross_call_checkpoint() {
     compile_run(
         "cont_switch_across_checkpoint",
         r#"(module
+            (elem declare func $b $a)
             (type $ht (func (result i32)))
             (tag $t (type $ht))
             (type $fa (func (result i32)))
@@ -1162,6 +1193,7 @@ fn switch_round_trips_back_into_a_checkpointed_callee() {
     compile_run(
         "cont_switch_back_into_checkpoint",
         r#"(module
+            (elem declare func $b $a)
             (type $ht (func (result i32)))
             (tag $t (type $ht))
             (type $fa (func (result i32)))
@@ -1216,6 +1248,7 @@ fn null_cont_local_defaults_to_null() {
 fn echo_generator_wat(ty: &str, lit: &str) -> String {
     format!(
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result {ty})))
             (type $ct (cont $ft))
             (type $ft2 (func (param {ty}) (result {ty})))
@@ -1271,6 +1304,7 @@ fn f64_nan_payload_survives_the_erased_continuation_slot() {
 fn summing_driver_module(gen_body: &str) -> String {
     format!(
         r#"(module
+            (elem declare func $gen)
             (type $ft (func (result i32)))
             (type $ct (cont $ft))
             (tag $yield (param i32))

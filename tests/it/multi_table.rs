@@ -49,6 +49,7 @@ fn table_ops_act_on_the_named_table_only() {
           (func $a (result i32) i32.const 7)
           (table $t0 1 funcref)
           (table $t1 2 funcref)
+          (elem declare func $a)
           (func (export "set1") (param i32)
             local.get 0 ref.func $a table.set $t1)
           (func (export "is_null") (param i32 i32) (result i32)

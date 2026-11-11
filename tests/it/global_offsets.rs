@@ -85,5 +85,8 @@ fn a_global_offset_reading_a_mutable_global_is_rejected() {
     let err = wasm2rs::transpile(&wasm)
         .expect_err("must be rejected")
         .to_string();
-    assert!(err.contains("data offset"), "{err}");
+    // Input validation (wasmparser) now rejects this before wasm2rs's own check, which is
+    // unreachable for validated input; assert the validation rejection instead.
+    assert!(err.contains("failed to parse wasm"), "{err}");
+    assert!(err.contains("mutable global"), "{err}");
 }

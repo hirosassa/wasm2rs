@@ -146,8 +146,8 @@ fn rethrow_reraises_to_outer_try() {
             (tag $e (param i32))
             (func (export "f") (param i32) (result i32)
               try (result i32)
-                local.get 0
                 try (result i32)
+                  local.get 0
                   throw $e
                 catch_all
                   rethrow 0
@@ -344,6 +344,7 @@ fn br_from_catch_handler_to_outer_block() {
                   i32.const 7
                   br 1
                 end
+                drop
                 i32.const 99)))"#,
         "assert_eq!(func0(), 7);",
     );

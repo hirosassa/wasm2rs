@@ -68,6 +68,7 @@ const MODULE: &str = r#"(module
       (ref.test (ref $ct) (local.get $k)))))"#;
 
 #[test]
+#[ignore = "wasmparser rejects ref.test/ref.cast/br_on_cast to a continuation type, so validated input never reaches this lowering"]
 fn ref_test_on_a_concrete_continuation_type_follows_declared_subtyping() {
     common::compile_run(
         "cont_cast_test",
@@ -79,6 +80,7 @@ fn ref_test_on_a_concrete_continuation_type_follows_declared_subtyping() {
 }
 
 #[test]
+#[ignore = "wasmparser rejects ref.test/ref.cast/br_on_cast to a continuation type, so validated input never reaches this lowering"]
 fn ref_cast_to_a_concrete_continuation_type_passes_a_match_and_traps_otherwise() {
     common::compile_run(
         "cont_cast_cast",
@@ -89,6 +91,7 @@ fn ref_cast_to_a_concrete_continuation_type_passes_a_match_and_traps_otherwise()
 }
 
 #[test]
+#[ignore = "wasmparser rejects ref.test/ref.cast/br_on_cast to a continuation type, so validated input never reaches this lowering"]
 fn br_on_cast_to_a_concrete_continuation_type_branches_on_a_match() {
     common::compile_run(
         "cont_cast_br",
@@ -98,6 +101,7 @@ fn br_on_cast_to_a_concrete_continuation_type_branches_on_a_match() {
 }
 
 #[test]
+#[ignore = "wasmparser rejects ref.test/ref.cast/br_on_cast to a continuation type, so validated input never reaches this lowering"]
 fn bind_and_a_resume_handler_retype_the_continuation() {
     // `cont.bind` makes it a `$ct2` (no longer `$ct3`); a continuation suspended
     // into a handler block typed `$cth` is a `$cth`, not the `$ct` it was created as.
@@ -109,6 +113,7 @@ fn bind_and_a_resume_handler_retype_the_continuation() {
 }
 
 #[test]
+#[ignore = "wasmparser rejects ref.test/ref.cast/br_on_cast to a continuation type, so validated input never reaches this lowering"]
 fn a_module_that_creates_no_continuation_has_only_null_to_test() {
     common::compile_run(
         "cont_cast_none",
@@ -122,6 +127,7 @@ fn a_module_that_creates_no_continuation_has_only_null_to_test() {
 }
 
 #[test]
+#[ignore = "wasmparser rejects ref.test/ref.cast/br_on_cast to a continuation type, so validated input never reaches this lowering"]
 fn a_reference_kept_across_cont_bind_still_has_its_own_type() {
     // `cont.bind` consumes `$k` (a `$ct3`) into a new `$ct2`; the old reference is
     // still a `$ct3`, and is no longer resumable.
@@ -143,6 +149,7 @@ fn a_reference_kept_across_cont_bind_still_has_its_own_type() {
 }
 
 #[test]
+#[ignore = "wasmparser rejects ref.test/ref.cast/br_on_cast to a continuation type, so validated input never reaches this lowering"]
 fn a_reference_kept_across_a_suspend_still_has_its_own_type() {
     common::compile_run(
         "cont_cast_old_suspend",
@@ -195,6 +202,7 @@ fn switch_module(b_body: &str) -> String {
 }
 
 #[test]
+#[ignore = "wasmparser rejects ref.test/ref.cast/br_on_cast to a continuation type, so validated input never reaches this lowering"]
 fn a_switch_gives_the_parked_switcher_the_self_reference_type() {
     // `$b` sees the switcher as a `$cas` (not the `$ca` it was created as).
     let module = switch_module(
@@ -210,6 +218,7 @@ fn a_switch_gives_the_parked_switcher_the_self_reference_type() {
 }
 
 #[test]
+#[ignore = "wasmparser rejects ref.test/ref.cast/br_on_cast to a continuation type, so validated input never reaches this lowering"]
 fn a_reference_kept_across_a_switch_still_has_its_own_type() {
     let module = switch_module("local.get 0");
     common::compile_run(
@@ -220,6 +229,7 @@ fn a_reference_kept_across_a_switch_still_has_its_own_type() {
 }
 
 #[test]
+#[ignore = "wasmparser rejects ref.test/ref.cast/br_on_cast to a continuation type, so validated input never reaches this lowering"]
 fn ref_cast_of_the_switcher_traps_on_a_mismatch_and_passes_a_match() {
     let bad = switch_module("(drop (ref.cast (ref $ca) (local.get 1))) local.get 0");
     common::compile_run(
@@ -234,4 +244,22 @@ fn ref_cast_of_the_switcher_traps_on_a_mismatch_and_passes_a_match() {
         &good,
         "let mut inst = Instance::new(); assert_eq!(inst.func2(), 11);",
     );
+}
+
+/// A cast to a continuation type is invalid wasm, so validation rejects it before
+/// codegen (which is why the tests above are ignored).
+#[test]
+fn a_cast_to_a_continuation_type_is_rejected_by_validation() {
+    let wasm = wat::parse_str(
+        r#"(module
+             (type $ft (func))
+             (type $ct (cont $ft))
+             (func (param contref) (result i32)
+               (ref.test (ref $ct) (local.get 0))))"#,
+    )
+    .expect("wat should assemble");
+    assert!(matches!(
+        wasm2rs::transpile(&wasm),
+        Err(wasm2rs::TranspileError::Parse(_))
+    ));
 }

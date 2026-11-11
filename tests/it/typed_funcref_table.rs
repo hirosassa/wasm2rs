@@ -28,6 +28,7 @@ fn table_get_set_and_call_ref_on_a_typed_funcref_table() {
              (type $ft (func (result i32)))
              (func $a (result i32) i32.const 5)
              (table $t 2 (ref null $ft))
+             (elem declare func $a)
              (func (export "f") (result i32)
                i32.const 1 ref.func $a table.set $t
                i32.const 1 table.get $t

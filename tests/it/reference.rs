@@ -69,6 +69,7 @@ fn ref_is_null_distinguishes_null_from_a_function() {
     let wat = r#"
         (module
           (func $target (result i32) (i32.const 42))
+          (elem declare func $target)
           (func (result i32) (ref.is_null (ref.null func)))
           (func (result i32) (ref.is_null (ref.func $target))))
         "#;
@@ -86,6 +87,7 @@ fn funcref_round_trips_through_a_local() {
     let wat = r#"
         (module
           (func $target (result i32) (i32.const 42))
+          (elem declare func $target)
           (func (result i32) (local funcref)
             (local.set 0 (ref.func $target))
             (ref.is_null (local.get 0))))

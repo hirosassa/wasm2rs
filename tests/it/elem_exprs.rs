@@ -138,18 +138,22 @@ fn an_element_item_may_read_a_defined_funcref_global() {
 }
 
 #[test]
-fn a_table_initializer_may_read_a_defined_funcref_global() {
-    common::compile_run(
-        "table_init_global_get",
+fn a_table_initializer_cannot_read_a_defined_funcref_global() {
+    // The table section precedes the global section, so a table initializer can only
+    // name an imported global; validation rejects a defined one, and wasm2rs's own
+    // handling of it is unreachable for validated input.
+    let wasm = wat::parse_str(
         r#"(module
-             (type $r (func (result i32)))
              (global $g funcref (ref.func $f))
              (table 2 funcref (global.get $g))
-             (func $f (result i32) i32.const 8)
-             (func (export "call") (param i32) (result i32)
-               (call_indirect (type $r) (local.get 0))))"#,
-        "let mut inst = Instance::new();\n assert_eq!(inst.func1(1), 8);",
-    );
+             (func $f (result i32) i32.const 8))"#,
+    )
+    .expect("valid wat");
+    let err = wasm2rs::transpile(&wasm)
+        .expect_err("must be rejected")
+        .to_string();
+    assert!(err.contains("failed to parse wasm"), "{err}");
+    assert!(err.contains("unknown global"), "{err}");
 }
 
 #[test]

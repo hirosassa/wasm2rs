@@ -75,9 +75,9 @@ fn round_trip_preserves_reference_identity() {
         r#"(module
             (type $s (struct (field i32)))
             (func (export "same") (result i32)
-              (local $a (ref null any))
+              (local $a (ref null eq))
               i32.const 1 struct.new $s local.set $a
-              local.get $a extern.convert_any any.convert_extern
+              local.get $a extern.convert_any any.convert_extern ref.cast (ref null eq)
               local.get $a
               ref.eq))"#,
         "let mut inst = Instance::new(); assert_eq!(inst.func0(), 1);",
