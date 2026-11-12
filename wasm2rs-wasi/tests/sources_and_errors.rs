@@ -208,6 +208,19 @@ fn the_os_source_fills_every_length_and_its_insecure_values_move() {
     assert!(os.fill_random(&mut empty).is_ok());
 }
 
+#[cfg(feature = "os-random")]
+#[test]
+fn a_default_os_source_is_independently_seeded_and_fills_like_new() {
+    use wasm2rs_wasi::OsRandom;
+    let mut a = OsRandom::default();
+    let mut b = OsRandom::default();
+    // Each is seeded from the OS, so two defaults do not replay one sequence.
+    assert_ne!(a.insecure_u64(), b.insecure_u64());
+    let mut buf = [0u8; 256];
+    a.fill_random(&mut buf).unwrap();
+    assert!(buf.iter().any(|&x| x != 0));
+}
+
 #[test]
 fn insecure_bytes_are_the_generators_words_in_order_and_zero_length_is_empty() {
     struct Counter(u64);
