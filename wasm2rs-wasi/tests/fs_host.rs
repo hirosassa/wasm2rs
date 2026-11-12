@@ -393,15 +393,11 @@ fn a_read_only_preopen_refuses_every_change_but_allows_reading_and_sync() {
 
     // reading and flushing change nothing, so they are allowed
     assert_eq!(read_at(&mut host, f, 8, 0), (b"data".to_vec(), true));
-    // (Windows cannot flush a handle that was opened read-only, nor a directory)
-    #[cfg(unix)]
-    {
-        assert_eq!(host.wasi_filesystem_types_method_descriptor_sync(f), Ok(()));
-        assert_eq!(
-            host.wasi_filesystem_types_method_descriptor_sync_data(ROOT),
-            Ok(())
-        );
-    }
+    assert_eq!(host.wasi_filesystem_types_method_descriptor_sync(f), Ok(()));
+    assert_eq!(
+        host.wasi_filesystem_types_method_descriptor_sync_data(ROOT),
+        Ok(())
+    );
 }
 
 // ---- directories ------------------------------------------------------------------------
