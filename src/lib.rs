@@ -435,13 +435,44 @@ pub fn transpile_with_options(
     wasm: &[u8],
     opts: &TranspileOptions,
 ) -> Result<String, TranspileError> {
+    transpile_with_host_imports(wasm, opts).map(|(code, _)| code)
+}
+
+/// [`transpile_with_options`] that also returns the function imports of the module that its
+/// `Imports` trait declares (the ones that are not natively implemented WASI functions), with
+/// the method name each got. `topts.named_imports` must be on.
+pub(crate) fn transpile_with_host_imports(
+    wasm: &[u8],
+    topts: &TranspileOptions,
+) -> Result<(String, Vec<wit::CoreImport>), TranspileError> {
+    let single = SplitOptions::single_file();
     let mut code = None;
-    transpile_split_impl(wasm, &SplitOptions::single_file(), opts, |file| {
-        code = Some(file.code);
-        Ok(())
+    let mut imports = Vec::new();
+    transpile_impl(wasm, topts, |parts| {
+        imports = parts
+            .imports
+            .iter()
+            .filter(|im| im.wasi.is_none())
+            .filter_map(|im| {
+                Some(wit::CoreImport {
+                    module: im.module.clone(),
+                    field: im.field.clone(),
+                    ident: im.ident.clone()?,
+                })
+            })
+            .collect();
+        codegen::generate_module_split(
+            parts,
+            single.funcs_per_file,
+            single.max_bytes_per_file,
+            &mut |_, text| {
+                code = Some(text);
+                Ok(())
+            },
+        )
     })?;
-    // The single-file path always emits exactly one file.
-    code.ok_or_else(|| TranspileError::Internal("no source emitted".into()))
+    let code = code.ok_or_else(|| TranspileError::Internal("no source emitted".into()))?;
+    Ok((code, imports))
 }
 
 /// Transpile a wasm binary into a single Rust source, returned in three

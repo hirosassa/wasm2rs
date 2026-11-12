@@ -832,6 +832,35 @@ pub fn wit_host_glue_with_options(
     component: &[u8],
     options: &WitOptions,
 ) -> Result<String, TranspileError> {
+    glue_text(component, options, None)
+}
+
+/// A function import of the program core module that its `Imports` trait declares.
+pub(crate) struct CoreImport {
+    pub module: String,
+    pub field: String,
+    /// The name of its `Imports` method (`named_imports`).
+    pub ident: String,
+}
+
+/// [`wit_host_glue_with_options`] for a component whose program module has the function
+/// imports `core_imports`: the glue implements exactly those `Imports` methods, in that
+/// order, each delegating to the `Host` method of the WIT function it lowers. The module may
+/// name the interface by another compatible version than the component's own import, or import
+/// one function under several versions; the glue then still has one method per module import.
+pub(crate) fn wit_host_glue_for_module(
+    component: &[u8],
+    options: &WitOptions,
+    core_imports: &[CoreImport],
+) -> Result<String, TranspileError> {
+    glue_text(component, options, Some(core_imports))
+}
+
+fn glue_text(
+    component: &[u8],
+    options: &WitOptions,
+    core_imports: Option<&[CoreImport]>,
+) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
     let exports = if options.exports {
         wit_exports(component)?
@@ -873,6 +902,94 @@ pub fn wit_host_glue_with_options(
     let exported = options
         .exports
         .then_some((exports.as_slice(), export_names.as_slice()));
-    glue::write(&mut out, &funcs, &names, &records, exported)?;
+    let methods = match core_imports {
+        Some(core) => core_methods(&funcs, &names, core)?,
+        None => funcs
+            .iter()
+            .zip(&names)
+            .map(|(func, name)| glue::Method {
+                func,
+                name,
+                host: name,
+            })
+            .collect(),
+    };
+    glue::write(&mut out, &methods, &records, exported)?;
     Ok(out)
+}
+
+/// One glue method per core import, in import order.
+fn core_methods<'a>(
+    funcs: &'a [WitFunc],
+    host_names: &'a [String],
+    core: &'a [CoreImport],
+) -> Result<Vec<glue::Method<'a>>, TranspileError> {
+    let mut methods = Vec::new();
+    for import in core {
+        let Some(index) = resolve_core_import(funcs, &import.module, &import.field)? else {
+            continue;
+        };
+        let (Some(func), Some(host)) = (funcs.get(index), host_names.get(index)) else {
+            return Err(TranspileError::Internal(
+                "a resolved core import is not a component function".into(),
+            ));
+        };
+        methods.push(glue::Method {
+            func,
+            name: &import.ident,
+            host,
+        });
+    }
+    Ok(methods)
+}
+
+/// The index in `funcs` of the WIT function the core import `module` `field` lowers: the one
+/// of the same interface and name; failing that, of a version of the interface that the
+/// module's version stands for (`wasi:cli/environment@0.2.0` is satisfied by a component
+/// importing `@0.2.12`, as `wit-component` names them). `None` when no function does: the
+/// import is not a WIT one, so the glue has no method for it (the module's `Imports` then
+/// stays unimplemented, which the compiler reports).
+fn resolve_core_import(
+    funcs: &[WitFunc],
+    module: &str,
+    field: &str,
+) -> Result<Option<usize>, TranspileError> {
+    if let Some(i) = funcs
+        .iter()
+        .position(|f| f.interface == module && f.name == field)
+    {
+        return Ok(Some(i));
+    }
+    let mut compatible = funcs
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.name == field && compatible_versions(&f.interface, module))
+        .map(|(i, _)| i);
+    match (compatible.next(), compatible.next()) {
+        (found, None) => Ok(found),
+        (Some(_), Some(_)) => Err(unsupported(format!(
+            "the core module imports `{field}` from `{module}`, which the component imports at \
+             several compatible versions: the name alone does not say which one it lowers"
+        ))),
+        (None, Some(_)) => Ok(None),
+    }
+}
+
+/// Whether the interface names `a` and `b` are the same interface at semver-compatible
+/// versions, as `wit-parser` links them: `0.2.10` and `0.2.0` (same `0.minor`), `1.2.0` and
+/// `1.3.1` (same major). A pre-release, a `0.0.x` or a version without all three numbers
+/// is compatible with itself only.
+fn compatible_versions(a: &str, b: &str) -> bool {
+    fn track(name: &str) -> Option<(&str, u64, u64)> {
+        let (base, version) = name.split_once('@')?;
+        let mut parts = version.split('.');
+        let major: u64 = parts.next()?.parse().ok()?;
+        let minor: u64 = parts.next()?.parse().ok()?;
+        let _patch: u64 = parts.next()?.parse().ok()?;
+        if parts.next().is_some() || (major == 0 && minor == 0) {
+            return None;
+        }
+        Some((base, major, if major == 0 { minor } else { 0 }))
+    }
+    matches!((track(a), track(b)), (Some(x), Some(y)) if x == y)
 }

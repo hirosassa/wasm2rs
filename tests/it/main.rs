@@ -33,6 +33,7 @@ mod calls;
 mod cli;
 mod codegen_limits;
 mod compile_and_run;
+mod component_core_import_versions;
 mod component_input;
 mod component_wit_edges;
 mod condition_simplify;
