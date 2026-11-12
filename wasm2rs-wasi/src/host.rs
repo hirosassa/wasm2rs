@@ -827,7 +827,9 @@ mod tests {
         let escaped = Error::new(ErrorKind::PermissionDenied, "outside the sandbox");
         assert_eq!(sandbox_error(escaped), Fs::NotPermitted);
         // a real `EACCES` stays `access`
-        assert_eq!(sandbox_error(Error::from_raw_os_error(13)), Fs::Access);
+        // (13 is EACCES on Unix; on Windows it is another error, ERROR_ACCESS_DENIED is 5)
+        let eacces = if cfg!(windows) { 5 } else { 13 };
+        assert_eq!(sandbox_error(Error::from_raw_os_error(eacces)), Fs::Access);
         // any other error is mapped as ever, with or without an OS number
         assert_eq!(
             sandbox_error(Error::new(ErrorKind::NotFound, "gone")),

@@ -89,7 +89,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Test wasm2rs-wasi
-        run: cargo test -p wasm2rs-wasi
+        run: cargo test -p wasm2rs-wasi --no-fail-fast
 
   # The wasi-sdk E2E tests need a ~190MB toolchain, so they live in their own job
   # (cached) instead of slowing down every toolchain of the build matrix.
