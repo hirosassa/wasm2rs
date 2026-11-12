@@ -6,6 +6,7 @@ mod common;
 
 use common::{builder, scratch, traps};
 use std::path::Path;
+#[cfg(unix)]
 use std::time::UNIX_EPOCH;
 use wasm2rs_wasi::wasi_clocks_wall_clock::Datetime;
 use wasm2rs_wasi::wasi_filesystem_types::{
@@ -420,6 +421,7 @@ fn read_directory_lists_each_entry_once_with_its_type() {
         entries.push((entry.name, entry.type_));
     }
     entries.sort_by(|x, y| x.0.cmp(&y.0));
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut expected = vec![
         ("a".to_string(), DescriptorType::RegularFile),
         ("b".to_string(), DescriptorType::Directory),
@@ -1096,6 +1098,7 @@ fn a_zero_length_file_stream_read_is_ok_before_the_end_and_closed_at_it() {
 
 // ---- open-at: flags and error mapping ----------------------------------------------------
 
+#[cfg(unix)]
 #[test]
 fn a_dangling_symlink_is_no_entry_unless_a_file_is_to_be_created_through_it() {
     let root = scratch("dangling");
@@ -1122,6 +1125,7 @@ fn create_and_truncate_work_without_the_write_descriptor_flag() {
     assert_eq!(std::fs::read(root.join("old")).unwrap(), b"");
 }
 
+#[cfg(unix)]
 #[test]
 fn an_unreadable_file_is_access_whether_or_not_it_is_reached_through_a_symlink() {
     use std::os::unix::fs::PermissionsExt;
