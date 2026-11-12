@@ -47,7 +47,11 @@ moves the examples, the CLI and the build-script story onto it.
      the program cannot be told from the plumbing;
    - an export of a nested component (inherited from `wit_exports`);
    - string encodings other than UTF-8 (inherited from `wit_exports`);
-   - input that is a core module rather than a component: the error says to use `transpile`.
+   - input that is a core module rather than a component: the error says to use `transpile`;
+   - a program module (the one that lifts the exports) that imports a memory, table or global from
+     another core module, as the adapter of a preview1-adapter component does: the error says that
+     linking several core modules is not supported (it used to surface as a `reentrant_imports`
+     options error).
 6. **A broken input is an `Err`, never a panic.**
 7. **Index spaces.** `WitExport::core_module` counts *top-level* core modules only, while
    `extract_core_modules` also lists the modules of nested components, in appearance order. The two
