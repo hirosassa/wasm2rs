@@ -235,7 +235,6 @@ impl Flattener {
                     Node::Switch {
                         tag,
                         target,
-                        ty,
                         payload,
                         save,
                     } => {
@@ -252,7 +251,7 @@ impl Flattener {
                             format!(
                                 "{}return {};",
                                 render_cont::park_pc(&save, resume),
-                                render_cont::switch_result(tag, &target, ty, &payload)
+                                render_cont::switch_result(tag, &target, &payload)
                             ),
                         ));
                         self.arms.push((state, std::mem::take(&mut stmts)));

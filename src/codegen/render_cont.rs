@@ -41,7 +41,7 @@ pub(super) fn continuation_runtime_lines(
         // `target`, handing it `args` (the switch payload) and `ty`, the continuation
         // type the parked switcher takes as the target's self-reference; the driving
         // `resume` (its `(on $tag switch)` handler) follows the transfer — see `resume`.
-        "    Switch { tag: u32, target: u32, ty: u32, args: Vec<i64> },".to_string(),
+        "    Switch { tag: u32, target: u32, args: Vec<i64> },".to_string(),
         "}".to_string(),
         String::new(),
     ];
@@ -125,7 +125,7 @@ fn frame_start_literal(ctx: &ModuleCtx<'_>, n: u32) -> String {
 /// handle still naming the old occupant traps as consumed.
 pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
     let mut lines = vec![
-        "pub fn cont_new(&mut self, __funcidx: u32, __ty: u32) -> u32 {".to_string(),
+        "pub fn cont_new(&mut self, __funcidx: u32) -> u32 {".to_string(),
         "    let __obj = match __funcidx {".to_string(),
     ];
     for n in &ctx.cont.bodies {
@@ -137,12 +137,12 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
     lines.extend([
         "        _ => panic!(\"cont.new: not a continuation function\"),".to_string(),
         "    };".to_string(),
-        "    self.cont_alloc(Box::new(__obj), __ty)".to_string(),
+        "    self.cont_alloc(Box::new(__obj))".to_string(),
         "}".to_string(),
         String::new(),
         // Store `__obj` in a free slot (or a new one) and mint its handle. The last
         // index is never handed out: a null handle (`u32::MAX`) decodes to it.
-        "fn cont_alloc(&mut self, __obj: Box<ContObj>, __ty: u32) -> u32 {".to_string(),
+        "fn cont_alloc(&mut self, __obj: Box<ContObj>) -> u32 {".to_string(),
         "    let __obj = Some(__obj);".to_string(),
         "    let (__i, __epoch) = match self.cont_free.pop() {".to_string(),
         "        Some(__i) => {".to_string(),
@@ -158,12 +158,11 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "            (__i, 0)".to_string(),
         "        }".to_string(),
         "    };".to_string(),
-        "    Self::cont_handle(__i, __epoch, __ty)".to_string(),
+        "    Self::cont_handle(__i, __epoch)".to_string(),
         "}".to_string(),
         String::new(),
         // The handle for slot `__i` at generation `__epoch`.
-        "fn cont_handle(__i: u32, __epoch: u32, __ty: u32) -> u32 {".to_string(),
-        "    let _ = __ty;".to_string(),
+        "fn cont_handle(__i: u32, __epoch: u32) -> u32 {".to_string(),
         "    (__epoch << CONT_IDX_BITS) | __i".to_string(),
         "}".to_string(),
         String::new(),
@@ -239,8 +238,7 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         // handle back typed as the partially-applied continuation. The next
         // resume prepends the prefix to its own arguments (see `cont_step`).
         "#[allow(dead_code)]".to_string(),
-        "pub fn cont_bind(&mut self, __h: u32, __prefix: &[i64], __ty: u32) -> u32 {".to_string(),
-        "    let _ = __ty;".to_string(),
+        "pub fn cont_bind(&mut self, __h: u32, __prefix: &[i64]) -> u32 {".to_string(),
         "    let __i = self.cont_slot(__h, \"cont.bind of a consumed continuation\");".to_string(),
         "    match self.conts[__i].obj.as_deref_mut().expect(\"cont.bind of a consumed continuation\") {"
             .to_string(),
@@ -268,17 +266,9 @@ pub(super) fn suspend_result(tag: impl std::fmt::Display, payload: &str) -> Stri
     format!("StepResult::Suspend {{ tag: {tag}u32, payload: vec![{payload}] }}")
 }
 
-/// A `StepResult::Switch` transferring to `target`; `ty` identifies the
-/// switching continuation's own type and `args` is the encoded payload.
-pub(super) fn switch_result(
-    tag: impl std::fmt::Display,
-    target: &str,
-    ty: impl std::fmt::Display,
-    args: &str,
-) -> String {
-    format!(
-        "StepResult::Switch {{ tag: {tag}u32, target: {target}, ty: {ty}u32, args: vec![{args}] }}"
-    )
+/// A `StepResult::Switch` transferring to `target` with the encoded payload `args`.
+pub(super) fn switch_result(tag: impl std::fmt::Display, target: &str, args: &str) -> String {
+    format!("StepResult::Switch {{ tag: {tag}u32, target: {target}, args: vec![{args}] }}")
 }
 
 /// The `match` that drives the callee step function `callee` once, forwarding
@@ -294,11 +284,11 @@ pub(super) fn drive_callee_match(
     on_return: &str,
 ) -> String {
     let suspend = pass("StepResult::Suspend { tag: __t, payload: __p }");
-    let switch = pass("StepResult::Switch { tag: __t, target: __tgt, ty: __ty, args: __a }");
+    let switch = pass("StepResult::Switch { tag: __t, target: __tgt, args: __a }");
     format!(
         "match self.cont_step_func{callee}(&mut __frame.sub, __args) {{ \
          StepResult::Suspend {{ tag: __t, payload: __p }} => {suspend}{sep}\
-         StepResult::Switch {{ tag: __t, target: __tgt, ty: __ty, args: __a }} => {switch}{sep}\
+         StepResult::Switch {{ tag: __t, target: __tgt, args: __a }} => {switch}{sep}\
          StepResult::Return(__cret) => {on_return} }}"
     )
 }

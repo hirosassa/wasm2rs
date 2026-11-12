@@ -321,7 +321,7 @@ impl super::FuncGen<'_> {
                             "switch after a cross-call checkpoint".into(),
                         ));
                     }
-                    let (payload_tys, injected_tys, self_cont) =
+                    let (payload_tys, injected_tys) =
                         self.switch_transfer_types(cont_type_index)?;
                     // Fix the evaluation order across the suspension boundary:
                     // freeze every operand into a temp so the target handle and the
@@ -337,7 +337,7 @@ impl super::FuncGen<'_> {
                     arms.push(format!(
                         "{stmts}{}{}",
                         render_cont::park_pc(&save, next),
-                        render_cont::switch_result(tag_index, &target.code, self_cont, &payload)
+                        render_cont::switch_result(tag_index, &target.code, &payload)
                     ));
                     pc = next;
                     // Control switches back here carrying `t2*` — the
@@ -602,7 +602,7 @@ impl super::FuncGen<'_> {
         cont_type_index: u32,
         tag_index: u32,
     ) -> Result<(), TranspileError> {
-        let (payload_tys, injected_tys, self_cont) = self.switch_transfer_types(cont_type_index)?;
+        let (payload_tys, injected_tys) = self.switch_transfer_types(cont_type_index)?;
         // The target continuation handle is on top; the payload `t1*` sits below it.
         let target = self.pop()?;
         let payload = self.pop_encode_tail(&payload_tys)?;
@@ -611,7 +611,6 @@ impl super::FuncGen<'_> {
         self.cur.push(Node::Switch {
             tag: tag_index,
             target: target.code,
-            ty: self_cont,
             payload,
             save,
         });
@@ -772,7 +771,7 @@ impl super::FuncGen<'_> {
     fn switch_transfer_types(
         &self,
         cont_type_index: u32,
-    ) -> Result<(Vec<ValType>, Vec<ValType>, u32), TranspileError> {
+    ) -> Result<(Vec<ValType>, Vec<ValType>), TranspileError> {
         let sig = cont_underlying_sig(self.ctx.type_kinds, self.ctx.types, cont_type_index)?;
         let (self_ref, payload) = sig.params.split_last().ok_or_else(|| {
             TranspileError::Unsupported(
@@ -781,7 +780,7 @@ impl super::FuncGen<'_> {
         })?;
         let self_cont = concrete_ref_index(*self_ref)?;
         let injected = cont_param_types(self.ctx.type_kinds, self.ctx.types, self_cont)?;
-        Ok((payload.to_vec(), injected, self_cont))
+        Ok((payload.to_vec(), injected))
     }
 
     /// Write the step function's opening: the `#[allow]` line, the `pub fn

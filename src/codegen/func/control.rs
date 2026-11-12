@@ -573,7 +573,7 @@ impl<'a> super::FuncGen<'a> {
                     // trailing self-reference and drive the target with the switch
                     // payload as its injected args.
                     self.line(format!(
-                        "StepResult::Switch {{ tag: __t, target: __tgt, ty: _, args: __sa }} \
+                        "StepResult::Switch {{ tag: __t, target: __tgt, args: __sa }} \
                          if __t == {tag}u32 => {{"
                     ));
                     // The switcher becomes the target's self-reference.
