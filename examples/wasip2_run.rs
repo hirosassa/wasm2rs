@@ -35,6 +35,16 @@ mod common;
 
 const RUN_INTERFACE: &str = "wasi:cli/run@0.2.0";
 
+/// The name of the `Exports` method for `func` of `interface`, as the generated glue makes it.
+fn export_method(interface: &str, func: &str) -> String {
+    let ident = |s: &str| {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect::<String>()
+    };
+    format!("export_{}_{}", ident(interface), ident(func))
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let input = args
@@ -51,11 +61,12 @@ fn main() {
     // `wasm2rs::transpile_component` picks the program module and generates the glue.
     // The default `ComponentOptions` (`exports: true`) make a method for every export of the
     // component, not only `run`: one the glue cannot lower or lift fails here too.
-    let generated =
-        common::transpile_exporting(&component, RUN_INTERFACE, "run").unwrap_or_else(|err| {
+    let (generated, run_interface) = common::transpile_exporting(&component, RUN_INTERFACE, "run")
+        .unwrap_or_else(|err| {
             eprintln!("wasip2_run: {err}");
             std::process::exit(2);
         });
+    let run_method = export_method(&run_interface, "run");
     let argv0 = &input;
     let main = format!(
         "fn main() {{\n    \
@@ -68,7 +79,7 @@ fn main() {
          let mut inst = Instance::new(Glue(host));\n    \
          // A guest trap is a Rust panic (its message is printed by the panic hook); a panic\n    \
          // during the `run` call (also inside a host import it calls) becomes the trap exit code.\n    \
-         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Exports::export_wasi_cli_run_0_2_0_run(&mut inst))) {{\n        \
+         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Exports::{run_method}(&mut inst))) {{\n        \
          Ok(result) => result,\n        \
          Err(_) => {{ eprintln!(\"wasip2_run: the program trapped\"); std::process::exit(134) }}\n    }};\n    \
          drop(inst); // flushes the connections' send queues\n    \

@@ -385,7 +385,14 @@ fallback.
   different core modules (the shape #185 describes) returns both results.
 - **L5 real components**: `#[ignore]`d tests (fixtures not committed) for
   `p1-hello.wasm` and `go-hello.wasm` run through `examples/wasip2_run`;
-  update the survey table (B and C pass). Reproduction is at the end of the survey.
+  update the survey table. Reproduction is at the end of the survey.
+  *Result (2026-11-12)*: B passes (the only fix was in `examples/wasip2_run`, which asked for
+  `wasi:cli/run@0.2.0` while the adapter exports `@0.2.3`; it now matches any patch version);
+  a `#[ignore]`d test (`WASM2RS_P1_HELLO_COMPONENT`) covers it. C transpiles and builds but traps
+  at run time in the adapter's state assertion: a Go heap / adapter page overlap that wasmtime
+  does not show (#311, not an L3 constraint). Timing (F4 data, release build of the example):
+  B 7.0 s in total (rustc 1.6 s); C about 3 min (rustc 168 s, 4.3 GB peak RSS, 458 K-line
+  `program.rs`).
 - **F2 (documented follow-up, not scheduled; Q8)**: dylink-style modules; needs L2's imported
   table/global binding with `__table_base`/`__memory_base`, init order, and
   libpython-scale compile time work (F4).

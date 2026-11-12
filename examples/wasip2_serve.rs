@@ -46,8 +46,15 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("create work dir");
 
     let component = std::fs::read(&input).expect("read component");
-    let generated = common::transpile_exporting(&component, HANDLER_INTERFACE, "handle")
-        .unwrap_or_else(|err| fail(err));
+    let (generated, interface) =
+        common::transpile_exporting(&component, HANDLER_INTERFACE, "handle")
+            .unwrap_or_else(|err| fail(err));
+    // `server.rs` calls the `0.2.0` method by name.
+    if interface != HANDLER_INTERFACE {
+        fail(format!(
+            "the component exports `{interface}`, not `{HANDLER_INTERFACE}`"
+        ));
+    }
     let server = include_str!("wasip2_serve/server.rs");
     let source = format!("{generated}\n{server}\n");
     let Some(bin) = common::build_program(&dir, &source) else {

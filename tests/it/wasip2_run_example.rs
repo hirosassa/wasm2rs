@@ -87,9 +87,14 @@ pub(crate) fn component() -> Vec<u8> {
 /// A component of `world` (in the package `world_wit`, after `IO` and the `cli` package)
 /// around the core module `core`.
 pub(crate) fn component_of(world_wit: &str, core: &str) -> Vec<u8> {
+    component_of_packages(IO, CLI, world_wit, core)
+}
+
+/// Like [`component_of`], with the `io` and `cli` packages given.
+fn component_of_packages(io: &str, cli: &str, world_wit: &str, core: &str) -> Vec<u8> {
     let mut resolve = Resolve::default();
-    resolve.push_str("io.wit", IO).unwrap();
-    resolve.push_str("cli.wit", CLI).unwrap();
+    resolve.push_str("io.wit", io).unwrap();
+    resolve.push_str("cli.wit", cli).unwrap();
     let package = resolve.push_str("test.wit", world_wit).unwrap();
     let world = resolve.select_world(&[package], Some("w")).unwrap();
     let mut module = wat::parse_str(core).unwrap();
@@ -125,6 +130,45 @@ fn a_component_prints_its_argument_through_the_typed_host() {
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "hello",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success());
+}
+
+/// A component built by an adapter (`wasm-tools component new --adapt`) exports
+/// `wasi:cli/run` at the adapter's version (`0.2.3` for wasmtime's), not at `0.2.0`.
+#[test]
+fn a_run_export_at_a_newer_compatible_version_is_run() {
+    let at_0_2_3 = |s: &str| s.replace("0.2.0", "0.2.3");
+    let component = component_of_packages(
+        &at_0_2_3(IO),
+        &at_0_2_3(CLI),
+        &at_0_2_3(WORLD),
+        &at_0_2_3(CORE),
+    );
+    let out = run_example(&component, "run-0-2-3", &["hello"]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "hello",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success());
+}
+
+/// A component a real toolchain made (Rust `wasm32-wasip1` + the preview1 command adapter, see
+/// the reproduction in `docs/component-toolchain-survey.md`): the program, the adapter and the
+/// shim and fixup modules are linked. The file is not in the repository: set
+/// `WASM2RS_P1_HELLO_COMPONENT` to it and run with `--ignored`.
+#[test]
+#[ignore = "needs WASM2RS_P1_HELLO_COMPONENT (a wasm32-wasip1 + adapter component)"]
+fn a_real_wasip1_adapter_component_prints_hello() {
+    let path = std::env::var_os("WASM2RS_P1_HELLO_COMPONENT")
+        .expect("WASM2RS_P1_HELLO_COMPONENT names the component");
+    let out = run_example(&std::fs::read(path).unwrap(), "real-p1", &[]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("hello"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
