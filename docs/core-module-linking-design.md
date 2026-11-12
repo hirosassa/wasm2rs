@@ -237,6 +237,22 @@ fallback.
 - **L0 (spike inside L1's PR, no merge on its own)**: confirm how `ModuleIr`
   keeps operators (`wasmparser::Operator`/ranges) and pick the restricted rewrite
   or per-body bias for appended modules (operator subset fixed by Q6).
+  **L0 result [verified in the L1 PR]**: `ModuleIr` keeps each body as an
+  undecoded `wasmparser::FunctionBody<'a>` (a byte range into the input, `parse.rs`
+  `bodies`); operators are decoded lazily and independently at three sites
+  (`analysis.rs` twice, `driver.rs` once). Decision: **restricted rewrite**, not a
+  per-body index bias. Reasons: (1) an import of an appended module is not shifted
+  by a constant: it is replaced by an arbitrary target (an export of another
+  module, or a host import), so a remap table is needed, and a bias in codegen
+  would have to thread that table through every index-bearing emission and the
+  three decode sites; (2) with the Q6 subset the index-bearing operators are few
+  (`call`, `call_indirect`, `ref.func`, `global.get/set`, `table.*`,
+  `memory.*`/memarg, `data.drop`/`elem.drop`, block-type indices), so the rewrite
+  copies the raw bytes between operators (`into_iter_with_offsets`) and re-encodes
+  only those immediates, with `Unsupported` naming any other operator; (3) the
+  rewritten bytes are owned by the linker and `FunctionBody::new(BinaryReader::new(..))`
+  borrows them, so `ModuleIr<'a>` keeps its shape. The program module's 2 MB of
+  bodies are never rewritten: its imports stay as alias imports (L2).
 - **L1 reader keeps the wiring** (refactor, no behaviour change).
   `Layout`/`scan` records, per core instance, which module it instantiates and,
   per import name, which (instance, export) feeds it; `CoreInstance::FromExports`
@@ -244,6 +260,12 @@ fallback.
   **core-func -> component-func mapping of `canon lower`** (decision Q2) so a
   core function that reaches a module through shim/fixup can be named by its WIT
   interface and function.
+  *As implemented*: the graph lives in the component reader (`src/wit/exports.rs`
+  `Reader`, exposed as `core_wiring` -> `wit/wiring.rs` `CoreWiring`), which already owns
+  the core func/memory/instance spaces; `Layout`/`scan` in `component.rs` is left as is
+  (it still serves `select_index`) instead of duplicating the graph, and can be derived
+  from `CoreWiring` once L3 consumes it. `wit-component` 0.263 names the fixup's
+  import modules `actual` and `shim` (not `""`).
   *First failing test*: unit test on the adapter-shaped WAT component asserting
   the graph (`$main.wasi_snapshot_preview1` <- shim exports; adapter `env.memory`
   <- `$main` memory; fixup table <- shim table) and that fixup's `""."6"` maps to

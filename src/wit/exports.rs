@@ -5,6 +5,8 @@
 //! instance made by instantiating a top-level core module. Anything else is an
 //! [`Unsupported`](TranspileError::Unsupported) error naming the export.
 
+use std::collections::BTreeMap;
+
 use wasmparser::{
     CanonicalFunction, CanonicalOption, ComponentAlias, ComponentExternalKind,
     ComponentOuterAliasKind, ComponentTypeRef, ExternalKind, Instance as CoreInstanceDef, Payload,
@@ -12,6 +14,7 @@ use wasmparser::{
 
 use super::WitFunc;
 use super::read::{Def, Scope, Sig, Soft, def_at, innermost, read_component, unsupported};
+use super::wiring::{CoreWiring, HostFunc, Supplier, WiredInstance};
 use crate::TranspileError;
 
 /// A function the component exports, and the core module export it is lifted from.
@@ -49,13 +52,39 @@ pub fn wit_exports(component: &[u8]) -> Result<Vec<WitExport>, TranspileError> {
     reader.resolve()
 }
 
+/// The core instance graph of `component` (see [`CoreWiring`]).
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the linker in stage L3")
+)]
+pub(crate) fn core_wiring(component: &[u8]) -> Result<CoreWiring, TranspileError> {
+    let mut reader = Reader::default();
+    read_component(component, Some(&mut reader))?;
+    Ok(reader.wiring())
+}
+
 /// A function of the component's function index space.
 #[derive(Clone)]
 enum Func {
     Lift(Lift),
-    /// Anything else (an import, an alias of an instance's export).
+    /// An alias of an export of an imported instance: a function the host provides.
+    Imported(HostFunc),
+    /// Anything else (an import, an alias of another instance's export).
     Other(&'static str),
 }
+
+impl Func {
+    /// What a function that is not a `canon lift` is, for an error message.
+    fn describe(&self) -> Option<&'static str> {
+        match self {
+            Func::Lift(_) => None,
+            Func::Imported(_) => Some(ALIAS_OF_INSTANCE_EXPORT),
+            Func::Other(what) => Some(what),
+        }
+    }
+}
+
+const ALIAS_OF_INSTANCE_EXPORT: &str = "an alias of an export of an instance";
 
 impl Default for Func {
     fn default() -> Self {
@@ -75,18 +104,23 @@ struct Lift {
 enum CoreFunc {
     /// An alias of an export of a core instance.
     Export { instance: u32, name: String },
-    /// A `canon lower`.
-    Lowered,
+    /// A `canon lower` of this function of the component's function index space.
+    Lowered { func: u32 },
     /// Another canonical built-in.
     Builtin,
 }
 
 #[derive(Clone)]
 enum CoreInstance {
-    /// An instantiation of the top-level core module with this index.
-    Module(usize),
-    /// An instance made from exports only (a shim or adapter).
-    FromExports,
+    /// An instantiation of the core module with this index of the module index space, with
+    /// the core instances given as arguments by import module name.
+    Module {
+        module: usize,
+        args: Vec<(String, u32)>,
+    },
+    /// An instance made from exports only (a shim or adapter): `(name, kind, index in the
+    /// core index space of that kind)`.
+    FromExports(Vec<(String, ExternalKind, u32)>),
 }
 
 /// An instance of the component's instance index space.
@@ -100,7 +134,9 @@ enum Instance {
         component: usize,
         args: Vec<(String, u32)>,
     },
-    /// An import or an alias.
+    /// An imported instance (an interface the host provides), by import name.
+    Imported(String),
+    /// An alias.
     #[default]
     Other,
 }
@@ -164,6 +200,8 @@ pub(super) struct Reader {
     funcs: Vec<Func>,
     core_funcs: Vec<CoreFunc>,
     core_memories: Vec<(u32, String)>,
+    core_tables: Vec<(u32, String)>,
+    core_globals: Vec<(u32, String)>,
     core_instances: Vec<CoreInstance>,
     instances: Vec<Instance>,
     /// The core module index space; `None` for a module that is not one of the top-level
@@ -216,10 +254,18 @@ impl Reader {
             Payload::InstanceSection(reader) => {
                 for instance in reader.clone() {
                     self.core_instances.push(match instance? {
-                        CoreInstanceDef::Instantiate { module_index, .. } => {
-                            CoreInstance::Module(index(module_index).unwrap_or(usize::MAX))
+                        CoreInstanceDef::Instantiate { module_index, args } => {
+                            CoreInstance::Module {
+                                module: index(module_index).unwrap_or(usize::MAX),
+                                args: args.iter().map(|a| (a.name.to_string(), a.index)).collect(),
+                            }
                         }
-                        CoreInstanceDef::FromExports(_) => CoreInstance::FromExports,
+                        CoreInstanceDef::FromExports(exports) => CoreInstance::FromExports(
+                            exports
+                                .iter()
+                                .map(|e| (e.name.to_string(), e.kind, e.index))
+                                .collect(),
+                        ),
                     });
                 }
             }
@@ -259,9 +305,12 @@ impl Reader {
             }
             Payload::ComponentImportSection(reader) => {
                 for import in reader.clone() {
-                    match import?.ty {
+                    let import = import?;
+                    match import.ty {
                         ComponentTypeRef::Func(_) => self.funcs.push(Func::Other("an import")),
-                        ComponentTypeRef::Instance(_) => self.instances.push(Instance::Other),
+                        ComponentTypeRef::Instance(_) => self
+                            .instances
+                            .push(Instance::Imported(import.name.full_name().into_owned())),
                         // Counted as in `transpile_component`.
                         ComponentTypeRef::Module(_) => self.modules.push(None),
                         // An opaque shim, as for an alias of a component.
@@ -306,10 +355,21 @@ impl Reader {
 
     fn alias(&mut self, alias: &ComponentAlias<'_>) {
         match alias {
-            ComponentAlias::InstanceExport { kind, .. } => match kind {
-                ComponentExternalKind::Func => self
-                    .funcs
-                    .push(Func::Other("an alias of an export of an instance")),
+            ComponentAlias::InstanceExport {
+                kind,
+                instance_index,
+                name,
+            } => match kind {
+                ComponentExternalKind::Func => {
+                    let func = match index(*instance_index).and_then(|i| self.instances.get(i)) {
+                        Some(Instance::Imported(interface)) => Func::Imported(HostFunc {
+                            interface: interface.clone(),
+                            name: (*name).to_string(),
+                        }),
+                        _ => Func::Other(ALIAS_OF_INSTANCE_EXPORT),
+                    };
+                    self.funcs.push(func);
+                }
                 ComponentExternalKind::Instance => self.instances.push(Instance::Other),
                 ComponentExternalKind::Module => self.modules.push(None),
                 ComponentExternalKind::Component => self.components.push(Shim::opaque()),
@@ -326,6 +386,12 @@ impl Reader {
                 }),
                 ExternalKind::Memory => self
                     .core_memories
+                    .push((*instance_index, (*name).to_string())),
+                ExternalKind::Table => self
+                    .core_tables
+                    .push((*instance_index, (*name).to_string())),
+                ExternalKind::Global => self
+                    .core_globals
                     .push((*instance_index, (*name).to_string())),
                 _ => {}
             },
@@ -360,7 +426,9 @@ impl Reader {
                     options: options.to_vec(),
                 }));
             }
-            CanonicalFunction::Lower { .. } => self.core_funcs.push(CoreFunc::Lowered),
+            CanonicalFunction::Lower { func_index, .. } => {
+                self.core_funcs.push(CoreFunc::Lowered { func: func_index })
+            }
             _ => self.core_funcs.push(CoreFunc::Builtin),
         }
         Ok(())
@@ -446,6 +514,63 @@ impl Reader {
         Ok(())
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by the linker in stage L3")
+    )]
+    fn wiring(&self) -> CoreWiring {
+        let instances = self
+            .core_instances
+            .iter()
+            .map(|instance| match instance {
+                CoreInstance::Module { module, args } => WiredInstance::Module {
+                    module: self
+                        .modules
+                        .get(*module)
+                        .and_then(Option::as_ref)
+                        .map(|m| m.ordinal),
+                    args: args.clone(),
+                },
+                CoreInstance::FromExports(members) => WiredInstance::Exports(
+                    members
+                        .iter()
+                        .map(|(name, kind, at)| (name.clone(), self.supplier(*kind, *at)))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+            })
+            .collect();
+        CoreWiring { instances }
+    }
+
+    /// What provides the core item `at` of the index space of `kind`.
+    fn supplier(&self, kind: ExternalKind, at: u32) -> Supplier {
+        let export = |(instance, name): &(u32, String)| Supplier::Export {
+            instance: *instance,
+            name: name.clone(),
+        };
+        let space = |items: &[(u32, String)]| index(at).and_then(|i| items.get(i)).map(export);
+        let found = match kind {
+            ExternalKind::Func => match index(at).and_then(|i| self.core_funcs.get(i)) {
+                Some(CoreFunc::Export { instance, name }) => Some(Supplier::Export {
+                    instance: *instance,
+                    name: name.clone(),
+                }),
+                Some(CoreFunc::Lowered { func }) => {
+                    match index(*func).and_then(|i| self.funcs.get(i)) {
+                        Some(Func::Imported(host)) => Some(Supplier::Host(host.clone())),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            ExternalKind::Memory => space(&self.core_memories),
+            ExternalKind::Table => space(&self.core_tables),
+            ExternalKind::Global => space(&self.core_globals),
+            _ => None,
+        };
+        found.unwrap_or(Supplier::Other)
+    }
+
     fn resolve(&self) -> Result<Vec<WitExport>, TranspileError> {
         let mut out = Vec::new();
         for exported in &self.exported {
@@ -512,7 +637,8 @@ impl Reader {
         };
         let lift = match index(at).and_then(|i| self.funcs.get(i)) {
             Some(Func::Lift(lift)) => lift,
-            Some(Func::Other(what)) => {
+            Some(other) => {
+                let what = other.describe().unwrap_or("not a function");
                 return Err(unsupported(format!(
                     "export `{label}` is {what}, not a `canon lift` in this component \
                      (exports of a nested component are not traced)"
@@ -611,7 +737,7 @@ impl Reader {
     ) -> Result<((usize, u32), String), TranspileError> {
         let (instance, name) = match index(at).and_then(|i| self.core_funcs.get(i)) {
             Some(CoreFunc::Export { instance, name }) => (*instance, name),
-            Some(CoreFunc::Lowered) => {
+            Some(CoreFunc::Lowered { .. }) => {
                 return Err(unsupported(format!(
                     "export `{label}`: its {what} is the result of a canon lower, not a core \
                      module export"
@@ -623,7 +749,7 @@ impl Reader {
                 )));
             }
         };
-        let Some(&CoreInstance::Module(module)) =
+        let Some(&CoreInstance::Module { module, .. }) =
             index(instance).and_then(|i| self.core_instances.get(i))
         else {
             return Err(unsupported(format!(
@@ -673,6 +799,7 @@ impl Reader {
 
 #[cfg(test)]
 mod tests {
+    use super::super::wiring::{HostFunc, Supplier, WiredInstance};
     use super::*;
     use wasmparser::Parser;
 
@@ -729,5 +856,153 @@ mod tests {
         assert!(reader.components[0].opaque);
         // `$inner` lands at index 1, so an `Instantiated` index resolves to it.
         assert!(!reader.components[1].opaque);
+    }
+
+    /// A component made like `wasm-tools component new --adapt`: a program module that imports
+    /// `wasi_snapshot_preview1.args_get`, an adapter that imports `env.memory` and the WIT
+    /// function `wasi:cli/environment@0.2.3` `get-arguments`, and `wit-component`'s shim and
+    /// fixup modules that tie them together through a table.
+    fn adapter_component() -> Vec<u8> {
+        use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
+        use wit_parser::Resolve;
+
+        let embed = |wit: &str, world: &str, wat: &str| {
+            let mut resolve = Resolve::default();
+            let package = resolve.push_str("test.wit", wit).unwrap();
+            let world = resolve.select_world(&[package], Some(world)).unwrap();
+            let mut module = wat::parse_str(wat).unwrap();
+            embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false)
+                .unwrap();
+            module
+        };
+        let adapter = embed(
+            "package wasi:cli@0.2.3;
+interface environment { get-arguments: func() -> list<string>; }
+world adapter { import environment; }",
+            "adapter",
+            r#"(module
+  (import "env" "memory" (memory 1))
+  (import "wasi:cli/environment@0.2.3" "get-arguments" (func $get (param i32)))
+  (func (export "cabi_import_realloc") (param i32 i32 i32 i32) (result i32) i32.const 0)
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) i32.const 0)
+  (func (export "args_get") (param i32 i32) (result i32)
+    i32.const 0 call $get
+    i32.const 0 i32.const 0 i32.store
+    i32.const 0))"#,
+        );
+        let main = embed(
+            "package t:p;
+world w { export run: func(); }",
+            "w",
+            r#"(module
+  (import "wasi_snapshot_preview1" "args_get" (func (param i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) i32.const 0)
+  (func (export "run") i32.const 0 i32.const 0 call 0 drop))"#,
+        );
+        ComponentEncoder::default()
+            .module(&main)
+            .unwrap()
+            .adapter("wasi_snapshot_preview1", &adapter)
+            .unwrap()
+            .validate(true)
+            .encode()
+            .unwrap()
+    }
+
+    /// The core instance that instantiates the top-level core module `module`.
+    fn instance_of(wiring: &CoreWiring, module: usize) -> u32 {
+        wiring.module_instance(module).unwrap()
+    }
+
+    fn export(instance: u32, name: &str) -> Supplier {
+        Supplier::Export {
+            instance,
+            name: name.to_string(),
+        }
+    }
+
+    // The modules of `adapter_component`, by ordinal: main 0, adapter 1, shim 2, fixup 3.
+    const MAIN: usize = 0;
+    const ADAPTER: usize = 1;
+    const SHIM: usize = 2;
+    const FIXUP: usize = 3;
+
+    #[test]
+    fn the_program_module_is_fed_its_preview1_import_by_the_shim() {
+        let wiring = core_wiring(&adapter_component()).unwrap();
+        let main = instance_of(&wiring, MAIN);
+        let shim = instance_of(&wiring, SHIM);
+        assert_eq!(
+            wiring.supplier(main, "wasi_snapshot_preview1", "args_get"),
+            Some(export(shim, "0"))
+        );
+    }
+
+    #[test]
+    fn the_adapters_memory_is_the_program_modules_memory() {
+        let wiring = core_wiring(&adapter_component()).unwrap();
+        let main = instance_of(&wiring, MAIN);
+        let adapter = instance_of(&wiring, ADAPTER);
+        assert_eq!(
+            wiring.supplier(adapter, "env", "memory"),
+            Some(export(main, "memory"))
+        );
+    }
+
+    #[test]
+    fn the_adapters_host_import_is_fed_by_the_shim() {
+        let wiring = core_wiring(&adapter_component()).unwrap();
+        let adapter = instance_of(&wiring, ADAPTER);
+        let shim = instance_of(&wiring, SHIM);
+        assert_eq!(
+            wiring.supplier(adapter, "wasi:cli/environment@0.2.3", "get-arguments"),
+            Some(export(shim, "1"))
+        );
+    }
+
+    #[test]
+    fn the_fixups_table_is_the_shims_table() {
+        let wiring = core_wiring(&adapter_component()).unwrap();
+        let fixup = instance_of(&wiring, FIXUP);
+        let shim = instance_of(&wiring, SHIM);
+        assert_eq!(
+            wiring.supplier(fixup, "shim", "$imports"),
+            Some(export(shim, "$imports"))
+        );
+    }
+
+    #[test]
+    fn the_fixups_actual_functions_are_the_adapter_and_the_lowered_host_function() {
+        let wiring = core_wiring(&adapter_component()).unwrap();
+        let fixup = instance_of(&wiring, FIXUP);
+        let adapter = instance_of(&wiring, ADAPTER);
+        assert_eq!(
+            wiring.supplier(fixup, "actual", "0"),
+            Some(export(adapter, "args_get"))
+        );
+        assert_eq!(
+            wiring.supplier(fixup, "actual", "1"),
+            Some(Supplier::Host(HostFunc {
+                interface: "wasi:cli/environment@0.2.3".into(),
+                name: "get-arguments".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn a_lone_module_has_one_unwired_instance() {
+        let wiring = core_wiring(
+            &wat::parse_str(r#"(component (core module $a (func (export "f"))) (core instance (instantiate $a)))"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            wiring.instances,
+            [WiredInstance::Module {
+                module: Some(0),
+                args: vec![]
+            }]
+        );
     }
 }

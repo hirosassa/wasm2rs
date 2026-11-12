@@ -19,6 +19,7 @@ mod emit;
 mod exports;
 mod glue;
 mod read;
+mod wiring;
 
 pub(crate) use emit::NODE_BUDGET;
 pub use emit::{
