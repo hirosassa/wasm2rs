@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::helpers::{HELPER_ORDER, helper_lines, shared_helper_lines, table_accessor};
 use super::render_cont::{continuation_method_lines, continuation_runtime_lines};
 use super::runtime::render_rt_helpers;
-use super::wasi::{WasiAccess, confine_lines};
+use super::wasi::{WasiAccess, confine_lines, guest_range_lines};
 use super::{
     ALLOW, DataSegment, ElemSegment, ExportInfo, GlobalExportInfo, Helper, ImportInfo,
     ImportedGlobalInfo, ModuleCtx, ModuleParts, SegOffset, TableFill, WASM_PAGE_SIZE, WasiFn,
@@ -1128,6 +1128,9 @@ fn wasi_method_lines(imports: &[ImportInfo], layout: &Layout, shared: bool) -> V
         .any(|im| im.wasi.is_some_and(WasiFn::confines_path))
     {
         inner.extend(confine_lines());
+    }
+    if imports.iter().any(|im| im.wasi.is_some()) {
+        inner.extend(guest_range_lines());
     }
     for im in imports {
         if let Some(w) = im.wasi
