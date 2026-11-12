@@ -63,6 +63,10 @@ Host behavior:
   instead of a structured `error-code` for connection failures.
 - File access is confined with `cap-std` (`openat` with `O_NOFOLLOW`). That is Unix only: other
   platforms are not tested (#205).
+- The confinement above is for `wasm2rs-wasi` only. The native WASI preview1 shim of the generated code uses
+  `std::fs` after a canonicalize check, which a sibling wasi-threads guest thread or another host
+  process can race with a symlink swap (#225, see the notes in
+  [cli-reference.md](cli-reference.md)).
 
 Transpilation of a component (`Unsupported` errors that say why):
 
