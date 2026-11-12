@@ -51,10 +51,6 @@ pub fn wit_exports(component: &[u8]) -> Result<Vec<WitExport>, TranspileError> {
 }
 
 /// The core instance graph of `component` (see [`CoreWiring`]).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the linker in stage L3")
-)]
 pub(crate) fn core_wiring(component: &[u8]) -> Result<CoreWiring, TranspileError> {
     let mut reader = Reader::default();
     read_component(component, Some(&mut reader))?;
@@ -91,8 +87,9 @@ struct Lift {
 enum CoreFunc {
     /// An alias of an export of a core instance.
     Export { instance: u32, name: String },
-    /// A `canon lower` of this function of the component's function index space.
-    Lowered { func: u32 },
+    /// A `canon lower` of this function of the component's function index space, with the
+    /// core function of its `realloc` option.
+    Lowered { func: u32, realloc: Option<u32> },
     /// Another canonical built-in.
     Builtin,
 }
@@ -352,6 +349,7 @@ impl Reader {
                         Some(Instance::Imported(interface)) => Func::Imported(HostFunc {
                             interface: interface.clone(),
                             name: (*name).to_string(),
+                            realloc: None,
                         }),
                         _ => Func::Other(ALIAS_OF_INSTANCE_EXPORT),
                     };
@@ -413,9 +411,16 @@ impl Reader {
                     options: options.to_vec(),
                 }));
             }
-            CanonicalFunction::Lower { func_index, .. } => {
-                self.core_funcs.push(CoreFunc::Lowered { func: func_index })
-            }
+            CanonicalFunction::Lower {
+                func_index,
+                options,
+            } => self.core_funcs.push(CoreFunc::Lowered {
+                func: func_index,
+                realloc: options.iter().find_map(|o| match o {
+                    CanonicalOption::Realloc(f) => Some(*f),
+                    _ => None,
+                }),
+            }),
             _ => self.core_funcs.push(CoreFunc::Builtin),
         }
         Ok(())
@@ -501,10 +506,6 @@ impl Reader {
         Ok(())
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the linker in stage L3")
-    )]
     fn wiring(&self) -> CoreWiring {
         let instances = self
             .core_instances
@@ -529,6 +530,14 @@ impl Reader {
         CoreWiring { instances }
     }
 
+    /// The core instance and export name of core function `at`, when it is an alias of one.
+    fn core_export_of(&self, at: u32) -> Option<(u32, String)> {
+        match index(at).and_then(|i| self.core_funcs.get(i)) {
+            Some(CoreFunc::Export { instance, name }) => Some((*instance, name.clone())),
+            _ => None,
+        }
+    }
+
     /// What provides the core item `at` of the index space of `kind`.
     fn supplier(&self, kind: ExternalKind, at: u32) -> Supplier {
         let space = |items: &[(u32, String)]| {
@@ -541,9 +550,12 @@ impl Reader {
                 Some(CoreFunc::Export { instance, name }) => {
                     Some(Supplier::export(*instance, name))
                 }
-                Some(CoreFunc::Lowered { func }) => {
+                Some(CoreFunc::Lowered { func, realloc }) => {
                     match index(*func).and_then(|i| self.funcs.get(i)) {
-                        Some(Func::Imported(host)) => Some(Supplier::Host(host.clone())),
+                        Some(Func::Imported(host)) => Some(Supplier::Host(HostFunc {
+                            realloc: realloc.and_then(|f| self.core_export_of(f)),
+                            ..host.clone()
+                        })),
                         _ => None,
                     }
                 }
@@ -969,6 +981,7 @@ world w { export run: func(); }",
             Some(Supplier::Host(HostFunc {
                 interface: "wasi:cli/environment@0.2.3".into(),
                 name: "get-arguments".into(),
+                realloc: Some((adapter, "cabi_import_realloc".into())),
             }))
         );
     }

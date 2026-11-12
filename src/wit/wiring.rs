@@ -6,11 +6,6 @@
 //! another. This keeps that graph, and, for a core function that comes from a `canon lower`,
 //! the WIT function it calls, so a later stage can link the modules and name the host imports.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the linker in stage L3")
-)]
-
 use std::collections::BTreeMap;
 
 /// A function of an imported interface instance. (A top-level imported function is not
@@ -20,6 +15,10 @@ pub(crate) struct HostFunc {
     /// The imported instance, e.g. `wasi:cli/environment@0.2.3`.
     pub interface: String,
     pub name: String,
+    /// The core instance and export name of the lowering's `realloc` option, if it has one
+    /// (an adapter's `cabi_import_realloc`). `None` for a function the reader did not see
+    /// lowered.
+    pub realloc: Option<(u32, String)>,
 }
 
 /// What provides an item that a core instance receives or exports.

@@ -446,10 +446,18 @@ pub(crate) fn transpile_with_host_imports(
     wasm: &[u8],
     topts: &TranspileOptions,
 ) -> Result<(String, Vec<wit::CoreImport>), TranspileError> {
+    transpile_ir_with_host_imports(parse::parse_module(wasm, topts)?, topts)
+}
+
+/// [`transpile_with_host_imports`] for a module that is already parsed (or linked).
+pub(crate) fn transpile_ir_with_host_imports(
+    ir: parse::ModuleIr<'_>,
+    topts: &TranspileOptions,
+) -> Result<(String, Vec<wit::CoreImport>), TranspileError> {
     let single = SplitOptions::single_file();
     let mut code = None;
     let mut imports = Vec::new();
-    transpile_impl(wasm, topts, |parts| {
+    generate_from_ir(ir, topts, |parts| {
         imports = parts
             .imports
             .iter()

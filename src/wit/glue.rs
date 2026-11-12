@@ -168,6 +168,12 @@ mod glue_mem {
 }
 "#;
 
+/// The module of [`ALLOC_HELPERS`], which allocates through `cabi_realloc`.
+const ALLOC_MODULE: &str = "glue_alloc";
+
+/// The module of [`ALLOC_HELPERS`] with an import's `realloc` in place of `cabi_realloc`.
+const IMPORT_ALLOC_MODULE: &str = "glue_alloc_import";
+
 /// Allocating in the guest; present only when a `string` or `list` is returned.
 const ALLOC_HELPERS: &str = r#"
 mod glue_alloc {
@@ -199,6 +205,18 @@ mod glue_alloc {
     }
 }
 "#;
+
+/// [`ALLOC_HELPERS`] calling the guest's `realloc` export instead of `cabi_realloc`, in the
+/// module [`IMPORT_ALLOC_MODULE`].
+fn import_alloc_helpers(realloc: &str) -> String {
+    ALLOC_HELPERS
+        .replace(
+            &format!("mod {ALLOC_MODULE} "),
+            &format!("mod {IMPORT_ALLOC_MODULE} "),
+        )
+        .replace("g.cabi_realloc(", &format!("g.{realloc}("))
+        .replace("`cabi_realloc`", &format!("`{realloc}`"))
+}
 
 fn core_rust(flat: Flat) -> &'static str {
     match flat {
@@ -309,6 +327,8 @@ struct Gen<'a> {
     writes_memory: bool,
     /// Some result is a `string` or `list`, allocated through `cabi_realloc`.
     allocates: bool,
+    /// The module of allocation helpers the generated code calls (see [`ALLOC_MODULE`]).
+    alloc: &'static str,
 }
 
 impl Gen<'_> {
@@ -587,9 +607,10 @@ impl Gen<'_> {
                 self.allocates = true;
                 self.writes_memory = true;
                 let next = base.saturating_add(1);
+                let al = self.alloc;
                 format!(
                     "{{ let v = {value}; let b = v.as_bytes(); \
-                     let p = glue_alloc::alloc(g, 1, b.len() as u64, 1); glue_mem::st(g, p, b); \
+                     let p = {al}::alloc(g, 1, b.len() as u64, 1); glue_mem::st(g, p, b); \
                      out[{base}] = p; out[{next}] = b.len() as u64; }}"
                 )
             }
@@ -597,9 +618,10 @@ impl Gen<'_> {
                 self.allocates = true;
                 self.writes_memory = true;
                 let next = base.saturating_add(1);
+                let al = self.alloc;
                 if matches!(**t, WitType::U8) {
                     return Ok(format!(
-                        "{{ let v = {value}; let p = glue_alloc::alloc(g, 1, v.len() as u64, 1); \
+                        "{{ let v = {value}; let p = {al}::alloc(g, 1, v.len() as u64, 1); \
                          glue_mem::st(g, p, &v); out[{base}] = p; out[{next}] = v.len() as u64; }}"
                     ));
                 }
@@ -609,7 +631,7 @@ impl Gen<'_> {
                 let elem = self.store(t, &format!("x{id}"), &elem_at)?;
                 format!(
                     "{{ let v{id} = {value}; let n{id} = v{id}.len() as u64; \
-                     let p{id} = glue_alloc::alloc(g, {align}, n{id}, {size}); \
+                     let p{id} = {al}::alloc(g, {align}, n{id}, {size}); \
                      for (i{id}, x{id}) in v{id}.into_iter().enumerate() {{ {elem} }} \
                      out[{base}] = p{id}; out[{next}] = n{id}; }}"
                 )
@@ -676,12 +698,14 @@ impl Gen<'_> {
             }
             WitType::String => {
                 self.allocates = true;
-                format!("glue_alloc::put_bytes(g, {at}, ({value}).as_bytes());")
+                let al = self.alloc;
+                format!("{al}::put_bytes(g, {at}, ({value}).as_bytes());")
             }
             WitType::List(t) => {
                 self.allocates = true;
+                let al = self.alloc;
                 if matches!(**t, WitType::U8) {
-                    return Ok(format!("glue_alloc::put_bytes(g, {at}, &({value}));"));
+                    return Ok(format!("{al}::put_bytes(g, {at}, &({value}));"));
                 }
                 let (size, align) = self.layout(t)?;
                 let id = self.fresh();
@@ -689,9 +713,9 @@ impl Gen<'_> {
                 let elem = self.store(t, &format!("x{id}"), &elem_at)?;
                 format!(
                     "{{ let v{id} = {value}; let n{id} = v{id}.len() as u64; \
-                     let p{id} = glue_alloc::alloc(g, {align}, n{id}, {size}); \
+                     let p{id} = {al}::alloc(g, {align}, n{id}, {size}); \
                      for (i{id}, x{id}) in v{id}.into_iter().enumerate() {{ {elem} }} \
-                     glue_alloc::put_ptr_len(g, {at}, p{id}, n{id}); }}"
+                     {al}::put_ptr_len(g, {at}, p{id}, n{id}); }}"
                 )
             }
             _ => String::new(),
@@ -751,6 +775,7 @@ pub(super) fn write(
     methods: &[Method<'_>],
     records: &Records,
     exports: Option<(&[WitExport], &[String])>,
+    import_realloc: Option<&str>,
 ) -> Result<(), TranspileError> {
     let mut sig_budget = Budget::new();
     let mut gen_ = Gen {
@@ -759,6 +784,11 @@ pub(super) fn write(
         fresh: 0,
         writes_memory: false,
         allocates: false,
+        alloc: if import_realloc.is_some() {
+            IMPORT_ALLOC_MODULE
+        } else {
+            ALLOC_MODULE
+        },
     };
     out.push_str(HELPERS);
     out.push_str(
@@ -858,14 +888,30 @@ pub(super) fn write(
         out.push_str("    }\n");
     }
     out.push_str("}\n");
+    // Results of imports allocate through the import's `realloc`; the lifts' own go through
+    // `cabi_realloc`.
+    let import_allocates = std::mem::replace(&mut gen_.allocates, false);
+    gen_.alloc = ALLOC_MODULE;
     if let Some((exports, export_names)) = exports {
         write_exports(out, &mut gen_, exports, export_names)?;
     }
     if gen_.writes_memory {
         out.push_str(MEM_HELPERS);
     }
-    if gen_.allocates {
-        out.push_str(ALLOC_HELPERS);
+    match import_realloc {
+        Some(realloc) => {
+            if import_allocates {
+                out.push_str(&import_alloc_helpers(realloc));
+            }
+            if gen_.allocates {
+                out.push_str(ALLOC_HELPERS);
+            }
+        }
+        None => {
+            if import_allocates || gen_.allocates {
+                out.push_str(ALLOC_HELPERS);
+            }
+        }
     }
     Ok(())
 }

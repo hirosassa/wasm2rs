@@ -29,7 +29,9 @@ pub use emit::{
 pub use exports::{WitExport, wit_exports};
 pub use read::wit_functions;
 
-pub(crate) use emit::{CoreImport, wit_host_glue_for_module};
+pub(crate) use emit::{CoreImport, is_wit_function, wit_host_glue_for_module};
+pub(crate) use exports::core_wiring;
+pub(crate) use wiring::{HostFunc, Supplier, WiredInstance};
 
 /// A WIT value type that a host function can take or return.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -8,7 +8,7 @@ use std::process::{Command, Output};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
 
-const IO: &str = r#"
+pub(crate) const IO: &str = r#"
 package wasi:io@0.2.0;
 interface error {
   resource error;
@@ -26,7 +26,7 @@ interface streams {
 }
 "#;
 
-const CLI: &str = r#"
+pub(crate) const CLI: &str = r#"
 package wasi:cli@0.2.0;
 interface environment {
   get-arguments: func() -> list<string>;

@@ -11,11 +11,6 @@
 //! This is a purely core-level step: the caller says, for each import, what provides it
 //! ([`Source`]); nothing here knows about components.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the component reader in stage L3")
-)]
-
 use std::collections::HashMap;
 
 use wasmparser::{BinaryReader, BlockType, ConstExpr, FunctionBody, HeapType, Operator, ValType};
@@ -77,6 +72,10 @@ pub(crate) struct ImportSources {
 pub(crate) struct LinkModule<'a> {
     pub ir: ModuleIr<'a>,
     pub sources: ImportSources,
+    /// Function exports of an appended module that the linked module exports too, as
+    /// `(its export name, the name in the linked module)`. Other exports of appended modules
+    /// are dropped. Ignored for the main module, which keeps all of its exports.
+    pub carried: Vec<(String, String)>,
 }
 
 /// The bytes the linker writes: rewritten bodies of the appended modules and the body of a
@@ -912,6 +911,7 @@ pub(crate) fn link<'b>(
     }
     let layout = Layout::new(&modules)?;
     let starts = layout.start_funcs(&modules)?;
+    let carried: Vec<Vec<(String, String)>> = modules.iter().map(|m| m.carried.clone()).collect();
     let mut modules = modules.into_iter();
     let mut ir = modules
         .next()
@@ -929,12 +929,14 @@ pub(crate) fn link<'b>(
         }
     }
 
+    let mut by_sig = seed_canon(&ir)?;
     for (m, a) in &appended {
         check_appended(a, *m)?;
-        merge_types(&layout, &mut ir, *m, a)?;
+        merge_types(&layout, &mut ir, &mut by_sig, *m, a)?;
     }
     merge_functions(&layout, &mut ir, &appended, rewritten)?;
     ir.tail_imports = layout.tail_imports(&appended)?;
+    carry_exports(&layout, &mut ir, &appended, &carried)?;
     merge_globals(&layout, &mut ir, &appended)?;
     merge_memories(&mut ir, &appended);
     merge_tables(&layout, &mut ir, &appended)?;
@@ -1005,16 +1007,15 @@ fn unit_function_type(ir: &mut ModuleIr<'_>) -> Result<u32, TranspileError> {
 
 /// Append the types of module `m`. Function types with equal signatures share a canonical
 /// id across modules, so a `call_indirect` of one module can reach another's function.
-fn merge_types(
-    layout: &Layout,
-    ir: &mut ModuleIr<'_>,
-    m: usize,
-    appended: &ModuleIr<'_>,
-) -> Result<(), TranspileError> {
-    // Seed from the types the main module's functions and imports are declared with: those
-    // are the canonical ids its `call_indirect` targets are compared against (the first
-    // type of a given shape may sit in a rec group or have a supertype, and is not).
-    let mut by_sig: HashMap<(Vec<ValType>, Vec<ValType>), u32> = HashMap::new();
+/// The canonical id of each function signature, shared by every appended module so that a
+/// `call_indirect` in one reaches a function declared in another (see [`merge_types`]).
+type CanonBySig = HashMap<(Vec<ValType>, Vec<ValType>), u32>;
+
+/// Seeds the canonical ids from the types the main module's functions and imports are declared
+/// with: those are the ids its `call_indirect` targets are compared against (the first type of
+/// a given shape may sit in a rec group or have a supertype, and is not).
+fn seed_canon(ir: &ModuleIr<'_>) -> Result<CanonBySig, TranspileError> {
+    let mut by_sig = CanonBySig::new();
     let declared = ir
         .func_type_indices
         .iter()
@@ -1028,6 +1029,16 @@ fn merge_types(
                 .or_insert(*canon);
         }
     }
+    Ok(by_sig)
+}
+
+fn merge_types(
+    layout: &Layout,
+    ir: &mut ModuleIr<'_>,
+    by_sig: &mut CanonBySig,
+    m: usize,
+    appended: &ModuleIr<'_>,
+) -> Result<(), TranspileError> {
     for (k, sig) in appended.types.signatures.iter().enumerate() {
         let super_ = appended
             .types
@@ -1089,6 +1100,34 @@ fn merge_functions<'b>(
         }
         for g in &a.global_funcs {
             ir.global_funcs.push(layout.func(m, *g)?);
+        }
+    }
+    Ok(())
+}
+
+/// Adds the function exports the caller asked to keep from the appended modules.
+fn carry_exports(
+    layout: &Layout,
+    ir: &mut ModuleIr<'_>,
+    appended: &[(usize, ModuleIr<'_>)],
+    carried: &[Vec<(String, String)>],
+) -> Result<(), TranspileError> {
+    for (m, a) in appended {
+        for (own, name) in carried.get(*m).into_iter().flatten() {
+            let export = a.exports.iter().find(|e| e.name == *own).ok_or_else(|| {
+                unsupported(format!(
+                    "linked module {m} does not export function `{own}`"
+                ))
+            })?;
+            if ir.exports.iter().any(|e| e.name == *name) {
+                return Err(unsupported(format!(
+                    "linked modules export `{name}` more than once"
+                )));
+            }
+            ir.exports.push(codegen::ExportInfo {
+                name: name.clone(),
+                func_index: layout.func(*m, export.func_index)?,
+            });
         }
     }
     Ok(())
@@ -1266,6 +1305,7 @@ mod tests {
                 Ok(LinkModule {
                     ir: parse::parse_module(bytes, topts)?,
                     sources,
+                    carried: Vec::new(),
                 })
             })
             .collect::<Result<Vec<_>, TranspileError>>()?;
@@ -1674,6 +1714,102 @@ mod tests {
         );
     }
 
+    /// Links `wasms` (main first) with `carried[k]` kept from module `k`.
+    fn link_carrying(
+        wasms: &[Vec<u8>],
+        carried: Vec<Vec<(String, String)>>,
+    ) -> Result<String, TranspileError> {
+        let topts = TranspileOptions::default();
+        let modules = wasms
+            .iter()
+            .zip(carried)
+            .map(|(bytes, carried)| {
+                Ok(LinkModule {
+                    ir: parse::parse_module(bytes, &topts)?,
+                    sources: ImportSources::default(),
+                    carried,
+                })
+            })
+            .collect::<Result<Vec<_>, TranspileError>>()?;
+        let rewritten = rewrite_bodies(&modules)?;
+        let ir = link(modules, &rewritten)?;
+        Ok(ir
+            .exports
+            .iter()
+            .map(|e| e.name.clone())
+            .collect::<Vec<_>>()
+            .join(","))
+    }
+
+    fn carry(own: &str, name: &str) -> Vec<(String, String)> {
+        vec![(own.to_string(), name.to_string())]
+    }
+
+    #[test]
+    fn a_carried_export_of_an_appended_module_is_exported_under_the_given_name() {
+        let wasms = [
+            wasm(r#"(module (func (export "f")))"#),
+            wasm(r#"(module (func (export "g")))"#),
+        ];
+        let exports = link_carrying(&wasms, vec![Vec::new(), carry("g", "renamed")]).unwrap();
+        assert_eq!(exports, "f,renamed");
+    }
+
+    #[test]
+    fn carrying_an_export_the_module_lacks_is_refused() {
+        let wasms = [
+            wasm(r#"(module (func (export "f")))"#),
+            wasm(r#"(module (func (export "g")))"#),
+        ];
+        let err = link_carrying(&wasms, vec![Vec::new(), carry("missing", "x")]).unwrap_err();
+        assert!(err.to_string().contains("`missing`"), "{err}");
+    }
+
+    #[test]
+    fn carrying_an_export_over_an_existing_name_is_refused() {
+        let wasms = [
+            wasm(r#"(module (func (export "f")))"#),
+            wasm(r#"(module (func (export "g")))"#),
+        ];
+        let err = link_carrying(&wasms, vec![Vec::new(), carry("g", "f")]).unwrap_err();
+        assert!(err.to_string().contains("more than once"), "{err}");
+    }
+
+    /// A signature that only appended modules declare gets one canonical id across them, so
+    /// a `call_indirect` of one reaches a function of the other.
+    #[test]
+    fn appended_modules_share_the_canonical_id_of_a_signature_the_main_module_lacks() {
+        let main = r#"(module (func (export "f")))"#;
+        let b = r#"(module
+            (type $t (func (param i64) (result i64)))
+            (table (export "t") 1 funcref)
+            (elem (i32.const 0) $inc)
+            (func $inc (type $t) local.get 0 i64.const 1 i64.add))"#;
+        let c = r#"(module
+            (import "b" "t" (table 1 funcref))
+            (type $t (func (param i64) (result i64)))
+            (func (export "g") (result i64) i64.const 41 i32.const 0 call_indirect (type $t)))"#;
+        let wasms = [wasm(main), wasm(b), wasm(c)];
+        let sources = vec![
+            ImportSources::default(),
+            ImportSources::default(),
+            ImportSources {
+                tables: vec![Source::Table {
+                    module: 1,
+                    index: 0,
+                }],
+                ..ImportSources::default()
+            },
+        ];
+        // `g` is function 2 of the merged module (main's `f`, then `inc`, then `g`).
+        link_and_run(
+            "canon_shared",
+            &wasms,
+            sources,
+            "let mut inst = Instance::new();\n    assert_eq!(inst.func2(), 42);",
+        );
+    }
+
     #[test]
     fn a_single_appended_start_is_the_merged_start() {
         let main = r#"(module (func (export "f")))"#;
@@ -1684,10 +1820,12 @@ mod tests {
             LinkModule {
                 ir: parse::parse_module(&main, &topts).unwrap(),
                 sources: ImportSources::default(),
+                carried: Vec::new(),
             },
             LinkModule {
                 ir: parse::parse_module(&b, &topts).unwrap(),
                 sources: ImportSources::default(),
+                carried: Vec::new(),
             },
         ];
         let rewritten = rewrite_bodies(&modules).unwrap();
@@ -1893,6 +2031,7 @@ mod tests {
             .map(|(bytes, sources)| LinkModule {
                 ir: parse::parse_module(bytes, &topts).expect("parse"),
                 sources,
+                carried: Vec::new(),
             })
             .collect::<Vec<_>>();
         let rewritten = rewrite_bodies(&modules).expect("rewrite");

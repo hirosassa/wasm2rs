@@ -832,7 +832,7 @@ pub fn wit_host_glue_with_options(
     component: &[u8],
     options: &WitOptions,
 ) -> Result<String, TranspileError> {
-    glue_text(component, options, None)
+    glue_text(component, options, None, None)
 }
 
 /// A function import of the program core module that its `Imports` trait declares.
@@ -848,18 +848,23 @@ pub(crate) struct CoreImport {
 /// order, each delegating to the `Host` method of the WIT function it lowers. The module may
 /// name the interface by another compatible version than the component's own import, or import
 /// one function under several versions; the glue then still has one method per module import.
+///
+/// `import_realloc` is the export of the program that the lowered imports allocate through
+/// when it is not the lifts' `cabi_realloc` (a linked adapter's `cabi_import_realloc`).
 pub(crate) fn wit_host_glue_for_module(
     component: &[u8],
     options: &WitOptions,
     core_imports: &[CoreImport],
+    import_realloc: Option<&str>,
 ) -> Result<String, TranspileError> {
-    glue_text(component, options, Some(core_imports))
+    glue_text(component, options, Some(core_imports), import_realloc)
 }
 
 fn glue_text(
     component: &[u8],
     options: &WitOptions,
     core_imports: Option<&[CoreImport]>,
+    import_realloc: Option<&str>,
 ) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
     let exports = if options.exports {
@@ -890,15 +895,6 @@ fn glue_text(
             )));
         }
     }
-    if let Some(other) = exports
-        .iter()
-        .find(|e| e.core_module != exports[0].core_module)
-    {
-        return Err(unsupported(format!(
-            "export `{}`: the exports come from more than one core module",
-            other.core_export
-        )));
-    }
     let exported = options
         .exports
         .then_some((exports.as_slice(), export_names.as_slice()));
@@ -914,7 +910,7 @@ fn glue_text(
             })
             .collect(),
     };
-    glue::write(&mut out, &methods, &records, exported)?;
+    glue::write(&mut out, &methods, &records, exported, import_realloc)?;
     Ok(out)
 }
 
@@ -941,6 +937,16 @@ fn core_methods<'a>(
         });
     }
     Ok(methods)
+}
+
+/// Whether the core import `module` `field` lowers one of the WIT functions `funcs` (the glue
+/// then implements it; see [`resolve_core_import`]).
+pub(crate) fn is_wit_function(
+    funcs: &[WitFunc],
+    module: &str,
+    field: &str,
+) -> Result<bool, TranspileError> {
+    resolve_core_import(funcs, module, field).map(|found| found.is_some())
 }
 
 /// The index in `funcs` of the WIT function the core import `module` `field` lowers: the one

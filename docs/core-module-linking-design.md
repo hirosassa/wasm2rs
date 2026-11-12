@@ -1,7 +1,7 @@
 # Linking several core modules (F1 step 2)
 
-Status: L1 (#307), L2 (`src/link.rs`, not called yet) and L2b (tail-import slot) are
-implemented; L3 is next. All open questions are decided (Section 6).
+Status: L1 (#307), L2 (`src/link.rs`), L2b (tail-import slot) and L3 (component
+integration) are implemented; L4 is next. All open questions are decided (Section 6).
 
 Background: [component-toolchain-survey.md](component-toolchain-survey.md) (F1/F2),
 [component-input-design.md](component-input-design.md),
@@ -340,6 +340,43 @@ fallback.
   adapter-shaped component transpiles, builds, and `run` executes against a test
   `Host` that records `get-stdout`/`write` (replacing today's `Unsupported`
   assertion).
+  *As implemented* (`src/component/link.rs`; `tests/it/component_link_adapter.rs`):
+  - **Gate** (`component.rs` `select_program`): the linker runs only where the component did
+    not work before: (1) lifts span several modules, (2) the lifting module imports a
+    memory/table/global from another core instance (#305's shape), (3) the program takes a
+    *function* from another core instance whose import name is not a WIT function of the
+    component. (3) is the real `wit-component` adapter shape: the program's
+    `wasi_snapshot_preview1` imports come from the shim, and the old path transpiled it
+    without error but its `Glue` lacked those `Imports` methods, so it did not build. A
+    function reached through a shim under its WIT name (a lowered import that needs memory)
+    stays on the old path. Single-module components never read the wiring.
+  - **Wiring to linker**: every instantiated module is linked in instantiation order, the
+    first one that defines a memory first (main). Each import is resolved with
+    `CoreWiring::supplier`: an export of another linked module becomes a `Source` by the
+    export's index (resolved against the module's own export section, all kinds), anything
+    else stays `Source::Host`. A host import of an *appended* module is renamed to the WIT
+    interface and function of its `canon lower` (Q2) before linking, so `actual.1` of the
+    fixup is `wasi:cli/environment@0.2.3 get-arguments` to the glue. The main module's host
+    imports keep their names (the glue already resolves versions for them).
+  - **#184**: `HostFunc` now carries the `realloc` option of its `canon lower`. When it is an
+    appended module's export, `link` keeps it (`LinkModule::carried`) as `cabi_import_realloc`
+    of the unit; the glue's import side calls it through a second allocation helper module
+    (`glue_alloc_import`, the same text with that name) while the lifts keep `cabi_realloc`.
+    Without a distinct import realloc the glue text is unchanged. Different `realloc`s among
+    the lowered imports are refused.
+  - `LinkModule::carried` also keeps the lifted core exports (and their `realloc` and
+    `post-return`) of an appended module, so lifts from several modules work when their core
+    export names are distinct (a clash is an error; L4 decides the naming, #185/#186).
+  - The duplicated "several core modules" check in `emit.rs` is gone; `transpile_component`
+    no longer refuses lifts from several modules.
+  - **L2 bug found by this stage**: appended modules each started a fresh signature -> canonical
+    id map seeded from main only, so the shim's `call_indirect` type and the fixup's imports of
+    the same signature got different ids and the table call trapped. The map is now seeded once
+    and shared (`link.rs` `seed_canon`).
+  - A module other than main that defines its own memory is refused (the glue addresses memory 0 only).
+  - Known limit: an adapter that needs a `global`/`memory`/`table` import served by the host
+    (not by a module) is still refused by the linker; a start-less shim and fixup are linked
+    like any module.
 - **L4 #185 and #186 for linked programs**: lifts in different modules become
   exports of one instance; names are assigned over the linked unit's exports, which are
   only what the component re-exports/lifts plus `memory` and `cabi_realloc`;

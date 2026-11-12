@@ -1,6 +1,8 @@
 //! Transpile a WebAssembly component in one call: its program core module, the typed import
 //! glue and (optionally) the typed export side, as one Rust source.
 
+mod link;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use wasmparser::{
@@ -8,7 +10,7 @@ use wasmparser::{
     ExternalKind, Instance, Parser, Payload, TypeRef,
 };
 
-use crate::wit::wit_host_glue_for_module;
+use crate::wit::{Supplier, core_wiring, is_wit_function, wit_functions, wit_host_glue_for_module};
 use crate::{
     TranspileError, TranspileOptions, WitExport, WitOptions, transpile_with_host_imports,
     wit_exports,
@@ -52,13 +54,18 @@ impl Default for ComponentOptions {
 /// ([`wit_exports`](crate::wit_exports)); a component without exports uses the module that is
 /// instantiated with the lowered imports (a module that exports no function and has no start
 /// function is wiring, as `wit-component`'s fixup module, and is skipped). Other core modules
-/// (shims, adapters) are not emitted.
+/// (shims) are not emitted.
+///
+/// A component whose core modules are wired to each other (a preview1 adapter, or exports
+/// lifted from several modules) is transpiled as one program: its modules are linked into a
+/// single `Instance`, and the adapter's calls into the host become `Host` methods of the WIT
+/// functions they lower.
 ///
 /// # Errors
 ///
 /// [`TranspileError::InvalidInput`] when the input is a core module (use
-/// [`transpile`](crate::transpile)), has no core module, has exports lifted from more than one
-/// module, or has several candidate modules and nothing tells them apart; plus every error of
+/// [`transpile`](crate::transpile)), has no core module, or has several candidate modules and
+/// nothing tells them apart; plus every error of
 /// [`wit_exports`](crate::wit_exports), [`transpile_with_options`] and
 /// [`wit_host_glue_with_options`] (an export of a nested component, a string encoding other
 /// than UTF-8, a shape the glue cannot lower). A malformed input is a [`TranspileError::Parse`].
@@ -84,7 +91,6 @@ pub fn transpile_component_with_exports(
 ) -> Result<(String, Vec<WitExport>), TranspileError> {
     let layout = scan(component)?;
     let exports = wit_exports(component)?;
-    let module = select_module(&layout, &exports)?;
     let transpile = TranspileOptions {
         named_imports: true,
         named_exports: true,
@@ -96,16 +102,44 @@ pub fn transpile_component_with_exports(
         exports: options.exports,
         ..WitOptions::default()
     };
+    let module = match select_program(component, &layout, &exports)? {
+        Program::Module(module) => module,
+        Program::Linked => {
+            let code = link::transpile_linked(component, &layout, &exports, &transpile, &wit)?;
+            return Ok((code, exports));
+        }
+    };
     let (mut out, core_imports) = transpile_with_host_imports(module, &transpile)?;
     out.push('\n');
-    out.push_str(&wit_host_glue_for_module(component, &wit, &core_imports)?);
+    out.push_str(&wit_host_glue_for_module(
+        component,
+        &wit,
+        &core_imports,
+        None,
+    )?);
     Ok((out, exports))
 }
 
-fn select_module<'a>(
+/// What the component's program is.
+enum Program<'a> {
+    /// One core module, transpiled on its own.
+    Module(&'a [u8]),
+    /// Several core modules wired to each other, linked into one unit (see [`link`]).
+    Linked,
+}
+
+/// Picks the program. The linker is used only where a single module cannot be: the exports are
+/// lifted from several modules, or the module that lifts them (or the only candidate) takes an
+/// item from another core module, which a host import cannot stand for. Every other component
+/// keeps the single-module path, so its output does not change.
+fn select_program<'a>(
+    component: &[u8],
     layout: &'a Layout,
     exports: &[WitExport],
-) -> Result<&'a [u8], TranspileError> {
+) -> Result<Program<'a>, TranspileError> {
+    if lifts_span_modules(exports) {
+        return Ok(Program::Linked);
+    }
     let index = select_index(layout, exports)?;
     let module = layout
         .modules
@@ -114,22 +148,71 @@ fn select_module<'a>(
         .ok_or_else(|| {
             TranspileError::InvalidInput(format!("core module {index} is not in the component"))
         })?;
-    reject_state_from_core_instances(module, layout.core_linked.get(&index))?;
-    Ok(module)
+    if imports_state_from_core_instances(module, layout.core_linked.get(&index))?
+        || takes_functions_from_core_instances(component, layout, index, module)?
+    {
+        return Ok(Program::Linked);
+    }
+    Ok(Program::Module(module))
 }
 
-/// Rejects a program module that imports a memory, table or global from another core module.
-///
-/// That is the shape of the module that lifts the exports of an adapter-based component
-/// (`wasm-tools component new --adapt`): the adapter imports `env.memory` from the user's
-/// module. `reentrant_imports` cannot take such a module, and its own error would blame the
-/// options instead of the component.
-fn reject_state_from_core_instances(
+/// Whether the lifted exports come from more than one core module.
+fn lifts_span_modules(exports: &[WitExport]) -> bool {
+    exports
+        .first()
+        .is_some_and(|first| exports.iter().any(|e| e.core_module != first.core_module))
+}
+
+/// Whether the module takes a function from another core module that its own import name does
+/// not say how to implement: the shape of a program made with a preview1 adapter, whose
+/// `wasi_snapshot_preview1` imports are answered through `wit-component`'s shim by the adapter.
+/// An import whose name is a WIT function of the component is a lowered import (reached through
+/// a shim, as `wit-component` does for a function that needs memory), which the glue implements.
+fn takes_functions_from_core_instances(
+    component: &[u8],
+    layout: &Layout,
+    index: usize,
+    module: &[u8],
+) -> Result<bool, TranspileError> {
+    // A lone module has nothing to take a function from.
+    if layout.modules.len() < 2 {
+        return Ok(false);
+    }
+    let wiring = core_wiring(component)?;
+    let Some(instance) = wiring.module_instance(index) else {
+        return Ok(false);
+    };
+    let funcs = wit_functions(component)?;
+    for payload in Parser::new(0).parse_all(module) {
+        let Payload::ImportSection(reader) = payload? else {
+            continue;
+        };
+        for import in reader.into_imports() {
+            let import = import?;
+            if !matches!(import.ty, TypeRef::Func(_) | TypeRef::FuncExact(_)) {
+                continue;
+            }
+            let fed_by_a_module = matches!(
+                wiring.supplier(instance, import.module, import.name),
+                Some(Supplier::Export { .. })
+            );
+            if fed_by_a_module && !is_wit_function(&funcs, import.module, import.name)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Whether the module imports a memory, table or global from another core module: an
+/// adapter's `env.memory`, in a component made with `wasm-tools component new --adapt` whose
+/// adapter lifts the exports. `reentrant_imports` cannot take such a module on its own.
+fn imports_state_from_core_instances(
     module: &[u8],
     linked: Option<&BTreeSet<String>>,
-) -> Result<(), TranspileError> {
+) -> Result<bool, TranspileError> {
     let Some(linked) = linked else {
-        return Ok(());
+        return Ok(false);
     };
     for payload in Parser::new(0).parse_all(module) {
         let Payload::ImportSection(reader) = payload? else {
@@ -137,16 +220,12 @@ fn reject_state_from_core_instances(
         };
         for import in reader.into_imports() {
             let import = import?;
-            if let Some(kind) = state_import(import.module, import.ty, linked) {
-                return Err(TranspileError::Unsupported(format!(
-                    "the core module that lifts the component's exports imports a {kind} from \
-                     another core module; linking several core modules (as in a component \
-                     made with a preview1 adapter) is not supported"
-                )));
+            if state_import(import.module, import.ty, linked).is_some() {
+                return Ok(true);
             }
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// The kind of a memory, table or global import that `linked` (the import module names given
@@ -165,12 +244,6 @@ fn state_import(module: &str, ty: TypeRef, linked: &BTreeSet<String>) -> Option<
 
 fn select_index(layout: &Layout, exports: &[WitExport]) -> Result<usize, TranspileError> {
     if let Some(first) = exports.first() {
-        if let Some(other) = exports.iter().find(|e| e.core_module != first.core_module) {
-            return Err(TranspileError::InvalidInput(format!(
-                "the exports come from more than one core module (`{}` and `{}`)",
-                first.core_export, other.core_export
-            )));
-        }
         return Ok(first.core_module);
     }
     match layout.modules.len() {
