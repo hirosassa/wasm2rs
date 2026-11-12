@@ -254,8 +254,52 @@ pub(super) struct Stat {
     pub(super) link_count: u64,
     pub(super) accessed: Option<Datetime>,
     pub(super) modified: Option<Datetime>,
-    /// Device and inode, which name the file within one run (zero where there are none).
-    pub(super) id: (u64, u64),
+    /// Device and inode (volume serial and file index on Windows), which name the file within
+    /// one run; `None` where the host could not read them.
+    pub(super) id: Option<(u64, u64)>,
+}
+
+impl Stat {
+    /// The identity and link count of the file behind an open handle. Windows only gives them
+    /// for a handle, not for what a path names; a handle it cannot read leaves them unset.
+    #[cfg(windows)]
+    pub(super) fn identified_by(mut self, handle: &impl std::os::windows::io::AsHandle) -> Self {
+        let info = handle
+            .as_handle()
+            .try_clone_to_owned()
+            .and_then(|owned| winapi_util::file::information(std::fs::File::from(owned)));
+        if let Ok(info) = info {
+            self.link_count = info.number_of_links();
+            self.id = Some((info.volume_serial_number(), info.file_index()));
+        }
+        self
+    }
+
+    #[cfg(not(windows))]
+    pub(super) fn identified_by<H>(self, _handle: &H) -> Self {
+        self
+    }
+
+    /// `identified_by` for the file or directory `path` names below `dir`, opened so that
+    /// there is a handle to read; a symlink (not followed) or an entry that cannot be opened
+    /// keeps its path as identity.
+    #[cfg(windows)]
+    pub(super) fn identified_below(self, dir: &Dir, path: &Path) -> Self {
+        let handle = match self.kind {
+            DescriptorType::Directory => dir.open_dir(path).map(|d| d.into_std_file()),
+            DescriptorType::RegularFile => dir.open(path).map(|f| f.into_std()),
+            _ => return self,
+        };
+        match handle {
+            Ok(file) => self.identified_by(&file),
+            Err(_) => self,
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub(super) fn identified_below(self, _dir: &Dir, _path: &Path) -> Self {
+        self
+    }
 }
 
 impl From<std::fs::Metadata> for Stat {
@@ -263,10 +307,10 @@ impl From<std::fs::Metadata> for Stat {
         #[cfg(unix)]
         let (link_count, id) = {
             use std::os::unix::fs::MetadataExt;
-            (meta.nlink(), (meta.dev(), meta.ino()))
+            (meta.nlink(), Some((meta.dev(), meta.ino())))
         };
         #[cfg(not(unix))]
-        let (link_count, id) = (1u64, (0u64, 0u64));
+        let (link_count, id) = (1u64, None);
         Stat {
             kind: descriptor_type(&meta.file_type()),
             size: meta.len(),
@@ -280,12 +324,12 @@ impl From<std::fs::Metadata> for Stat {
 
 impl From<cap_std::fs::Metadata> for Stat {
     fn from(meta: cap_std::fs::Metadata) -> Self {
-        // cap-std's Windows `dev`/`ino`/`nlink` panic unless the metadata came from an open
-        // handle, so non-Unix hosts report no identity, like the `std` conversion above.
+        // cap-std's Windows `dev`/`ino`/`nlink` are unavailable (they need an unstable `std`
+        // API), so off Unix this carries no identity until `identified_by` reads a handle.
         #[cfg(unix)]
-        let (link_count, id) = { (meta.nlink(), (meta.dev(), meta.ino())) };
+        let (link_count, id) = { (meta.nlink(), Some((meta.dev(), meta.ino()))) };
         #[cfg(not(unix))]
-        let (link_count, id) = (1u64, (0u64, 0u64));
+        let (link_count, id) = (1u64, None);
         Stat {
             kind: descriptor_type(&meta.file_type()),
             size: meta.len(),
@@ -319,15 +363,9 @@ pub(super) fn descriptor_stat(meta: Stat) -> DescriptorStat {
 
 /// What names a file within one run: its device and inode (its path where there are none).
 pub(super) fn file_identity(meta: &Stat, path: &Path) -> (u64, u64, String) {
-    #[cfg(unix)]
-    {
-        let _ = path;
-        (meta.id.0, meta.id.1, String::new())
-    }
-    #[cfg(not(unix))]
-    {
-        // `meta.id` is zero here, so the path alone tells files apart.
-        (meta.id.0, meta.id.1, path.to_string_lossy().into_owned())
+    match meta.id {
+        Some((dev, ino)) => (dev, ino, String::new()),
+        None => (0, 0, path.to_string_lossy().into_owned()),
     }
 }
 

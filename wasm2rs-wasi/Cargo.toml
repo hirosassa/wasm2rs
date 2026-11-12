@@ -28,6 +28,11 @@ cap-fs-ext = "4"
 # not decoded.
 ureq = { version = "3.4.3", optional = true, default-features = false, features = ["rustls"] }
 
+# Windows gives a file's volume serial and index only for an open handle; this reads them
+# through a safe wrapper (`unsafe_code` is denied here).
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1"
+
 # The root `[lints]` tables are not inherited by workspace members; the hardening
 # lints that this crate's host logic must satisfy are set here once it holds any.
 [lints.rust]
