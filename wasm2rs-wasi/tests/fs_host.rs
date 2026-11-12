@@ -393,11 +393,15 @@ fn a_read_only_preopen_refuses_every_change_but_allows_reading_and_sync() {
 
     // reading and flushing change nothing, so they are allowed
     assert_eq!(read_at(&mut host, f, 8, 0), (b"data".to_vec(), true));
-    assert_eq!(host.wasi_filesystem_types_method_descriptor_sync(f), Ok(()));
-    assert_eq!(
-        host.wasi_filesystem_types_method_descriptor_sync_data(ROOT),
-        Ok(())
-    );
+    // (Windows cannot flush a handle that was opened read-only, nor a directory)
+    #[cfg(unix)]
+    {
+        assert_eq!(host.wasi_filesystem_types_method_descriptor_sync(f), Ok(()));
+        assert_eq!(
+            host.wasi_filesystem_types_method_descriptor_sync_data(ROOT),
+            Ok(())
+        );
+    }
 }
 
 // ---- directories ------------------------------------------------------------------------
@@ -600,30 +604,35 @@ fn metadata_hash_names_a_file_not_a_path() {
     let root = scratch("hash");
     std::fs::write(root.join("a"), b"1").unwrap();
     std::fs::write(root.join("b"), b"1").unwrap();
+    #[cfg(unix)]
     std::fs::hard_link(root.join("a"), root.join("a2")).unwrap();
     let mut host = host_over(&root, Access::ReadOnly);
     let ro = DescriptorFlags::READ;
     let a = open(&mut host, "a", OpenFlags(0), ro).unwrap();
     let a_again = open(&mut host, "a", OpenFlags(0), ro).unwrap();
-    let a2 = open(&mut host, "a2", OpenFlags(0), ro).unwrap();
     let b = open(&mut host, "b", OpenFlags(0), ro).unwrap();
     let hash = |h: &mut WasiHost, d| {
         h.wasi_filesystem_types_method_descriptor_metadata_hash(d)
             .unwrap()
     };
     assert_eq!(hash(&mut host, a), hash(&mut host, a_again));
-    assert_eq!(
-        hash(&mut host, a),
-        hash(&mut host, a2),
-        "a hard link is the same file"
-    );
+    // non-Unix hosts identify a file by its path, so a hard link is a different file there
+    #[cfg(unix)]
+    {
+        let a2 = open(&mut host, "a2", OpenFlags(0), ro).unwrap();
+        assert_eq!(
+            hash(&mut host, a),
+            hash(&mut host, a2),
+            "a hard link is the same file"
+        );
+        assert!(host.wasi_filesystem_types_method_descriptor_is_same_object(a, a2));
+    }
     assert_ne!(hash(&mut host, a), hash(&mut host, b));
     let h = hash(&mut host, a);
     assert_ne!(
         h.lower, h.upper,
         "the two halves are not one value repeated"
     );
-    assert!(host.wasi_filesystem_types_method_descriptor_is_same_object(a, a2));
     assert!(!host.wasi_filesystem_types_method_descriptor_is_same_object(a, b));
     // an unknown descriptor is not the same as anything, itself included
     assert!(
@@ -645,12 +654,16 @@ fn hard_links_share_the_file_and_refuse_directories_and_taken_names() {
     };
     assert_eq!(link(&mut host, FOLLOW, "f", "g"), Ok(()));
     let g = open(&mut host, "g", OpenFlags(0), DescriptorFlags::READ).unwrap();
+    // non-Unix hosts do not report a link count (always 1)
+    #[cfg(unix)]
     assert_eq!(
         host.wasi_filesystem_types_method_descriptor_stat(g)
             .unwrap()
             .link_count,
         2
     );
+    #[cfg(not(unix))]
+    let _ = g;
     assert_eq!(link(&mut host, FOLLOW, "f", "taken"), Err(Fs::Exist));
     assert_eq!(link(&mut host, FOLLOW, "d", "d2"), Err(Fs::NotPermitted));
     assert_eq!(
@@ -680,7 +693,7 @@ fn set_times_sets_exactly_what_was_asked_and_leaves_no_change_alone() {
     host.wasi_filesystem_types_method_descriptor_set_times(
         f,
         timestamp(1_000, 500),
-        timestamp(2_000, 7),
+        timestamp(2_000, 700), // NTFS keeps 100ns ticks, so not a finer value
     )
     .unwrap();
     let stat = host
@@ -691,7 +704,7 @@ fn set_times_sets_exactly_what_was_asked_and_leaves_no_change_alone() {
         stat.data_modification_timestamp,
         Some(Datetime {
             seconds: 2_000,
-            nanoseconds: 7
+            nanoseconds: 700
         })
     );
     assert_eq!(stat.status_change_timestamp, None, "never reported");
@@ -1171,6 +1184,7 @@ fn a_read_of_a_length_that_is_not_a_chunk_multiple_returns_exactly_that_many() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_device_is_neither_a_file_nor_a_directory_nor_a_link() {
     let mut host = host_over(Path::new("/dev"), Access::ReadOnly);
