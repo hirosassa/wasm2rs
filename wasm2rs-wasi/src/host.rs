@@ -567,6 +567,15 @@ impl WasiHost {
     /// Flushes the file or directory behind a descriptor to disk (`data_only`: without its
     /// metadata).
     fn sync_descriptor(&self, descriptor: u32, data_only: bool) -> Result<(), Fs> {
+        // Windows refuses to flush a handle without write access (`FlushFileBuffers`), and a
+        // directory. Such a handle has no writes of its own to flush, so answer as Unix does.
+        #[cfg(windows)]
+        {
+            let d = self.open_descriptor(descriptor)?;
+            if d.dir.is_some() || !d.write {
+                return Ok(());
+            }
+        }
         self.with_descriptor_file(descriptor, |file| {
             if data_only {
                 file.sync_data()
