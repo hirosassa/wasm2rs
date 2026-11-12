@@ -1155,22 +1155,38 @@ impl Host for WasiHost {
         self.require_writable(self_.0)?;
         let times = file_times(data_access_timestamp, data_modification_timestamp)?;
         let dir = self.directory(self_.0)?;
-        let file = if path_flags.contains(PathFlags::SYMLINK_FOLLOW) {
-            dir.open(below(&path)?)
+        let follow = path_flags.contains(PathFlags::SYMLINK_FOLLOW);
+        let target = if follow {
+            below(&path)?
         } else {
-            let entry = entry_path(&path)?;
-            if dir
-                .symlink_metadata(entry)
+            entry_path(&path)?
+        };
+        if !follow
+            && dir
+                .symlink_metadata(target)
                 .map_err(sandbox_error)?
                 .is_symlink()
-            {
-                return Err(Fs::Unsupported.into());
-            }
-            let mut options = cap_std::fs::OpenOptions::new();
-            options.read(true).follow(FollowSymlinks::No);
-            dir.open_with(entry, &options)
+        {
+            return Err(Fs::Unsupported.into());
         }
-        .map_err(sandbox_error)?;
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.read(true).follow(if follow {
+            FollowSymlinks::Yes
+        } else {
+            FollowSymlinks::No
+        });
+        // Windows refuses SetFileTime on a handle without write-attributes access, which a
+        // read-only open lacks; backup semantics lets the same open reach a directory.
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt as _;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            options
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        let file = dir.open_with(target, &options).map_err(sandbox_error)?;
         Ok(file.into_std().set_times(times).map_err(io_error_code)?)
     }
 
