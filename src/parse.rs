@@ -201,9 +201,7 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
     fn payload(&mut self, payload: Payload<'a>) -> Result<(), TranspileError> {
         match payload {
             Payload::Version { encoding, .. } => reject_component(encoding)?,
-            Payload::TypeSection(reader) => {
-                self.type_section(reader)?;
-            }
+            Payload::TypeSection(reader) => self.type_section(reader)?,
             Payload::ImportSection(reader) => self.import_section(reader)?,
             Payload::FunctionSection(reader) => {
                 for type_index in reader {
