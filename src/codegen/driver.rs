@@ -51,6 +51,9 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) imports: &'a [ImportInfo],
     /// Locally-defined functions, occupying the indices after the imports.
     pub(crate) funcs: &'a [FuncInput<'a>],
+    /// Host imports occupying the indices after the defined functions (see
+    /// `ModuleIr::tail_imports`); empty unless the module was linked.
+    pub(crate) tail_imports: &'a [ImportInfo],
     /// Per defined function (parallel to `funcs`): the locals it writes.
     pub(crate) mutated_locals: Vec<LocalFlags>,
     /// Per defined function: whether its body is wrapped in a synthetic block
@@ -170,14 +173,22 @@ impl ModuleCtx<'_> {
     /// The signature `(params, results)` of the function at full index `fidx`,
     /// spanning imports then defined functions.
     pub(crate) fn full_sig(&self, fidx: usize) -> Option<(&[ValType], &[ValType])> {
-        let n_imports = self.imports.len();
-        if fidx < n_imports {
-            let im = &self.imports[fidx];
-            Some((&im.params, &im.results))
-        } else {
-            let f = self.funcs.get(fidx - n_imports)?;
-            Some((f.params, f.results))
+        if let Some(im) = self.host_import(fidx) {
+            return Some((&im.params, &im.results));
         }
+        let defined = fidx.checked_sub(self.imports.len())?;
+        let f = self.funcs.get(defined)?;
+        Some((f.params, f.results))
+    }
+
+    /// The import at full function index `fidx`: one of the leading imports, or a tail one
+    /// after the defined functions.
+    pub(crate) fn host_import(&self, fidx: usize) -> Option<&ImportInfo> {
+        if let Some(im) = self.imports.get(fidx) {
+            return Some(im);
+        }
+        let tail = fidx.checked_sub(self.imports.len().checked_add(self.funcs.len())?)?;
+        self.tail_imports.get(tail)
     }
 
     /// The full indices of every function whose signature is exactly
@@ -251,7 +262,7 @@ impl ModuleCtx<'_> {
     /// a native inherent method; any other imported function is dispatched
     /// through the injected host; defined ones are (method) calls.
     pub(crate) fn call_expr(&self, fidx: usize, arg_list: &str) -> String {
-        if let Some(im) = self.imports.get(fidx) {
+        if let Some(im) = self.host_import(fidx) {
             // A linked import is a direct call of the function that answers it.
             if let Some(target) = im.alias {
                 return self.call_expr(target as usize, arg_list);
@@ -280,6 +291,8 @@ impl ModuleCtx<'_> {
 /// context ([`ModuleCtx`]) is computed from these.
 pub(crate) struct ModuleParts<'a> {
     pub(crate) imports: &'a [ImportInfo],
+    /// Host imports after the defined functions in the function index space.
+    pub(crate) tail_imports: &'a [ImportInfo],
     pub(crate) imported_globals: &'a [ImportedGlobalInfo],
     pub(crate) funcs: &'a [FuncInput<'a>],
     /// Parallel to `funcs`: whether each defined function is emitted. A dead
@@ -331,6 +344,7 @@ pub(crate) fn build_ctx<'a>(
 ) -> Result<(ModuleCtx<'a>, bool), TranspileError> {
     let ModuleParts {
         imports,
+        tail_imports,
         imported_globals,
         funcs,
         types,
@@ -406,6 +420,7 @@ pub(crate) fn build_ctx<'a>(
     // The host is injected whenever anything is imported (globals, non-WASI
     // functions, or host-owned memory/table).
     let has_imports = !imports.is_empty()
+        || !tail_imports.is_empty()
         || !imported_globals.is_empty()
         || memories.iter().any(|m| m.imported && !m.shared)
         || table.is_some_and(|t| t.imported);
@@ -474,6 +489,11 @@ pub(crate) fn build_ctx<'a>(
                     .iter()
                     .zip(parts.live)
                     .map(|(f, live)| live.then_some((f.params, f.results))),
+            )
+            .chain(
+                tail_imports
+                    .iter()
+                    .map(|im| Some((im.params.as_slice(), im.results.as_slice()))),
             ),
     );
     // A function is a possible `call_indirect` target only if some funcref value
@@ -488,12 +508,15 @@ pub(crate) fn build_ctx<'a>(
     let is_ref = |ty: &ValType| matches!(ty, ValType::Ref(_));
     let host_funcrefs = table.is_some_and(|t| t.imported)
         || imported_globals.iter().any(|g| is_ref(&g.ty))
-        || imports.iter().any(|im| im.results.iter().any(is_ref))
+        || imports
+            .iter()
+            .chain(tail_imports)
+            .any(|im| im.results.iter().any(is_ref))
         || funcs
             .iter()
             .zip(parts.live)
             .any(|(f, &live)| live && f.params.iter().any(is_ref));
-    let mut referenced = vec![host_funcrefs; n_imports + funcs.len()];
+    let mut referenced = vec![host_funcrefs; n_imports + funcs.len() + tail_imports.len()];
     let named = elements
         .iter()
         .flat_map(|e| e.funcs.iter())
@@ -514,17 +537,22 @@ pub(crate) fn build_ctx<'a>(
             *slot = false;
         }
     }
-    let func_decl_types = imports.iter().map(|im| Some(im.type_index)).chain(
-        funcs
-            .iter()
-            .zip(parts.live)
-            .map(|(f, live)| live.then_some(f.type_index)),
-    );
+    let func_decl_types = imports
+        .iter()
+        .map(|im| Some(im.type_index))
+        .chain(
+            funcs
+                .iter()
+                .zip(parts.live)
+                .map(|(f, live)| live.then_some(f.type_index)),
+        )
+        .chain(tail_imports.iter().map(|im| Some(im.type_index)));
     let func_targets = index_func_targets(type_kinds, type_rel, func_decl_types, &referenced);
     let needs_gc_types = needs_gc_types(parts, scan.uses_abstract_gc);
     let ctx = ModuleCtx {
         imports,
         funcs,
+        tail_imports,
         mutated_locals: scan.mutated,
         branches_to_function_label: scan.branches_to_function_label,
         has_return: scan.has_return,

@@ -1,7 +1,7 @@
 # Linking several core modules (F1 step 2)
 
-Status: L1 (#307) and L2 (`src/link.rs`, not called yet) are implemented; L2b (tail-import
-slot) is the next prerequisite of L3. All open questions are decided (Section 6).
+Status: L1 (#307), L2 (`src/link.rs`, not called yet) and L2b (tail-import slot) are
+implemented; L3 is next. All open questions are decided (Section 6).
 
 Background: [component-toolchain-survey.md](component-toolchain-survey.md) (F1/F2),
 [component-input-design.md](component-input-design.md),
@@ -311,7 +311,7 @@ fallback.
     function that calls them in order is synthesized (its body lives in `Rewritten`).
   - **L2b (needed before L3): a tail-import slot.** An *appended* module's import that stays
     with the host (the fixup's `actual` imports of the lowered `wasi:*` functions) cannot be
-    linked yet: it is refused with an error naming the import. Why it needs codegen work: the
+    linked before L2b (L2 refused it with an error naming the import). Why it needs codegen work: the
     function index space is fixed as imports first, then defined functions
     (`ModuleCtx::imports`/`funcs`, `fidx - imports.len()` in `driver.rs`, `reach.rs`,
     `render.rs`, `analysis.rs`), and the main module's bodies must not be renumbered, so a
@@ -319,6 +319,19 @@ fallback.
     defined function of main. L2b adds host imports *after* the defined functions (a tail slot
     in the index space that `full_sig`, `call_expr`, the dispatch tables, `Imports` trait
     rendering and the `import{j}` naming understand), after which the linker can place them.
+  - *Implemented (L2b).* `ModuleIr::tail_imports` / `ModuleParts::tail_imports` /
+    `ModuleCtx::tail_imports` hold the extra host imports; their full index is
+    `imports.len() + funcs.len() + k`, so a synthesized start function (pushed after the
+    defined functions) stays before them. `ModuleCtx::host_import(fidx)` resolves either kind
+    and is what `full_sig` and `call_expr` use; the signature index, the `call_indirect`
+    dispatch targets, the `Imports` trait (`import{fidx}` / `named_imports` names, which now
+    cover both lists) and the host-needed checks include them. `reach.rs` and `analysis.rs`
+    needed no change: a tail index has no body, so their `fidx - imports.len()` lookups
+    already fall out of range and are skipped. The linker assigns the slots in module order,
+    then import order, and an import chain that ends at an appended module's host import
+    resolves to that one slot. A tail import is always a host method (never a native WASI
+    function), even when it is a `wasi_snapshot_preview1` import. Host
+    *global/memory/table* imports of an appended module are still refused.
 - **L3 Component integration + glue**: use the linker when the gate fires (Q3);
   name the host imports from the L1 `canon lower` mapping (Q2); lowering with
   `cabi_import_realloc` (#184: pass the realloc export name to the shared

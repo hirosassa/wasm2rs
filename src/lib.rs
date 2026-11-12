@@ -453,6 +453,7 @@ pub(crate) fn transpile_with_host_imports(
         imports = parts
             .imports
             .iter()
+            .chain(parts.tail_imports)
             .filter(|im| im.is_host())
             .filter_map(|im| {
                 Some(wit::CoreImport {
@@ -536,8 +537,12 @@ fn resolve_reentrant_imports(
     topts: &TranspileOptions,
     ir: &parse::ModuleIr<'_>,
 ) -> Result<bool, TranspileError> {
-    let reentrant_imports =
-        topts.reentrant_imports && ir.imports.iter().any(codegen::ImportInfo::is_host);
+    let reentrant_imports = topts.reentrant_imports
+        && ir
+            .imports
+            .iter()
+            .chain(&ir.tail_imports)
+            .any(codegen::ImportInfo::is_host);
     if reentrant_imports {
         let host_owned = ir.memories.iter().any(|m| m.imported)
             || ir.table.as_ref().is_some_and(|t| t.imported)
@@ -576,22 +581,28 @@ fn generate_from_ir<R>(
     generate: impl FnOnce(&codegen::ModuleParts<'_>) -> Result<R, TranspileError>,
 ) -> Result<R, TranspileError> {
     if topts.named_imports {
-        let imports = &mut ir.imports;
-        let hosted: Vec<usize> = (0..imports.len())
-            .filter(|&i| imports.get(i).is_some_and(codegen::ImportInfo::is_host))
+        // Tail imports follow the defined functions in the function index space.
+        let tail_base = ir.imports.len().saturating_add(ir.bodies.len());
+        let mut hosted: Vec<(u32, &mut codegen::ImportInfo)> = ir
+            .imports
+            .iter_mut()
+            .enumerate()
+            .chain(
+                ir.tail_imports
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(k, im)| (tail_base.saturating_add(k), im)),
+            )
+            .filter(|(_, im)| im.is_host())
+            .filter_map(|(i, im)| Some((u32::try_from(i).ok()?, im)))
             .collect();
-        let names = codegen::assign_import_names(hosted.iter().filter_map(|&i| {
-            let im = imports.get(i)?;
-            Some((
-                im.module.as_str(),
-                im.field.as_str(),
-                u32::try_from(i).ok()?,
-            ))
-        }));
-        for (i, name) in hosted.into_iter().zip(names) {
-            if let Some(im) = imports.get_mut(i) {
-                im.ident = Some(name);
-            }
+        let names = codegen::assign_import_names(
+            hosted
+                .iter()
+                .map(|(i, im)| (im.module.as_str(), im.field.as_str(), *i)),
+        );
+        for ((_, im), name) in hosted.iter_mut().zip(names) {
+            im.ident = Some(name);
         }
     }
 
@@ -615,6 +626,7 @@ fn generate_from_ir<R>(
 
     let parts = codegen::ModuleParts {
         imports: &ir.imports,
+        tail_imports: &ir.tail_imports,
         imported_globals: &ir.imported_globals,
         funcs: &funcs,
         live: &live,

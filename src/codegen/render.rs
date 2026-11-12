@@ -1693,6 +1693,7 @@ fn shared_memory_runtime_lines() -> Vec<String> {
 /// module whose imports are all WASI is fully standalone.
 fn needs_host_trait(parts: &ModuleParts<'_>) -> bool {
     parts.imports.iter().any(ImportInfo::is_host)
+        || !parts.tail_imports.is_empty()
         || !parts.imported_globals.is_empty()
         || parts.memories.iter().any(|m| m.imported && !m.shared)
         || parts.table.is_some_and(|t| t.imported)
@@ -1987,7 +1988,14 @@ fn import_trait_lines(
         lines.push(format!("    fn {get}(&self) -> &[{elem}];"));
         lines.push(format!("    fn {get_mut}(&mut self) -> &mut Vec<{elem}>;"));
     }
-    for (j, im) in imports.iter().enumerate() {
+    // The tail imports follow the defined functions in the index space.
+    let tail_base = imports.len().saturating_add(ctx.funcs.len());
+    let tail = ctx
+        .tail_imports
+        .iter()
+        .enumerate()
+        .map(|(k, im)| (tail_base.saturating_add(k), im));
+    for (j, im) in imports.iter().enumerate().chain(tail) {
         // A recognised WASI import is a native inherent method, not a host
         // trait method; skip it while keeping `import{j}` aligned to the
         // absolute import index used by `call_expr`.

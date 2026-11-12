@@ -172,6 +172,10 @@ struct ModInfo {
     elems: u32,
     /// Filled in by [`Layout::new`]; zero everywhere for the main module.
     offsets: Offsets,
+    has_start: bool,
+    /// Per function import: the merged index of its tail slot when the host answers it
+    /// (appended modules only; the main module's host imports keep their own slots).
+    tail_slots: Vec<Option<u32>>,
 }
 
 impl ModInfo {
@@ -203,6 +207,8 @@ impl ModInfo {
             data: to_u32(ir.data.len())?,
             elems: to_u32(ir.elements.len())?,
             offsets: Offsets::default(),
+            has_start: ir.start.is_some(),
+            tail_slots: Vec::new(),
         })
     }
 
@@ -271,12 +277,54 @@ impl Layout {
                 elems: add(next.elems, info.elems)?,
             };
         }
+        // Host imports of appended modules go after the defined functions, and after the
+        // function that starts the several modules when one is synthesized.
+        let synthesized_start = mods.iter().filter(|i| i.has_start).count() > 1;
+        let mut tail_next = add(next.spaces.func, u32::from(synthesized_start))?;
+        for info in mods.iter_mut().skip(1) {
+            let mut slots = Vec::new();
+            for j in 0..info.imports.func {
+                if *info.source(Space::Func, j) == Source::Host {
+                    slots.push(Some(tail_next));
+                    tail_next = add(tail_next, 1)?;
+                } else {
+                    slots.push(None);
+                }
+            }
+            info.tail_slots = slots;
+        }
         let layout = Self {
             mods,
             total_funcs: next.spaces.func,
         };
         layout.check_imports()?;
         Ok(layout)
+    }
+
+    /// The host imports of the appended modules, in tail-slot order.
+    fn tail_imports(
+        &self,
+        appended: &[(usize, ModuleIr<'_>)],
+    ) -> Result<Vec<codegen::ImportInfo>, TranspileError> {
+        let mut tail = Vec::new();
+        for (m, ir) in appended {
+            let slots = &self.info(*m)?.tail_slots;
+            for (im, slot) in ir.imports.iter().zip(slots) {
+                if slot.is_some() {
+                    tail.push(codegen::ImportInfo {
+                        type_index: self.type_(*m, im.type_index)?,
+                        params: im.params.clone(),
+                        results: im.results.clone(),
+                        wasi: None,
+                        module: im.module.clone(),
+                        field: im.field.clone(),
+                        ident: None,
+                        alias: None,
+                    });
+                }
+            }
+        }
+        Ok(tail)
     }
 
     fn info(&self, m: usize) -> Result<&ModInfo, TranspileError> {
@@ -330,10 +378,18 @@ impl Layout {
                 }
                 return match source {
                     Source::Host if m == 0 => Ok(j),
-                    Source::Host => Err(unsupported(format!(
-                        "host import {} of linked module {m}: only the main module can import from the host",
-                        info.import_name(space, j)
-                    ))),
+                    Source::Host => match space {
+                        Space::Func => usize::try_from(j)
+                            .ok()
+                            .and_then(|j| info.tail_slots.get(j).copied().flatten())
+                            .ok_or_else(|| {
+                                TranspileError::Internal("host import without a tail slot".into())
+                            }),
+                        _ => Err(unsupported(format!(
+                            "host import {} of linked module {m}: only the main module can import a global, memory or table from the host",
+                            info.import_name(space, j)
+                        ))),
+                    },
                     other => Err(unsupported(format!(
                         "{} import of linked module {m} is provided by {other:?}",
                         space.name()
@@ -878,6 +934,7 @@ pub(crate) fn link<'b>(
         merge_types(&layout, &mut ir, *m, a)?;
     }
     merge_functions(&layout, &mut ir, &appended, rewritten)?;
+    ir.tail_imports = layout.tail_imports(&appended)?;
     merge_globals(&layout, &mut ir, &appended)?;
     merge_memories(&mut ir, &appended);
     merge_tables(&layout, &mut ir, &appended)?;
@@ -1654,15 +1711,193 @@ mod tests {
         }
     }
 
+    /// main calls b.g (answered by b); b calls the host import `env.scale` and adds one.
+    const MAIN_CALLS_B_ARG: &str = r#"(module
+        (import "b" "g" (func $g (param i32) (result i32)))
+        (func (export "run") (param i32) (result i32) local.get 0 call $g))"#;
+    const B_CALLS_HOST: &str = r#"(module
+        (import "env" "scale" (func $scale (param i32) (result i32)))
+        (func (export "g") (param i32) (result i32)
+          local.get 0 call $scale i32.const 1 i32.add))"#;
+
+    fn host_pair_sources() -> Vec<ImportSources> {
+        vec![
+            ImportSources {
+                funcs: vec![func(1, 1)],
+                ..ImportSources::default()
+            },
+            ImportSources::default(),
+        ]
+    }
+
     #[test]
-    fn an_appended_host_import_is_named_and_refused() {
-        let main = r#"(module (func (export "f")))"#;
-        let b = r#"(module (import "wasi:cli/env" "get" (func)))"#;
-        let what = link_error(
-            &[wasm(main), wasm(b)],
-            vec![ImportSources::default(), ImportSources::default()],
+    fn an_appended_host_import_is_called_through_the_host() {
+        // main: import 0, run = 1, b.scale (import) = module 1 index 0, b.g = module 1 index 1
+        // -> merged 2; b's host import takes the tail slot 3.
+        link_and_run(
+            "tail_import_run",
+            &[wasm(MAIN_CALLS_B_ARG), wasm(B_CALLS_HOST)],
+            host_pair_sources(),
+            "struct H;\n    impl Imports for H {\n        fn import3(&mut self, a0: i32) -> i32 { a0 * 10 }\n    }\n    let mut inst = Instance::new(H);\n    assert_eq!(inst.func1(5), 51);",
         );
-        assert!(what.contains("wasi:cli/env.get"), "{what}");
+    }
+
+    #[test]
+    fn an_appended_host_import_is_a_method_of_the_imports_trait() {
+        let generated = linked_source(
+            &[wasm(MAIN_CALLS_B_ARG), wasm(B_CALLS_HOST)],
+            host_pair_sources(),
+        )
+        .expect("link and transpile");
+        assert!(
+            generated.contains("fn import3(&mut self, a0: i32) -> i32;"),
+            "{generated}"
+        );
+    }
+
+    #[test]
+    fn named_imports_name_an_appended_host_import_after_the_wasm_import() {
+        let topts = TranspileOptions {
+            named_imports: true,
+            ..TranspileOptions::default()
+        };
+        let generated = linked_source_with(
+            &[wasm(MAIN_CALLS_B_ARG), wasm(B_CALLS_HOST)],
+            host_pair_sources(),
+            &topts,
+        )
+        .expect("link and transpile");
+        assert!(
+            generated.contains("fn env_scale(&mut self, a0: i32) -> i32;"),
+            "{generated}"
+        );
+    }
+
+    #[test]
+    fn appended_host_imports_of_several_modules_get_consecutive_slots() {
+        // main: imports 0,1, run = 2; b.g = 3; c.h = 4; tail: b.scale = 5, c.bump = 6.
+        let main = r#"(module
+            (import "b" "g" (func $g (param i32) (result i32)))
+            (import "c" "h" (func $h (param i32) (result i32)))
+            (func (export "run") (param i32) (result i32)
+              local.get 0 call $g call $h))"#;
+        let c = r#"(module
+            (import "env" "bump" (func $bump (param i32) (result i32)))
+            (func (export "h") (param i32) (result i32) local.get 0 call $bump))"#;
+        link_and_run(
+            "tail_import_two",
+            &[wasm(main), wasm(B_CALLS_HOST), wasm(c)],
+            vec![
+                ImportSources {
+                    funcs: vec![func(1, 1), func(2, 1)],
+                    ..ImportSources::default()
+                },
+                ImportSources::default(),
+                ImportSources::default(),
+            ],
+            "struct H;\n    impl Imports for H {\n        fn import5(&mut self, a0: i32) -> i32 { a0 * 10 }\n        fn import6(&mut self, a0: i32) -> i32 { a0 + 100 }\n    }\n    let mut inst = Instance::new(H);\n    assert_eq!(inst.func2(5), 151);",
+        );
+    }
+
+    #[test]
+    fn a_tail_import_can_be_a_call_indirect_target_and_follows_a_synthesized_start() {
+        // Both modules start, so a start function is synthesized after the defined
+        // functions; the tail slot comes after it.
+        let main = r#"(module
+            (import "b" "g" (func $g (param i32) (result i32)))
+            (global $s (export "s") (mut i32) (i32.const 0))
+            (func $init i32.const 7 global.set $s)
+            (func (export "run") (param i32) (result i32) local.get 0 call $g)
+            (start $init))"#;
+        let b = r#"(module
+            (import "env" "scale" (func $scale (param i32) (result i32)))
+            (table 1 funcref)
+            (elem (i32.const 0) $scale)
+            (func $nop)
+            (func (export "g") (param i32) (result i32)
+              local.get 0 i32.const 0 call_indirect (param i32) (result i32))
+            (start $nop))"#;
+        // main: import 0, init 1, run 2; b: nop 3, g 4; synthesized start 5; tail scale 6.
+        link_and_run(
+            "tail_import_indirect",
+            &[wasm(main), wasm(b)],
+            vec![
+                ImportSources {
+                    funcs: vec![func(1, 2)],
+                    ..ImportSources::default()
+                },
+                ImportSources::default(),
+            ],
+            "struct H;\n    impl Imports for H {\n        fn import6(&mut self, a0: i32) -> i32 { a0 * 10 }\n    }\n    let mut inst = Instance::new(H);\n    assert_eq!(inst.func2(5), 50);",
+        );
+    }
+
+    #[test]
+    fn a_host_import_chain_through_an_appended_module_reaches_one_tail_slot() {
+        // c's import is answered by b's host import, so the call reaches that one slot.
+        let main = r#"(module
+            (import "c" "h" (func $h (param i32) (result i32)))
+            (func (export "run") (param i32) (result i32) local.get 0 call $h))"#;
+        let c = r#"(module
+            (import "b" "scale" (func $s (param i32) (result i32)))
+            (func (export "h") (param i32) (result i32) local.get 0 call $s))"#;
+        let b = r#"(module
+            (import "env" "scale" (func (param i32) (result i32))))"#;
+        // main: import 0, run 1; c.h = 2; b defines nothing; the tail slot is 3.
+        link_and_run(
+            "tail_import_chain",
+            &[wasm(main), wasm(c), wasm(b)],
+            vec![
+                ImportSources {
+                    funcs: vec![func(1, 1)],
+                    ..ImportSources::default()
+                },
+                ImportSources {
+                    funcs: vec![func(2, 0)],
+                    ..ImportSources::default()
+                },
+                ImportSources::default(),
+            ],
+            "struct H;\n    impl Imports for H {\n        fn import3(&mut self, a0: i32) -> i32 { a0 * 10 }\n    }\n    let mut inst = Instance::new(H);\n    assert_eq!(inst.func1(5), 50);",
+        );
+    }
+
+    #[test]
+    fn entry_exports_and_reentrant_hosts_see_an_appended_host_import() {
+        let topts = TranspileOptions {
+            entry_exports: Some(vec!["run".to_string()]),
+            reentrant_imports: true,
+            ..TranspileOptions::default()
+        };
+        let generated = linked_source_with(
+            &[wasm(MAIN_CALLS_B_ARG), wasm(B_CALLS_HOST)],
+            host_pair_sources(),
+            &topts,
+        )
+        .expect("link and transpile");
+        assert!(generated.contains("fn import3(&mut self, g: &mut Instance<Self>"));
+        run_source(
+            "tail_import_reentrant",
+            &generated,
+            "struct H;\n    impl Imports for H {\n        fn import3(&mut self, _g: &mut Instance<Self>, a0: i32) -> i32 { a0 * 10 }\n    }\n    let mut inst = Instance::new(H);\n    assert_eq!(inst.func1(5), 51);",
+        );
+    }
+
+    #[test]
+    fn linked_modules_without_an_appended_host_import_have_no_tail_slot() {
+        let topts = TranspileOptions::default();
+        let wasms = [wasm(MAIN_CALLS_B), wasm(B_USES_A)];
+        let modules = wasms
+            .iter()
+            .zip(two_module_sources())
+            .map(|(bytes, sources)| LinkModule {
+                ir: parse::parse_module(bytes, &topts).expect("parse"),
+                sources,
+            })
+            .collect::<Vec<_>>();
+        let rewritten = rewrite_bodies(&modules).expect("rewrite");
+        let ir = link(modules, &rewritten).expect("link");
+        assert!(ir.tail_imports.is_empty());
     }
 
     #[test]
