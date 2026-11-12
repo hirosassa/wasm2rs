@@ -224,13 +224,13 @@ const EXN_REF_DEF: &str = "\
 // because the exception itself is the payload of a panic, which must be `Send`.
 #[allow(dead_code)]
 fn wasm2rs_exn_new(exn: &Wasm2RsException) -> GcRef {
-    GcRef::Exn(std::sync::Arc::new(exn.clone()))
+    GcRef::Exn(std::sync::Arc::new(std::sync::Arc::new(exn.clone())))
 }
 
 #[allow(dead_code)]
 fn wasm2rs_exn_load(exn: &GcRef) -> Wasm2RsException {
     match exn {
-        GcRef::Exn(e) => match e.downcast_ref::<Wasm2RsException>() {
+        GcRef::Exn(e) => match (**e).downcast_ref::<Wasm2RsException>() {
             Some(exn) => exn.clone(),
             None => panic!(\"not an exception reference\"),
         },
@@ -241,7 +241,7 @@ fn wasm2rs_exn_load(exn: &GcRef) -> Wasm2RsException {
 #[allow(dead_code)]
 fn wasm2rs_exn_pack(exns: &mut Vec<Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>>, exn: GcRef) -> u64 {
     exns.push(match exn {
-        GcRef::Exn(e) => Some(e),
+        GcRef::Exn(e) => Some((*e).clone()),
         _ => None,
     });
     (exns.len() - 1) as u64
@@ -250,7 +250,7 @@ fn wasm2rs_exn_pack(exns: &mut Vec<Option<std::sync::Arc<dyn std::any::Any + Sen
 #[allow(dead_code)]
 fn wasm2rs_exn_unpack(exns: &[Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>], index: u64) -> GcRef {
     match &exns[index as usize] {
-        Some(e) => GcRef::Exn(e.clone()),
+        Some(e) => GcRef::Exn(std::sync::Arc::new(e.clone())),
         None => GcRef::Null,
     }
 }";
@@ -259,8 +259,10 @@ fn wasm2rs_exn_unpack(exns: &[Option<std::sync::Arc<dyn std::any::Any + Send + S
 /// `Rc<RefCell<Vec<GcSlot>>>`: a struct's slots are its fields in declaration
 /// order, an array's slots are its elements. `GcRef::Null` is the null
 /// reference. Reference cycles leak, since there is no tracing collector; that
-/// is acceptable for this phase. Emitted at module scope only when the module
-/// declares at least one struct/array type.
+/// is acceptable for this phase. A `GcSlot` is two words: `v128` is boxed and
+/// `Exn` is a thin `Arc<Arc<dyn ..>>`, because each otherwise forces every slot
+/// (every struct field and array element) up to 32 bytes. Emitted at module
+/// scope only when the module declares at least one struct/array type.
 const GCREF_DEF: &str = "\
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -268,7 +270,7 @@ pub enum GcRef {
     Null,
     I31(i32),
     Obj { ty: u32, slots: std::rc::Rc<std::cell::RefCell<Vec<GcSlot>>> },
-    Exn(std::sync::Arc<dyn std::any::Any + Send + Sync>),
+    Exn(std::sync::Arc<std::sync::Arc<dyn std::any::Any + Send + Sync>>),
 }
 
 #[derive(Clone)]
@@ -278,7 +280,7 @@ pub enum GcSlot {
     I64(i64),
     F32(f32),
     F64(f64),
-    V128(u128),
+    V128(Box<u128>),
     Ref(GcRef),
     Func(u32),
 }
