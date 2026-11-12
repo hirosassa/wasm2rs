@@ -26,8 +26,8 @@ pub(crate) struct ContInfo {
     /// `ContFrame` as its `sub` field.
     pub(crate) checkpoint_callee: HashMap<u32, u32>,
     /// Per step function, its local types by index (`l{i}`). Each becomes a
-    /// `ContFrame` field so the local survives suspends. Step functions have no
-    /// parameters (rejected), so these are exactly the declared locals.
+    /// `ContFrame` field so the local survives suspends. Parameters come first,
+    /// then the declared locals.
     pub(crate) step_locals: HashMap<u32, Vec<ValType>>,
 }
 

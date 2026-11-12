@@ -26,7 +26,7 @@ Status, entry points and the known limitations of the whole WASI 0.2 support are
 [docs/wasi-p2-status.md](../docs/wasi-p2-status.md); the design is in
 [docs/typed-host-design.md](../docs/typed-host-design.md) and
 [docs/wasi-http-design.md](../docs/wasi-http-design.md). File confinement relies on `cap-std`
-and is only tested on Unix.
+and runs in CI on Unix and Windows (see [docs/windows.md](../docs/windows.md)); only the Unix runs check symlink escapes.
 
 ## Configuring a host
 

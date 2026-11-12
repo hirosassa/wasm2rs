@@ -476,9 +476,8 @@ pub(crate) fn step_functions(
 
     Ok((step.into_iter().collect(), checkpoint))
 }
-/// The local types (by index) of each step function, so `render` can give each
-/// `ContFrame` a field per local. Step functions have no parameters (rejected
-/// at emit time), so these are the declared locals starting at index 0.
+/// The local types (by index) of each step function, its parameters followed by
+/// its declared locals, so `render` can give each `ContFrame` a field per local.
 pub(crate) fn step_function_locals(
     funcs: &[FuncInput<'_>],
     n_imports: usize,
