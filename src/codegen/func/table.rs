@@ -491,7 +491,7 @@ impl<'a> super::FuncGen<'a> {
             .ok_or_else(|| TranspileError::Unsupported("cont.new: type index too large".into()))?;
         let tmp = self.fresh_temp();
         self.line(format!(
-            "let {tmp}: u32 = self.cont_new(({}) as u32, {cont_type_index}u32);",
+            "let {tmp}: u32 = self.cont_new(({}) as u32);",
             func.code
         ));
         self.push(Val {
@@ -550,7 +550,7 @@ impl<'a> super::FuncGen<'a> {
 
         let result = self.fresh_temp();
         self.line(format!(
-            "let {result}: u32 = self.cont_bind({handle_var}, &[{}], {after_index}u32);",
+            "let {result}: u32 = self.cont_bind({handle_var}, &[{}]);",
             encoded.join(", ")
         ));
         self.push(Val {

@@ -200,9 +200,6 @@ pub(crate) enum Node {
     Switch {
         tag: u32,
         target: String,
-        /// The continuation type the parked switcher takes (the target's trailing
-        /// self-reference parameter).
-        ty: u32,
         payload: String,
         save: String,
     },

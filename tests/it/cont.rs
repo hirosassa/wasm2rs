@@ -1532,3 +1532,24 @@ fn call_ref_and_call_indirect_to_same_typed_function_skip_the_step_function() {
         "let mut inst = Instance::new(); assert_eq!(inst.func2(), 75);",
     );
 }
+
+#[test]
+fn generated_continuation_code_carries_no_type_argument() {
+    // The declared continuation type is not needed at run time (handles are
+    // type-erased), so neither the `cont_*` helpers nor `StepResult::Switch` may
+    // thread it through.
+    let files = common::transpile_files(
+        r#"(module
+            (elem declare func $gen)
+            (type $ft (func (result i32)))
+            (type $ct (cont $ft))
+            (func $gen (result i32) i32.const 42)
+            (func (export "f") (result i32)
+              ref.func $gen cont.new $ct ref.is_null))"#,
+        0,
+    );
+    let src: String = files.iter().map(|f| f.code.as_str()).collect();
+    assert!(src.contains("pub fn cont_new(&mut self, __funcidx: u32) -> u32"));
+    assert!(src.contains("Switch { tag: u32, target: u32, args: Vec<i64> }"));
+    assert!(!src.contains("__ty"), "vestigial type argument remains");
+}
