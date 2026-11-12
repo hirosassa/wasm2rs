@@ -244,3 +244,215 @@ fn binary(stack: &mut Vec<String>, method: &str) -> Result<(), TranspileError> {
     stack.push(format!("({a}).{method}({b})"));
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use wasmparser::{BinaryReader, ValType};
+
+    use super::*;
+    use crate::codegen::GlobalInfo;
+
+    // Constant expressions are built from raw bytes, bypassing validation, so the
+    // evaluator's own defences (type mismatch, underflow, leftovers) are reachable.
+    const I32_NEG1: [u8; 2] = [0x41, 0x7f];
+    const I32_1: [u8; 2] = [0x41, 0x01];
+    const I32_2: [u8; 2] = [0x41, 0x02];
+    const I64_NEG1: [u8; 2] = [0x42, 0x7f];
+    const I64_1: [u8; 2] = [0x42, 0x01];
+    const I32_ADD: u8 = 0x6a;
+    const I32_SUB: u8 = 0x6b;
+    const I32_MUL: u8 = 0x6c;
+    const I64_ADD: u8 = 0x7c;
+    const DROP: u8 = 0x1a;
+    const GLOBAL_GET: u8 = 0x23;
+    const END: u8 = 0x0b;
+
+    fn expr(parts: &[&[u8]]) -> Vec<u8> {
+        let mut bytes: Vec<u8> = parts.concat();
+        bytes.push(END);
+        bytes
+    }
+
+    fn parse(bytes: &[u8]) -> ConstExpr<'_> {
+        ConstExpr::new(BinaryReader::new(bytes, 0))
+    }
+
+    fn no_globals() -> IntGlobals<'static> {
+        IntGlobals {
+            imported: 0,
+            values: &[],
+        }
+    }
+
+    fn u32_of(bytes: &[u8]) -> Result<u32, TranspileError> {
+        const_expr_u32(&parse(bytes), no_globals())
+    }
+
+    fn u64_of(bytes: &[u8]) -> Result<u64, TranspileError> {
+        const_expr_u64(&parse(bytes), no_globals())
+    }
+
+    #[allow(
+        clippy::panic,
+        reason = "a test helper: a wrong variant fails the test"
+    )]
+    fn unsupported_msg(err: TranspileError) -> String {
+        match err {
+            TranspileError::Unsupported(m) => m,
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn i32_operators_wrap_at_the_u32_boundary() {
+        // -1 as u32 is u32::MAX, so MAX + 1 wraps to 0.
+        assert_eq!(u32_of(&expr(&[&I32_NEG1, &I32_1, &[I32_ADD]])).unwrap(), 0);
+        // 0 - 1 wraps to u32::MAX; MAX * 2 wraps to MAX - 1.
+        assert_eq!(
+            u32_of(&expr(&[&[0x41, 0x00], &I32_1, &[I32_SUB]])).unwrap(),
+            u32::MAX
+        );
+        assert_eq!(
+            u32_of(&expr(&[&I32_NEG1, &I32_2, &[I32_MUL]])).unwrap(),
+            u32::MAX - 1
+        );
+    }
+
+    #[test]
+    fn a_negative_i32_offset_widens_to_a_32_bit_address_not_a_sign_extended_one() {
+        assert_eq!(u64_of(&expr(&[&I32_NEG1])).unwrap(), u64::from(u32::MAX));
+    }
+
+    #[test]
+    fn i64_operators_wrap_at_the_u64_boundary() {
+        assert_eq!(u64_of(&expr(&[&I64_NEG1, &I64_1, &[I64_ADD]])).unwrap(), 0);
+    }
+
+    #[test]
+    fn an_i64_element_offset_is_rejected_for_a_32_bit_table() {
+        let msg = unsupported_msg(u32_of(&expr(&[&I64_1])).unwrap_err());
+        assert!(msg.contains("an i64 offset"), "{msg}");
+    }
+
+    #[test]
+    fn mixing_i32_and_i64_operands_is_an_operand_type_mismatch() {
+        let msg = unsupported_msg(u32_of(&expr(&[&I32_1, &I64_1, &[I32_ADD]])).unwrap_err());
+        assert!(msg.contains("operand type mismatch"), "{msg}");
+        assert!(msg.contains("two i32 operands"), "{msg}");
+        let msg = unsupported_msg(u64_of(&expr(&[&I64_1, &I32_1, &[I64_ADD]])).unwrap_err());
+        assert!(msg.contains("two i64 operands"), "{msg}");
+    }
+
+    #[test]
+    fn a_binary_operator_without_two_operands_underflows() {
+        assert!(matches!(
+            u32_of(&expr(&[&I32_1, &[I32_ADD]])),
+            Err(TranspileError::StackUnderflow)
+        ));
+        assert!(matches!(
+            u64_of(&expr(&[&[I64_ADD]])),
+            Err(TranspileError::StackUnderflow)
+        ));
+    }
+
+    #[test]
+    fn an_expression_must_leave_exactly_one_value() {
+        let msg = unsupported_msg(u32_of(&expr(&[])).unwrap_err());
+        assert!(msg.starts_with("empty"), "{msg}");
+        let msg = unsupported_msg(u32_of(&expr(&[&I32_1, &I32_2])).unwrap_err());
+        assert!(msg.contains("leftover operand"), "{msg}");
+    }
+
+    #[test]
+    fn an_unsupported_operator_in_an_offset_is_named_with_its_role() {
+        let msg = unsupported_msg(u32_of(&expr(&[&I32_1, &[DROP]])).unwrap_err());
+        assert!(msg.starts_with("element offset"), "{msg}");
+        assert!(msg.contains("Drop"), "{msg}");
+    }
+
+    #[test]
+    fn global_get_in_an_offset_reads_only_known_defined_integer_globals() {
+        let values = [Some(ConstInt::I32(7)), None];
+        let globals = IntGlobals {
+            imported: 1,
+            values: &values,
+        };
+        let eval = |index: u8| {
+            let bytes = expr(&[&[GLOBAL_GET, index]]);
+            const_expr_u64(&parse(&bytes), globals)
+        };
+        // Index 0 is the imported global, 1 the first defined one, 2 the
+        // defined one without a known value.
+        assert!(eval(0).is_err());
+        assert_eq!(eval(1).unwrap(), 7);
+        assert!(eval(2).is_err());
+        assert!(eval(3).is_err());
+    }
+
+    fn to_rust(
+        bytes: &[u8],
+        imported: &[ImportedGlobalInfo],
+        defined: &[GlobalInfo],
+    ) -> Result<String, TranspileError> {
+        const_expr_to_rust(&parse(bytes), &[], imported, defined)
+    }
+
+    #[test]
+    fn extended_const_arithmetic_lowers_to_wrapping_methods_in_operand_order() {
+        assert_eq!(
+            to_rust(&expr(&[&I32_1, &I32_2, &[I32_SUB]]), &[], &[]).unwrap(),
+            "(1i32).wrapping_sub(2i32)"
+        );
+    }
+
+    #[test]
+    fn a_global_initializer_binary_operator_without_operands_underflows() {
+        assert!(matches!(
+            to_rust(&expr(&[&I32_1, &[I32_ADD]]), &[], &[]),
+            Err(TranspileError::StackUnderflow)
+        ));
+    }
+
+    #[test]
+    fn a_global_initializer_rejects_unsupported_operators_and_stray_operands() {
+        let msg = unsupported_msg(to_rust(&expr(&[&I32_1, &[DROP]]), &[], &[]).unwrap_err());
+        assert!(msg.starts_with("global initializer"), "{msg}");
+        let msg = unsupported_msg(to_rust(&expr(&[&I32_1, &I32_2]), &[], &[]).unwrap_err());
+        assert!(msg.contains("leftover operand"), "{msg}");
+    }
+
+    #[test]
+    fn global_get_in_an_initializer_inlines_immutable_defined_and_reads_imported_ones() {
+        let imported = [
+            ImportedGlobalInfo {
+                ty: ValType::I32,
+                mutable: false,
+            },
+            ImportedGlobalInfo {
+                ty: ValType::I32,
+                mutable: true,
+            },
+        ];
+        let defined = [
+            GlobalInfo {
+                ty: ValType::I32,
+                mutable: false,
+                init: "5i32".into(),
+            },
+            GlobalInfo {
+                ty: ValType::I32,
+                mutable: true,
+                init: "6i32".into(),
+            },
+        ];
+        let get = |index: u8| to_rust(&expr(&[&[GLOBAL_GET, index]]), &imported, &defined);
+        assert_eq!(get(0).unwrap(), "imports.get_global0()");
+        assert_eq!(get(2).unwrap(), "(5i32)");
+        // A mutable global (imported or defined) and an out-of-range index are
+        // not constants.
+        for index in [1, 3, 4] {
+            let msg = unsupported_msg(get(index).unwrap_err());
+            assert!(msg.contains("mutable or later global"), "{index}: {msg}");
+        }
+    }
+}
