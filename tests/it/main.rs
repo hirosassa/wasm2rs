@@ -65,6 +65,7 @@ mod gc_i31_unify;
 mod gc_null;
 mod gc_ref_reuse;
 mod gc_refs;
+mod gc_slot_size;
 mod global_init;
 mod global_offsets;
 mod helper_naming;

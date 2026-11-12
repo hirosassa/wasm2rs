@@ -68,6 +68,7 @@ impl SlotShape {
             SlotShape::Packed { mask, .. } => format!("GcSlot::I32(({value}) & {mask:#X})"),
             SlotShape::Func(_) => format!("GcSlot::Func({value})"),
             SlotShape::Val(ValType::Ref(_)) => format!("GcSlot::Ref(({value}).clone())"),
+            SlotShape::Val(ValType::V128) => format!("GcSlot::V128(Box::new({value}))"),
             SlotShape::Val(ty) => format!("GcSlot::{}({value})", Self::val_variant(*ty)),
         })
     }
@@ -92,6 +93,10 @@ impl SlotShape {
                     ty,
                 )
             }
+            SlotShape::Val(ValType::V128) => (
+                format!("match {slot} {{ GcSlot::V128(v) => **v, _ => unreachable!() }}"),
+                ValType::V128,
+            ),
             SlotShape::Val(ty) => (
                 format!(
                     "match {slot} {{ GcSlot::{}(v) => *v, _ => unreachable!() }}",
@@ -143,7 +148,7 @@ impl SlotShape {
             }
             SlotShape::Val(ValType::V128) => (
                 16,
-                format!("GcSlot::V128(u128::from_le_bytes([{}]))", le(16)),
+                format!("GcSlot::V128(Box::new(u128::from_le_bytes([{}])))", le(16)),
             ),
             SlotShape::Func(_) | SlotShape::Val(ValType::Ref(_)) => {
                 return Err(TranspileError::Unsupported(
@@ -173,7 +178,7 @@ impl SlotShape {
             SlotShape::Val(ValType::I64) => "GcSlot::I64(0)",
             SlotShape::Val(ValType::F32) => "GcSlot::F32(0.0)",
             SlotShape::Val(ValType::F64) => "GcSlot::F64(0.0)",
-            SlotShape::Val(ValType::V128) => "GcSlot::V128(0)",
+            SlotShape::Val(ValType::V128) => "GcSlot::V128(Box::new(0))",
             SlotShape::Val(ValType::Ref(_)) => "GcSlot::Ref(GcRef::Null)",
         })
     }
