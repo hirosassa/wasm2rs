@@ -257,7 +257,7 @@ fn a_child_can_use_a_descriptor_the_parent_opened() {
 
 #[test]
 fn concurrent_path_opens_get_distinct_descriptors() {
-    // Four children each open the same file and record `1 << fd` in a mask at
+    // Four children each open the same (initially missing) file and record `1 << fd` in a mask at
     // 500. With one shared table the descriptors are 4..=7 (mask 0xf0); a slot
     // handed out twice, or a per-thread table, would leave bits unset.
     compile_run(
@@ -315,8 +315,13 @@ fn concurrent_path_opens_get_distinct_descriptors() {
         ),
         r#"let dir = std::env::temp_dir().join(format!("wasm2rs_distinct_fds_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut inst = Instance::new(SharedMemory::new(65536)).with_preopen_root(&dir);
-        assert_eq!(inst.func5(), 0xf0);
+        // The race is between a path that does not exist yet and its creation
+        // by a sibling thread, so repeat the round with the file removed.
+        for _ in 0..300 {
+            std::fs::remove_file(dir.join("same.txt")).ok();
+            let mut inst = Instance::new(SharedMemory::new(65536)).with_preopen_root(&dir);
+            assert_eq!(inst.func5(), 0xf0);
+        }
         std::fs::remove_dir_all(&dir).ok();"#,
     );
 }
