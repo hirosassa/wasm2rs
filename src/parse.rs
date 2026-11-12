@@ -78,6 +78,9 @@ pub(crate) struct ModuleIr<'a> {
     pub(crate) elements: Vec<codegen::ElemSegment>,
     pub(crate) data: Vec<codegen::DataSegment>,
     pub(crate) imports: Vec<codegen::ImportInfo>,
+    /// Host function imports placed after the defined functions in the function index
+    /// space (set only by the core linker, which cannot renumber the main module).
+    pub(crate) tail_imports: Vec<codegen::ImportInfo>,
     pub(crate) imported_globals: Vec<codegen::ImportedGlobalInfo>,
     /// Exception tags, imported ones first then locally-defined ones, matching
     /// the wasm tag index space.
@@ -684,6 +687,7 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
             elements: self.elements,
             data: self.data,
             imports: self.imports,
+            tail_imports: Vec::new(),
             imported_globals: self.imported_globals,
             tags: self.tags,
             exports: self.exports,
