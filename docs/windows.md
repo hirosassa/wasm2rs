@@ -16,7 +16,6 @@ Observed in CI, not guesses:
 | `metadata-hash`, `is-same-object` | a file is identified by its path string (case-sensitive, not normalised), so a hard link, or `a` vs `A`, counts as a different object |
 | timestamps | NTFS keeps 100 ns ticks, so finer values are rounded |
 | `sync` / `sync-data` | succeed on a read-only handle or a directory, as on Unix, but flush nothing: Windows refuses `FlushFileBuffers` without write access, so the host skips it. Writes made through another handle to the same file, and directory entries, get no durability barrier from this call |
-| `set-times-at` through a path | answered `access` for a file that is open (cause not diagnosed; likely the path open lacks write-attributes access) |
 
 cap-std's own Windows `dev`/`ino`/`nlink` panic unless the metadata came from an open
 handle, so the host does not call them off Unix (`Stat::from` in `src/host/fs.rs`).
