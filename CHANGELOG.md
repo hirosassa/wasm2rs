@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-12
+
+`wasm2rs`, `wasm2rs-macros` and (first publication) `wasm2rs-wasi` 0.1.0.
+
 ### Added
 - Opt-in `TranspileOptions::simd_intrinsics` (CLI `--simd-intrinsics`, `include_wasm!` option `simd_intrinsics`) — improvement item A10: the integer SIMD lane helpers (add/sub/mul/neg/abs, saturating add/sub, `avgr_u`, integer compares) emit `core::arch` NEON (aarch64) / SSE2 (x86_64) bodies with the scalar loop kept as the `cfg` fallback. About 1.6x on a mixed integer-lane kernel at `-O3` (up to ~9x on `u8` saturating add in a microbenchmark). Bit-identical to the scalar loop (differential test `tests/it/simd_intrinsics.rs`); adds `unsafe` to the generated code, so it is off by default and default output is byte-identical.
 - Opt-in call-depth limit (`TranspileOptions::call_depth_limit`, CLI `--call-depth-limit=N`): unbounded guest recursion traps with `panic!("call stack exhausted")` instead of exhausting the native stack and aborting the host. A per-thread RAII counter; `return_call*` chains stay at one activation. Off by default, so existing output is byte-identical. The spec harness now replays `assert_exhaustion` as a trap.
@@ -649,7 +653,8 @@ bounds checks, and trap behaviour).
   faster code on modules trusted to stay in bounds (an out-of-bounds access
   becomes undefined behaviour instead of a wasm trap).
 
-[Unreleased]: https://github.com/hirosassa/wasm2rs/compare/wasm2rs-macros-v0.3.1...HEAD
+[Unreleased]: https://github.com/hirosassa/wasm2rs/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/hirosassa/wasm2rs/compare/wasm2rs-macros-v0.3.1...v0.4.0
 [0.3.1]: https://github.com/hirosassa/wasm2rs/compare/v0.3.0...wasm2rs-macros-v0.3.1
 [0.3.0]: https://github.com/hirosassa/wasm2rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hirosassa/wasm2rs/compare/v0.1.1...v0.2.0

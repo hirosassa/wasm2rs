@@ -11,7 +11,7 @@ Procedural macros that embed a WebAssembly module as native Rust source at compi
 
 ```toml
 [dependencies]
-wasm2rs-macros = "0.3"
+wasm2rs-macros = "0.4"
 ```
 
 ```rust
