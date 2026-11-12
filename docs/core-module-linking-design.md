@@ -1,7 +1,7 @@
 # Linking several core modules (F1 step 2)
 
-Status: design only, nothing implemented. All open questions are decided
-(Section 6); implementation starts at stage L1.
+Status: L1 (#307) and L2 (`src/link.rs`, not called yet) are implemented; L2b (tail-import
+slot) is the next prerequisite of L3. All open questions are decided (Section 6).
 
 Background: [component-toolchain-survey.md](component-toolchain-survey.md) (F1/F2),
 [component-input-design.md](component-input-design.md),
@@ -279,6 +279,46 @@ fallback.
   existing build helper returns the expected value; and a test that linking a
   single module returns the input unchanged. A direct Rust-level test on the
   linker with the shim/fixup-style cycle (table + active elem).
+  *As implemented* (`src/link.rs`; nothing calls it yet, so output is unchanged):
+  - API: `link(Vec<LinkModule>, &Rewritten) -> ModuleIr`, after `rewrite_bodies(&[LinkModule])`.
+    A `LinkModule` is a parsed `ModuleIr` plus `ImportSources` (per import, a `Source`:
+    `Host`, or an item of another linked module by that module's own index). It does not
+    depend on `CoreWiring`; L3 converts. The rewritten bodies are owned by `Rewritten`,
+    which the caller keeps alive (the linked `ModuleIr<'b>` borrows them), so the
+    `ModuleIr` shape is unchanged. One module links to itself unchanged.
+  - Resolution is by index (not export name) because `ModuleIr` keeps only function and
+    global exports; L3 resolves names against the wasm bytes. Chains of imports are followed
+    (bounded, so a cycle is an error), and every import of every module is resolved eagerly.
+  - Main keeps all indices. A main function import that another module answers keeps its
+    slot as `ImportInfo::alias` (`call_expr` emits the direct call; the host trait skips it;
+    `ImportInfo::is_host` replaces the `wasi.is_none()` checks). Main's global, memory and
+    table imports must stay host ones (`Unsupported` otherwise): aliasing them would need the
+    same treatment for globals/memory/tables in codegen and no known shape needs it.
+  - Appended modules: types (function types only; equal signatures share a canonical id so
+    `call_indirect` crosses modules), defined functions/globals/tables/memories/segments get
+    offsets; imports are bound to what provides them (memory/table/global by index); bodies
+    are rewritten for `call`, `call_indirect`, `ref.func`, `global.*`, `table.*`, `memory.*`,
+    loads/stores' memarg, `data.drop`/`elem.drop` and block types. Everything outside MVP,
+    sign-extension, bulk-memory and reference types is `Unsupported` naming the operator
+    (the check is generated from wasmparser's `for_each_operator!`). Tags, GC/continuation
+    types, typed references and segment offsets/table initializers that read an imported
+    global are refused. Global initializers are re-rendered from the stored `ConstExpr`
+    (`ModuleIr::global_inits`) with merged indices.
+  - Exports of appended modules are not carried over (L4 decides the exported names); main's
+    stay. A `ref.func` of an aliased import yields the import's own index (a second handle for
+    the same function); only `ref.func` equality could tell, and wasm has no such operator.
+  - Start: main's, then each appended module's in the order given; with more than one a
+    function that calls them in order is synthesized (its body lives in `Rewritten`).
+  - **L2b (needed before L3): a tail-import slot.** An *appended* module's import that stays
+    with the host (the fixup's `actual` imports of the lowered `wasi:*` functions) cannot be
+    linked yet: it is refused with an error naming the import. Why it needs codegen work: the
+    function index space is fixed as imports first, then defined functions
+    (`ModuleCtx::imports`/`funcs`, `fidx - imports.len()` in `driver.rs`, `reach.rs`,
+    `render.rs`, `analysis.rs`), and the main module's bodies must not be renumbered, so a
+    host import of another module has nowhere to go: pushing it onto `imports` shifts every
+    defined function of main. L2b adds host imports *after* the defined functions (a tail slot
+    in the index space that `full_sig`, `call_expr`, the dispatch tables, `Imports` trait
+    rendering and the `import{j}` naming understand), after which the linker can place them.
 - **L3 Component integration + glue**: use the linker when the gate fires (Q3);
   name the host imports from the L1 `canon lower` mapping (Q2); lowering with
   `cabi_import_realloc` (#184: pass the realloc export name to the shared

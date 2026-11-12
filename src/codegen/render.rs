@@ -1692,7 +1692,7 @@ fn shared_memory_runtime_lines() -> Vec<String> {
 /// Recognised WASI imports are native inherent methods and need no host, so a
 /// module whose imports are all WASI is fully standalone.
 fn needs_host_trait(parts: &ModuleParts<'_>) -> bool {
-    parts.imports.iter().any(|im| im.wasi.is_none())
+    parts.imports.iter().any(ImportInfo::is_host)
         || !parts.imported_globals.is_empty()
         || parts.memories.iter().any(|m| m.imported && !m.shared)
         || parts.table.is_some_and(|t| t.imported)
@@ -1991,7 +1991,7 @@ fn import_trait_lines(
         // A recognised WASI import is a native inherent method, not a host
         // trait method; skip it while keeping `import{j}` aligned to the
         // absolute import index used by `call_expr`.
-        if im.wasi.is_some() {
+        if !im.is_host() {
             continue;
         }
         let mut params = String::from(self_params);

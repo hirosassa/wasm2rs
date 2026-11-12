@@ -252,6 +252,10 @@ impl ModuleCtx<'_> {
     /// through the injected host; defined ones are (method) calls.
     pub(crate) fn call_expr(&self, fidx: usize, arg_list: &str) -> String {
         if let Some(im) = self.imports.get(fidx) {
+            // A linked import is a direct call of the function that answers it.
+            if let Some(target) = im.alias {
+                return self.call_expr(target as usize, arg_list);
+            }
             // A recognised WASI import is a native inherent method; any other
             // import is dispatched through the injected host trait.
             return match im.wasi {

@@ -183,6 +183,19 @@ pub(crate) struct ImportInfo {
     pub field: String,
     /// The `Imports` method name under `named_imports`; `None` keeps `import{j}`.
     pub ident: Option<String>,
+    /// Set by the core linker when another module of the linked program provides
+    /// this import: the full index of the function that answers it. The entry keeps
+    /// its slot so the function indices of the module's own code stay valid, but it
+    /// is a direct call, not a host method.
+    pub alias: Option<u32>,
+}
+
+impl ImportInfo {
+    /// Whether this import is answered by the host (a method of the `Imports` trait):
+    /// not a native WASI function and not an alias of a linked function.
+    pub(crate) fn is_host(&self) -> bool {
+        self.wasi.is_none() && self.alias.is_none()
+    }
 }
 
 /// An imported global: its type and mutability. Imported globals occupy the low
