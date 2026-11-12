@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- `transpile_component`: the generated `Glue` now implements exactly the `Imports` methods of the program module, one per core import in import order, delegating to the `Host` method of the WIT function it lowers. A module that names an interface by another compatible version than the component's own import (`@0.2.0` vs `@0.2.12`), or imports one function under several versions, no longer fails to build for the missing `Imports` methods. `wit_host_glue` (no module at hand) is unchanged.
+### Added
+- `transpile_component` / `--component` now transpile components made with a preview1 adapter (`wasm-tools component new --adapt`, wasi-sdk, Go): the program, the adapter and `wit-component`'s shim and fixup modules are linked into one `Instance`, the adapter's `wasi_snapshot_preview1` functions become internal calls, and the host sees only the WIT functions the adapter calls (`wasi:cli/*`, `wasi:io/*`, ...). Exports lifted from several core modules are linked the same way instead of being refused. Every component that transpiled before takes the unchanged single-module path, so its output is byte-identical.
 
-### Changed
-- `transpile_component` / `--component` on an adapter-based component (`wasm-tools component new --adapt`, Go, wasi-sdk) now fails with `unsupported: the core module that lifts the component's exports imports a memory from another core module; linking several core modules ... is not supported` instead of the misleading `invalid options: reentrant_imports with an imported memory, table or global`. Linking the modules (F1 step 2) is still open.
+### Fixed
+- Linked modules that declare the same function signature now share one canonical type, so a `call_indirect` through a table filled by another appended module (the shim/fixup trampolines) reaches its target instead of trapping with `indirect call type mismatch`.
+- A string or list that a lowered import returns is allocated through the `realloc` the component names for that lowering (an adapter's `cabi_import_realloc`) instead of the lifts' `cabi_realloc` (#184).
+- `transpile_component`: the generated `Glue` now implements exactly the `Imports` methods of the program module, one per core import in import order, delegating to the `Host` method of the WIT function it lowers. A module that names an interface by another compatible version than the component's own import (`@0.2.0` vs `@0.2.12`), or imports one function under several versions, no longer fails to build for the missing `Imports` methods. `wit_host_glue` (no module at hand) is unchanged.
 
 ## [0.4.0] - 2026-11-12
 

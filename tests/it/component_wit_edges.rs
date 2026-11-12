@@ -39,8 +39,8 @@ fn lift_of(module: &str, export: &str) -> String {
 // --- module selection ---
 
 #[test]
-fn exports_lifted_from_two_core_modules_are_refused_naming_both() {
-    let why = unsupported(&format!(
+fn exports_lifted_from_two_core_modules_are_linked_into_one_unit() {
+    let code = code_of(&format!(
         r#"(component
   (core module $a (func (export "fa")))
   (core module $b (func (export "fb")))
@@ -49,10 +49,8 @@ fn exports_lifted_from_two_core_modules_are_refused_naming_both() {
         lift_of("a", "fa"),
         lift_of("b", "fb")
     ));
-    assert!(
-        why.contains("more than one core module") && why.contains("`fa`") && why.contains("`fb`"),
-        "{why}"
-    );
+    assert!(code.contains("pub fn fa("), "{code}");
+    assert!(code.contains("pub fn fb("), "{code}");
 }
 
 #[test]
