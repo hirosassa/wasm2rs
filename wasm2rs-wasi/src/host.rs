@@ -79,7 +79,9 @@ use crate::wasi_sockets_network::*;
 use crate::wasi_sockets_tcp::*;
 use crate::wasi_sockets_udp::*;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Dir, MetadataExt as _};
+use cap_std::fs::Dir;
+#[cfg(unix)]
+use cap_std::fs::MetadataExt as _;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::net::{
@@ -825,7 +827,9 @@ mod tests {
         let escaped = Error::new(ErrorKind::PermissionDenied, "outside the sandbox");
         assert_eq!(sandbox_error(escaped), Fs::NotPermitted);
         // a real `EACCES` stays `access`
-        assert_eq!(sandbox_error(Error::from_raw_os_error(13)), Fs::Access);
+        // (13 is EACCES on Unix; on Windows it is another error, ERROR_ACCESS_DENIED is 5)
+        let eacces = if cfg!(windows) { 5 } else { 13 };
+        assert_eq!(sandbox_error(Error::from_raw_os_error(eacces)), Fs::Access);
         // any other error is mapped as ever, with or without an OS number
         assert_eq!(
             sandbox_error(Error::new(ErrorKind::NotFound, "gone")),

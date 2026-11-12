@@ -6,6 +6,7 @@ mod common;
 
 use common::{builder, scratch, traps};
 use std::path::Path;
+#[cfg(unix)]
 use std::time::UNIX_EPOCH;
 use wasm2rs_wasi::wasi_clocks_wall_clock::Datetime;
 use wasm2rs_wasi::wasi_filesystem_types::{
@@ -392,11 +393,15 @@ fn a_read_only_preopen_refuses_every_change_but_allows_reading_and_sync() {
 
     // reading and flushing change nothing, so they are allowed
     assert_eq!(read_at(&mut host, f, 8, 0), (b"data".to_vec(), true));
-    assert_eq!(host.wasi_filesystem_types_method_descriptor_sync(f), Ok(()));
-    assert_eq!(
-        host.wasi_filesystem_types_method_descriptor_sync_data(ROOT),
-        Ok(())
-    );
+    // (Windows cannot flush a handle that was opened read-only, nor a directory)
+    #[cfg(unix)]
+    {
+        assert_eq!(host.wasi_filesystem_types_method_descriptor_sync(f), Ok(()));
+        assert_eq!(
+            host.wasi_filesystem_types_method_descriptor_sync_data(ROOT),
+            Ok(())
+        );
+    }
 }
 
 // ---- directories ------------------------------------------------------------------------
@@ -420,6 +425,7 @@ fn read_directory_lists_each_entry_once_with_its_type() {
         entries.push((entry.name, entry.type_));
     }
     entries.sort_by(|x, y| x.0.cmp(&y.0));
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut expected = vec![
         ("a".to_string(), DescriptorType::RegularFile),
         ("b".to_string(), DescriptorType::Directory),
@@ -598,30 +604,35 @@ fn metadata_hash_names_a_file_not_a_path() {
     let root = scratch("hash");
     std::fs::write(root.join("a"), b"1").unwrap();
     std::fs::write(root.join("b"), b"1").unwrap();
+    #[cfg(unix)]
     std::fs::hard_link(root.join("a"), root.join("a2")).unwrap();
     let mut host = host_over(&root, Access::ReadOnly);
     let ro = DescriptorFlags::READ;
     let a = open(&mut host, "a", OpenFlags(0), ro).unwrap();
     let a_again = open(&mut host, "a", OpenFlags(0), ro).unwrap();
-    let a2 = open(&mut host, "a2", OpenFlags(0), ro).unwrap();
     let b = open(&mut host, "b", OpenFlags(0), ro).unwrap();
     let hash = |h: &mut WasiHost, d| {
         h.wasi_filesystem_types_method_descriptor_metadata_hash(d)
             .unwrap()
     };
     assert_eq!(hash(&mut host, a), hash(&mut host, a_again));
-    assert_eq!(
-        hash(&mut host, a),
-        hash(&mut host, a2),
-        "a hard link is the same file"
-    );
+    // non-Unix hosts identify a file by its path, so a hard link is a different file there
+    #[cfg(unix)]
+    {
+        let a2 = open(&mut host, "a2", OpenFlags(0), ro).unwrap();
+        assert_eq!(
+            hash(&mut host, a),
+            hash(&mut host, a2),
+            "a hard link is the same file"
+        );
+        assert!(host.wasi_filesystem_types_method_descriptor_is_same_object(a, a2));
+    }
     assert_ne!(hash(&mut host, a), hash(&mut host, b));
     let h = hash(&mut host, a);
     assert_ne!(
         h.lower, h.upper,
         "the two halves are not one value repeated"
     );
-    assert!(host.wasi_filesystem_types_method_descriptor_is_same_object(a, a2));
     assert!(!host.wasi_filesystem_types_method_descriptor_is_same_object(a, b));
     // an unknown descriptor is not the same as anything, itself included
     assert!(
@@ -643,12 +654,16 @@ fn hard_links_share_the_file_and_refuse_directories_and_taken_names() {
     };
     assert_eq!(link(&mut host, FOLLOW, "f", "g"), Ok(()));
     let g = open(&mut host, "g", OpenFlags(0), DescriptorFlags::READ).unwrap();
+    // non-Unix hosts do not report a link count (always 1)
+    #[cfg(unix)]
     assert_eq!(
         host.wasi_filesystem_types_method_descriptor_stat(g)
             .unwrap()
             .link_count,
         2
     );
+    #[cfg(not(unix))]
+    let _ = g;
     assert_eq!(link(&mut host, FOLLOW, "f", "taken"), Err(Fs::Exist));
     assert_eq!(link(&mut host, FOLLOW, "d", "d2"), Err(Fs::NotPermitted));
     assert_eq!(
@@ -678,7 +693,7 @@ fn set_times_sets_exactly_what_was_asked_and_leaves_no_change_alone() {
     host.wasi_filesystem_types_method_descriptor_set_times(
         f,
         timestamp(1_000, 500),
-        timestamp(2_000, 7),
+        timestamp(2_000, 700), // NTFS keeps 100ns ticks, so not a finer value
     )
     .unwrap();
     let stat = host
@@ -689,7 +704,7 @@ fn set_times_sets_exactly_what_was_asked_and_leaves_no_change_alone() {
         stat.data_modification_timestamp,
         Some(Datetime {
             seconds: 2_000,
-            nanoseconds: 7
+            nanoseconds: 700
         })
     );
     assert_eq!(stat.status_change_timestamp, None, "never reported");
@@ -704,19 +719,23 @@ fn set_times_sets_exactly_what_was_asked_and_leaves_no_change_alone() {
         .wasi_filesystem_types_method_descriptor_stat(f)
         .unwrap();
     assert_eq!(stat.data_modification_timestamp.unwrap().seconds, 2_000);
-    // through a path as well
-    host.wasi_filesystem_types_method_descriptor_set_times_at(
-        ROOT,
-        FOLLOW,
-        "f".into(),
-        timestamp(5, 0),
-        timestamp(6, 0),
-    )
-    .unwrap();
-    let stat = host
-        .wasi_filesystem_types_method_descriptor_stat_at(ROOT, FOLLOW, "f".into())
+    // through a path as well (on Windows this answers `access` for a file that is open;
+    // observed in CI, see docs/windows.md)
+    #[cfg(unix)]
+    {
+        host.wasi_filesystem_types_method_descriptor_set_times_at(
+            ROOT,
+            FOLLOW,
+            "f".into(),
+            timestamp(5, 0),
+            timestamp(6, 0),
+        )
         .unwrap();
-    assert_eq!(stat.data_modification_timestamp.unwrap().seconds, 6);
+        let stat = host
+            .wasi_filesystem_types_method_descriptor_stat_at(ROOT, FOLLOW, "f".into())
+            .unwrap();
+        assert_eq!(stat.data_modification_timestamp.unwrap().seconds, 6);
+    }
 }
 
 #[test]
@@ -1096,6 +1115,7 @@ fn a_zero_length_file_stream_read_is_ok_before_the_end_and_closed_at_it() {
 
 // ---- open-at: flags and error mapping ----------------------------------------------------
 
+#[cfg(unix)]
 #[test]
 fn a_dangling_symlink_is_no_entry_unless_a_file_is_to_be_created_through_it() {
     let root = scratch("dangling");
@@ -1122,6 +1142,7 @@ fn create_and_truncate_work_without_the_write_descriptor_flag() {
     assert_eq!(std::fs::read(root.join("old")).unwrap(), b"");
 }
 
+#[cfg(unix)]
 #[test]
 fn an_unreadable_file_is_access_whether_or_not_it_is_reached_through_a_symlink() {
     use std::os::unix::fs::PermissionsExt;
@@ -1167,6 +1188,7 @@ fn a_read_of_a_length_that_is_not_a_chunk_multiple_returns_exactly_that_many() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_device_is_neither_a_file_nor_a_directory_nor_a_link() {
     let mut host = host_over(Path::new("/dev"), Access::ReadOnly);
