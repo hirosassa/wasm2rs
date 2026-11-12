@@ -16,7 +16,7 @@ The generated code preserves WebAssembly semantics (wrapping arithmetic, linear-
 - **Standalone Rust source**: the output is a normal crate with no runtime dependency on a WebAssembly engine.
 - **Memory-efficient** on very large modules: output can be split across many files ([split output](docs/cli-reference.md#single-file-vs-split-output)).
 - **Wide proposal coverage**: SIMD and relaxed SIMD, atomics and shared memory, multi-memory, tail calls, exception handling (including legacy), GC, stack-switching continuations.
-- **WASI**: preview1 is implemented natively, other imports go through a generated host `Imports` trait; wasi-threads and emscripten builds run on native threads ([docs/wasi-threads-e2e.md](docs/wasi-threads-e2e.md)).
+- **WASI**: preview1 is implemented natively, other imports go through a generated host `Imports` trait; wasi-threads and emscripten builds run on native threads ([docs/wasi-threads-e2e.md](docs/wasi-threads-e2e.md)). The preview1 preopen check is check-then-use and can be raced by a sibling wasi-threads thread or a host process that swaps in a symlink; see the known limitation in [docs/cli-reference.md](docs/cli-reference.md).
 - **Components (WASI 0.2)**: `--component` transpiles a `wasm32-wasip2` component against the typed `wasm2rs-wasi` host, including `wasi:http` ([docs/wasi-p2-status.md](docs/wasi-p2-status.md)).
 - **Parallel code generation** with byte-identical output (`--jobs`).
 

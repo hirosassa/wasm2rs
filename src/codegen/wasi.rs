@@ -1530,8 +1530,11 @@ pub(super) fn guest_range_lines() -> Vec<String> {
 /// it only the parent is, matching calls that act on the link itself. This is
 /// check-then-use, so a concurrent host process, or a sibling guest thread
 /// (wasi-threads share the filesystem), swapping a path component between the
-/// check and the use can still race it; closing that needs `openat` with
-/// `RESOLVE_BENEATH`, which `std` does not expose.
+/// check and the use can still race it; closing that needs per-component
+/// `openat` with `O_NOFOLLOW` or `openat2(RESOLVE_BENEATH)`, which `std` does
+/// not expose and the std-only generated code cannot use. This is a documented
+/// known limitation (#225, see `docs/cli-reference.md`); it affects only this
+/// preview1 shim, not the `cap-std` based `wasm2rs-wasi` host of WASI 0.2.
 pub(super) fn confine_lines() -> Vec<String> {
     [
         "fn wasi_confine(&self, full: &std::path::Path, follow: bool) -> bool {",
