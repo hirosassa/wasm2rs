@@ -731,17 +731,24 @@ fn offset_expr(at: &str, offset: u64) -> String {
     }
 }
 
-/// Appends the glue to `out`: the helpers, `Glue` and its `Imports` impl, one method per
-/// function of `funcs` (named `names[i]`, like the `Host` method), and with `exports` the
-/// `Exports` trait and its impl (see [`write_exports`]).
+/// A method of the glue's `Imports` impl: `name` is the core module's, which lowers the WIT
+/// function `func` by calling the `Host` method `host`.
+pub(super) struct Method<'a> {
+    pub func: &'a WitFunc,
+    pub name: &'a str,
+    pub host: &'a str,
+}
+
+/// Appends the glue to `out`: the helpers, `Glue` and its `Imports` impl with one method per
+/// entry of `methods`, and with `exports` the `Exports` trait and its impl (see
+/// [`write_exports`]).
 ///
 /// # Errors
 ///
 /// A type that expands past the node budget.
 pub(super) fn write(
     out: &mut String,
-    funcs: &[WitFunc],
-    names: &[String],
+    methods: &[Method<'_>],
     records: &Records,
     exports: Option<(&[WitExport], &[String])>,
 ) -> Result<(), TranspileError> {
@@ -761,7 +768,12 @@ pub(super) fn write(
          #[allow(unused_variables, unused_parens)]\n\
          impl<H: Host> Imports for Glue<H> {\n",
     );
-    for (f, name) in funcs.iter().zip(names) {
+    for &Method {
+        func: f,
+        name,
+        host,
+    } in methods
+    {
         let sig = core_signature(f, &mut sig_budget)?;
         let _ = writeln!(out, "    /// {:?} {:?}", f.interface, f.name);
         let mut head = format!("    fn {name}(&mut self, g: &mut Instance<Self>");
@@ -816,7 +828,7 @@ pub(super) fn write(
             args.push(format!("a{i}"));
         }
 
-        let call = format!("self.0.{name}({})", args.join(", "));
+        let call = format!("self.0.{host}({})", args.join(", "));
         match (&f.result, sig.results.first()) {
             (Some(ty), _) if sig.result_in_memory => {
                 let (size, align) = gen_.layout(ty)?;

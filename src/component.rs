@@ -8,9 +8,10 @@ use wasmparser::{
     ExternalKind, Instance, Parser, Payload,
 };
 
+use crate::wit::wit_host_glue_for_module;
 use crate::{
-    TranspileError, TranspileOptions, WitExport, WitOptions, transpile_with_options, wit_exports,
-    wit_host_glue_with_options,
+    TranspileError, TranspileOptions, WitExport, WitOptions, transpile_with_host_imports,
+    wit_exports,
 };
 
 /// Options of [`transpile_component`].
@@ -95,9 +96,9 @@ pub fn transpile_component_with_exports(
         exports: options.exports,
         ..WitOptions::default()
     };
-    let mut out = transpile_with_options(module, &transpile)?;
+    let (mut out, core_imports) = transpile_with_host_imports(module, &transpile)?;
     out.push('\n');
-    out.push_str(&wit_host_glue_with_options(component, &wit)?);
+    out.push_str(&wit_host_glue_for_module(component, &wit, &core_imports)?);
     Ok((out, exports))
 }
 

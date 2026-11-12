@@ -28,6 +28,8 @@ pub use emit::{
 pub use exports::{WitExport, wit_exports};
 pub use read::wit_functions;
 
+pub(crate) use emit::{CoreImport, wit_host_glue_for_module};
+
 /// A WIT value type that a host function can take or return.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(missing_docs, reason = "the variants are the WIT type names")]

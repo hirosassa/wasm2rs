@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `transpile_component`: the generated `Glue` now implements exactly the `Imports` methods of the program module, one per core import in import order, delegating to the `Host` method of the WIT function it lowers. A module that names an interface by another compatible version than the component's own import (`@0.2.0` vs `@0.2.12`), or imports one function under several versions, no longer fails to build for the missing `Imports` methods. `wit_host_glue` (no module at hand) is unchanged.
+
 ## [0.4.0] - 2026-11-12
 
 `wasm2rs`, `wasm2rs-macros` and (first publication) `wasm2rs-wasi` 0.1.0.
