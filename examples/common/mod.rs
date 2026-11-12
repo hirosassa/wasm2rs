@@ -7,23 +7,35 @@ use wasm2rs::{ComponentOptions, transpile_component_with_exports};
 
 /// Transpiles `component` with [`transpile_component_with_exports`] and checks that it lifts
 /// `{interface}#{func}` directly (a missing export, or an adapter in between, is reported here,
-/// before the build; a transpile error takes precedence over a missing export). The error is the message to print.
+/// before the build; a transpile error takes precedence over a missing export). The interface
+/// matches at any patch version (`wasi:cli/run@0.2.3`, as an adapter exports it, is `@0.2.0`'s
+/// too). Returns the code and the interface as the component names it. The error is the message to print.
 pub fn transpile_exporting(
     component: &[u8],
     interface: &str,
     func: &str,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let (code, exports) = transpile_component_with_exports(component, &ComponentOptions::default())
         .map_err(|e| e.to_string())?;
-    if !exports
+    let Some(found) = exports
         .iter()
-        .any(|e| e.func.interface == interface && e.func.name == func)
-    {
+        .find(|e| e.func.name == func && same_minor_version(&e.func.interface, interface))
+    else {
         return Err(format!(
             "the component does not export `{interface}#{func}`"
         ));
+    };
+    Ok((code, found.func.interface.clone()))
+}
+
+/// Whether `a` and `b` name the same interface at versions that differ in the patch number at most.
+fn same_minor_version(a: &str, b: &str) -> bool {
+    fn minor(name: &str) -> Option<(&str, &str)> {
+        let (base, version) = name.split_once('@')?;
+        let (minor, _patch) = version.rsplit_once('.')?;
+        Some((base, minor))
     }
-    Ok(code)
+    a == b || matches!((minor(a), minor(b)), (Some(x), Some(y)) if x == y)
 }
 
 /// Builds the `wasm2rs-wasi` library with `cargo` into `dir` (it depends on `getrandom`, which a

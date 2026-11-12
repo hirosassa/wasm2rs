@@ -12,8 +12,8 @@ directory; the commands are below so the survey can be repeated.
 | # | Toolchain | Component | Result |
 |---|---|---|---|
 | A | `rustc --target wasm32-wasip2` (std) | 2.7 MB, one core module | **works** (about 16 s with the `wasm2rs-wasi` build), args passed through |
-| B | `wasm32-wasip1` core + `wasm-tools component new --adapt` (command adapter) | 2.2 MB, main + adapter module | **fails**: `invalid options: reentrant_imports with an imported memory, table or global` |
-| C | Go (`GOOS=wasip1`) + the same adapter | 2.5 MB, main + adapter module | **fails**: same as B |
+| B | `wasm32-wasip1` core + `wasm-tools component new --adapt` (command adapter) | 2.2 MB, main + adapter module | **works** (L3 linking; run in 7.0 s with the `wasm2rs-wasi` build, rustc 1.6 s): prints `hello from rust`. The first run failed only in `wasip2_run`, which looked for `wasi:cli/run@0.2.0` while the adapter exports `@0.2.3` |
+| C | Go (`GOOS=wasip1`) + the same adapter | 2.5 MB, main + adapter module | **fails at run time** (#311): transpiles and builds (about 3 min in total; rustc 168 s, 4.3 GB peak RSS at `-C opt-level=1`), then traps with `assertion failed at adapter line 2745` (the adapter's `State` magic). The adapter's two extra pages (36 -> 38) overlap Go's heap range (`bloc` 36 pages, `blocMax` 38 pages). The component runs under wasmtime v30.0.0; why the same order does not break there is not found |
 | D | `jco componentize` (StarlingMonkey, JS) | 13.9 MB | **fails** in `rustc` (E0046) after about 10 minutes |
 | E | `componentize-py` (CPython 3.14) | 17.6 MB, 12 core modules | **fails**: `unsupported: export exports#init: its memory is not an export of the same core instance as the function` |
 

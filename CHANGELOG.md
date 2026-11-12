@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Linked modules that declare the same function signature now share one canonical type, so a `call_indirect` through a table filled by another appended module (the shim/fixup trampolines) reaches its target instead of trapping with `indirect call type mismatch`.
 - A string or list that a lowered import returns is allocated through the `realloc` the component names for that lowering (an adapter's `cabi_import_realloc`) instead of the lifts' `cabi_realloc` (#184).
 - `transpile_component`: the generated `Glue` now implements exactly the `Imports` methods of the program module, one per core import in import order, delegating to the `Host` method of the WIT function it lowers. A module that names an interface by another compatible version than the component's own import (`@0.2.0` vs `@0.2.12`), or imports one function under several versions, no longer fails to build for the missing `Imports` methods. `wit_host_glue` (no module at hand) is unchanged.
+- `examples/wasip2_run` accepts `wasi:cli/run` exported at a newer patch version than `0.2.0`: a component made with the preview1 adapter exports `wasi:cli/run@0.2.3`, which was reported as "does not export `wasi:cli/run@0.2.0#run`". A real Rust `wasm32-wasip1` + adapter component now runs (`wasip2_serve` still requires `wasi:http/incoming-handler@0.2.0`).
 
 ## [0.4.0] - 2026-11-12
 
