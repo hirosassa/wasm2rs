@@ -13,7 +13,8 @@
 
 use std::collections::BTreeMap;
 
-/// A function of an imported interface (or a top-level imported function: empty `interface`).
+/// A function of an imported interface instance. (A top-level imported function is not
+/// traced yet: a `canon lower` of one is `Supplier::Other`.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HostFunc {
     /// The imported instance, e.g. `wasi:cli/environment@0.2.3`.
@@ -30,6 +31,15 @@ pub(crate) enum Supplier {
     Host(HostFunc),
     /// Anything else (another canonical built-in, or an item this reader does not trace).
     Other,
+}
+
+impl Supplier {
+    pub fn export(instance: u32, name: &str) -> Self {
+        Self::Export {
+            instance,
+            name: name.to_string(),
+        }
+    }
 }
 
 /// A core instance of the component.
@@ -74,10 +84,7 @@ impl CoreWiring {
         };
         let (_, given) = args.iter().find(|(m, _)| m == module)?;
         match self.instance(*given)? {
-            WiredInstance::Module { .. } => Some(Supplier::Export {
-                instance: *given,
-                name: name.to_string(),
-            }),
+            WiredInstance::Module { .. } => Some(Supplier::export(*given, name)),
             WiredInstance::Exports(members) => members.get(name).cloned(),
         }
     }

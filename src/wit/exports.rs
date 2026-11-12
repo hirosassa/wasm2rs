@@ -5,8 +5,6 @@
 //! instance made by instantiating a top-level core module. Anything else is an
 //! [`Unsupported`](TranspileError::Unsupported) error naming the export.
 
-use std::collections::BTreeMap;
-
 use wasmparser::{
     CanonicalFunction, CanonicalOption, ComponentAlias, ComponentExternalKind,
     ComponentOuterAliasKind, ComponentTypeRef, ExternalKind, Instance as CoreInstanceDef, Payload,
@@ -71,17 +69,6 @@ enum Func {
     Imported(HostFunc),
     /// Anything else (an import, an alias of another instance's export).
     Other(&'static str),
-}
-
-impl Func {
-    /// What a function that is not a `canon lift` is, for an error message.
-    fn describe(&self) -> Option<&'static str> {
-        match self {
-            Func::Lift(_) => None,
-            Func::Imported(_) => Some(ALIAS_OF_INSTANCE_EXPORT),
-            Func::Other(what) => Some(what),
-        }
-    }
 }
 
 const ALIAS_OF_INSTANCE_EXPORT: &str = "an alias of an export of an instance";
@@ -535,7 +522,7 @@ impl Reader {
                     members
                         .iter()
                         .map(|(name, kind, at)| (name.clone(), self.supplier(*kind, *at)))
-                        .collect::<BTreeMap<_, _>>(),
+                        .collect(),
                 ),
             })
             .collect();
@@ -544,17 +531,16 @@ impl Reader {
 
     /// What provides the core item `at` of the index space of `kind`.
     fn supplier(&self, kind: ExternalKind, at: u32) -> Supplier {
-        let export = |(instance, name): &(u32, String)| Supplier::Export {
-            instance: *instance,
-            name: name.clone(),
+        let space = |items: &[(u32, String)]| {
+            index(at)
+                .and_then(|i| items.get(i))
+                .map(|(instance, name)| Supplier::export(*instance, name))
         };
-        let space = |items: &[(u32, String)]| index(at).and_then(|i| items.get(i)).map(export);
         let found = match kind {
             ExternalKind::Func => match index(at).and_then(|i| self.core_funcs.get(i)) {
-                Some(CoreFunc::Export { instance, name }) => Some(Supplier::Export {
-                    instance: *instance,
-                    name: name.clone(),
-                }),
+                Some(CoreFunc::Export { instance, name }) => {
+                    Some(Supplier::export(*instance, name))
+                }
                 Some(CoreFunc::Lowered { func }) => {
                     match index(*func).and_then(|i| self.funcs.get(i)) {
                         Some(Func::Imported(host)) => Some(Supplier::Host(host.clone())),
@@ -638,7 +624,11 @@ impl Reader {
         let lift = match index(at).and_then(|i| self.funcs.get(i)) {
             Some(Func::Lift(lift)) => lift,
             Some(other) => {
-                let what = other.describe().unwrap_or("not a function");
+                let what = match other {
+                    Func::Imported(_) => ALIAS_OF_INSTANCE_EXPORT,
+                    Func::Other(what) => what,
+                    Func::Lift(_) => return Err(TranspileError::Internal("a lift".into())),
+                };
                 return Err(unsupported(format!(
                     "export `{label}` is {what}, not a `canon lift` in this component \
                      (exports of a nested component are not traced)"
@@ -915,13 +905,6 @@ world w { export run: func(); }",
         wiring.module_instance(module).unwrap()
     }
 
-    fn export(instance: u32, name: &str) -> Supplier {
-        Supplier::Export {
-            instance,
-            name: name.to_string(),
-        }
-    }
-
     // The modules of `adapter_component`, by ordinal: main 0, adapter 1, shim 2, fixup 3.
     const MAIN: usize = 0;
     const ADAPTER: usize = 1;
@@ -935,7 +918,7 @@ world w { export run: func(); }",
         let shim = instance_of(&wiring, SHIM);
         assert_eq!(
             wiring.supplier(main, "wasi_snapshot_preview1", "args_get"),
-            Some(export(shim, "0"))
+            Some(Supplier::export(shim, "0"))
         );
     }
 
@@ -946,7 +929,7 @@ world w { export run: func(); }",
         let adapter = instance_of(&wiring, ADAPTER);
         assert_eq!(
             wiring.supplier(adapter, "env", "memory"),
-            Some(export(main, "memory"))
+            Some(Supplier::export(main, "memory"))
         );
     }
 
@@ -957,7 +940,7 @@ world w { export run: func(); }",
         let shim = instance_of(&wiring, SHIM);
         assert_eq!(
             wiring.supplier(adapter, "wasi:cli/environment@0.2.3", "get-arguments"),
-            Some(export(shim, "1"))
+            Some(Supplier::export(shim, "1"))
         );
     }
 
@@ -968,7 +951,7 @@ world w { export run: func(); }",
         let shim = instance_of(&wiring, SHIM);
         assert_eq!(
             wiring.supplier(fixup, "shim", "$imports"),
-            Some(export(shim, "$imports"))
+            Some(Supplier::export(shim, "$imports"))
         );
     }
 
@@ -979,7 +962,7 @@ world w { export run: func(); }",
         let adapter = instance_of(&wiring, ADAPTER);
         assert_eq!(
             wiring.supplier(fixup, "actual", "0"),
-            Some(export(adapter, "args_get"))
+            Some(Supplier::export(adapter, "args_get"))
         );
         assert_eq!(
             wiring.supplier(fixup, "actual", "1"),
