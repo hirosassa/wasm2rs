@@ -122,6 +122,7 @@ mod unsupported;
 mod wasi;
 mod wasi_fs;
 mod wasi_generated;
+mod wasi_guest_pointer_wrap;
 mod wasi_poll;
 mod wasi_sdk_e2e;
 mod wasi_shared_memory;
