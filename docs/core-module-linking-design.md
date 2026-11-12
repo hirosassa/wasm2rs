@@ -1,6 +1,7 @@
 # Linking several core modules (F1 step 2)
 
-Status: design only, nothing implemented.
+Status: design only, nothing implemented. All open questions are decided
+(Section 6); implementation starts at stage L1.
 
 Background: [component-toolchain-survey.md](component-toolchain-survey.md) (F1/F2),
 [component-input-design.md](component-input-design.md),
@@ -176,9 +177,10 @@ Core idea: do not renumber the big module. Main keeps all its indices.
   adapter's `allocate_stack`, then none for shim/fixup).
 - Appended modules' function bodies need their own index operands translated.
   That is a *small* renumbering (the adapter is 13 KB, Rust-compiled MVP+bulk) over
-  a restricted operator subset that **fails loudly on anything else**; or, if
-  `ModuleIr` bodies are lazily decoded (to be checked), a per-body index bias in
-  codegen with no rewriting at all.
+  a restricted operator subset (MVP, bulk-memory, sign-extension, reference
+  types; decision Q6) that **fails loudly on anything else**. If `ModuleIr`
+  bodies turn out to be lazily decoded, a per-body index bias in codegen is an
+  implementation alternative with the same operator restriction.
 - Output: one `Instance`, one `Imports` trait that only contains the *unresolved*
   imports (the `wasi:*` lowered functions + any host import), so the glue and the
   `wasm2rs-wasi` host work as they do for a wasip2-native component.
@@ -187,7 +189,8 @@ Core idea: do not renumber the big module. Main keeps all its indices.
   solves #185 (a lift into any merged module is just an export of the one
   `Instance`); F2 extends it.
 - Con: needs a trustworthy mapping from "a shim/fixup-routed lowered function" to
-  its WIT name (see Section 6, Q2); size grows by the adapter (13-23 KB of Wasm,
+  its WIT name (resolved by decision Q2: derived from the `canon lower`
+  definition); size grows by the adapter (13-23 KB of Wasm,
   small against 2.2-2.5 MB main); compile time is dominated by main anyway.
 - Effort: medium-large (the linker plus component wiring), risk medium and
   localised: the single-module path is not touched.
@@ -210,17 +213,18 @@ Core idea: do not renumber the big module. Main keeps all its indices.
 
 ## 5. Recommendation: (c), staged
 
-Gate: the linked path is used **only** when `select_index` today would fail
-(program module imports state from another core module, or lifts span several
-modules, i.e. exactly the cases #305 and #185 reject). Everything that succeeds
-today takes the current path, so existing output is byte-identical and the golden
-tests are the regression guard (G3).
+Gate (decision Q3): the linked path is used **only** when `select_index` today
+would fail (program module imports state from another core module, or lifts span
+several modules, i.e. exactly the cases #305 and #185 reject). Everything that
+succeeds today takes the current path, so existing output is byte-identical and
+the golden tests are the regression guard (G3).
 
-Honest linking of all four modules (including shim and fixup) is preferred over
-special-casing `wit-component`'s pattern: it also covers adapters that differ from
-today's and #185, and it needs no "is this really a trampoline" detection. The one
-non-trivial part is naming the host imports (Q2). #184 must be solved on the way
-(lowered functions use `cabi_import_realloc`), so it is part of stage L3.
+All modules of the instantiation graph are linked, shim and fixup included
+(decision Q1): no detection of `wit-component`'s trampoline pattern, and it also
+covers adapters that differ from today's plus #185. Host-import names behind the
+shim/fixup come from the component's `canon lower` definitions (decision Q2), so
+the component reader is extended in L1 and consumed in L3. #184 is solved on the
+way (lowered functions use `cabi_import_realloc`) in L3.
 
 ### Stages (one PR each; first failing test given)
 
@@ -230,25 +234,31 @@ module and a WAT adapter via `ComponentEncoder::adapter`, which gets the exact
 shim/fixup wiring for free; a hand-written WAT with the same shape is the
 fallback.
 
-- **L0 (spike inside L1's PR, no merge on its own)**: confirm `ModuleIr` keeps
-  operators as `wasmparser::Operator`/ranges and whether a per-body index bias or
-  a restricted rewrite is cheaper. Decides the "Appended modules" line above.
-- **L1 `scan` keeps the instantiate graph** (refactor, no behaviour change).
-  `Layout` records, per core instance, which module it instantiates and, per
-  import name, which (instance, export) feeds it; `CoreInstance::FromExports`
-  keeps its member list.
+- **L0 (spike inside L1's PR, no merge on its own)**: confirm how `ModuleIr`
+  keeps operators (`wasmparser::Operator`/ranges) and pick the restricted rewrite
+  or per-body bias for appended modules (operator subset fixed by Q6).
+- **L1 reader keeps the wiring** (refactor, no behaviour change).
+  `Layout`/`scan` records, per core instance, which module it instantiates and,
+  per import name, which (instance, export) feeds it; `CoreInstance::FromExports`
+  keeps its member list. The component reader also retains the
+  **core-func -> component-func mapping of `canon lower`** (decision Q2) so a
+  core function that reaches a module through shim/fixup can be named by its WIT
+  interface and function.
   *First failing test*: unit test on the adapter-shaped WAT component asserting
   the graph (`$main.wasi_snapshot_preview1` <- shim exports; adapter `env.memory`
-  <- `$main` memory; fixup table <- shim table). Existing #305 test stays green.
+  <- `$main` memory; fixup table <- shim table) and that fixup's `""."6"` maps to
+  `wasi:cli/environment@0.2.3` `get-arguments`. Existing #305 test stays green.
 - **L2 `src/link.rs`: link N core modules into one `ModuleIr`** with alias
   imports, memory/table/global binding and start order; pure core level.
+  Appended modules are limited to MVP + bulk-memory + sign-ext + reference
+  types; anything else is an explicit `Unsupported` naming the operator (Q6).
   *First failing test*: a two-module WAT pair (module B imports `a.f` and a
   memory exported by A; A's `_start` calls B) linked and executed through the
   existing build helper returns the expected value; and a test that linking a
   single module returns the input unchanged. A direct Rust-level test on the
   linker with the shim/fixup-style cycle (table + active elem).
-- **L3 Component integration + glue**: use the linker when the gate fires;
-  resolve host-import names through shim/fixup (Q2); lowering with
+- **L3 Component integration + glue**: use the linker when the gate fires (Q3);
+  name the host imports from the L1 `canon lower` mapping (Q2); lowering with
   `cabi_import_realloc` (#184: pass the realloc export name to the shared
   helper); remove the duplicated single-module check in `glue_text`.
   *First failing test*: the #305 WAT test becomes a success test: the
@@ -256,49 +266,44 @@ fallback.
   `Host` that records `get-stdout`/`write` (replacing today's `Unsupported`
   assertion).
 - **L4 #185 and #186 for linked programs**: lifts in different modules become
-  exports of one instance; name assignment over the linked export list with the
-  rule from Q4.
+  exports of one instance; names are assigned over the linked unit's exports, which are
+  only what the component re-exports/lifts plus `memory` and `cabi_realloc`;
+  internal wiring exports are dropped (Q4).
   *First failing test*: a WAT component whose two lifted exports come from two
   different core modules (the shape #185 describes) returns both results.
 - **L5 real components**: `#[ignore]`d tests (fixtures not committed) for
   `p1-hello.wasm` and `go-hello.wasm` run through `examples/wasip2_run`;
   update the survey table (B and C pass). Reproduction is at the end of the survey.
-- **F2 (later, not scheduled)**: dylink-style modules; needs L2's imported
+- **F2 (documented follow-up, not scheduled; Q8)**: dylink-style modules; needs L2's imported
   table/global binding with `__table_base`/`__memory_base`, init order, and
   libpython-scale compile time work (F4).
 
-## 6. Open questions (need your decision)
+## 6. Decisions
 
-1. **Scope of "linking"**: accept the recommendation to link all modules of the
-   instantiation graph honestly (shim + fixup included, one extra `call_indirect`
-   per preview1 call), or special-case the `wit-component` shim/fixup pattern and
-   bind main's preview1 imports directly to the adapter exports (faster, but
-   pattern-dependent)?
-2. **Naming host imports behind shim/fixup**: the lowered functions arrive at
-   fixup as `""."6"`, with no WIT name. Options: (i) derive the name from the
-   component's `canon lower` definition (needs the component reader to retain the
-   core-func -> component-func mapping; accurate), or (ii) use the adapter's
-   import names (`wasi:cli/environment@0.2.3`/`get-arguments`, which is what the
-   current by-name resolver already understands; pattern-dependent). Preference?
-3. **Gate**: link only when today's code would reject (recommended, keeps every
-   current output byte-identical) vs. always link when a component has more than
-   one *instantiated* module (cleaner, but changes existing successful outputs
-   for components with ignorable shims).
-4. **#186 naming for a linked program**: names are assigned over the exports of
-   the linked unit. Which exports does the unit have: all exports of all
-   merged modules (collision-prone, `_{func_index}` suffixes are not stable) or
-   only those the component re-exports / lifts plus `memory`/`cabi_realloc`
-   (recommended; internal wiring exports are dropped)?
-5. **Dependency policy**: confirm "no new runtime dependency" is a hard rule. If
-   not, (a) with `wasm-encoder` becomes the smallest-effort option and the
-   alias-import machinery in (c) is unnecessary.
-6. **Appended-module operator subset**: acceptable to fail loudly when an appended
-   (non-main) module uses operators outside MVP + bulk-memory + sign-ext +
-   reference types, given that the only known adapters are Rust-compiled? Or must
-   it support every proposal (then the per-body-bias route of L0 is required)?
-7. **Component-level state**: the adapter's `__stack_pointer`, `internal_state_ptr`,
-   `allocation_state` are plain mutable globals initialised in `allocate_stack`.
-   Confirm that the merged `Instance` may expose them as ordinary private fields
-   (no host visibility needed).
-8. **F2**: keep as a documented follow-up of the same linker (this design), or
-   drop it from the roadmap until there is demand?
+Each open question of the first draft was decided by the maintainer in favour of
+the recommendation.
+
+1. **Link every module of the instantiation graph, shim and fixup included.**
+   Why: no dependence on `wit-component`'s trampoline pattern; also covers
+   differently shaped adapters and #185. Cost: one extra table-indirect call per
+   preview1 call, negligible against the host call behind it.
+2. **Name shim/fixup-routed host imports from the `canon lower` definition**:
+   the component reader keeps the core-func -> component-func mapping (stage L1,
+   consumed in L3). Why: accurate and independent of the adapter's import names.
+3. **Use the linker only where today's code errors.** Why: every output that
+   works today stays byte-identical, so the existing golden tests are the
+   regression guard.
+4. **#186 naming for a linked program**: the unit's exports are what the
+   component re-exports/lifts plus `memory` and `cabi_realloc`; internal wiring
+   exports are dropped. Why: stable names, no `_{func_index}` collisions.
+5. **No new runtime dependency (hard rule).** Why: `wasmparser`-only is a selling
+   point; this is what rules out option (a) via `wasm-encoder`.
+6. **Appended modules may use only MVP, bulk-memory, sign-ext and reference-type
+   operators**; others are an explicit error. Why: the only known adapters are
+   Rust-compiled; keeps the renumbering small and safe.
+7. **Adapter state (`__stack_pointer`, `internal_state_ptr`, `allocation_state`)
+   becomes private fields of the merged `Instance`.** No host visibility needed.
+8. **F2 (dynamic linking) is a documented follow-up of the same linker, not on
+   the schedule.**
+
+Implementation starts at L1, with its own Todo approval.
