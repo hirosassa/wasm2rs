@@ -422,6 +422,8 @@ impl<'a> super::FuncGen<'a> {
                 ty: AbstractHeapType::Exn,
                 ..
             } => ValType::EXNREF,
+            // The `ok_or_else`s below are unreachable for validated input (`RefType::new`
+            // only fails for an out-of-range index); kept instead of `unwrap`.
             // A bottom type holds only null (it lowers like the top type of its
             // hierarchy) and `contref` is a `u32` handle: keep the type as written.
             hty if is_bottom_u32_heap(hty) || is_cont_heap(hty) => {

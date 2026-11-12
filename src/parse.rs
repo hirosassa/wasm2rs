@@ -63,8 +63,8 @@ pub(crate) struct ModuleIr<'a> {
     /// The module's function types, so `call_indirect` can resolve its declared
     /// type index back to a signature.
     pub(crate) type_sigs: Vec<codegen::TypeSig>,
-    /// The declared type relation, when the type section validates on its own.
-    pub(crate) type_rel: Option<codegen::TypeRel>,
+    /// The declared type relation behind funcref `ref.test`/`ref.cast`.
+    pub(crate) type_rel: codegen::TypeRel,
     func_type_indices: Vec<u32>,
     bodies: Vec<wasmparser::FunctionBody<'a>>,
     pub(crate) globals: Vec<codegen::GlobalInfo>,
@@ -133,22 +133,19 @@ pub(crate) fn parse_module<'a>(
 ) -> Result<ModuleIr<'a>, TranspileError> {
     // Reject ill-typed input up front: the code generator assumes a validated module
     // and would otherwise emit wrong Rust for it (e.g. a mismatched operand stack).
-    wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all()).validate_all(wasm)?;
+    let types = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(wasm)?;
     let mut builder = ModuleBuilder::new(topts);
     for payload in Parser::new(0).parse_all(wasm) {
         builder.payload(payload?)?;
     }
-    builder.finish()
+    builder.finish(type_relation(&types)?)
 }
 
 /// The accumulators a module is parsed into, plus the state that only matters
 /// while parsing.
 struct ModuleBuilder<'a, 'o> {
     topts: &'o TranspileOptions,
-    /// The type section run through the validator (types only, never the bodies),
-    /// for the declared subtype relation behind funcref `ref.test`/`ref.cast`;
-    /// `None` if it does not validate.
-    type_validator: Option<wasmparser::Validator>,
     types: TypeSpace,
     func_type_indices: Vec<u32>,
     bodies: Vec<wasmparser::FunctionBody<'a>>,
@@ -179,9 +176,6 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
     fn new(topts: &'o TranspileOptions) -> Self {
         Self {
             topts,
-            type_validator: Some(wasmparser::Validator::new_with_features(
-                wasmparser::WasmFeatures::all(),
-            )),
             types: TypeSpace::default(),
             func_type_indices: Vec::new(),
             bodies: Vec::new(),
@@ -206,20 +200,8 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
 
     fn payload(&mut self, payload: Payload<'a>) -> Result<(), TranspileError> {
         match payload {
-            Payload::Version {
-                num,
-                encoding,
-                range,
-            } => {
-                reject_component(encoding)?;
-                feed_validator(&mut self.type_validator, |v| {
-                    v.version(num, encoding, &range)
-                });
-            }
-            Payload::TypeSection(reader) => {
-                feed_validator(&mut self.type_validator, |v| v.type_section(&reader));
-                self.type_section(reader)?;
-            }
+            Payload::Version { encoding, .. } => reject_component(encoding)?,
+            Payload::TypeSection(reader) => self.type_section(reader)?,
             Payload::ImportSection(reader) => self.import_section(reader)?,
             Payload::FunctionSection(reader) => {
                 for type_index in reader {
@@ -666,7 +648,7 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
         Ok(())
     }
 
-    fn finish(mut self) -> Result<ModuleIr<'a>, TranspileError> {
+    fn finish(mut self, type_rel: codegen::TypeRel) -> Result<ModuleIr<'a>, TranspileError> {
         self.resolve_table_inits()?;
         let type_sigs = self
             .types
@@ -677,7 +659,6 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
                 results: s.results.clone(),
             })
             .collect();
-        let type_rel = self.type_validator.as_ref().and_then(type_relation);
         Ok(ModuleIr {
             types: self.types,
             type_sigs,
@@ -996,28 +977,18 @@ fn eval_ref_const(
     }
 }
 
-/// Run one step on the type validator, dropping it (and with it the type relation) if
-/// the step fails.
-fn feed_validator(
-    validator: &mut Option<wasmparser::Validator>,
-    step: impl FnOnce(&mut wasmparser::Validator) -> wasmparser::Result<()>,
-) {
-    if validator.as_mut().is_some_and(|v| step(v).is_err()) {
-        *validator = None;
-    }
-}
-
-/// The declared type relation of a validator that has read the type section: each type
-/// index's canonical id (a `CoreTypeId`, shared by equivalent types) and each canonical
-/// id's declared direct supertype.
-fn type_relation(validator: &wasmparser::Validator) -> Option<codegen::TypeRel> {
-    let types = validator.types(0)?;
+/// The declared type relation of a validated module: each type index's canonical id (a
+/// `CoreTypeId`, shared by equivalent types) and each canonical id's declared direct
+/// supertype.
+fn type_relation(types: &wasmparser::types::Types) -> Result<codegen::TypeRel, TranspileError> {
+    let types = types.as_ref();
     let mut ids = std::collections::HashMap::new();
     let mut canon = Vec::new();
     let mut canon_super: Vec<Option<wasmparser::types::CoreTypeId>> = Vec::new();
     for i in 0..types.core_type_count_in_module() {
         let id = types.core_type_at_in_module(i);
-        let next = u32::try_from(ids.len()).ok()?;
+        let next = u32::try_from(ids.len())
+            .map_err(|_| TranspileError::Unsupported("too many types".into()))?;
         let dense = *ids.entry(id).or_insert_with(|| {
             canon_super.push(
                 types[id]
@@ -1033,5 +1004,5 @@ fn type_relation(validator: &wasmparser::Validator) -> Option<codegen::TypeRel> 
         .into_iter()
         .map(|sup| sup.and_then(|id| ids.get(&id).copied()))
         .collect();
-    Some(codegen::TypeRel { canon, canon_super })
+    Ok(codegen::TypeRel { canon, canon_super })
 }

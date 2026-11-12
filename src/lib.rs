@@ -581,7 +581,7 @@ fn transpile_impl<R>(
         types: &ir.type_sigs,
         type_kinds: ir.type_kinds(),
         supers: ir.supers(),
-        type_rel: ir.type_rel.as_ref(),
+        type_rel: &ir.type_rel,
         globals: &ir.globals,
         memories: &ir.memories,
         data: &ir.data,

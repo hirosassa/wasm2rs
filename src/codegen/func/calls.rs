@@ -115,7 +115,9 @@ impl<'a> super::FuncGen<'a> {
         self.branch(depth, None)
     }
 
-    /// The parameter count of the self-looping function.
+    /// The parameter count of the self-looping function. `self_loop` is set by the
+    /// caller that chose the self-tail-call lowering, so the error is defence in
+    /// depth against that bookkeeping drifting, not a reachable input error.
     fn own_param_count(&self) -> Result<usize, TranspileError> {
         let own = self
             .self_loop

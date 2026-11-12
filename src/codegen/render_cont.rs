@@ -6,44 +6,17 @@
 //! per-function `cont_step_func{N}` state machines that these types feed are
 //! lowered separately (in the `func` submodule).
 
-use super::{CompositeKind, ModuleCtx, default_value, rust_type};
+use super::{ModuleCtx, default_value, rust_type};
 use crate::TranspileError;
 
 /// Bits of a continuation handle that index the slot table (about a million
-/// simultaneously live continuations). The handle's remaining low bits hold the
-/// slot's generation and — only when the module casts to continuation types — the
-/// continuation type's id; bit 31 stays clear (it tags external funcrefs, and
-/// `u32::MAX` is null).
+/// simultaneously live continuations). The remaining bits below bit 31 hold the
+/// slot's generation; bit 31 stays clear (it tags external funcrefs, and `u32::MAX`
+/// is null).
 const CONT_IDX_BITS: u32 = 20;
 
-/// The module's continuation types (by type index), in id order. With casts the
-/// handle carries the id so that a consumed reference still reports its own type.
-fn cont_type_indices(ctx: &ModuleCtx<'_>) -> Vec<usize> {
-    ctx.type_kinds
-        .iter()
-        .enumerate()
-        .filter(|(_, k)| matches!(k, CompositeKind::Cont(_)))
-        .map(|(i, _)| i)
-        .collect()
-}
-
-/// The generation width of the handle layout `[type | gen | idx]`: whatever bits
-/// below bit 31 the slot index and (with casts) the type id leave over.
-fn handle_gen_bits(ctx: &ModuleCtx<'_>) -> Result<u32, TranspileError> {
-    let type_bits = if ctx.cont.casts {
-        let n = cont_type_indices(ctx).len().max(1);
-        usize::BITS - (n - 1).leading_zeros()
-    } else {
-        0
-    };
-    let gen_bits = 31u32.saturating_sub(CONT_IDX_BITS + type_bits);
-    if gen_bits < 2 {
-        return Err(TranspileError::Unsupported(
-            "too many continuation types to cast between".into(),
-        ));
-    }
-    Ok(gen_bits)
-}
+/// The generation width of the handle layout `[gen | idx]`.
+const CONT_GEN_BITS: u32 = 31 - CONT_IDX_BITS;
 
 /// The module-scope typed-continuations runtime: the `StepResult` a step
 /// function returns, one `ContFrame{N}` per continuation-bodied function
@@ -110,17 +83,12 @@ pub(super) fn continuation_runtime_lines(
     // One handle-table entry. `epoch` advances whenever the slot's continuation is
     // consumed, so a handle minted for an earlier occupant no longer matches.
     // The frame is boxed so stepping moves a pointer, not the whole `ContObj`.
-    let gen_bits = handle_gen_bits(ctx)?;
     lines.extend([
         format!("const CONT_IDX_BITS: u32 = {CONT_IDX_BITS};"),
-        format!("const CONT_GEN_BITS: u32 = {gen_bits};"),
+        format!("const CONT_GEN_BITS: u32 = {CONT_GEN_BITS};"),
         format!("const CONT_IDX_MASK: u32 = (1u32 << {CONT_IDX_BITS}) - 1;"),
         "const CONT_GEN_MASK: u32 = (1u32 << CONT_GEN_BITS) - 1;".to_string(),
     ]);
-    if ctx.cont.casts {
-        // Where the continuation type id sits in a handle.
-        lines.push("const CONT_TYPE_SHIFT: u32 = CONT_IDX_BITS + CONT_GEN_BITS;".to_string());
-    }
     lines.push("#[allow(dead_code)]".to_string());
     lines.push("pub struct ContSlot { epoch: u32, obj: Option<Box<ContObj>> }".to_string());
     Ok(lines)
@@ -150,7 +118,7 @@ fn frame_start_literal(ctx: &ModuleCtx<'_>, n: u32) -> String {
 
 /// The `cont_new`/`cont_step` methods on `Instance`. `cont_new` allocates a
 /// fresh resumable frame for the referenced function and returns its handle
-/// (`[type | generation | slot index]`, see [`CONT_IDX_BITS`]); `cont_step`
+/// (`[generation | slot index]`, see [`CONT_IDX_BITS`]); `cont_step`
 /// resumes the handle once, dispatching to the right step function and — since a
 /// continuation is one-shot — keeping the (advanced) object only while it is still
 /// suspended; on return the slot is recycled and its generation advanced, so any
@@ -193,22 +161,10 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "    Self::cont_handle(__i, __epoch, __ty)".to_string(),
         "}".to_string(),
         String::new(),
-        // The handle for slot `__i` at generation `__epoch`; with casts it also carries
-        // the id of continuation type `__ty`, so a consumed reference keeps its type.
+        // The handle for slot `__i` at generation `__epoch`.
         "fn cont_handle(__i: u32, __epoch: u32, __ty: u32) -> u32 {".to_string(),
-    ]);
-    if ctx.cont.casts {
-        lines.push(
-            "    (Self::cont_type_id(__ty) << CONT_TYPE_SHIFT) | (__epoch << CONT_IDX_BITS) | __i"
-                .to_string(),
-        );
-    } else {
-        lines.extend([
-            "    let _ = __ty;".to_string(),
-            "    (__epoch << CONT_IDX_BITS) | __i".to_string(),
-        ]);
-    }
-    lines.extend([
+        "    let _ = __ty;".to_string(),
+        "    (__epoch << CONT_IDX_BITS) | __i".to_string(),
         "}".to_string(),
         String::new(),
         // The live slot behind `__h`: it must still hold its continuation and carry
@@ -282,15 +238,9 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         // continuation's `bound` prefix and hands the (same, in this backend)
         // handle back typed as the partially-applied continuation. The next
         // resume prepends the prefix to its own arguments (see `cont_step`).
-        // With casts to continuation types, the bound continuation moves to a new
-        // handle (the old reference is consumed and keeps its own type).
         "#[allow(dead_code)]".to_string(),
         "pub fn cont_bind(&mut self, __h: u32, __prefix: &[i64], __ty: u32) -> u32 {".to_string(),
-        if ctx.cont.casts {
-            "    let __h = self.cont_retype(__h, __ty);".to_string()
-        } else {
-            "    let _ = __ty;".to_string()
-        },
+        "    let _ = __ty;".to_string(),
         "    let __i = self.cont_slot(__h, \"cont.bind of a consumed continuation\");".to_string(),
         "    match self.conts[__i].obj.as_deref_mut().expect(\"cont.bind of a consumed continuation\") {"
             .to_string(),
@@ -301,48 +251,6 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         ));
     }
     lines.extend(["    }".to_string(), "    __h".to_string(), "}".to_string()]);
-    if ctx.cont.casts {
-        // The ids of the module's continuation types: what a handle carries so a
-        // cast can read the type back without the (possibly recycled) slot.
-        let types = cont_type_indices(ctx);
-        lines.push(String::new());
-        lines.push("fn cont_type_id(__ty: u32) -> u32 {".to_string());
-        lines.push("    match __ty {".to_string());
-        for (id, ty) in types.iter().enumerate() {
-            lines.push(format!("        {ty}u32 => {id}u32,"));
-        }
-        lines.push("        _ => panic!(\"not a continuation type\"),".to_string());
-        lines.push("    }".to_string());
-        lines.push("}".to_string());
-        lines.push(String::new());
-        lines.push("pub fn cont_type_of(&self, __h: u32) -> u32 {".to_string());
-        lines.push("    match __h >> CONT_TYPE_SHIFT {".to_string());
-        for (id, ty) in types.iter().enumerate() {
-            lines.push(format!("        {id}u32 => {ty}u32,"));
-        }
-        lines.push("        _ => panic!(\"not a continuation handle\"),".to_string());
-        lines.push("    }".to_string());
-        lines.push("}".to_string());
-        lines.extend([
-            String::new(),
-            // The continuation behind `__h` moves to a fresh handle of type `__ty`; the
-            // old handle is consumed (the slot's generation advances) and keeps the type
-            // it had.
-            "#[allow(dead_code)]".to_string(),
-            "pub fn cont_retype(&mut self, __h: u32, __ty: u32) -> u32 {".to_string(),
-            "    let __i = self.cont_slot(__h, \"retype of a consumed continuation\");".to_string(),
-            "    let __s = &mut self.conts[__i];".to_string(),
-            "    __s.epoch = (__s.epoch + 1) & CONT_GEN_MASK;".to_string(),
-            // On wrap the slot is retired (never freed) and the continuation moves.
-            "    if __s.epoch == 0 {".to_string(),
-            "        let __o = __s.obj.take().expect(\"retype of a consumed continuation\");"
-                .to_string(),
-            "        return self.cont_alloc(__o, __ty);".to_string(),
-            "    }".to_string(),
-            "    Self::cont_handle(__i as u32, __s.epoch, __ty)".to_string(),
-            "}".to_string(),
-        ]);
-    }
     lines
 }
 
