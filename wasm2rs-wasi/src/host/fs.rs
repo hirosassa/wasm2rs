@@ -400,6 +400,29 @@ impl WasiHost {
     }
 }
 
+/// Opens `path` below `dir` for `set-times`: a file or a directory, with the access to set
+/// its times.
+pub(super) fn open_for_set_times(
+    dir: &Dir,
+    path: &Path,
+    follow: FollowSymlinks,
+) -> std::io::Result<std::fs::File> {
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(follow);
+    // Windows refuses SetFileTime on a handle without write-attributes access, which a
+    // read-only open lacks; backup semantics lets the same open reach a directory.
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt as _;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    dir.open_with(path, &options).map(|f| f.into_std())
+}
+
 /// The times of a `set-times` call. Nanoseconds of a second or more, or a time too far
 /// ahead, are `invalid`.
 pub(super) fn file_times(

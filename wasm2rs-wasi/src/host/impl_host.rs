@@ -1138,6 +1138,12 @@ impl Host for WasiHost {
             return Err(Fs::BadDescriptor.into());
         }
         let times = file_times(data_access_timestamp, data_modification_timestamp)?;
+        // a directory is reopened with the access to set times; a file already has it
+        if let Some(dir) = &d.dir {
+            let file = open_for_set_times(dir, Path::new("."), FollowSymlinks::Yes)
+                .map_err(sandbox_error)?;
+            return Ok(file.set_times(times).map_err(io_error_code)?);
+        }
         Ok(self.with_descriptor_file(self_.0, |file| file.set_times(times))?)
     }
 
@@ -1169,25 +1175,17 @@ impl Host for WasiHost {
         {
             return Err(Fs::Unsupported.into());
         }
-        let mut options = cap_std::fs::OpenOptions::new();
-        options.read(true).follow(if follow {
-            FollowSymlinks::Yes
-        } else {
-            FollowSymlinks::No
-        });
-        // Windows refuses SetFileTime on a handle without write-attributes access, which a
-        // read-only open lacks; backup semantics lets the same open reach a directory.
-        #[cfg(windows)]
-        {
-            use cap_std::fs::OpenOptionsExt as _;
-            const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
-            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-            options
-                .access_mode(FILE_WRITE_ATTRIBUTES)
-                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
-        }
-        let file = dir.open_with(target, &options).map_err(sandbox_error)?;
-        Ok(file.into_std().set_times(times).map_err(io_error_code)?)
+        let file = open_for_set_times(
+            dir,
+            target,
+            if follow {
+                FollowSymlinks::Yes
+            } else {
+                FollowSymlinks::No
+            },
+        )
+        .map_err(sandbox_error)?;
+        Ok(file.set_times(times).map_err(io_error_code)?)
     }
 
     /// Truncates or zero-extends the file. Like writing, it needs a writable preopen and a
