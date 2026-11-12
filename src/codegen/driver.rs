@@ -29,11 +29,6 @@ pub(crate) struct ContInfo {
     /// `ContFrame` field so the local survives suspends. Step functions have no
     /// parameters (rejected), so these are exactly the declared locals.
     pub(crate) step_locals: HashMap<u32, Vec<ValType>>,
-    /// Whether the module tests or casts to a concrete continuation type. Then a
-    /// `cont.bind` or a `resume` handler moves the continuation to a new handle, so a
-    /// reference kept from before still has its own type; otherwise the handle is
-    /// reused, which spares the handle table a slot per suspend.
-    pub(crate) casts: bool,
 }
 
 /// The per-tag payload/result types for one module, grouped so `ctx.tags.params`
@@ -84,8 +79,6 @@ pub(crate) struct ModuleCtx<'a> {
     /// once so each `ref.test`/`ref.cast` site looks it up instead of walking
     /// the whole hierarchy.
     descendants: Vec<Vec<u32>>,
-    /// See [`ModuleParts::type_rel`].
-    type_rel: Option<&'a TypeRel>,
     /// Per type index, the full indices of the functions a `call_indirect`/`call_ref`
     /// or function-type `ref.test` of that type can reach, ascending (empty for a
     /// non-function type). Built once by [`index_func_targets`] so no call site
@@ -195,38 +188,11 @@ impl ModuleCtx<'_> {
             .map_or(&[], Vec::as_slice)
     }
 
-    /// The indices of the continuation types that are `target` or a declared subtype
-    /// of it, ascending: the types of the continuations a test against the
-    /// continuation type `target` accepts. `None` when the type relation is
-    /// unavailable.
-    pub(crate) fn cont_types_of_subtype(&self, target: u32) -> Option<Vec<u32>> {
-        let rel = self.type_rel?;
-        Some(
-            self.type_kinds
-                .iter()
-                .enumerate()
-                .filter(|(_, kind)| matches!(kind, CompositeKind::Cont(_)))
-                .filter_map(|(t, _)| u32::try_from(t).ok())
-                .filter(|&t| rel.is_subtype(t, target))
-                .collect(),
-        )
-    }
-
-    /// The full indices of every function that can be a funcref value (see
-    /// [`ModuleParts::global_funcs`]) and whose declared type is `target` or a
-    /// declared subtype of it, ascending: the funcrefs a test against the function
-    /// type `target` accepts. `None` when the type relation is unavailable.
-    pub(crate) fn funcs_of_subtype(&self, target: u32) -> Option<&[usize]> {
-        self.type_rel
-            .is_some()
-            .then(|| self.dispatch_targets(target))
-    }
-
     /// The full indices of the functions a `call_indirect`/`call_ref` of function type
     /// `type_index` can reach, ascending: the functions that can be a funcref value
     /// (named by an element segment, `ref.func`, global/table initialiser or export)
-    /// whose declared type is that type or a declared subtype of it, or, if the type
-    /// relation is unavailable, whose signature is exactly its signature.
+    /// whose declared type is that type or a declared subtype of it. This is also the
+    /// set of funcrefs a `ref.test`/`ref.cast` against that function type accepts.
     pub(crate) fn dispatch_targets(&self, type_index: u32) -> &[usize] {
         self.func_targets
             .get(type_index as usize)
@@ -321,8 +287,8 @@ pub(crate) struct ModuleParts<'a> {
     /// The declared direct supertype of every type index (`None` when none),
     /// parallel to `type_kinds`. Drives the runtime subtype checks.
     pub(crate) supers: &'a [Option<u32>],
-    /// The declared type relation, when the type section validated.
-    pub(crate) type_rel: Option<&'a TypeRel>,
+    /// The declared type relation of the validated type section.
+    pub(crate) type_rel: &'a TypeRel,
     pub(crate) globals: &'a [GlobalInfo],
     /// Every linear memory, in index order (imported memories first, then
     /// defined). Empty when the module declares none.
@@ -451,10 +417,6 @@ pub(crate) fn build_ctx<'a>(
     // independent full scans.
     let scan = scan_bodies(funcs, parts.opts.jobs)?;
     let uses_extern_box = scan.uses_extern_box;
-    let casts = scan
-        .cast_targets
-        .iter()
-        .any(|&t| matches!(type_kinds.get(t as usize), Some(CompositeKind::Cont(_))));
     // Continuations carry per-instance state (the `conts` handle table), so any
     // module that creates one is stateful even without other mutable state.
     let cont_bodies = scan.cont_bodies;
@@ -554,14 +516,7 @@ pub(crate) fn build_ctx<'a>(
             .zip(parts.live)
             .map(|(f, live)| live.then_some(f.type_index)),
     );
-    let func_targets = index_func_targets(
-        types,
-        type_kinds,
-        type_rel,
-        &funcs_by_sig,
-        func_decl_types,
-        &referenced,
-    );
+    let func_targets = index_func_targets(type_kinds, type_rel, func_decl_types, &referenced);
     let needs_gc_types = needs_gc_types(parts, scan.uses_abstract_gc);
     let ctx = ModuleCtx {
         imports,
@@ -574,7 +529,6 @@ pub(crate) fn build_ctx<'a>(
         types,
         type_kinds,
         descendants: index_descendants(type_kinds, supers),
-        type_rel,
         func_targets,
         needs_gc_types,
         imported_globals: imported_globals.iter().map(|g| (g.ty, g.mutable)).collect(),
@@ -616,7 +570,6 @@ pub(crate) fn build_ctx<'a>(
             step_set,
             checkpoint_callee,
             step_locals,
-            casts,
         },
         unsafe_memory: parts.opts.unsafe_memory,
         simd_intrinsics: parts.opts.simd_intrinsics,
@@ -1020,30 +973,25 @@ fn index_by_signature<'a>(
 
 /// Per type index, the functions a `call_indirect`/`call_ref` of that function type
 /// can reach (see [`ModuleCtx::dispatch_targets`]): the `referenced` functions whose
-/// declared type is the type or a declared subtype of it (the type relation, when
-/// available), else those of exactly its signature. `func_decl_types` is the declared
+/// declared type is the type or a declared subtype of it. `func_decl_types` is the declared
 /// type of every function in the index space, `None` for a dead one.
 ///
 /// Functions are grouped by declared type first, so the subtype relation is
 /// evaluated once per (function type, distinct declared type) pair rather than once
 /// per function.
 fn index_func_targets(
-    types: &[TypeSig],
     type_kinds: &[CompositeKind],
-    type_rel: Option<&TypeRel>,
-    funcs_by_sig: &SigIndex,
+    type_rel: &TypeRel,
     func_decl_types: impl Iterator<Item = Option<u32>>,
     referenced: &[bool],
 ) -> Vec<Vec<usize>> {
     let is_referenced = |f: usize| referenced.get(f).copied().unwrap_or(false);
     let mut by_decl: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
-    if type_rel.is_some() {
-        for (f, ty) in func_decl_types.enumerate() {
-            if let Some(ty) = ty
-                && is_referenced(f)
-            {
-                by_decl.entry(ty).or_default().push(f);
-            }
+    for (f, ty) in func_decl_types.enumerate() {
+        if let Some(ty) = ty
+            && is_referenced(f)
+        {
+            by_decl.entry(ty).or_default().push(f);
         }
     }
     type_kinds
@@ -1056,27 +1004,13 @@ fn index_func_targets(
             let Ok(t) = u32::try_from(i) else {
                 return Vec::new();
             };
-            if let Some(rel) = type_rel {
-                let mut targets: Vec<usize> = by_decl
-                    .iter()
-                    .filter(|&(&decl, _)| rel.is_subtype(decl, t))
-                    .flat_map(|(_, funcs)| funcs.iter().copied())
-                    .collect();
-                targets.sort_unstable();
-                targets
-            } else {
-                types.get(i).map_or_else(Vec::new, |sig| {
-                    funcs_by_sig
-                        .get(&(sig.params.clone(), sig.results.clone()))
-                        .map_or_else(Vec::new, |funcs| {
-                            funcs
-                                .iter()
-                                .copied()
-                                .filter(|&f| is_referenced(f))
-                                .collect()
-                        })
-                })
-            }
+            let mut targets: Vec<usize> = by_decl
+                .iter()
+                .filter(|&(&decl, _)| type_rel.is_subtype(decl, t))
+                .flat_map(|(_, funcs)| funcs.iter().copied())
+                .collect();
+            targets.sort_unstable();
+            targets
         })
         .collect()
 }

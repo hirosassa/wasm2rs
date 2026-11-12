@@ -68,8 +68,10 @@ pub(super) fn decode_from_i64(expr: &str, ty: ValType) -> Result<String, Transpi
     })
 }
 
-/// Validate that `cont_type_index` names a continuation type, without needing its
+/// Check that `cont_type_index` names a continuation type, without needing its
 /// underlying signature (used where only the kind matters, e.g. `resume_throw`).
+/// Validation already guarantees this; the check is defence in depth against a
+/// type-index mix-up in the lowering itself.
 pub(super) fn require_cont_type(
     type_kinds: &[CompositeKind],
     cont_type_index: u32,

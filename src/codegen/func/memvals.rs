@@ -135,6 +135,8 @@ impl<'a> super::FuncGen<'a> {
 
     pub(super) fn global_set(&mut self, global_index: u32) -> Result<(), TranspileError> {
         let (_, mutable, imported) = self.global(global_index)?;
+        // Validation rejects a `global.set` of an immutable global; kept so a bug
+        // upstream cannot silently emit an assignment to a constant.
         if !mutable {
             return Err(TranspileError::Unsupported(
                 "set of immutable global".into(),

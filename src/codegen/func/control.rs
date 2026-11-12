@@ -1,6 +1,6 @@
 use std::mem;
 
-use wasmparser::{BlockType, HeapType, ValType};
+use wasmparser::{BlockType, ValType};
 
 use super::super::{
     BrArm, BranchEscape, CatchArm, CatchKind, EXC_TYPE, Frame, FrameKind, Node, RegionNode, Rt,
@@ -573,12 +573,11 @@ impl<'a> super::FuncGen<'a> {
                     // trailing self-reference and drive the target with the switch
                     // payload as its injected args.
                     self.line(format!(
-                        "StepResult::Switch {{ tag: __t, target: __tgt, ty: __sty, args: __sa }} \
+                        "StepResult::Switch {{ tag: __t, target: __tgt, ty: _, args: __sa }} \
                          if __t == {tag}u32 => {{"
                     ));
-                    // The switcher becomes the target's self-reference, of the type
-                    // that parameter declares (`__sty`).
-                    self.emit_cont_retype("let __self", &cur_var, "__sty");
+                    // The switcher becomes the target's self-reference.
+                    self.line(format!("let __self = {cur_var};"));
                     self.line("let mut __next = __sa; __next.push(__self as i64);");
                     self.line(format!("{cur_var} = __tgt; {args_var} = __next;"));
                     self.line("continue 'drive;");
@@ -601,17 +600,6 @@ impl<'a> super::FuncGen<'a> {
             });
         }
         Ok(())
-    }
-
-    /// Give the continuation behind `src` the type `ty` and bind it to `dst`: a fresh
-    /// handle when casts can observe types (an old reference keeps its own type),
-    /// else the same handle retyped in place.
-    fn emit_cont_retype(&mut self, dst: &str, src: &str, ty: &str) {
-        if self.ctx.cont.casts {
-            self.line(format!("{dst} = self.cont_retype({src}, {ty});"));
-        } else {
-            self.line(format!("{dst} = {src};"));
-        }
     }
 
     /// Emit one `(on $tag $label)` resume handler arm: on a matching suspend,
@@ -658,32 +646,11 @@ impl<'a> super::FuncGen<'a> {
         ));
         self.assign_decoded(&vars, &payload_tys, "__pl")?;
         let cont_var = vars.last().ok_or(TranspileError::StackUnderflow)?;
-        // The handler block gives the suspended continuation its own type.
-        match self.label_cont_type(label_depth) {
-            Some(ty) => self.emit_cont_retype(cont_var, handle_var, &format!("{ty}u32")),
-            None => self.line(format!("{cont_var} = {handle_var};")),
-        }
+        self.line(format!("{cont_var} = {handle_var};"));
         let keyword = if is_loop { "continue" } else { "break" };
         self.line(format!("{keyword} 'l{label};"));
         self.line("}");
         Ok(())
-    }
-
-    /// The continuation type index a branch target's last value has, if it is a
-    /// reference to a concrete continuation type.
-    fn label_cont_type(&self, label_depth: u32) -> Option<u32> {
-        let frame = &self.frames[self.frame_index(label_depth)?];
-        let (_, ty) = if frame.kind == FrameKind::Loop {
-            frame.loop_params.last()?
-        } else {
-            frame.results.last()?
-        };
-        let ValType::Ref(rt) = ty else { return None };
-        let HeapType::Concrete(idx) = rt.heap_type() else {
-            return None;
-        };
-        let idx = idx.as_module_index()?;
-        self.is_cont_type(Some(idx)).then_some(idx)
     }
 
     pub(super) fn branch_table(

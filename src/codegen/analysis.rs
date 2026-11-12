@@ -94,9 +94,6 @@ pub(crate) struct BodyScan {
     /// Per defined function (0-based): whether its body contains a
     /// `return_call`/`return_call_indirect`/`return_call_ref`.
     pub(crate) has_tail_call: Vec<bool>,
-    /// The concrete type indices that `ref.test`/`ref.cast`/`br_on_cast` target (any
-    /// kind; the driver keeps the continuation ones).
-    pub(crate) cast_targets: Vec<u32>,
     /// Per defined function (0-based): the callees of its direct
     /// `call`/`return_call` edges (full index space). Shared by the `can_suspend`
     /// and `step_functions` fixpoints so neither re-scans.
@@ -227,22 +224,12 @@ struct FuncScan {
     branches_to_function_label: bool,
     has_return: bool,
     has_tail_call: bool,
-    cast_targets: Vec<u32>,
     calls: Vec<u32>,
     uses_extern_box: bool,
     uses_call_ref: bool,
     uses_array_segment_ops: bool,
     uses_abstract_gc: bool,
     ref_funcs: Vec<u32>,
-}
-
-/// Records the type index a cast or test names, if it is a concrete one.
-fn note_cast_target(targets: &mut Vec<u32>, hty: HeapType) {
-    if let HeapType::Concrete(idx) = hty
-        && let Some(i) = idx.as_module_index()
-    {
-        targets.push(i);
-    }
 }
 
 fn scan_function(input: &FuncInput<'_>) -> Result<FuncScan, TranspileError> {
@@ -287,15 +274,6 @@ fn scan_function(input: &FuncInput<'_>) -> Result<FuncScan, TranspileError> {
             }
             Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
                 scan.mutated.insert(local_index);
-            }
-            Operator::RefTestNonNull { hty }
-            | Operator::RefTestNullable { hty }
-            | Operator::RefCastNonNull { hty }
-            | Operator::RefCastNullable { hty } => {
-                note_cast_target(&mut scan.cast_targets, hty);
-            }
-            Operator::BrOnCast { to_ref_type, .. } | Operator::BrOnCastFail { to_ref_type, .. } => {
-                note_cast_target(&mut scan.cast_targets, to_ref_type.heap_type());
             }
             Operator::Suspend { .. } | Operator::Switch { .. } => scan.suspends = true,
             Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
@@ -376,7 +354,6 @@ pub(crate) fn scan_bodies(
         has_tail_call: Vec::with_capacity(funcs.len()),
         calls: Vec::with_capacity(funcs.len()),
         uses_extern_box: false,
-        cast_targets: Vec::new(),
         uses_call_ref: false,
         uses_array_segment_ops: false,
         uses_abstract_gc: false,
@@ -390,7 +367,6 @@ pub(crate) fn scan_bodies(
             .push(f.branches_to_function_label);
         scan.has_return.push(f.has_return);
         scan.has_tail_call.push(f.has_tail_call);
-        scan.cast_targets.extend(f.cast_targets);
         scan.calls.push(f.calls);
         scan.uses_extern_box |= f.uses_extern_box;
         scan.uses_call_ref |= f.uses_call_ref;

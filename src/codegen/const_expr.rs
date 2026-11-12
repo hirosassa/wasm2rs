@@ -77,9 +77,10 @@ fn eval_int_const_expr(
     single_result(stack, what)
 }
 
-/// The one value a well-formed constant expression leaves on the stack. The
-/// transpiler does not run the validator, so a malformed expression with none or
-/// several values is rejected here instead of silently keeping the last one.
+/// The one value a well-formed constant expression leaves on the stack. Validation
+/// guarantees exactly one, so this is defence in depth: it reports a bug in the
+/// evaluator (or a caller that skipped validation) instead of silently keeping the
+/// last value, and avoids a panicking `pop().unwrap()`.
 fn single_result<T>(mut stack: Vec<T>, what: &str) -> Result<T, TranspileError> {
     let value = stack
         .pop()
@@ -205,7 +206,8 @@ pub(crate) fn const_expr_to_rust(
             }
             Operator::GlobalGet { global_index } => {
                 let index = usize::try_from(global_index).ok();
-                // Only an immutable global is a constant.
+                // Only an immutable global is a constant. Validation already rejects
+                // anything else; the `None` arms keep this lookup panic-free.
                 let constant = match index {
                     Some(i) if i < imported.len() => imported
                         .get(i)
