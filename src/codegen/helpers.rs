@@ -149,12 +149,15 @@ pub(super) const HELPER_ORDER: [Helper; 50] = [
 
 /// How a helper template's placeholders are rendered: the method name
 /// (`@NAME`), the read and write accessors of the linear-memory bytes (`@R` /
-/// `@W`), and whether slice indexing drops its bounds check (`unsafe_memory`).
+/// `@W`), the address-space types (`@ADDR` / `@OFF` operand types and `@EA`, the
+/// clamped effective-address expression, all selected by `memory64`), and
+/// whether slice indexing drops its bounds check (`unsafe_memory`).
 struct AccessCtx {
     name: String,
     read: String,
     write: String,
     unchecked: bool,
+    memory64: bool,
 }
 
 impl AccessCtx {
@@ -168,7 +171,24 @@ impl AccessCtx {
     /// `get_unchecked` accepts both a range (yielding `&[u8]`) and a single index
     /// (`&u8`), so one rewrite covers scalar, v128, lane and `memory.fill` helpers.
     fn render(&self, line: &str) -> String {
-        let line = line.replace("@NAME", &self.name);
+        let (addr, off, ea) = if self.memory64 {
+            (
+                "i64",
+                "u64",
+                "(addr as u64).saturating_add(offset).min(isize::MAX as u64) as usize",
+            )
+        } else {
+            (
+                "i32",
+                "u32",
+                "usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX)",
+            )
+        };
+        let line = line
+            .replace("@NAME", &self.name)
+            .replace("@ADDR", addr)
+            .replace("@OFF", off)
+            .replace("@EA", ea);
         let line = if self.unchecked {
             let line = rewrite_index_unchecked(&line, "@W", &self.write, "get_unchecked_mut");
             rewrite_index_unchecked(&line, "@R", &self.read, "get_unchecked")
@@ -201,7 +221,8 @@ pub(super) fn helper_lines(
     memory64: bool,
 ) -> Vec<String> {
     let base = base_helper_lines(helper, max_pages);
-    // Order matters: widening rewrites the safe template, and the unchecked form
+    // Order matters: widening replaces the grow/fill/copy templates (scalar
+    // accesses are widened later by `AccessCtx::render`), and the unchecked form
     // is derived from the (possibly widened) template.
     let base = if memory64 {
         widen_helper_lines(helper, max_pages, base)
@@ -219,6 +240,7 @@ pub(super) fn helper_lines(
         read: format!("self.{get}()"),
         write: format!("self.{get_mut}()"),
         unchecked: unsafe_memory,
+        memory64,
     }
     .render_all(base)
 }
@@ -284,10 +306,11 @@ pub(super) fn index_expr64(code: &str) -> String {
     format!("(({code}) as u64).min(isize::MAX as u64) as usize")
 }
 
-/// Widen a placeholder helper template to a 64-bit memory (memory64 proposal): the
-/// address becomes `i64` and the static offset `u64`; `memory.grow`/`fill`/`copy`
-/// take `i64` operands. The effective address is clamped like [`index_expr64`], so
-/// an address whose sum with the offset overflows `u64` still traps.
+/// Widen a placeholder helper template to a 64-bit memory (memory64 proposal):
+/// `memory.grow`/`fill`/`copy` take `i64` operands. Scalar load/store templates
+/// need no rewrite — their `@ADDR`/`@OFF`/`@EA` placeholders resolve to `i64`/`u64`
+/// and an effective address clamped like [`index_expr64`] (so an address whose sum
+/// with the offset overflows `u64` still traps) in [`AccessCtx::render`].
 fn widen_helper_lines(helper: Helper, max_pages: Option<u64>, base: Vec<String>) -> Vec<String> {
     let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     match helper {
@@ -341,17 +364,7 @@ fn widen_helper_lines(helper: Helper, max_pages: Option<u64>, base: Vec<String>)
             "}",
         ]),
         Helper::TableCopy | Helper::TableFill => base,
-        _ => base
-            .into_iter()
-            .map(|line| {
-                line.replace("addr: i32", "addr: i64")
-                    .replace("offset: u32", "offset: u64")
-                    .replace(
-                        "usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX)",
-                        "(addr as u64).saturating_add(offset).min(isize::MAX as u64) as usize",
-                    )
-            })
-            .collect(),
+        _ => base,
     }
 }
 
@@ -394,6 +407,7 @@ pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
         read: "__m".to_string(),
         write: "__m".to_string(),
         unchecked: false,
+        memory64: false,
     };
     if matches!(helper, Helper::TableCopy | Helper::TableFill) {
         return ctx.render_all(base);
@@ -426,145 +440,146 @@ pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
 }
 
 /// The placeholder template lines of one memory helper method: `@NAME` is the
-/// method name, `@R` / `@W` the read / write accessors of the memory bytes.
+/// method name, `@R` / `@W` the read / write accessors of the memory bytes, and
+/// `@ADDR` / `@OFF` / `@EA` the address operand types and effective address.
 fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
     let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     match helper {
         Helper::LoadI32 => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> i32 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i32 {",
+            "    let a = @EA;",
             "    i32::from_le_bytes(@R[a..a + 4].try_into().unwrap())",
             "}",
         ]),
         Helper::Load8U => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> i32 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i32 {",
+            "    let a = @EA;",
             "    @R[a] as i32",
             "}",
         ]),
         Helper::Load8S => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> i32 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i32 {",
+            "    let a = @EA;",
             "    @R[a] as i8 as i32",
             "}",
         ]),
         Helper::Load16U => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> i32 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i32 {",
+            "    let a = @EA;",
             "    u16::from_le_bytes(@R[a..a + 2].try_into().unwrap()) as i32",
             "}",
         ]),
         Helper::Load16S => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> i32 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i32 {",
+            "    let a = @EA;",
             "    i16::from_le_bytes(@R[a..a + 2].try_into().unwrap()) as i32",
             "}",
         ]),
         Helper::StoreI32 => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: i32) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i32) {",
+            "    let a = @EA;",
             "    @W[a..a + 4].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::Store8 => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: i32) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i32) {",
+            "    let a = @EA;",
             "    @W[a] = value as u8;",
             "}",
         ]),
         Helper::Store16 => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: i32) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i32) {",
+            "    let a = @EA;",
             "    @W[a..a + 2].copy_from_slice(&(value as u16).to_le_bytes());",
             "}",
         ]),
         Helper::LoadI64 => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
+            "    let a = @EA;",
             "    i64::from_le_bytes(@R[a..a + 8].try_into().unwrap())",
             "}",
         ]),
         Helper::LoadF32 => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> f32 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> f32 {",
+            "    let a = @EA;",
             "    f32::from_le_bytes(@R[a..a + 4].try_into().unwrap())",
             "}",
         ]),
         Helper::LoadF64 => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> f64 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> f64 {",
+            "    let a = @EA;",
             "    f64::from_le_bytes(@R[a..a + 8].try_into().unwrap())",
             "}",
         ]),
         Helper::Load8UI64 => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
+            "    let a = @EA;",
             "    @R[a] as i64",
             "}",
         ]),
         Helper::Load8SI64 => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
+            "    let a = @EA;",
             "    @R[a] as i8 as i64",
             "}",
         ]),
         Helper::Load16UI64 => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
+            "    let a = @EA;",
             "    u16::from_le_bytes(@R[a..a + 2].try_into().unwrap()) as i64",
             "}",
         ]),
         Helper::Load16SI64 => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
+            "    let a = @EA;",
             "    i16::from_le_bytes(@R[a..a + 2].try_into().unwrap()) as i64",
             "}",
         ]),
         Helper::Load32UI64 => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
+            "    let a = @EA;",
             "    u32::from_le_bytes(@R[a..a + 4].try_into().unwrap()) as i64",
             "}",
         ]),
         Helper::Load32SI64 => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> i64 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
+            "    let a = @EA;",
             "    i32::from_le_bytes(@R[a..a + 4].try_into().unwrap()) as i64",
             "}",
         ]),
         Helper::StoreI64 => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: i64) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i64) {",
+            "    let a = @EA;",
             "    @W[a..a + 8].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::StoreF32 => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: f32) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: f32) {",
+            "    let a = @EA;",
             "    @W[a..a + 4].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::StoreF64 => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: f64) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: f64) {",
+            "    let a = @EA;",
             "    @W[a..a + 8].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
         Helper::Store8I64 => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: i64) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i64) {",
+            "    let a = @EA;",
             "    @W[a] = value as u8;",
             "}",
         ]),
         Helper::Store16I64 => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: i64) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i64) {",
+            "    let a = @EA;",
             "    @W[a..a + 2].copy_from_slice(&(value as u16).to_le_bytes());",
             "}",
         ]),
         Helper::Store32I64 => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: i64) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i64) {",
+            "    let a = @EA;",
             "    @W[a..a + 4].copy_from_slice(&(value as u32).to_le_bytes());",
             "}",
         ]),
@@ -572,16 +587,16 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         // `u128`; the slice access is bounds-checked, so an out-of-range access
         // panics (a wasm trap).
         Helper::LoadV128 => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    let mut b = [0u8; 16];",
             "    b.copy_from_slice(&@R[a..a + 16]);",
             "    u128::from_le_bytes(b)",
             "}",
         ]),
         Helper::StoreV128 => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: u128) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: u128) {",
+            "    let a = @EA;",
             "    @W[a..a + 16].copy_from_slice(&value.to_le_bytes());",
             "}",
         ]),
@@ -589,14 +604,14 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         // `load*_zero` reads one into the low lane and zeroes the rest. Each
         // access is bounds-checked, so an out-of-range read traps.
         Helper::Load8Splat => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    u128::from_le_bytes([@R[a]; 16])",
             "}",
         ]),
         Helper::Load16Splat => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    let lane = [@R[a], @R[a + 1]];",
             "    let mut b = [0u8; 16];",
             "    let mut i = 0;",
@@ -608,8 +623,8 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "}",
         ]),
         Helper::Load32Splat => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    let lane = [@R[a], @R[a + 1], @R[a + 2], @R[a + 3]];",
             "    let mut b = [0u8; 16];",
             "    let mut i = 0;",
@@ -621,8 +636,8 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "}",
         ]),
         Helper::Load64Splat => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    let mut b = [0u8; 16];",
             "    b[0..8].copy_from_slice(&@R[a..a + 8]);",
             "    b.copy_within(0..8, 8);",
@@ -630,16 +645,16 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "}",
         ]),
         Helper::Load32Zero => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    let mut b = [0u8; 16];",
             "    b[0..4].copy_from_slice(&@R[a..a + 4]);",
             "    u128::from_le_bytes(b)",
             "}",
         ]),
         Helper::Load64Zero => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    let mut b = [0u8; 16];",
             "    b[0..8].copy_from_slice(&@R[a..a + 8]);",
             "    u128::from_le_bytes(b)",
@@ -649,8 +664,8 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         // to a double-width lane: `_s` sign-extends, `_u` zero-extends. The eight
         // bytes are bounds-checked, so an out-of-range read traps.
         Helper::Load8x8S => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    let mut r = [0u8; 16];",
             "    let mut i = 0;",
             "    while i < 8 {",
@@ -662,8 +677,8 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "}",
         ]),
         Helper::Load8x8U => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    let mut r = [0u8; 16];",
             "    let mut i = 0;",
             "    while i < 8 {",
@@ -675,8 +690,8 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "}",
         ]),
         Helper::Load16x4S => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    let mut r = [0u8; 16];",
             "    let mut i = 0;",
             "    while i < 4 {",
@@ -689,8 +704,8 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "}",
         ]),
         Helper::Load16x4U => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    let mut r = [0u8; 16];",
             "    let mut i = 0;",
             "    while i < 4 {",
@@ -703,8 +718,8 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "}",
         ]),
         Helper::Load32x2S => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    let mut r = [0u8; 16];",
             "    let mut i = 0;",
             "    while i < 2 {",
@@ -717,8 +732,8 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "}",
         ]),
         Helper::Load32x2U => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
+            "    let a = @EA;",
             "    let mut r = [0u8; 16];",
             "    let mut i = 0;",
             "    while i < 2 {",
@@ -734,16 +749,16 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
         // memory; `store*_lane` writes one lane of `value` back to memory. `lane`
         // is a validated lane index, so the byte range is always in bounds.
         Helper::Load8Lane => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32, value: u128, lane: usize) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) -> u128 {",
+            "    let a = @EA;",
             "    let mut b = value.to_le_bytes();",
             "    b[lane] = @R[a];",
             "    u128::from_le_bytes(b)",
             "}",
         ]),
         Helper::Load16Lane => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32, value: u128, lane: usize) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) -> u128 {",
+            "    let a = @EA;",
             "    let o = lane * 2;",
             "    let mut b = value.to_le_bytes();",
             "    b[o..o + 2].copy_from_slice(&@R[a..a + 2]);",
@@ -751,8 +766,8 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "}",
         ]),
         Helper::Load32Lane => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32, value: u128, lane: usize) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) -> u128 {",
+            "    let a = @EA;",
             "    let o = lane * 4;",
             "    let mut b = value.to_le_bytes();",
             "    b[o..o + 4].copy_from_slice(&@R[a..a + 4]);",
@@ -760,8 +775,8 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "}",
         ]),
         Helper::Load64Lane => owned(&[
-            "fn @NAME(&self, addr: i32, offset: u32, value: u128, lane: usize) -> u128 {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) -> u128 {",
+            "    let a = @EA;",
             "    let o = lane * 8;",
             "    let mut b = value.to_le_bytes();",
             "    b[o..o + 8].copy_from_slice(&@R[a..a + 8]);",
@@ -769,28 +784,28 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "}",
         ]),
         Helper::Store8Lane => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: u128, lane: usize) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) {",
+            "    let a = @EA;",
             "    @W[a] = value.to_le_bytes()[lane];",
             "}",
         ]),
         Helper::Store16Lane => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: u128, lane: usize) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) {",
+            "    let a = @EA;",
             "    let o = lane * 2;",
             "    @W[a..a + 2].copy_from_slice(&value.to_le_bytes()[o..o + 2]);",
             "}",
         ]),
         Helper::Store32Lane => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: u128, lane: usize) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) {",
+            "    let a = @EA;",
             "    let o = lane * 4;",
             "    @W[a..a + 4].copy_from_slice(&value.to_le_bytes()[o..o + 4]);",
             "}",
         ]),
         Helper::Store64Lane => owned(&[
-            "fn @NAME(&mut self, addr: i32, offset: u32, value: u128, lane: usize) {",
-            "    let a = usize::try_from(addr as u32 as u64 + offset as u64).unwrap_or(usize::MAX);",
+            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) {",
+            "    let a = @EA;",
             "    let o = lane * 8;",
             "    @W[a..a + 8].copy_from_slice(&value.to_le_bytes()[o..o + 8]);",
             "}",
@@ -878,6 +893,52 @@ mod tests {
             }
             for line in rendered {
                 assert!(!line.contains('@'), "{}: {line}", helper_name(helper));
+            }
+        }
+    }
+
+    #[test]
+    fn address_templates_use_placeholders_not_32bit_literals() {
+        for helper in HELPER_ORDER {
+            for line in base_helper_lines(helper, Some(5)) {
+                assert!(
+                    !line.contains("addr: i32") && !line.contains("offset: u32"),
+                    "{}: {line}",
+                    helper_name(helper)
+                );
+                assert!(
+                    !line.contains("addr as u32"),
+                    "{}: {line}",
+                    helper_name(helper)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn memory64_widens_every_address_operand() {
+        let widened = ["Grow", "MemoryFill", "MemoryCopy", "TableCopy", "TableFill"];
+        for helper in HELPER_ORDER {
+            let narrow = helper_lines(helper, 0, None, false, false).join("\n");
+            let wide = helper_lines(helper, 0, None, false, true).join("\n");
+            if narrow.contains("addr: i32") {
+                assert!(
+                    wide.contains("addr: i64, offset: u64"),
+                    "{}",
+                    helper_name(helper)
+                );
+                assert!(
+                    wide.contains("saturating_add(offset)"),
+                    "{}",
+                    helper_name(helper)
+                );
+                assert!(!wide.contains("addr: i32") && !wide.contains("addr as u32"));
+            } else {
+                assert!(
+                    !wide.contains("addr:") || widened.contains(&helper_name(helper)),
+                    "{}",
+                    helper_name(helper)
+                );
             }
         }
     }
