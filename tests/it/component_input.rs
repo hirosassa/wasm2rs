@@ -446,3 +446,40 @@ fn the_cli_component_flag_rejects_a_core_module() {
         "{stderr}"
     );
 }
+
+// --- an adapter-shaped component (the program module imports its memory from another module) ---
+
+/// The `wasm-tools component new --adapt` shape: the module that lifts the export (the adapter)
+/// imports `env.memory` and `main._start` from the user's module.
+fn adapter_shaped_component() -> Vec<u8> {
+    wat::parse_str(
+        r#"(component
+            (core module $main (memory (export "memory") 1) (func (export "_start")))
+            (core module $adapter
+                (import "env" "memory" (memory 1))
+                (import "main" "_start" (func $start))
+                (func (export "run") call $start))
+            (core instance $m (instantiate $main))
+            (alias core export $m "memory" (core memory $mem))
+            (alias core export $m "_start" (core func $start))
+            (core instance $env (export "memory" (memory $mem)))
+            (core instance $mainfns (export "_start" (func $start)))
+            (core instance $a (instantiate $adapter
+                (with "env" (instance $env))
+                (with "main" (instance $mainfns))))
+            (alias core export $a "run" (core func $run))
+            (func (export "run") (canon lift (core func $run))))"#,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_program_module_importing_memory_from_another_core_module_is_rejected_clearly() {
+    let err =
+        transpile_component(&adapter_shaped_component(), &ComponentOptions::default()).unwrap_err();
+    assert!(matches!(err, TranspileError::Unsupported(_)), "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains("another core module"), "{msg}");
+    assert!(msg.contains("memory"), "{msg}");
+    assert!(!msg.contains("reentrant_imports"), "{msg}");
+}

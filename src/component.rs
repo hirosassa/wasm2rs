@@ -1,11 +1,11 @@
 //! Transpile a WebAssembly component in one call: its program core module, the typed import
 //! glue and (optionally) the typed export side, as one Rust source.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use wasmparser::{
     ComponentAlias, ComponentExternalKind, ComponentOuterAliasKind, ComponentTypeRef, Encoding,
-    ExternalKind, Instance, Parser, Payload,
+    ExternalKind, Instance, Parser, Payload, TypeRef,
 };
 
 use crate::wit::wit_host_glue_for_module;
@@ -107,9 +107,60 @@ fn select_module<'a>(
     exports: &[WitExport],
 ) -> Result<&'a [u8], TranspileError> {
     let index = select_index(layout, exports)?;
-    layout.modules.get(index).map(Vec::as_slice).ok_or_else(|| {
-        TranspileError::InvalidInput(format!("core module {index} is not in the component"))
-    })
+    let module = layout
+        .modules
+        .get(index)
+        .map(Vec::as_slice)
+        .ok_or_else(|| {
+            TranspileError::InvalidInput(format!("core module {index} is not in the component"))
+        })?;
+    reject_state_from_core_instances(module, layout.core_linked.get(&index))?;
+    Ok(module)
+}
+
+/// Rejects a program module that imports a memory, table or global from another core module.
+///
+/// That is the shape of the module that lifts the exports of an adapter-based component
+/// (`wasm-tools component new --adapt`): the adapter imports `env.memory` from the user's
+/// module. `reentrant_imports` cannot take such a module, and its own error would blame the
+/// options instead of the component.
+fn reject_state_from_core_instances(
+    module: &[u8],
+    linked: Option<&BTreeSet<String>>,
+) -> Result<(), TranspileError> {
+    let Some(linked) = linked else {
+        return Ok(());
+    };
+    for payload in Parser::new(0).parse_all(module) {
+        let Payload::ImportSection(reader) = payload? else {
+            continue;
+        };
+        for import in reader.into_imports() {
+            let import = import?;
+            if let Some(kind) = state_import(import.module, import.ty, linked) {
+                return Err(TranspileError::Unsupported(format!(
+                    "the core module that lifts the component's exports imports a {kind} from \
+                     another core module; linking several core modules (as in a component \
+                     made with a preview1 adapter) is not supported"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The kind of a memory, table or global import that `linked` (the import module names given
+/// another core instance) provides.
+fn state_import(module: &str, ty: TypeRef, linked: &BTreeSet<String>) -> Option<&'static str> {
+    if !linked.contains(module) {
+        return None;
+    }
+    match ty {
+        TypeRef::Memory(_) => Some("memory"),
+        TypeRef::Table(_) => Some("table"),
+        TypeRef::Global(_) => Some("global"),
+        _ => None,
+    }
 }
 
 fn select_index(layout: &Layout, exports: &[WitExport]) -> Result<usize, TranspileError> {
@@ -156,6 +207,10 @@ fn select_index(layout: &Layout, exports: &[WitExport]) -> Result<usize, Transpi
 struct Layout {
     modules: Vec<Vec<u8>>,
     receivers: BTreeSet<usize>,
+    /// Per module: the import module names that an instantiation fills with a core instance
+    /// that holds a memory, table or global (an instantiated module, or an export bundle
+    /// with one).
+    core_linked: BTreeMap<usize, BTreeSet<String>>,
 }
 
 /// Reads the top-level structure of `component`, skipping the content of nested modules and
@@ -164,12 +219,15 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
     let mut layout = Layout {
         modules: Vec::new(),
         receivers: BTreeSet::new(),
+        core_linked: BTreeMap::new(),
     };
     // The module index space: the ordinal among top-level modules, or `None` for a module
     // that came from an alias or an import (not read).
     let mut module_space: Vec<Option<usize>> = Vec::new();
     // The core instance space: whether the instance exports a function.
     let mut instances: Vec<bool> = Vec::new();
+    // The core instance space: whether the instance holds a memory, table or global.
+    let mut holds_state: Vec<bool> = Vec::new();
     let mut depth = 0usize;
     for payload in Parser::new(0).parse_all(component) {
         let payload = payload?;
@@ -251,6 +309,14 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
                     match instance? {
                         Instance::FromExports(exports) => {
                             instances.push(exports.iter().any(|e| e.kind == ExternalKind::Func));
+                            holds_state.push(exports.iter().any(|e| {
+                                matches!(
+                                    e.kind,
+                                    ExternalKind::Memory
+                                        | ExternalKind::Table
+                                        | ExternalKind::Global
+                                )
+                            }));
                         }
                         Instance::Instantiate { module_index, args } => {
                             let module = at(&module_space, module_index).flatten();
@@ -261,7 +327,21 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
                             if let (Some(module), true) = (module, gets_functions) {
                                 layout.receivers.insert(module);
                             }
+                            if let Some(module) = module {
+                                for arg in args
+                                    .iter()
+                                    .filter(|a| at(&holds_state, a.index).unwrap_or(false))
+                                {
+                                    layout
+                                        .core_linked
+                                        .entry(module)
+                                        .or_default()
+                                        .insert(arg.name.to_string());
+                                }
+                            }
                             instances.push(false);
+                            // An instantiated module may export a memory, table or global.
+                            holds_state.push(true);
                         }
                     }
                 }
