@@ -616,8 +616,8 @@ impl WasiHost {
     fn descriptor_metadata(&self, descriptor: u32) -> Result<Stat, Fs> {
         let d = self.open_descriptor(descriptor)?;
         match (&d.file, &d.dir) {
-            (Some(file), _) => file.metadata().map(Stat::from),
-            (None, Some(dir)) => dir.dir_metadata().map(Stat::from),
+            (Some(file), _) => file.metadata().map(|m| Stat::from(m).identified_by(file)),
+            (None, Some(dir)) => dir.dir_metadata().map(|m| Stat::from(m).identified_by(dir)),
             (None, None) => return Err(Fs::BadDescriptor),
         }
         .map_err(sandbox_error)
@@ -646,13 +646,15 @@ impl WasiHost {
     /// entry itself.
     fn path_metadata(&self, dir: u32, flags: PathFlags, path: &str) -> Result<Stat, Fs> {
         let dir = self.directory(dir)?;
-        if flags.contains(PathFlags::SYMLINK_FOLLOW) || !names_an_entry(path) {
-            dir.metadata(below(path)?)
+        let (named, meta) = if flags.contains(PathFlags::SYMLINK_FOLLOW) || !names_an_entry(path) {
+            let named = below(path)?;
+            (named, dir.metadata(named))
         } else {
-            dir.symlink_metadata(entry_path(path)?)
-        }
-        .map(Stat::from)
-        .map_err(sandbox_error)
+            let named = entry_path(path)?;
+            (named, dir.symlink_metadata(named))
+        };
+        meta.map(|m| Stat::from(m).identified_below(dir, named))
+            .map_err(sandbox_error)
     }
 
     /// The target of the symlink at `path`, if it is relative and stays under the preopen.

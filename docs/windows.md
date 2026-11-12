@@ -12,13 +12,12 @@ Observed in CI, not guesses:
 | Area | Windows behaviour |
 | --- | --- |
 | `symlink-at` | `unsupported` (no symlink creation) |
-| `stat` / `stat-at` | no device/inode or link count: `link-count` is always 1 |
-| `metadata-hash`, `is-same-object` | a file is identified by its path string (case-sensitive, not normalised), so a hard link, or `a` vs `A`, counts as a different object |
+| `stat` / `stat-at`, `metadata-hash`, `is-same-object` | a file or directory is identified by the volume serial and file index of an open handle (for a path, the host opens it to read them), so hard links and `a` vs `A` are one object and `link-count` is real. An entry that cannot be opened (and a symlink looked up without `symlink-follow`) falls back to its path string |
 | timestamps | NTFS keeps 100 ns ticks, so finer values are rounded |
 | `sync` / `sync-data` | succeed on a read-only handle or a directory, as on Unix, but flush nothing: Windows refuses `FlushFileBuffers` without write access, so the host skips it. Writes made through another handle to the same file, and directory entries, get no durability barrier from this call |
 
-cap-std's own Windows `dev`/`ino`/`nlink` panic unless the metadata came from an open
-handle, so the host does not call them off Unix (`Stat::from` in `src/host/fs.rs`).
+cap-std's own Windows `dev`/`ino`/`nlink` need an unstable `std` API, so the host reads them
+from a handle with `winapi-util` (`Stat::identified_by` in `src/host/fs.rs`).
 
 ## What is not verified
 

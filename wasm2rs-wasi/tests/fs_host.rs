@@ -600,7 +600,6 @@ fn metadata_hash_names_a_file_not_a_path() {
     let root = scratch("hash");
     std::fs::write(root.join("a"), b"1").unwrap();
     std::fs::write(root.join("b"), b"1").unwrap();
-    #[cfg(unix)]
     std::fs::hard_link(root.join("a"), root.join("a2")).unwrap();
     let mut host = host_over(&root, Access::ReadOnly);
     let ro = DescriptorFlags::READ;
@@ -612,17 +611,18 @@ fn metadata_hash_names_a_file_not_a_path() {
             .unwrap()
     };
     assert_eq!(hash(&mut host, a), hash(&mut host, a_again));
-    // non-Unix hosts identify a file by its path, so a hard link is a different file there
-    #[cfg(unix)]
-    {
-        let a2 = open(&mut host, "a2", OpenFlags(0), ro).unwrap();
-        assert_eq!(
-            hash(&mut host, a),
-            hash(&mut host, a2),
-            "a hard link is the same file"
-        );
-        assert!(host.wasi_filesystem_types_method_descriptor_is_same_object(a, a2));
-    }
+    let a2 = open(&mut host, "a2", OpenFlags(0), ro).unwrap();
+    assert_eq!(
+        hash(&mut host, a),
+        hash(&mut host, a2),
+        "a hard link is the same file"
+    );
+    assert!(host.wasi_filesystem_types_method_descriptor_is_same_object(a, a2));
+    // the same file through a path, without a descriptor on it
+    let by_path = host
+        .wasi_filesystem_types_method_descriptor_metadata_hash_at(ROOT, FOLLOW, "a2".into())
+        .unwrap();
+    assert_eq!(hash(&mut host, a), by_path);
     assert_ne!(hash(&mut host, a), hash(&mut host, b));
     let h = hash(&mut host, a);
     assert_ne!(
@@ -650,16 +650,16 @@ fn hard_links_share_the_file_and_refuse_directories_and_taken_names() {
     };
     assert_eq!(link(&mut host, FOLLOW, "f", "g"), Ok(()));
     let g = open(&mut host, "g", OpenFlags(0), DescriptorFlags::READ).unwrap();
-    // non-Unix hosts do not report a link count (always 1)
-    #[cfg(unix)]
     assert_eq!(
         host.wasi_filesystem_types_method_descriptor_stat(g)
             .unwrap()
             .link_count,
         2
     );
-    #[cfg(not(unix))]
-    let _ = g;
+    let by_path = host
+        .wasi_filesystem_types_method_descriptor_stat_at(ROOT, FOLLOW, "f".into())
+        .unwrap();
+    assert_eq!(by_path.link_count, 2, "a path lookup reports it too");
     assert_eq!(link(&mut host, FOLLOW, "f", "taken"), Err(Fs::Exist));
     assert_eq!(link(&mut host, FOLLOW, "d", "d2"), Err(Fs::NotPermitted));
     assert_eq!(
