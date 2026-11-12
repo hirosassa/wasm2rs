@@ -719,6 +719,20 @@ fn set_times_sets_the_times_of_a_descriptor() {
 }
 
 #[test]
+fn set_times_sets_the_times_of_an_opened_directory() {
+    let root = fresh_root("set_times_dir");
+    std::fs::create_dir(root.join("d")).unwrap();
+    // a directory opened for read through open-at, not the preopen itself
+    let body = format!(
+        "assert_eq!(inst.fs_open({D}, 2, 1), 0);
+         let d = inst.fs_last();
+         assert_eq!(inst.fs_set_times(d, 2, 1_100_000_000, 0, 2, 1_200_000_000, 0), 0);"
+    );
+    assert_succeeded(&run(&root, true, &body));
+    assert_eq!(times(&root.join("d")), (1_100_000_000, 1_200_000_000));
+}
+
+#[test]
 fn set_times_at_sets_the_times_of_a_path() {
     let root = fresh_root("set_times_at");
     std::fs::write(root.join("f.txt"), "one").unwrap();
