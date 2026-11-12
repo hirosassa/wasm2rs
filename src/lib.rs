@@ -14,6 +14,7 @@ mod codegen;
 mod component;
 mod dump;
 mod extract;
+mod link;
 mod parse;
 mod wit;
 mod wit_abi;
@@ -452,7 +453,7 @@ pub(crate) fn transpile_with_host_imports(
         imports = parts
             .imports
             .iter()
-            .filter(|im| im.wasi.is_none())
+            .filter(|im| im.is_host())
             .filter_map(|im| {
                 Some(wit::CoreImport {
                     module: im.module.clone(),
@@ -536,7 +537,7 @@ fn resolve_reentrant_imports(
     ir: &parse::ModuleIr<'_>,
 ) -> Result<bool, TranspileError> {
     let reentrant_imports =
-        topts.reentrant_imports && ir.imports.iter().any(|im| im.wasi.is_none());
+        topts.reentrant_imports && ir.imports.iter().any(codegen::ImportInfo::is_host);
     if reentrant_imports {
         let host_owned = ir.memories.iter().any(|m| m.imported)
             || ir.table.as_ref().is_some_and(|t| t.imported)
@@ -565,11 +566,19 @@ fn transpile_impl<R>(
     topts: &TranspileOptions,
     generate: impl FnOnce(&codegen::ModuleParts<'_>) -> Result<R, TranspileError>,
 ) -> Result<R, TranspileError> {
-    let mut ir = parse::parse_module(wasm, topts)?;
+    generate_from_ir(parse::parse_module(wasm, topts)?, topts, generate)
+}
+
+/// Hand an already parsed (or linked) module to `generate`.
+fn generate_from_ir<R>(
+    mut ir: parse::ModuleIr<'_>,
+    topts: &TranspileOptions,
+    generate: impl FnOnce(&codegen::ModuleParts<'_>) -> Result<R, TranspileError>,
+) -> Result<R, TranspileError> {
     if topts.named_imports {
         let imports = &mut ir.imports;
         let hosted: Vec<usize> = (0..imports.len())
-            .filter(|&i| imports.get(i).is_some_and(|im| im.wasi.is_none()))
+            .filter(|&i| imports.get(i).is_some_and(codegen::ImportInfo::is_host))
             .collect();
         let names = codegen::assign_import_names(hosted.iter().filter_map(|&i| {
             let im = imports.get(i)?;

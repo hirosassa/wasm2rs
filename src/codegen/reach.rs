@@ -65,6 +65,10 @@ pub(crate) fn live_functions(
     loop {
         while let Some(f) = work.pop() {
             let Some(i) = (f as usize).checked_sub(n_imports) else {
+                // A linked import is a call of the function that answers it.
+                if let Some(target) = input.imports.get(f as usize).and_then(|im| im.alias) {
+                    work.push(target);
+                }
                 continue;
             };
             // `live` and `funcs` have the same length; an out-of-range index

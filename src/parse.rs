@@ -12,9 +12,9 @@ use wasmparser::{
 };
 
 /// The signature of a wasm function: parameter and result value types.
-struct Signature {
-    params: Vec<ValType>,
-    results: Vec<ValType>,
+pub(crate) struct Signature {
+    pub(crate) params: Vec<ValType>,
+    pub(crate) results: Vec<ValType>,
 }
 
 impl Signature {
@@ -29,28 +29,28 @@ impl Signature {
 }
 
 /// One entry of the type index space.
-struct TypeEntry {
-    kind: codegen::CompositeKind,
-    sig: Signature,
+pub(crate) struct TypeEntry {
+    pub(crate) kind: codegen::CompositeKind,
+    pub(crate) sig: Signature,
     /// The declared direct supertype (`None` when the type declares none).
-    super_: Option<u32>,
+    pub(crate) super_: Option<u32>,
 }
 
 /// The type index space. The three views are parallel by construction — entries
 /// only enter through [`TypeSpace::push`] — so an index valid in one is valid in
 /// all.
 #[derive(Default)]
-struct TypeSpace {
-    signatures: Vec<Signature>,
+pub(crate) struct TypeSpace {
+    pub(crate) signatures: Vec<Signature>,
     /// The kind (function / struct / array / cont) of every type index, so a
     /// concrete reference can resolve its lowering.
-    kinds: Vec<codegen::CompositeKind>,
+    pub(crate) kinds: Vec<codegen::CompositeKind>,
     /// Drives the runtime subtype checks emitted for `ref.test`/`ref.cast`/`br_on_cast`.
-    supers: Vec<Option<u32>>,
+    pub(crate) supers: Vec<Option<u32>>,
 }
 
 impl TypeSpace {
-    fn push(&mut self, entry: TypeEntry) {
+    pub(crate) fn push(&mut self, entry: TypeEntry) {
         self.signatures.push(entry.sig);
         self.kinds.push(entry.kind);
         self.supers.push(entry.super_);
@@ -59,14 +59,14 @@ impl TypeSpace {
 
 /// A parsed module: everything the code generator needs, resolved and indexed.
 pub(crate) struct ModuleIr<'a> {
-    types: TypeSpace,
+    pub(crate) types: TypeSpace,
     /// The module's function types, so `call_indirect` can resolve its declared
     /// type index back to a signature.
     pub(crate) type_sigs: Vec<codegen::TypeSig>,
     /// The declared type relation behind funcref `ref.test`/`ref.cast`.
     pub(crate) type_rel: codegen::TypeRel,
-    func_type_indices: Vec<u32>,
-    bodies: Vec<wasmparser::FunctionBody<'a>>,
+    pub(crate) func_type_indices: Vec<u32>,
+    pub(crate) bodies: Vec<wasmparser::FunctionBody<'a>>,
     pub(crate) globals: Vec<codegen::GlobalInfo>,
     /// Every linear memory, in index order: imported memories occupy the low
     /// indices (like globals/functions), then defined ones. The multi-memory
@@ -88,6 +88,11 @@ pub(crate) struct ModuleIr<'a> {
     /// Functions named by `ref.func` in a global or table initialiser (roots for
     /// `entry_exports`).
     pub(crate) global_funcs: Vec<u32>,
+    /// How many of `memories` (0 or 1) are imports, which lead the index space.
+    pub(crate) memory_imports: usize,
+    /// The initializer expression of each defined global, so the linker can render it
+    /// again after renumbering. Empty in a linked module.
+    pub(crate) global_inits: Vec<wasmparser::ConstExpr<'a>>,
 }
 
 impl<'a> ModuleIr<'a> {
@@ -170,6 +175,8 @@ struct ModuleBuilder<'a, 'o> {
     global_exports: Vec<codegen::GlobalExportInfo>,
     start: Option<u32>,
     global_funcs: Vec<u32>,
+    memory_imports: usize,
+    global_inits: Vec<wasmparser::ConstExpr<'a>>,
 }
 
 impl<'a, 'o> ModuleBuilder<'a, 'o> {
@@ -195,6 +202,8 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
             global_exports: Vec::new(),
             start: None,
             global_funcs: Vec::new(),
+            memory_imports: 0,
+            global_inits: Vec::new(),
         }
     }
 
@@ -341,6 +350,8 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
                 }
             }
         }
+        // Imports lead the memory index space, so what exists now is all imported.
+        self.memory_imports = self.memories.len();
         Ok(())
     }
 
@@ -563,6 +574,7 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
                 .and_then(RefConst::handle)
                 .filter(|_| !global.ty.mutable),
             );
+            self.global_inits.push(global.init_expr.clone());
             self.globals.push(codegen::GlobalInfo {
                 ty: global.ty.content_type,
                 mutable: global.ty.mutable,
@@ -678,6 +690,8 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
             global_exports: self.global_exports,
             start: self.start,
             global_funcs: self.global_funcs,
+            memory_imports: self.memory_imports,
+            global_inits: self.global_inits,
         })
     }
 }
@@ -759,6 +773,7 @@ fn classify_import(
                 module: module.to_string(),
                 field: name.to_string(),
                 ident: None,
+                alias: None,
             });
             Ok(())
         }
