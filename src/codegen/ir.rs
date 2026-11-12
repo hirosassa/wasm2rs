@@ -681,9 +681,9 @@ pub(crate) fn estimate_body_len(nodes: &[Node]) -> usize {
 /// (so ordinary functions keep their readable nested form) yet far below the
 /// parser's stack limit.
 pub(crate) const FLATTEN_DEPTH_THRESHOLD: usize = 40;
-/// Whether a body can be lowered to a flat dispatch loop with the currently
-/// supported constructs (block/loop/`br`/`br_if`/terminators). `if` regions and
-/// `br_table` are not yet flattenable, so a body containing them stays nested.
+/// Whether a body can be lowered to a flat dispatch loop. A body containing a
+/// `try` region or a condition-less (`br_if`-only) `if` has no flat lowering and
+/// stays nested.
 ///
 /// Walked with an explicit stack rather than by recursion, so a deeply nested
 /// module (the very case that triggers flattening) cannot overflow the thread's

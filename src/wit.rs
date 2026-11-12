@@ -10,7 +10,7 @@
 //! Supported types: integers, floats, `bool`, `char`, `string`, `list`, `option`,
 //! `result`, `tuple`, `record`, `variant`, `enum`, `flags` (at most 32) and resource handles
 //! (`own`/`borrow`). A function that uses anything else (`future`, `stream`,
-//! `error-context`, more than 32 flags, ...) is an [`Unsupported`](TranspileError::Unsupported) error naming
+//! `error-context`, more than 32 flags, ...) is an [`Unsupported`](crate::TranspileError::Unsupported) error naming
 //! the type, never silently dropped. A type that no function uses is not checked.
 
 use std::sync::Arc;

@@ -5,7 +5,7 @@ pull requests are all welcome.
 
 ## Reporting issues
 
-- **Bugs**: include the wasm2rs version (`wasm2rs --version`), the command line, and
+- **Bugs**: include the wasm2rs version (the crate version from `cargo install --list`, or the release tag), the command line, and
   ideally a minimal `.wat` / `.wasm` input that reproduces the problem. For a
   miscompile, say what the original wasm does (e.g. under wasmtime) versus what the
   generated Rust does.

@@ -43,6 +43,7 @@ wasm2rs_macros::include_wasm!("path.wasm" [, option]*);
 | `named_imports` | Name the host `Imports` trait methods after the imports (`env_log`) instead of `import{j}`. |
 | `import_memory` | Make the module's memory host-owned, lent through `Imports::memory`/`memory_mut`. |
 | `reentrant_imports` | Let the host call back into the guest while an import runs. |
+| `simd_intrinsics` | Emit the integer SIMD lane helpers with `core::arch` NEON / SSE2 bodies (the scalar loop stays as the `cfg` fallback). The generated code contains `unsafe`. |
 
 See the [wasm2rs README](https://github.com/hirosassa/wasm2rs#readme) for details on each option, the generated API, WASI support and supported proposals.
 

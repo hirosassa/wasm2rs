@@ -61,18 +61,18 @@ Host behavior:
   has no per-read timeout), which is stricter than the specification.
 - `HttpClientError` carries only a string, so the guest sees `internal-error` with a message
   instead of a structured `error-code` for connection failures.
-- File access is confined with `cap-std` (`openat` with `O_NOFOLLOW`). That is Unix only: other
-  platforms are not tested (#205).
+- File access is confined with `cap-std` (`openat` with `O_NOFOLLOW`). CI runs it on Unix and
+  Windows (#205, see [windows.md](windows.md)); only the Unix runs check the symlink escape cases.
 - The confinement above is for `wasm2rs-wasi` only. The native WASI preview1 shim of the generated code uses
   `std::fs` after a canonicalize check, which a sibling wasi-threads guest thread or another host
   process can race with a symlink swap (#225, see the notes in
   [cli-reference.md](cli-reference.md)).
 
-Transpilation of a component (`Unsupported` errors that say why):
+Transpilation of a component (errors that say why):
 
-- A component with a core module as its input, no core module, or exports lifted from more than
+- `InvalidInput`: a component with a core module as its input, no core module, or exports lifted from more than
   one core module, or several candidate modules that nothing tells apart. Shim and adapter modules are skipped, not emitted.
-- An export of a nested component, and a string encoding other than UTF-8.
+- `Unsupported`: an export of a nested component, and a string encoding other than UTF-8.
 - The CLI cannot turn `external_types` off (`--component` always uses a library, `wasm2rs_wasi`
   by default); only the library API can emit the types into the output.
 - The component bytes are parsed several times inside one transpilation (layout scan,
@@ -80,7 +80,7 @@ Transpilation of a component (`Unsupported` errors that say why):
 
 ## Not done yet
 
-- #205: verify (and fix, if needed) `wasm2rs-wasi` on a non-Unix platform.
+- Escape attempts through symlinks and junctions on Windows (everything else of #205 is done, see [windows.md](windows.md)).
 - A4: `resource.new` / `resource.rep` for resources a component defines and exports.
 - A structured `HttpClientError`, to map failures onto the specific `error-code` variants.
 - An `HttpClient` that really sends and receives trailers (the trait supports it; `UreqClient`
