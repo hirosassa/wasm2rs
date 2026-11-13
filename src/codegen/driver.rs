@@ -920,6 +920,21 @@ pub(crate) fn generate_function_into(
     line_prefix: &str,
     out: &mut String,
 ) -> Result<GenMeta, TranspileError> {
+    let start = out.len();
+    let meta = render_function_into(index, input, ctx, line_prefix, out)?;
+    // Redundant parentheses are what makes `rustc` quadratic on huge sources.
+    let rendered = out.split_off(start);
+    out.push_str(&super::parens::strip_redundant_parens(&rendered));
+    Ok(meta)
+}
+
+fn render_function_into(
+    index: usize,
+    input: &FuncInput<'_>,
+    ctx: &ModuleCtx<'_>,
+    line_prefix: &str,
+    out: &mut String,
+) -> Result<GenMeta, TranspileError> {
     let no_scanned_body =
         || TranspileError::Internal(format!("function {index} has no scanned body"));
     let mutated = index

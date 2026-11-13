@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The generated source no longer wraps call/method arguments, assigned values and block tails in redundant parentheses (`self.w32((a + b), v)` is now `self.w32(a + b, v)`). `rustc`'s `unused_parens` early lint copies the rest of the file for every such site, which is quadratic on very large modules: the 124 MB JS component core goes from about 587 s to about 55 s (metadata) and the Go component from 66 s to 12 s. Behaviour and machine code are unchanged (F4-1, #316).
+
 ### Added
 - `transpile_component` / `--component` now transpile components made with a preview1 adapter (`wasm-tools component new --adapt`, wasi-sdk, Go): the program, the adapter and `wit-component`'s shim and fixup modules are linked into one `Instance`, the adapter's `wasi_snapshot_preview1` functions become internal calls, and the host sees only the WIT functions the adapter calls (`wasi:cli/*`, `wasi:io/*`, ...). Exports lifted from several core modules are linked the same way instead of being refused. Every component that transpiled before takes the unchanged single-module path, so its output is byte-identical.
 

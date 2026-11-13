@@ -32,6 +32,7 @@ mod func;
 mod helpers;
 mod info;
 mod parallel;
+mod parens;
 mod render;
 mod render_cont;
 mod runtime;

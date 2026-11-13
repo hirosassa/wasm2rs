@@ -91,8 +91,14 @@ fn demote_and_promote_results_are_routed_through_a_quieting_helper() {
     // the conversion itself must quiet a NaN result rather than rely on hardware.
     let wasm = wat::parse_str(CONVERSIONS).unwrap();
     let out = wasm2rs::transpile(&wasm).unwrap();
-    assert!(out.contains("quiet_f32(("), "demote not quieted:\n{out}");
-    assert!(out.contains("quiet_f64(("), "promote not quieted:\n{out}");
+    assert!(
+        out.contains("quiet_f32(l0 as f32)"),
+        "demote not quieted:\n{out}"
+    );
+    assert!(
+        out.contains("quiet_f64(l0 as f64)"),
+        "promote not quieted:\n{out}"
+    );
 }
 
 #[test]

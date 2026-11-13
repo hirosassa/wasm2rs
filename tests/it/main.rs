@@ -98,6 +98,7 @@ mod nan_rounding;
 mod parallel_codegen;
 mod passive;
 mod programs;
+mod redundant_parens;
 mod reentrant_imports;
 mod reference;
 mod rotate_neg_receiver;
