@@ -7,7 +7,7 @@ linked from each section.
 ## Where it stands
 
 - The `wasm2rs-wasi` crate's `WasiHost` implements **all 199 methods of the official WASI 0.2.0
-  WIT** (`cli`, `clocks`, `filesystem`, `http`, `io`, `random`, `sockets`). `src/generated.rs` is
+  WIT** (`cli`, `clocks`, `filesystem`, `http`, `io`, `random`, `sockets`). `wasm2rs-wasi/src/generated.rs` is
   generated from the official WIT in `tests/wasi_p2_wit/` and a test fails on any difference.
 - A `wasm32-wasip2` **component** can be turned into Rust source from the CLI
   (`wasm2rs --component`), from the library (`transpile_component`,
@@ -27,6 +27,7 @@ linked from each section.
 | A2: component exports (`wit_exports`, the typed `Exports` trait, `wasip2_run` calls `run`) | #181 to #183, #187, #188 | [component-exports-design.md](component-exports-design.md) |
 | `wasi:http` client and server methods (H1 to H5) | #189 to #194 | [wasi-http-design.md](wasi-http-design.md) |
 | Serving a component over TCP (`wasip2_serve`) | #196, #210 | [wasi-http-design.md](wasi-http-design.md) |
+| Core module linking (adapter components, exports from several modules, dylink-style components such as `componentize-py`) | L1 to L5 (#307 to #310, #312, #315), F2-1 to F2-5 (#322, #324, #326 to #328), #329 | [core-module-linking-design.md](core-module-linking-design.md), [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md), [component-toolchain-survey.md](component-toolchain-survey.md) |
 | A3: component input (`transpile_component`, the examples use it, `--component`, `transpile_component_to_out_dir`, `include_component!`, `transpile_component_with_exports`) | #198 to #201, #203, #212 | [component-input-design.md](component-input-design.md) |
 | P3: stdin pollable lifecycle, preopen TOCTOU-safe file access | #202, #204 | [typed-host-design.md](typed-host-design.md) |
 | `wasi:http` follow-ups (incoming side, streaming, client trailers) | #206, #210, #211 | [wasi-http-design.md](wasi-http-design.md) |
@@ -42,8 +43,8 @@ linked from each section.
 | Include the result | `wasm2rs_macros::include_component!("stem")`: the name is the input's file stem, without `.wasm` |
 | Configure the host | `wasm2rs_wasi::WasiHost::builder()` (arguments, environment, preopens, `NetworkPolicy`, clock, random, stdio, `http_client`) |
 | Make HTTP requests from a guest | `WasiHost::builder().http_client(UreqClient::new())` with the `http-client` feature |
-| Run a `wasi:cli/run` component | `cargo run --release --example wasip2_run -- component.wasm` |
-| Serve a `wasi:http/incoming-handler` component | `cargo run --release --example wasip2_serve -- component.wasm --listen 127.0.0.1:8080` |
+| Run a `wasi:cli/run` component | `cargo run --release --example wasip2_run -- component.wasm` (`rustc` runs at `-C opt-level=1`; `WASM2RS_EXAMPLE_OPT_LEVEL` selects another level; `0` is needed for the JS guests) |
+| Serve a `wasi:http/incoming-handler` component | `cargo run --release --example wasip2_serve -- component.wasm --listen 127.0.0.1:8080` (the handler may be exported at any `0.2.x` patch version) |
 
 ## Known limitations
 
@@ -70,9 +71,19 @@ Host behavior:
 
 Transpilation of a component (errors that say why):
 
-- `InvalidInput`: a component with a core module as its input, no core module, or exports lifted from more than
-  one core module, or several candidate modules that nothing tells apart. Shim and adapter modules are skipped, not emitted.
-- `Unsupported`: an export of a nested component, and a string encoding other than UTF-8.
+- `InvalidInput`: a core module as the input, a component with no core module, or an export-less
+  component with several candidate modules that nothing tells apart.
+- `Unsupported`: an export of a nested component, and a string encoding other than UTF-8; a linked
+  component (below) whose lifts allocate through different `realloc` functions of several core
+  modules (#314, open); a linked core module other than the program that defines its own memory.
+- Components whose core modules are wired to each other (a preview1 adapter with `wit-component`'s
+  shim and fixup, exports lifted from several core modules, dylink-style libraries) are linked
+  into one `Instance` instead of being refused; every other component keeps the single-module
+  path, byte-identical. See [core-module-linking-design.md](core-module-linking-design.md) and
+  [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md). Which real toolchains work
+  (Rust, Rust + preview1 adapter, Go, `jco`, `componentize-py`, `wasi:http` handlers) is in
+  [component-toolchain-survey.md](component-toolchain-survey.md); JS guests need
+  `-C opt-level=0` (#331) and Python ones a long `rustc` run.
 - The CLI cannot turn `external_types` off (`--component` always uses a library, `wasm2rs_wasi`
   by default); only the library API can emit the types into the output.
 - The component bytes are parsed several times inside one transpilation (layout scan,
@@ -85,3 +96,6 @@ Transpilation of a component (errors that say why):
 - A structured `HttpClientError`, to map failures onto the specific `error-code` variants.
 - An `HttpClient` that really sends and receives trailers (the trait supports it; `UreqClient`
   does not).
+- Lifts that allocate through different `realloc` functions of several linked core modules (#314).
+- `rustc` at `-C opt-level=1` does not finish on the 125 MB source of a `jco` JS component (#331);
+  `-C opt-level=0` works.

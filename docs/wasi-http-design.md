@@ -3,6 +3,7 @@
 Status: implemented. H1 to H5, the T5 follow-ups (streaming, incoming-side trailers) and T6 (client-side
 trailers) are done: `WasiHost` overrides all 63 `wasi_http_*` methods of
 `wasm2rs-wasi/src/generated.rs` (none is left at the trapping default).
+`wasip2_serve` accepts a handler exported at any `0.2.x` patch version (a `wasi` 0.14 crate guest exports `incoming-handler@0.2.12`); real handlers built with Rust, `jco` and `componentize-py` are served, see [component-toolchain-survey.md](component-toolchain-survey.md) (cases F to H). Names such as `export_wasi_http_incoming_handler_0_2_0_handle` below are for an `@0.2.0` export; the method name takes the exported version.
 Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library),
 [component-exports-design.md](component-exports-design.md) (the export side that `incoming-handler`
 needs).
@@ -121,7 +122,7 @@ The `HttpClient` trait carries trailers both ways (breaking: new fields, no defa
 ## Serving over TCP: `examples/wasip2_serve.rs`
 
 `wasip2_serve <component.wasm> [--listen ADDR]` serves a component exporting
-`wasi:http/incoming-handler` (#195: "listening/accept"). It builds the program like
+`wasi:http/incoming-handler` at any `0.2.x` patch version (#195: "listening/accept"). It builds the program like
 `wasip2_run` (the build step is shared in `examples/common`) with the server of
 `examples/wasip2_serve/server.rs` appended in place of the `wasi:cli/run` call, and then
 becomes it (`exec` on unix, so killing the example kills the server).

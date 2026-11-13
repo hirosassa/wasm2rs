@@ -3,6 +3,18 @@
 Status: L1 (#307), L2 (`src/link.rs`), L2b (tail-import slot) and L3 (component
 integration) and L4 (export names) are implemented. All open questions are decided (Section 6).
 
+Update: L5 and the F2 follow-up are done too (F2-1 to F2-5: a lift's `memory` option through the
+link, per-import `realloc`, `trunc_sat` and imported-global segment offsets, glue for non-WASI export
+types and host-less modules, `componentize-py` end to end), and the gate also links a component whose other instantiated modules initialize a
+shared memory or table or have a start function (#325). The "As implemented" notes below are
+the state at each stage and are not rewritten; where a later stage lifted a limit stated there
+(different `realloc`s among the lowered imports, the operator subset of appended modules now
+including `trunc_sat`, segment offsets that read an imported global, a lift's memory that is
+imported from the program), see the Unreleased section of the CHANGELOG, then
+[f2-dynamic-linking-design.md](f2-dynamic-linking-design.md) (section 9) and
+[component-toolchain-survey.md](component-toolchain-survey.md). Still open: lifts that
+*allocate* through different `realloc`s of several modules (#314).
+
 Background: [component-toolchain-survey.md](component-toolchain-survey.md) (F1/F2),
 [component-input-design.md](component-input-design.md),
 [component-exports-design.md](component-exports-design.md), issues #184, #185, #186
