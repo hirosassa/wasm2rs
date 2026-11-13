@@ -408,6 +408,7 @@ fallback.
 - **F2 (documented follow-up, not scheduled; Q8)**: dylink-style modules; needs L2's imported
   table/global binding with `__table_base`/`__memory_base`, init order, and
   libpython-scale compile time work (F4).
+  Investigated in [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md).
 
 ## 6. Decisions
 

@@ -15,7 +15,7 @@ directory; the commands are below so the survey can be repeated.
 | B | `wasm32-wasip1` core + `wasm-tools component new --adapt` (command adapter) | 2.2 MB, main + adapter module | **works** (L3 linking; run in 7.0 s with the `wasm2rs-wasi` build, rustc 1.6 s): prints `hello from rust`. The first run failed only in `wasip2_run`, which looked for `wasi:cli/run@0.2.0` while the adapter exports `@0.2.3` |
 | C | Go (`GOOS=wasip1`) + the same adapter | 2.5 MB, main + adapter module | **runs when the environment is empty; fails with an environment, on wasmtime too** (#311): transpiles and builds (about 3 min in total; rustc 168 s, 4.3 GB peak RSS at `-C opt-level=1`). With an inherited environment it traps with `assertion failed at adapter line 2745` (the adapter's `State` magic) because the adapter's two extra pages (36 -> 38) overlap Go's heap range (`bloc` 36 pages, `blocMax` 38 pages). The same failure reproduces on wasmtime v30.0.0 with `-S inherit-env`; `wasmtime run` passes an empty environment by default, and `env -i` makes the wasm2rs program print `hello from go`. Not a wasm2rs defect: a Go + adapter incompatibility |
 | D | `jco componentize` (StarlingMonkey, JS) | 13.9 MB | **fails** in `rustc` (E0046) after about 10 minutes |
-| E | `componentize-py` (CPython 3.14) | 17.6 MB, 12 core modules | **fails**: `unsupported: export exports#init: its memory is not an export of the same core instance as the function` |
+| E | `componentize-py` (CPython 3.14) | 17.6 MB, 14 core modules (12 without the shim and fixup) | **fails**: `unsupported: export exports#init: its memory is not an export of the same core instance as the function`. Four small gates in the linker, then a 116 MB / 1.9 M-line source that `rustc` cannot be expected to build; see [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md) |
 
 ## Findings
 
@@ -46,6 +46,10 @@ core module, joined through shared memory and tables (`wit-component` dylib link
 guard hit is `exports#init`, whose memory comes from another instance. Beyond that guard this
 needs F1's linking and a lot more (shared table, indirect calls across modules, `dlopen`-style
 init order). Treat as out of scope until F1 is done; the error message is already explicit.
+
+Update (2026-11-13, after L1-L5): investigated in [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md).
+The linking side is small (shared memory and table, constant `__table_base`, no start functions); the
+blocker is F4, since the generated source is the size of the JS component's.
 
 ### F3. A function imported twice makes the glue incomplete (D)
 
@@ -81,7 +85,7 @@ opt-level, `-Z time-passes`) once F3 lets D build at all.
    design item. #185 (exports from several modules) should be designed together with it.
 3. #184 and #186 as small follow-ups (no survey case hit them): both done with F1 step 2 (L3, L4).
 4. F4 measurement after F3.
-5. F2 only after F1 step 2.
+5. F2 only after F1 step 2: done as an investigation; F4 first for the end-to-end goal, see the F2 design.
 
 Not covered yet: TinyGo, `cargo-component` with a custom world, wasi-sdk C/C++ `wasm32-wasip2`
 and `wasi:http` incoming-handler guests in other languages. Add a row to the table when one is
