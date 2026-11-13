@@ -941,7 +941,6 @@ fn segment_offset(
             format!("({rust}) as u32 as u64")
         },
         expr: bytes,
-        wide,
     })
 }
 

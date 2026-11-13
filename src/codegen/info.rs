@@ -81,8 +81,6 @@ pub(crate) enum SegOffset {
         /// The expression's bytes (a constant expression, as in the module), so the
         /// linker can evaluate it once the global resolves to one of another module.
         expr: Vec<u8>,
-        /// Whether the offset is an `i64` (a 64-bit memory or table).
-        wide: bool,
     },
 }
 

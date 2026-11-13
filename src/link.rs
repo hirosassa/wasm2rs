@@ -895,7 +895,7 @@ fn merged_offset(
     match offset {
         None => Ok(None),
         Some(codegen::SegOffset::Const(v)) => Ok(Some(codegen::SegOffset::Const(*v))),
-        Some(codegen::SegOffset::Runtime { expr, wide, .. }) => {
+        Some(codegen::SegOffset::Runtime { expr, .. }) => {
             let bytes = rewrite_const(layout, m, &ConstExpr::new(BinaryReader::new(expr, 0)))?;
             let values = codegen::IntGlobals {
                 imported: ir.imported_globals.len(),
@@ -912,12 +912,6 @@ fn merged_offset(
                      integer constant of the module that provides it"
                 ))
             })?;
-            // A 32-bit offset wraps like the runtime expression does.
-            let value = if *wide {
-                value
-            } else {
-                value & u64::from(u32::MAX)
-            };
             Ok(Some(codegen::SegOffset::Const(value)))
         }
     }
