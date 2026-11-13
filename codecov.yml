@@ -1,6 +1,5 @@
 coverage:
   status:
-    # Per-crate component statuses cover this; disable the global one to avoid duplicate checks
     project: off
     patch:
       default:
@@ -15,7 +14,6 @@ component_management:
         threshold: 1% # Tolerate tiny fluctuations
   individual_components:
     - component_id: core
-      # Floor set slightly below the measured 95.24% (2026-11-13)
       statuses:
         - type: project
           target: 94%
@@ -24,7 +22,6 @@ component_management:
       paths:
         - src/**
     - component_id: macros
-      # Floor set slightly below the measured 92.27% (2026-11-13)
       statuses:
         - type: project
           target: 90%
@@ -33,7 +30,6 @@ component_management:
       paths:
         - wasm2rs-macros/**
     - component_id: wasi
-      # Floor set slightly below the measured 83.93% (2026-11-13)
       statuses:
         - type: project
           target: 82%
