@@ -175,6 +175,24 @@ fn a_real_wasip1_adapter_component_prints_hello() {
     assert!(out.status.success());
 }
 
+/// A component `componentize-py` made (CPython 3.14 as dynamically linked libraries: 14 core
+/// modules sharing one memory and table, see `docs/f2-dynamic-linking-design.md`) prints its
+/// greeting. The file is 17.6 MB and not in the repository: set `WASM2RS_PY_HELLO_COMPONENT`
+/// to it and run with `--ignored` (the source is 120 MB; allow for a long `rustc` run).
+#[test]
+#[ignore = "needs WASM2RS_PY_HELLO_COMPONENT (a componentize-py component) and a long build"]
+fn a_real_componentize_py_component_prints_hello() {
+    let path = std::env::var_os("WASM2RS_PY_HELLO_COMPONENT")
+        .expect("WASM2RS_PY_HELLO_COMPONENT names the component");
+    let out = run_example(&std::fs::read(path).unwrap(), "real-py", &[]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("hello from python"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success());
+}
+
 #[test]
 fn an_error_result_from_run_is_a_nonzero_exit_code() {
     let out = run_example(&component(), "fail", &["a", "b"]);
