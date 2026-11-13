@@ -4,7 +4,8 @@
 //! difference. After a generator change, refresh the file with
 //! `WASM2RS_BLESS=1 cargo test --test it wasi_generated`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use wasm2rs::{WitNaming, WitOptions, wit_host_trait_with_options};
 
@@ -13,14 +14,14 @@ const GENERATED: &str = "wasm2rs-wasi/src/generated.rs";
 /// `package`'s directory under `tests/wasi_p2_wit` with the files of the same name under
 /// `tests/wasi_p2_wit/overlay` laid over it (copied to a scratch directory, since
 /// `Resolve::push_dir` reads a directory).
-fn package_dir(root: &Path, package: &str) -> std::path::PathBuf {
+fn package_dir(root: &Path, package: &str) -> PathBuf {
     let overlay = root.join("overlay").join(package);
     if !overlay.is_dir() {
         return root.join(package);
     }
     // unique per call: tests run in parallel and each builds its own copy
-    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
     let merged = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
         "wasi_p2_wit-{package}-{}-{call}",
         std::process::id()

@@ -25,7 +25,7 @@ overlay file over the 0.2.0 directory before generating:
 
 | file | source | difference from 0.2.0 |
 |---|---|---|
-| `overlay/cli/exit.wit` | https://github.com/WebAssembly/wasi-cli `v0.2.12` (`wit/exit.wit`) | adds `exit-with-code: func(status-code: u8)` (`@since(version = 0.2.12)`) |
+| `overlay/cli/exit.wit` | https://github.com/WebAssembly/WASI `v0.2.12` (`proposals/cli/wit/exit.wit`) | adds `exit-with-code: func(status-code: u8)` (`@since(version = 0.2.12)`) |
 
 `docs/wasi-post-0.2.0-additions.md` lists every difference between 0.2.0 and 0.2.12 and why only
 this one is here. To add one: copy the file from the tag, drop the `@since`/`@unstable` annotations
