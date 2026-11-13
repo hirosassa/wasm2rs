@@ -86,7 +86,7 @@ wasm2rs --dump module.wasm                       # inspect without generating co
 
 ### Verified toolchains
 
-Each toolchain was run end to end (`transpile_component`, `rustc`, run) with `examples/wasip2_run` (`wasi:cli/run`) and `examples/wasip2_serve` (`wasi:http/incoming-handler`). Details, timings and reproduction commands are in [docs/component-toolchain-survey.md](docs/component-toolchain-survey.md).
+Each toolchain was run end to end (`transpile_component`, `rustc`, run) with `examples/wasip2_run` (`wasi:cli/run`) and, where the table says so, `examples/wasip2_serve` (`wasi:http/incoming-handler`). Details, timings and reproduction commands are in [docs/component-toolchain-survey.md](docs/component-toolchain-survey.md).
 
 | Toolchain | `wasi:cli/run` | `wasi:http` | Notes |
 |---|---|---|---|
@@ -115,7 +115,7 @@ The examples build the component with `rustc -C opt-level=1`; set `WASM2RS_EXAMP
 - **Large components: start at `opt-level=0`.** The JS and Python components produce 125 MB and 122 MB of Rust, and LLVM time is the bottleneck, not wasm2rs (about 1 s to transpile Python).
 - **One source only.** `--component` refuses the split arguments (`funcs_per_file`, `max_bytes_per_file`); the other generated-code flags that it supports are `--unsafe-memory`, `--simd-intrinsics`, `--jobs`, `--split-dispatch`, `--call-depth-limit` and `--external-types`.
 - **Linked core modules (adapters, dylink libraries) may only use MVP, sign-extension, saturating float-to-int, bulk-memory and reference-types operators.** Any other operator (SIMD, atomics, exceptions, ...) is refused with an error naming it; lifts that allocate through different `realloc` functions of several modules are also refused (#314).
-- `wasip2_serve` serves one request at a time over loopback HTTP/1.x; `wasip2_run` and `wasip2_serve` have no outgoing HTTP client.
+- `wasip2_serve` serves one request at a time over HTTP/1.x (listening on `127.0.0.1:8080` by default); `wasip2_run` and `wasip2_serve` have no outgoing HTTP client.
 
 ## Library API
 
