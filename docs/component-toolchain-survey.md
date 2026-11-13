@@ -19,6 +19,10 @@ directory; the commands are below so the survey can be repeated.
 | F | Rust `wasm32-wasip2` + `wasi` 0.14 crate, `wasi:http` handler | 114 KB, one core module | **works** (2026-11-14): `wasip2_serve` answers `200`, a header, a body naming the request path and a trailer (`curl -i` shows it after the last chunk); build and start 8 s with the `wasm2rs-wasi` build. It exports `incoming-handler@0.2.12`, which `wasip2_serve` refused until it accepted any patch version (see G1). `#[ignore]` test: `WASM2RS_HTTP_HELLO_COMPONENT` |
 | G | `jco componentize` (StarlingMonkey, JS), `fetch` event | 13.0 MB | **works at `-C opt-level=0`** (2026-11-14): `200`, header and body over `wasip2_serve`; 86 s from start to listening. `-C opt-level=1` is the known F4 problem (#331) |
 | H | `componentize-py`, `IncomingHandler` | 18.4 MB | **works at `-C opt-level=0`** (2026-11-14): `200`, header and body over `wasip2_serve`, also for a second request; 75 s from start to listening |
+| I | TinyGo 0.44 `tinygo build -target=wasip2` (Go `fmt.Println`) | 773 KB, one core module, `wasi:cli/run@0.2.0` | **works** (2026-11-14): prints `hello from tinygo`, exit 0; `wasip2_run` end to end 24 s (rustc at `-C opt-level=1`, 480 MB peak RSS). No wall. `#[ignore]` test: `WASM2RS_TINYGO_HELLO_COMPONENT` |
+| J | wasi-sdk 34 `clang --target=wasm32-wasip2`, C `puts` | 227 KB, one core module, `wasi:cli/run@0.2.12` | **works** (2026-11-14): prints `hello from wasi-sdk C`, exit 0; 5.3 s end to end with a warm `wasm2rs-wasi` build (290 MB peak RSS). `#[ignore]` test: `WASM2RS_WASISDK_C_HELLO_COMPONENT` |
+| K | wasi-sdk 34 `clang++ --target=wasm32-wasip2 -fno-exceptions`, `std::cout` | 3.2 MB | **does not build** (2026-11-14): the program imports `wasi:cli/exit@0.2.12`'s `exit-with-code`, which the 0.2.0 `Host` trait does not have, so `rustc` fails with E0599 (`no method named wasi_cli_exit_exit_with_code`) and `wasip2_run` exits 2. Without `-fno-exceptions` the link fails in `wasm-ld` (`__cxa_throw`; wasi-sdk has no C++ exceptions), not a wasm2rs matter. See F6 (#339) |
+| L | `cargo component build` 0.21.1, custom world (`export ops` with a record, a string and integers; no `wasi:cli/run`) | 72 KB, `wasm32-wasip1` + adapter (one core module after linking) | **works** (2026-11-14): `wasip2_run` does not apply (no `run`), so a small program calls the typed `Exports` (`test_calc_ops_add(40, 2)` = 42, `greet`, `shift` on a record); 3 s for the test with a warm library build (430 MB peak RSS). `#[ignore]` test: `WASM2RS_CARGO_COMPONENT_CALC` |
 
 ## Findings
 
@@ -103,6 +107,15 @@ and `wasm-tools component wit --out-dir` output from a component is not accepted
 - `wasm32-wasip2` std output, including arguments (A).
 - Newer patch versions of the WASI 0.2 interfaces (D's imports at 0.2.10 / 0.2.12).
 
+### F6. `exit-with-code` is outside the generated `Host` trait (K)
+
+wasi-sdk's libc++ (`std::cout`) pulls in `wasi:cli/exit@0.2.12`'s `exit-with-code: func(status-code: u8)`,
+a function added after 0.2.0 (it is not in `tests/wasi_p2_wit`, the fixture `wasm2rs-wasi`'s
+generated `Host` is made from). The glue calls `Host::wasi_cli_exit_exit_with_code`, which does not exist,
+so the build fails with E0599. Rust, TinyGo and wasi-sdk C do not import it. A fix needs a decision
+(an overlay on the 0.2.0 WIT, or a default-provided method outside the generated trait, plus the
+freshness and every-method-overridden tests), so it is a separate issue (#339) rather than part of this survey.
+
 ## Suggested order
 
 1. F3 (glue emits every duplicate import). Small, a real bug, and it tells us whether D runs.
@@ -112,9 +125,8 @@ and `wasm-tools component wit --out-dir` output from a component is not accepted
 4. F4 measurement after F3.
 5. F2 only after F1 step 2: done as an investigation; F4 first for the end-to-end goal, see the F2 design.
 
-Not covered yet: TinyGo, `cargo-component` with a custom world and wasi-sdk C/C++ `wasm32-wasip2`
-(and `wasi:http` guests built with them). Add a row to the table when one is
-tried.
+Not covered yet: `wasi:http` guests built with TinyGo, wasi-sdk or `cargo-component`, and wasi-sdk
+C++ (blocked by F6). Add a row to the table when one is tried.
 
 ## Reproduction
 
@@ -131,6 +143,14 @@ wasm-tools component new go.core.wasm --adapt wasi_snapshot_preview1=adapter.was
 npx @bytecodealliance/jco componentize app.js --wit wit --world-name w -o js-hello.wasm
 # E
 uvx componentize-py -d wit -w w componentize app -o py-hello.wasm   # componentize-py 0.25.1
+# I (tinygo 0.44, wasm-tools in PATH)
+tinygo build -target=wasip2 -o tg-hello.wasm .
+# J, K (wasi-sdk 34; K needs -fno-exceptions to link)
+$WASI_SDK/bin/clang --target=wasm32-wasip2 -O2 hello.c -o c-hello.wasm
+$WASI_SDK/bin/clang++ --target=wasm32-wasip2 -O2 -fno-exceptions hello.cpp -o cpp-hello.wasm
+# L (cargo install cargo-component --locked; wit/world.wit: interface ops { record point {..} add greet shift }, world calc { export ops; })
+cargo component new --lib calc --namespace test && cargo component build --release   # target/wasm32-wasip1/release/calc.wasm
+WASM2RS_CARGO_COMPONENT_CALC=calc.wasm cargo test --test it component_real_custom_world -- --ignored
 # run
 cargo run --release --example wasip2_run -- <component>.wasm
 

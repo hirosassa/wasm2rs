@@ -217,6 +217,40 @@ fn a_real_jco_component_prints_hello() {
     assert!(out.status.success());
 }
 
+/// A component TinyGo made (`tinygo build -target=wasip2`, 0.44, 773 KB, one core module,
+/// `wasi:cli/run@0.2.0`) prints its greeting. The file is not in the repository: set
+/// `WASM2RS_TINYGO_HELLO_COMPONENT` to it and run with `--ignored`.
+#[test]
+#[ignore = "needs WASM2RS_TINYGO_HELLO_COMPONENT (a tinygo wasip2 component)"]
+fn a_real_tinygo_component_prints_hello() {
+    let path = std::env::var_os("WASM2RS_TINYGO_HELLO_COMPONENT")
+        .expect("WASM2RS_TINYGO_HELLO_COMPONENT names the component");
+    let out = run_example(&std::fs::read(path).unwrap(), "real-tinygo", &[]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("hello from tinygo"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success());
+}
+
+/// A component wasi-sdk's `clang --target=wasm32-wasip2` made from a C `main` (wasi-sdk 34,
+/// 227 KB, `wasi:cli/run@0.2.12`) prints its greeting. The file is not in the repository: set
+/// `WASM2RS_WASISDK_C_HELLO_COMPONENT` to it and run with `--ignored`.
+#[test]
+#[ignore = "needs WASM2RS_WASISDK_C_HELLO_COMPONENT (a wasi-sdk C wasm32-wasip2 component)"]
+fn a_real_wasi_sdk_c_component_prints_hello() {
+    let path = std::env::var_os("WASM2RS_WASISDK_C_HELLO_COMPONENT")
+        .expect("WASM2RS_WASISDK_C_HELLO_COMPONENT names the component");
+    let out = run_example(&std::fs::read(path).unwrap(), "real-wasisdk-c", &[]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("hello from wasi-sdk C"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success());
+}
+
 #[test]
 fn an_error_result_from_run_is_a_nonzero_exit_code() {
     let out = run_example(&component(), "fail", &["a", "b"]);

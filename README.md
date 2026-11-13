@@ -95,8 +95,10 @@ Each toolchain was run end to end (`transpile_component`, `rustc`, run) with `ex
 | Python (`componentize-py`, CPython as 14 dynamically linked core modules) | works | works | `-C opt-level=1` takes about 5.5 minutes and 7.5 GB; `-C opt-level=0` serves in about 75 s. |
 | JS (`jco componentize`) | works | works | `-C opt-level=0` only (about 90 s). At `-C opt-level=1` LLVM did not finish in 80 minutes (#331). |
 | Go (`GOOS=wasip1` + adapter) | only with an empty environment | not tried | The adapter's pages overlap Go's heap when the environment is inherited; wasmtime fails the same way (#311). |
-
-TinyGo, `cargo-component` with a custom world and wasi-sdk C/C++ components are untried.
+| TinyGo (`-target=wasip2`) | works | not tried | About 24 s to build and run a hello. |
+| wasi-sdk C (`wasm32-wasip2`) | works | not tried | |
+| wasi-sdk C++ (`wasm32-wasip2`) | does not build | not tried | The program imports `wasi:cli/exit`'s `exit-with-code`, which the 0.2.0 `Host` lacks (#339). |
+| `cargo component` (custom world, `wasm32-wasip1` + adapter) | no `run` export; typed `Exports` calls work | not tried | Called through the generated `Exports` trait (see the survey). |
 
 ### Usage
 
