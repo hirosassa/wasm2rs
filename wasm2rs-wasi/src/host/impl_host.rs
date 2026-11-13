@@ -6,6 +6,16 @@ use http::{
     HttpOutgoingResponse,
 };
 
+impl WasiHost {
+    /// Ends the process with `code` after flushing stdout, stderr and the connections' send
+    /// queues (see `flush_all_connections`).
+    fn exit_with(&mut self, code: i32) -> ! {
+        self.flush_stdio();
+        self.flush_all_connections();
+        std::process::exit(code)
+    }
+}
+
 impl Host for WasiHost {
     fn wasi_cli_stdout_get_stdout(&mut self) -> OutputStream {
         OutputStream(1)
@@ -31,12 +41,15 @@ impl Host for WasiHost {
         }
     }
 
-    /// `exit(status: result)`: `ok` is 0, `error` is 1. The send queues of the connections are
-    /// flushed first (see `flush_all_connections`).
+    /// `exit(status: result)`: `ok` is 0, `error` is 1.
     fn wasi_cli_exit_exit(&mut self, status: Result<(), ()>) {
-        self.flush_stdio();
-        self.flush_all_connections();
-        std::process::exit(i32::from(status.is_err()));
+        self.exit_with(i32::from(status.is_err()));
+    }
+
+    /// `exit-with-code(status-code: u8)` (wasi:cli 0.2.12): the process exits with `status-code`,
+    /// flushing the same queues as `exit`.
+    fn wasi_cli_exit_exit_with_code(&mut self, status_code: u8) {
+        self.exit_with(i32::from(status_code));
     }
 
     /// The message of the failure behind an `error` handle (an unknown one is empty).

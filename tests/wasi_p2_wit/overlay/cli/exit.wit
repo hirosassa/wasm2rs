@@ -1,0 +1,10 @@
+interface exit {
+  /// Exit the current instance and any linked instances.
+  exit: func(status: result);
+
+  /// Exit the current instance and any linked instances, reporting the
+  /// specified status code to the host.
+  ///
+  /// Added in wasi-cli 0.2.12 (`@since(version = 0.2.12)`); not in 0.2.0.
+  exit-with-code: func(status-code: u8);
+}

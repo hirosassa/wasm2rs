@@ -325,3 +325,37 @@ fn a_guest_that_blocks_forever_fails_the_run_instead_of_hanging() {
         std::time::Duration::from_secs(3),
     );
 }
+
+/// `wasi:cli/exit@0.2.12` adds `exit-with-code`, which the 0.2.0 WIT lacks (wasi-sdk's libc++
+/// imports it, #339). The import is at a newer patch version than the one the `Host` trait is
+/// made from.
+const EXIT_WITH_CODE_COMPONENT: &str = r#"
+(component
+  (import "wasi:cli/exit@0.2.12" (instance
+    (export "exit-with-code" (func (param "status-code" u8))))))
+"#;
+
+const EXIT_WITH_CODE_CORE: &str = r#"
+(module
+  (import "wasi:cli/exit@0.2.12" "exit-with-code" (func $exit (param i32)))
+  (func (export "bye") (param i32) (call $exit (local.get 0))))
+"#;
+
+fn exit_with_code(code: u8) -> Output {
+    run_program(
+        &wat::parse_str(EXIT_WITH_CODE_COMPONENT).unwrap(),
+        EXIT_WITH_CODE_CORE,
+        "WasiHost::new(Vec::new())",
+        &format!("inst.bye({code});"),
+    )
+}
+
+#[test]
+fn exit_with_code_exits_with_the_status_code() {
+    assert_eq!(exit_with_code(42).status.code(), Some(42));
+}
+
+#[test]
+fn exit_with_code_zero_is_a_successful_exit() {
+    assert_eq!(exit_with_code(0).status.code(), Some(0));
+}

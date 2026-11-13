@@ -1,15 +1,45 @@
 //! `wasm2rs-wasi/src/generated.rs` is the checked-in output of the generator for the official
-//! WASI 0.2.0 WIT (`tests/wasi_p2_wit/`); this test regenerates it and fails on any
+//! WASI 0.2.0 WIT (`tests/wasi_p2_wit/`) plus its overlay of later additions
+//! (`tests/wasi_p2_wit/overlay/`); this test regenerates it and fails on any
 //! difference. After a generator change, refresh the file with
 //! `WASM2RS_BLESS=1 cargo test --test it wasi_generated`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use wasm2rs::{WitNaming, WitOptions, wit_host_trait_with_options};
 
 const GENERATED: &str = "wasm2rs-wasi/src/generated.rs";
 
-/// The component of every WASI 0.2.0 interface (`world all` of `tests/wasi_p2_wit`).
+/// `package`'s directory under `tests/wasi_p2_wit` with the files of the same name under
+/// `tests/wasi_p2_wit/overlay` laid over it (copied to a scratch directory, since
+/// `Resolve::push_dir` reads a directory).
+fn package_dir(root: &Path, package: &str) -> PathBuf {
+    let overlay = root.join("overlay").join(package);
+    if !overlay.is_dir() {
+        return root.join(package);
+    }
+    // unique per call: tests run in parallel and each builds its own copy
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
+    let merged = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "wasi_p2_wit-{package}-{}-{call}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&merged).unwrap();
+    for dir in [root.join(package), overlay] {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "wit") {
+                std::fs::copy(&path, merged.join(path.file_name().unwrap())).unwrap();
+            }
+        }
+    }
+    merged
+}
+
+/// The component of every WASI 0.2.0 interface and overlay addition (`world all` of
+/// `tests/wasi_p2_wit`).
 pub fn wasi_p2_component() -> Vec<u8> {
     use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
     use wit_parser::{ManglingAndAbi, Resolve};
@@ -24,7 +54,7 @@ pub fn wasi_p2_component() -> Vec<u8> {
         "cli",
         "http",
     ] {
-        resolve.push_dir(root.join(package)).unwrap();
+        resolve.push_dir(package_dir(&root, package)).unwrap();
     }
     let package = resolve
         .push_str(

@@ -97,7 +97,7 @@ Each toolchain was run end to end (`transpile_component`, `rustc`, run) with `ex
 | Go (`GOOS=wasip1` + adapter) | only with an empty environment | not tried | The adapter's pages overlap Go's heap when the environment is inherited; wasmtime fails the same way (#311). |
 | TinyGo (`-target=wasip2`) | works | not tried | About 24 s to build and run a hello. |
 | wasi-sdk C (`wasm32-wasip2`) | works | not tried | About 5 s to build and run a hello (warm `wasm2rs-wasi` build). |
-| wasi-sdk C++ (`wasm32-wasip2`) | does not build | not tried | The program imports `wasi:cli/exit`'s `exit-with-code`, which the 0.2.0 `Host` lacks (#339). |
+| wasi-sdk C++ (`wasm32-wasip2`, `-fno-exceptions`) | works | not tried | About 10 s to build and run a `std::cout` hello (warm `wasm2rs-wasi` build). It imports `wasi:cli/exit`'s `exit-with-code`, added to the 0.2.0 `Host` by an overlay (#339). |
 | `cargo component` (custom world, `wasm32-wasip1` + adapter) | n/a (no `run` export) | not tried | The library world's exports are called through the typed `Exports` trait (see the survey). |
 
 ### Usage

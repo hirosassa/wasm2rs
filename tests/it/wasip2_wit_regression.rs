@@ -28,9 +28,10 @@ fn methods(source: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn the_trait_declares_every_wasi_0_2_0_method() {
-    // 199 methods in the 29 interfaces of the official 0.2.0 WIT
-    assert_eq!(methods(&generate()).len(), 199);
+fn the_trait_declares_every_wasi_0_2_0_method_and_the_overlay() {
+    // 199 methods in the 29 interfaces of the official 0.2.0 WIT, plus `exit-with-code` of
+    // `tests/wasi_p2_wit/overlay/`
+    assert_eq!(methods(&generate()).len(), 200);
 }
 
 #[test]

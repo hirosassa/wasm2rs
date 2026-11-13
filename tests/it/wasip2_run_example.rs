@@ -251,6 +251,25 @@ fn a_real_wasi_sdk_c_component_prints_hello() {
     assert!(out.status.success());
 }
 
+/// A component wasi-sdk's `clang++ --target=wasm32-wasip2 -fno-exceptions` made from a C++
+/// `main` using `std::cout` (wasi-sdk 34, 3.2 MB) prints its greeting. It imports
+/// `wasi:cli/exit@0.2.12`'s `exit-with-code`, which `tests/wasi_p2_wit/overlay/` adds to the
+/// 0.2.0 WIT (#339). The file is not in the repository: set `WASM2RS_WASISDK_CPP_HELLO_COMPONENT`
+/// to it and run with `--ignored`.
+#[test]
+#[ignore = "needs WASM2RS_WASISDK_CPP_HELLO_COMPONENT (a wasi-sdk C++ wasm32-wasip2 component)"]
+fn a_real_wasi_sdk_cpp_component_prints_hello() {
+    let path = std::env::var_os("WASM2RS_WASISDK_CPP_HELLO_COMPONENT")
+        .expect("WASM2RS_WASISDK_CPP_HELLO_COMPONENT names the component");
+    let out = run_example(&std::fs::read(path).unwrap(), "real-wasisdk-cpp", &[]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("hello from wasi-sdk C++"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success());
+}
+
 #[test]
 fn an_error_result_from_run_is_a_nonzero_exit_code() {
     let out = run_example(&component(), "fail", &["a", "b"]);
