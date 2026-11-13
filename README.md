@@ -86,7 +86,7 @@ wasm2rs --dump module.wasm                       # inspect without generating co
 
 ### Verified toolchains
 
-Each toolchain was run end to end (`transpile_component`, `rustc`, run) with `examples/wasip2_run` (`wasi:cli/run`) and, where the table says so, `examples/wasip2_serve` (`wasi:http/incoming-handler`). Details, timings and reproduction commands are in [docs/component-toolchain-survey.md](docs/component-toolchain-survey.md).
+Each toolchain was run end to end (`transpile_component`, `rustc`, run) with `examples/wasip2_run` (`wasi:cli/run`) and, where the table says so, `examples/wasip2_serve` (`wasi:http/incoming-handler`); a library world without `run` was called through the typed `Exports` trait instead. Details, timings and reproduction commands are in [docs/component-toolchain-survey.md](docs/component-toolchain-survey.md).
 
 | Toolchain | `wasi:cli/run` | `wasi:http` | Notes |
 |---|---|---|---|
@@ -95,8 +95,10 @@ Each toolchain was run end to end (`transpile_component`, `rustc`, run) with `ex
 | Python (`componentize-py`, CPython as 14 dynamically linked core modules) | works | works | `-C opt-level=1` takes about 5.5 minutes and 7.5 GB; `-C opt-level=0` serves in about 75 s. |
 | JS (`jco componentize`) | works | works | `-C opt-level=0` only (about 90 s). At `-C opt-level=1` LLVM did not finish in 80 minutes (#331). |
 | Go (`GOOS=wasip1` + adapter) | only with an empty environment | not tried | The adapter's pages overlap Go's heap when the environment is inherited; wasmtime fails the same way (#311). |
-
-TinyGo, `cargo-component` with a custom world and wasi-sdk C/C++ components are untried.
+| TinyGo (`-target=wasip2`) | works | not tried | About 24 s to build and run a hello. |
+| wasi-sdk C (`wasm32-wasip2`) | works | not tried | About 5 s to build and run a hello (warm `wasm2rs-wasi` build). |
+| wasi-sdk C++ (`wasm32-wasip2`) | does not build | not tried | The program imports `wasi:cli/exit`'s `exit-with-code`, which the 0.2.0 `Host` lacks (#339). |
+| `cargo component` (custom world, `wasm32-wasip1` + adapter) | n/a (no `run` export) | not tried | The library world's exports are called through the typed `Exports` trait (see the survey). |
 
 ### Usage
 
