@@ -6,8 +6,9 @@ use std::process::Command;
 use wasm2rs::{ComponentOptions, transpile_component_with_exports};
 
 /// Transpiles `component` with [`transpile_component_with_exports`] and checks that it lifts
-/// `{interface}#{func}` directly (a missing export, or an adapter in between, is reported here,
-/// before the build; a transpile error takes precedence over a missing export). The interface
+/// `{interface}#{func}` (a missing export is reported here, before the build; a transpile
+/// error takes precedence over a missing export). A component made with a preview1 adapter
+/// qualifies: `transpile_component` links its modules and the lift is found all the same. The interface
 /// matches at any patch version (`wasi:cli/run@0.2.3`, as an adapter exports it, is `@0.2.0`'s
 /// too). Returns the code and the interface as the component names it. The error is the message to print.
 pub fn transpile_exporting(

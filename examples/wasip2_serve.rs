@@ -14,12 +14,14 @@
 //! request with `Transfer-Encoding` is 501; a head over 64 KiB or a body over 1 MiB is 413; a
 //! malformed request line, header, `Content-Length` or an unsupported version is 400; a client
 //! that has not sent its whole request within 5 seconds is 408. The answer is read once the
-//! guest's `handle` returned (no streaming): no response set is 500, an `error-code` set is 502
+//! guest's `handle` returned; its body then follows the guest's `outgoing-body` (a finished one
+//! goes with a `Content-Length`, an open one or one with trailers is chunked, and one idle for
+//! `--body-timeout` is cut): no response set is 500, an `error-code` set is 502
 //! (its name in the body), and a guest trap (panic) is 500 too, after which the instance is
 //! created anew and the server keeps going. Instance state otherwise lasts across requests.
 //!
 //! Exit codes: 2 when the build fails or the component does not lift
-//! `wasi:http/incoming-handler#handle` directly, at any `0.2.x` patch version (or the address cannot be bound). The
+//! `wasi:http/incoming-handler#handle` at any `0.2.x` patch version (or the address cannot be bound). The
 //! build goes in `$WASIP2_WORK_DIR` (default: a temporary directory). Outgoing `wasi:http`
 //! calls are not implemented by this program's host (no `HttpClient`) and the network stays
 //! loopback-only, as in `wasip2_run`. See `docs/wasi-http-design.md`.

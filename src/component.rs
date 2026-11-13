@@ -55,8 +55,8 @@ impl Default for ComponentOptions {
 /// The program module is the one that lifts the component's exports
 /// ([`wit_exports`](crate::wit_exports)); a component without exports uses the module that is
 /// instantiated with the lowered imports (a module that exports no function and has no start
-/// function is wiring, as `wit-component`'s fixup module, and is skipped). Other core modules
-/// (shims) are not emitted.
+/// function is wiring, as `wit-component`'s fixup module, and is skipped). On this single-module
+/// path the other core modules (shims) are not emitted; see below for components that need them.
 ///
 /// A component whose core modules are wired to each other (a preview1 adapter, or exports
 /// lifted from several modules) is transpiled as one program: its modules are linked into a

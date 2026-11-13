@@ -10,7 +10,7 @@
 //! naming the `Host` trait and the interface-qualified types of the library at `<path>`).
 //!
 //! `wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>]
-//! <component.wasm> [output]` to write a component's program core module plus the typed `Glue`
+//! <component.wasm> [output]` to write a component's program (its core module, or the linked modules of an adapter component) plus the typed `Glue`
 //! and `Exports` (like `wasm2rs::transpile_component`).
 //!
 //! Reads a WebAssembly binary and writes the transpiled Rust source. With no

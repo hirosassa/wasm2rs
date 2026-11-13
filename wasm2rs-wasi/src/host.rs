@@ -1,7 +1,7 @@
 //! A WASI preview2 host written against the typed [`Host`](crate::Host) trait. It has no
 //! canonical-ABI code: strings, lists, results and resources arrive as Rust values, and the
 //! `Glue` that `wasm2rs --wit-host --glue --external-types=wasm2rs_wasi` generates per component lowers
-//! them to the module's flat `Imports`. It covers
+//! them to the module's flat `Imports`. It starts with
 //! the interfaces a `println!` program uses: stdout, the environment, the arguments
 //! (`with_arguments`), exit, output streams and pollables, stderr and the terminal
 //! queries (not a terminal), which a std program asks for at startup. Handles: 0 = stdin,
