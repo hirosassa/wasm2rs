@@ -17,7 +17,7 @@ The generated code preserves WebAssembly semantics (wrapping arithmetic, linear-
 - **Memory-efficient** on very large modules: output can be split across many files ([split output](docs/cli-reference.md#single-file-vs-split-output)).
 - **Wide proposal coverage**: SIMD and relaxed SIMD, atomics and shared memory, multi-memory, tail calls, exception handling (including legacy), GC, stack-switching continuations.
 - **WASI**: preview1 is implemented natively, other imports go through a generated host `Imports` trait; wasi-threads and emscripten builds run on native threads ([docs/wasi-threads-e2e.md](docs/wasi-threads-e2e.md)). The preview1 preopen check is check-then-use and can be raced by a sibling wasi-threads thread or a host process that swaps in a symlink; see the known limitation in [docs/cli-reference.md](docs/cli-reference.md).
-- **Components (WASI 0.2)**: `--component` transpiles a `wasm32-wasip2` component against the typed `wasm2rs-wasi` host, including `wasi:http` ([docs/wasi-p2-status.md](docs/wasi-p2-status.md)).
+- **Components (WASI 0.2)**: `--component` transpiles a component (Rust, Python, JS; preview1-adapter components too) against the typed `wasm2rs-wasi` host, including `wasi:http` ([verified toolchains](#components), [docs/wasi-p2-status.md](docs/wasi-p2-status.md)).
 - **Parallel code generation** with byte-identical output (`--jobs`).
 
 ## Installation
@@ -80,6 +80,43 @@ wasm2rs --dump module.wasm                       # inspect without generating co
 - **Single file**: when both `funcs_per_file` and `max_bytes_per_file` are `0` (the default), the module is emitted as one Rust source file (to `output`, or stdout).
 - **Split output**: when either cap is positive, `output` is a directory holding a `lib.rs` crate root, `funcs_0.rs`, `funcs_1.rs`, … and a ready-to-use `Cargo.toml`. Build it with `cargo build --release` inside that directory.
 
+## Components
+
+`--component` takes a WebAssembly component (WASI 0.2) and writes one Rust source: the component's core modules linked into one `Instance`, plus a `Glue` that connects them to the typed `wasm2rs-wasi` host and an `Exports` trait for the lifted exports. Build the result with `rustc` or `cargo` against the `wasm2rs-wasi` crate.
+
+### Verified toolchains
+
+Each toolchain was run end to end (`transpile_component`, `rustc`, run) with `examples/wasip2_run` (`wasi:cli/run`) and `examples/wasip2_serve` (`wasi:http/incoming-handler`). Details, timings and reproduction commands are in [docs/component-toolchain-survey.md](docs/component-toolchain-survey.md).
+
+| Toolchain | `wasi:cli/run` | `wasi:http` | Notes |
+|---|---|---|---|
+| Rust `wasm32-wasip2` | works | works | About 16 s to build and run a hello. |
+| Rust `wasm32-wasip1` + preview1 adapter | works | not tried | The adapter is linked into the same `Instance`. |
+| Python (`componentize-py`, CPython as 14 dynamically linked core modules) | works | works | `-C opt-level=1` takes about 5.5 minutes and 7.5 GB; `-C opt-level=0` serves in about 75 s. |
+| JS (`jco componentize`) | works | works | `-C opt-level=0` only (about 90 s). At `-C opt-level=1` LLVM did not finish in 80 minutes (#331). |
+| Go (`GOOS=wasip1` + adapter) | only with an empty environment | not tried | The adapter's pages overlap Go's heap when the environment is inherited; wasmtime fails the same way (#311). |
+
+TinyGo, `cargo-component` with a custom world and wasi-sdk C/C++ components are untried.
+
+### Usage
+
+```bash
+rustc --target wasm32-wasip2 -O hello.rs -o hello.wasm
+wasm2rs --component hello.wasm hello_component.rs   # one Rust source (stdout if omitted)
+
+cargo run --release --example wasip2_run -- hello.wasm                # transpile, build and run wasi:cli/run
+cargo run --release --example wasip2_serve -- handler.wasm --listen 127.0.0.1:8080   # serve wasi:http/incoming-handler
+```
+
+The examples build the component with `rustc -C opt-level=1`; set `WASM2RS_EXAMPLE_OPT_LEVEL=0` to change the level. From Rust code use `wasm2rs::transpile_component`, `wasm2rs::build::transpile_component_to_out_dir` and `wasm2rs_macros::include_component!` ([docs/library-api.md](docs/library-api.md)).
+
+### Known limits
+
+- **Large components: start at `opt-level=0`.** The JS and Python components produce 125 MB and 122 MB of Rust, and LLVM time is the bottleneck, not wasm2rs (about 1 s to transpile Python).
+- **One source only.** `--component` refuses the split arguments (`funcs_per_file`, `max_bytes_per_file`); the other generated-code flags that it supports are `--unsafe-memory`, `--simd-intrinsics`, `--jobs`, `--split-dispatch`, `--call-depth-limit` and `--external-types`.
+- **Linked core modules (adapters, dylink libraries) may only use MVP, sign-extension, saturating float-to-int, bulk-memory and reference-types operators.** Any other operator (SIMD, atomics, exceptions, ...) is refused with an error naming it; lifts that allocate through different `realloc` functions of several modules are also refused (#314).
+- `wasip2_serve` serves one request at a time over loopback HTTP/1.x; `wasip2_run` and `wasip2_serve` have no outgoing HTTP client.
+
 ## Library API
 
 ```rust
@@ -117,8 +154,10 @@ mod foo {
 
 - [CLI reference](docs/cli-reference.md): every argument and flag
 - [Library API](docs/library-api.md): `TranspileOptions`, split API, `build.rs`, proc macros, components, WIT API
+- [Component toolchain survey](docs/component-toolchain-survey.md): which real components run, with timings and reproduction commands
 - [WASI p2 status](docs/wasi-p2-status.md), [typed host design](docs/typed-host-design.md), [`wasm2rs-wasi` design](docs/wasm2rs-wasi-design.md), [`wasi:http` design](docs/wasi-http-design.md)
 - [Component input](docs/component-input-design.md), [component exports](docs/component-exports-design.md), [component model PoC](docs/component-model-poc.md)
+- [Core module linking](docs/core-module-linking-design.md), [dynamic linking (`componentize-py`)](docs/f2-dynamic-linking-design.md), [`rustc` time on large components](docs/f4-rustc-time-spike.md)
 - [wasi-threads end-to-end tests](docs/wasi-threads-e2e.md)
 - [Differential fuzzing](docs/differential-fuzzing.md), [HTTP fuzzing server](docs/fuzzing-http-server.md), [bounds-check benchmark](docs/bounds-check-bench.md)
 - [CONTRIBUTING](CONTRIBUTING.md) and [CHANGELOG](CHANGELOG.md)
