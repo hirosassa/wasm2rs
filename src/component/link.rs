@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
 
 use super::Layout;
+use crate::codegen;
 use crate::link::{ImportSources, LinkModule, Source, link, rewrite_bodies};
 use crate::parse::{ModuleIr, parse_module};
 use crate::wit::{HostFunc, Supplier, WiredInstance, core_wiring, wit_host_glue_for_module};
@@ -187,8 +188,10 @@ pub(super) fn transpile_linked(
         });
     }
 
-    let import_realloc = import_realloc(&at, &reallocs, &mut modules)?;
-    carry_lifts(&members, exports, &mut modules)?;
+    let mut plan = UnitExports::default();
+    let (lifts, lift_realloc) = name_lifts(&members, exports, &mut plan)?;
+    let import_realloc = import_realloc(&at, &reallocs, lift_realloc.as_ref(), &mut plan)?;
+    plan.apply(&mut modules)?;
 
     let rewritten = rewrite_bodies(&modules)?;
     let ir: ModuleIr<'_> = link(modules, &rewritten)?;
@@ -199,6 +202,7 @@ pub(super) fn transpile_linked(
         wit,
         &core_imports,
         import_realloc.as_deref(),
+        Some(lifts),
     )?);
     Ok(out)
 }
@@ -242,12 +246,13 @@ fn rename(
 }
 
 /// The export of the linked program that the lowered imports allocate through, or `None` when
-/// it is the lifts' `cabi_realloc` (or nothing allocates). An appended module's is carried
-/// under [`IMPORT_REALLOC`].
+/// it is the lifts' `cabi_realloc` (or nothing allocates). Otherwise it is exported under
+/// [`IMPORT_REALLOC`].
 fn import_realloc(
     at: &BTreeMap<u32, usize>,
     reallocs: &[(u32, String)],
-    modules: &mut [LinkModule<'_>],
+    lift_realloc: Option<&Realloc>,
+    plan: &mut UnitExports,
 ) -> Result<Option<String>, TranspileError> {
     let [(instance, name)] = reallocs else {
         return if reallocs.is_empty() {
@@ -261,25 +266,102 @@ fn import_realloc(
     let provider = at.get(instance).copied().ok_or_else(|| {
         unsupported("the `realloc` of a lowered import is not an export of a core module")
     })?;
-    if provider == 0 {
-        // The program's own export, already part of the unit.
-        return Ok((name != "cabi_realloc").then(|| name.clone()));
+    if lift_realloc.is_some_and(|(k, own)| *k == provider && own == name) {
+        return Ok(None);
     }
-    modules
-        .get_mut(provider)
-        .ok_or_else(|| TranspileError::Internal("realloc provider out of range".into()))?
-        .carried
-        .push((name.clone(), IMPORT_REALLOC.to_string()));
+    if lift_realloc.is_none() && provider == 0 && name == "cabi_realloc" {
+        // The program's own export: the glue's default allocator.
+        plan.add(provider, name, "cabi_realloc");
+        return Ok(None);
+    }
+    plan.add(provider, name, IMPORT_REALLOC);
     Ok(Some(IMPORT_REALLOC.to_string()))
 }
 
-/// Keeps the core exports the component lifts (and their `realloc` and `post-return`) from
-/// the modules that are appended to the program, so the glue can call them.
-fn carry_lifts(
+/// The name the unit exports the core function of a lift under: the lift's own WIT name
+/// (`interface#name`, as `wit-component` names it), which is unique in the component and does
+/// not depend on what the core modules happen to call their exports.
+fn unit_name(e: &WitExport) -> String {
+    if e.func.interface.is_empty() {
+        e.func.name.clone()
+    } else {
+        format!("{}#{}", e.func.interface, e.func.name)
+    }
+}
+
+/// A `realloc` function: its member and the module's own export name.
+type Realloc = (usize, String);
+
+/// The exports of the linked unit: (member, the module's own export name, the unit's name).
+/// The same function may be exported under several names.
+#[derive(Default)]
+struct UnitExports(Vec<(usize, String, String)>);
+
+impl UnitExports {
+    fn add(&mut self, member: usize, own: &str, unit: &str) {
+        if !self
+            .0
+            .iter()
+            .any(|(m, o, u)| *m == member && o == own && u == unit)
+        {
+            self.0.push((member, own.to_string(), unit.to_string()));
+        }
+    }
+
+    /// Hands each module its exports: the program's replace its export list (so everything
+    /// else it exports is dropped), an appended module's are carried.
+    fn apply(self, modules: &mut [LinkModule<'_>]) -> Result<(), TranspileError> {
+        let missing = || TranspileError::Internal("lifted module out of range".into());
+        let program = modules.first_mut().ok_or_else(missing)?;
+        let mut kept = Vec::new();
+        for (m, own, unit) in &self.0 {
+            if *m != 0 {
+                continue;
+            }
+            let export = program
+                .ir
+                .exports
+                .iter()
+                .find(|e| e.name == *own)
+                .ok_or_else(|| {
+                    unsupported(format!("the program does not export function `{own}`"))
+                })?;
+            kept.push(codegen::ExportInfo {
+                name: unit.clone(),
+                func_index: export.func_index,
+            });
+        }
+        program.ir.exports = kept;
+        for (m, own, unit) in self.0 {
+            if m != 0 {
+                modules
+                    .get_mut(m)
+                    .ok_or_else(missing)?
+                    .carried
+                    .push((own, unit));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Decides the exports of the linked unit (decision Q4): what the component lifts, and the
+/// `realloc` and `post-return` they name; the core modules' other exports are internal wiring
+/// and are dropped. Returns the lifts with their core export names changed to the unit's, and
+/// the function the lifts allocate through (the first lift's `realloc`).
+///
+/// The glue allocates through one `cabi_realloc` only, so the first lift's realloc is that and
+/// the realloc of a lift from a different function is exported as `cabi_realloc_m{module}_{n}`,
+/// which the glue refuses to use when the lift allocates.
+fn name_lifts(
     members: &[Member<'_>],
     exports: &[WitExport],
-    modules: &mut [LinkModule<'_>],
-) -> Result<(), TranspileError> {
+    plan: &mut UnitExports,
+) -> Result<(Vec<WitExport>, Option<Realloc>), TranspileError> {
+    let mut lifts = Vec::with_capacity(exports.len());
+    let mut lift_realloc: Option<Realloc> = None;
+    // The other reallocs, numbered so that two in one module stay apart.
+    let mut others: Vec<Realloc> = Vec::new();
     for e in exports {
         let Some(k) = members.iter().position(|m| m.ordinal == e.core_module) else {
             return Err(TranspileError::Internal(format!(
@@ -287,25 +369,36 @@ fn carry_lifts(
                 e.core_export
             )));
         };
-        if k == 0 {
-            continue;
+        let unit = unit_name(e);
+        plan.add(k, &e.core_export, &unit);
+        let mut lift = e.clone();
+        lift.core_export = unit.clone();
+        if let Some(own) = &e.post_return {
+            let name = format!("cabi_post_{unit}");
+            plan.add(k, own, &name);
+            lift.post_return = Some(name);
         }
-        let carried = &mut modules
-            .get_mut(k)
-            .ok_or_else(|| TranspileError::Internal("lifted module out of range".into()))?
-            .carried;
-        for name in [
-            Some(&e.core_export),
-            e.realloc.as_ref(),
-            e.post_return.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if !carried.iter().any(|(own, to)| own == name && to == name) {
-                carried.push((name.clone(), name.clone()));
-            }
+        if let Some(own) = &e.realloc {
+            let first = lift_realloc.get_or_insert_with(|| (k, own.clone()));
+            let name = if (first.0, first.1.as_str()) == (k, own.as_str()) {
+                "cabi_realloc".to_string()
+            } else {
+                let at = match others
+                    .iter()
+                    .position(|(m, o)| (*m, o.as_str()) == (k, own.as_str()))
+                {
+                    Some(at) => at,
+                    None => {
+                        others.push((k, own.clone()));
+                        others.len()
+                    }
+                };
+                format!("cabi_realloc_m{}_{at}", e.core_module)
+            };
+            plan.add(k, own, &name);
+            lift.realloc = Some(name);
         }
+        lifts.push(lift);
     }
-    Ok(())
+    Ok((lifts, lift_realloc))
 }
