@@ -248,3 +248,27 @@ change).
 - Not investigated: the speed of the resulting program, and the shape of the host-import glue
   duplicates (`..._13782`: libc and the adapter import the same WIT functions), which already
   work for the adapter case.
+
+## 9. Result of F2-1 to F2-5 (2026-11-13)
+
+All four link-side stages landed (#322 memory option, #324 per-import `realloc`, #326
+`trunc_sat` and imported-global segment offsets, #327 glue for export-only types and for
+modules without host imports) together with F4-1 (#321). `py-hello.wasm` now goes all the way
+[verified]:
+
+| Step | Result |
+|---|---|
+| `transpile_component` | 1.1 s, 122 MB `program.rs`, no linker error |
+| `rustc -C opt-level=1` + link (via `examples/wasip2_run`, release) | 337 s wall in total, 7.5 GB peak RSS |
+| run | prints `hello from python`, exit code 0 |
+
+- `wasi:cli/run#run` runs **without** a prior `exports#init` call, as inferred in section 8:
+  the init transform had already frozen the initialized memory into `main`'s data segments.
+- The ignored test `a_real_componentize_py_component_prints_hello`
+  (`WASM2RS_PY_HELLO_COMPONENT`, `tests/it/wasip2_run_example.rs`) pins this; it takes about 330 s.
+- Not done: `TableFill::ImportedGlobal` (a table initializer reading an imported global) is still
+  refused in a linked module; the fixture does not need it. A mutable provider global cannot be
+  named by a constant expression (invalid wasm), so G4's refusal is only reachable for an
+  immutable global whose initializer is not a constant (tested in `link::tests`).
+- Found on the way: #325 (instantiated modules are dropped when every lift comes from one
+  module), #323 and #317 (fixed in #327).
