@@ -13,7 +13,7 @@ source file** to look at the next character. On one 124 MB file that is quadrati
 accounts for about 90% of the time (system time equals user time, [inferred] from the huge
 allocations). The generated code is full of such parentheses (`self.w32(((a) + (b)), v)`), and
 `#[allow(unused_parens)]` does **not** switch the work off. Two independent fixes both bring the
-JS component from **587 s to about 61 s** (`program.rs`; 568 s -> 62 s for the equivalent core module) [verified]: (A) do not emit those parentheses,
+JS `program.rs` from **587 s to about 61 s** (`program.rs`; 568 s -> 62 s for the equivalent core module) [verified]: (A) do not emit those parentheses,
 (B) emit several smaller source files. **Recommendation: A** (small, no layout change), keep B
 as a follow-up for the memory floor.
 
