@@ -27,7 +27,7 @@ linked from each section.
 | A2: component exports (`wit_exports`, the typed `Exports` trait, `wasip2_run` calls `run`) | #181 to #183, #187, #188 | [component-exports-design.md](component-exports-design.md) |
 | `wasi:http` client and server methods (H1 to H5) | #189 to #194 | [wasi-http-design.md](wasi-http-design.md) |
 | Serving a component over TCP (`wasip2_serve`) | #196, #210 | [wasi-http-design.md](wasi-http-design.md) |
-| Core module linking (adapter components, exports from several modules, dylink-style components such as `componentize-py`) | L1 to L5 (#307, #309, #310, #312, #315), F2-1 to F2-5 (#322, #324, #326 to #328), #329 | [core-module-linking-design.md](core-module-linking-design.md), [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md), [component-toolchain-survey.md](component-toolchain-survey.md) |
+| Core module linking (adapter components, exports from several modules, dylink-style components such as `componentize-py`) | L1 to L5 (#307 to #310, #312, #315), F2-1 to F2-5 (#322, #324, #326 to #328), #329 | [core-module-linking-design.md](core-module-linking-design.md), [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md), [component-toolchain-survey.md](component-toolchain-survey.md) |
 | A3: component input (`transpile_component`, the examples use it, `--component`, `transpile_component_to_out_dir`, `include_component!`, `transpile_component_with_exports`) | #198 to #201, #203, #212 | [component-input-design.md](component-input-design.md) |
 | P3: stdin pollable lifecycle, preopen TOCTOU-safe file access | #202, #204 | [typed-host-design.md](typed-host-design.md) |
 | `wasi:http` follow-ups (incoming side, streaming, client trailers) | #206, #210, #211 | [wasi-http-design.md](wasi-http-design.md) |
@@ -43,7 +43,7 @@ linked from each section.
 | Include the result | `wasm2rs_macros::include_component!("stem")`: the name is the input's file stem, without `.wasm` |
 | Configure the host | `wasm2rs_wasi::WasiHost::builder()` (arguments, environment, preopens, `NetworkPolicy`, clock, random, stdio, `http_client`) |
 | Make HTTP requests from a guest | `WasiHost::builder().http_client(UreqClient::new())` with the `http-client` feature |
-| Run a `wasi:cli/run` component | `cargo run --release --example wasip2_run -- component.wasm` (`rustc` runs at `-C opt-level=1`; `WASM2RS_EXAMPLE_OPT_LEVEL=0` selects another level, needed for the JS guests) |
+| Run a `wasi:cli/run` component | `cargo run --release --example wasip2_run -- component.wasm` (`rustc` runs at `-C opt-level=1`; `WASM2RS_EXAMPLE_OPT_LEVEL` selects another level; `0` is needed for the JS guests) |
 | Serve a `wasi:http/incoming-handler` component | `cargo run --release --example wasip2_serve -- component.wasm --listen 127.0.0.1:8080` (the handler may be exported at any `0.2.x` patch version) |
 
 ## Known limitations
@@ -82,8 +82,8 @@ Transpilation of a component (errors that say why):
   path, byte-identical. See [core-module-linking-design.md](core-module-linking-design.md) and
   [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md). Which real toolchains work
   (Rust, Rust + preview1 adapter, Go, `jco`, `componentize-py`, `wasi:http` handlers) is in
-  [component-toolchain-survey.md](component-toolchain-survey.md); the JS and Python guests need
-  `-C opt-level=0` / a long `rustc` run (#331).
+  [component-toolchain-survey.md](component-toolchain-survey.md); JS guests need
+  `-C opt-level=0` (#331) and Python ones a long `rustc` run.
 - The CLI cannot turn `external_types` off (`--component` always uses a library, `wasm2rs_wasi`
   by default); only the library API can emit the types into the output.
 - The component bytes are parsed several times inside one transpilation (layout scan,

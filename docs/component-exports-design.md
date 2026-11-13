@@ -3,7 +3,7 @@
 Status: A2-1 (the decoder), A2-2 (the `Exports` trait), A2-3 (`wasip2_run` calls the typed `run`) and A2-4 (cleanup) are implemented. The `wasi:http` host this document defers is implemented too (see [wasi-http-design.md](wasi-http-design.md)).
 Update: the single-instance limits below were lifted by core module linking. Exports lifted from
 several core modules, a lift whose `memory` option is a memory the module imports from the program,
-and lifts reached through a preview1 adapter's shim are supported for `transpile_component` (the
+and lifts from a preview1 adapter module (a direct export of the instantiated adapter) are supported for `transpile_component` (the
 modules are linked into one `Instance`, see [core-module-linking-design.md](core-module-linking-design.md)).
 Still refused: lifts that allocate through different `realloc` functions of several modules (#314).
 `wit_exports` itself still reads only a lift that is a direct export of an instantiated core module.
