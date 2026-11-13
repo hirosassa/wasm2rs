@@ -1041,9 +1041,11 @@ fn write_export(
     let realloc = e.realloc.as_deref().and_then(export_method);
     if allocates && realloc.as_deref() != Some(REALLOC) {
         return Err(unsupported(format!(
-            "export `{}`: allocating guest memory needs the lift's realloc to be \
-             `{REALLOC}` (the lift names {})",
+            "export `{}` (core module {}): allocating guest memory needs the lift's realloc to \
+             be `{REALLOC}` (the lift names {}). Lifts that allocate through different `realloc` \
+             functions (several core modules each with their own) are not supported yet",
             e.core_export,
+            e.core_module,
             realloc.map_or_else(|| "none".to_string(), |i| format!("`{i}`")),
         )));
     }

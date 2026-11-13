@@ -832,7 +832,7 @@ pub fn wit_host_glue_with_options(
     component: &[u8],
     options: &WitOptions,
 ) -> Result<String, TranspileError> {
-    glue_text(component, options, None, None)
+    glue_text(component, options, None, None, None)
 }
 
 /// A function import of the program core module that its `Imports` trait declares.
@@ -851,13 +851,22 @@ pub(crate) struct CoreImport {
 ///
 /// `import_realloc` is the export of the program that the lowered imports allocate through
 /// when it is not the lifts' `cabi_realloc` (a linked adapter's `cabi_import_realloc`).
+/// `lifts` replaces the exports read from the component: a linked unit names the core exports
+/// of its lifts itself (see `component::link`).
 pub(crate) fn wit_host_glue_for_module(
     component: &[u8],
     options: &WitOptions,
     core_imports: &[CoreImport],
     import_realloc: Option<&str>,
+    lifts: Option<Vec<WitExport>>,
 ) -> Result<String, TranspileError> {
-    glue_text(component, options, Some(core_imports), import_realloc)
+    glue_text(
+        component,
+        options,
+        Some(core_imports),
+        import_realloc,
+        lifts,
+    )
 }
 
 fn glue_text(
@@ -865,10 +874,14 @@ fn glue_text(
     options: &WitOptions,
     core_imports: Option<&[CoreImport]>,
     import_realloc: Option<&str>,
+    lifts: Option<Vec<WitExport>>,
 ) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
     let exports = if options.exports {
-        wit_exports(component)?
+        match lifts {
+            Some(lifts) => lifts,
+            None => wit_exports(component)?,
+        }
     } else {
         Vec::new()
     };

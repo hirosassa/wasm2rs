@@ -79,7 +79,7 @@ opt-level, `-Z time-passes`) once F3 lets D build at all.
 1. F3 (glue emits every duplicate import). Small, a real bug, and it tells us whether D runs.
 2. F1 step 1 (clear error for adapter-based input), then F1 step 2 (module linking) as the main
    design item. #185 (exports from several modules) should be designed together with it.
-3. #184 and #186 as small follow-ups (no survey case hit them).
+3. #184 and #186 as small follow-ups (no survey case hit them): both done with F1 step 2 (L3, L4).
 4. F4 measurement after F3.
 5. F2 only after F1 step 2.
 

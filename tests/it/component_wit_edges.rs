@@ -49,8 +49,8 @@ fn exports_lifted_from_two_core_modules_are_linked_into_one_unit() {
         lift_of("a", "fa"),
         lift_of("b", "fb")
     ));
-    assert!(code.contains("pub fn fa("), "{code}");
-    assert!(code.contains("pub fn fb("), "{code}");
+    assert!(code.contains("pub fn ea("), "{code}");
+    assert!(code.contains("pub fn eb("), "{code}");
 }
 
 #[test]

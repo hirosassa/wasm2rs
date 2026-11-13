@@ -1,7 +1,7 @@
 # Linking several core modules (F1 step 2)
 
 Status: L1 (#307), L2 (`src/link.rs`), L2b (tail-import slot) and L3 (component
-integration) are implemented; L4 is next. All open questions are decided (Section 6).
+integration) and L4 (export names) are implemented. All open questions are decided (Section 6).
 
 Background: [component-toolchain-survey.md](component-toolchain-survey.md) (F1/F2),
 [component-input-design.md](component-input-design.md),
@@ -383,6 +383,18 @@ fallback.
   internal wiring exports are dropped (Q4).
   *First failing test*: a WAT component whose two lifted exports come from two
   different core modules (the shape #185 describes) returns both results.
+  *As implemented* (`src/component/link.rs` `name_lifts`/`UnitExports`;
+  `tests/it/component_link_exports.rs`): before L4 a clash failed cleanly with
+  "linked modules export `X` more than once" (no miscompile). Now every lift's core export is
+  exported under the lift's WIT name (`interface#name`, or the bare name; what `wit-component`
+  uses, so typical output is unchanged); its `post-return` as `cabi_post_{name}`; the first
+  lift's `realloc` as `cabi_realloc` (the glue's allocator) and the imports' as
+  `cabi_import_realloc` when different. The program's exports are replaced by this list (other
+  exports are internal wiring and dropped), an appended module's are carried; the glue gets the
+  renamed lifts (`wit_host_glue_for_module(.., lifts)`). **Limit**: the glue allocates through
+  one `cabi_realloc`, so two lifts that *allocate* through different reallocs are refused
+  ("different `realloc` functions ... not supported yet", naming the lift and core module);
+  other reallocs are exported as `cabi_realloc_m{module}_{n}`. Per-export realloc is #314.
 - **L5 real components**: `#[ignore]`d tests (fixtures not committed) for
   `p1-hello.wasm` and `go-hello.wasm` run through `examples/wasip2_run`;
   update the survey table. Reproduction is at the end of the survey.
