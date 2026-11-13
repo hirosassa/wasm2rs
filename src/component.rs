@@ -116,9 +116,15 @@ pub fn transpile_component_with_exports(
         &wit,
         &core_imports,
         None,
-        out.contains("\npub trait Imports"),
+        has_imports_trait(&out),
     )?);
     Ok((out, exports))
+}
+
+/// Whether the transpiled module declares a host (`pub trait Imports`) at the start of a
+/// line (data segments are byte strings on one line, so their contents cannot match).
+fn has_imports_trait(code: &str) -> bool {
+    code.starts_with("pub trait Imports") || code.contains("\npub trait Imports")
 }
 
 /// What the component's program is.

@@ -227,7 +227,7 @@ pub(super) fn transpile_linked(
         wit,
         &core_imports,
         Some(lifts),
-        out.contains("\npub trait Imports"),
+        super::has_imports_trait(&out),
     )?);
     Ok(out)
 }
