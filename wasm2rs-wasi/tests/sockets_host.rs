@@ -5,6 +5,7 @@
 mod common;
 
 use common::{builder, traps};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use wasm2rs_wasi::wasi_io_streams::{InputStream, OutputStream, StreamError};
 use wasm2rs_wasi::wasi_sockets_network::{
@@ -52,8 +53,29 @@ fn tcp(host: &mut WasiHost) -> TcpSocket {
         .unwrap()
 }
 
+/// Held while a test needs a loopback port nobody else may take: the tests run in parallel
+/// and an OS (Windows above all) hands a freed ephemeral port to the next listener at once.
+static PORT_WINDOW: Mutex<()> = Mutex::new(());
+
+fn port_window() -> MutexGuard<'static, ()> {
+    // a test that panicked inside the window leaves nothing to repair
+    PORT_WINDOW.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// A listener on an ephemeral loopback port: the socket and its port.
 fn listener(host: &mut WasiHost) -> (TcpSocket, u16) {
+    let _window = port_window();
+    listener_in_window(host)
+}
+
+/// `start-bind` of a TCP socket to an ephemeral loopback port, which the OS may pick from
+/// the ports `port_window` protects.
+fn start_bind_any(host: &mut WasiHost, s: TcpSocket, net: Network) -> Result<(), Net> {
+    let _window = port_window();
+    host.wasi_sockets_tcp_method_tcp_socket_start_bind(s, net, lo(0))
+}
+
+fn listener_in_window(host: &mut WasiHost) -> (TcpSocket, u16) {
     let s = tcp(host);
     host.wasi_sockets_tcp_method_tcp_socket_start_bind(s, NET, lo(0))
         .unwrap();
@@ -121,8 +143,7 @@ fn pair() -> Pair {
 fn a_tcp_socket_must_go_through_bind_listen_in_order() {
     let mut h = host(NetworkPolicy::Loopback);
     let s = tcp(&mut h);
-    let start_bind =
-        |h: &mut WasiHost, s| h.wasi_sockets_tcp_method_tcp_socket_start_bind(s, NET, lo(0));
+    let start_bind = |h: &mut WasiHost, s| start_bind_any(h, s, NET);
     let finish_bind = |h: &mut WasiHost, s| h.wasi_sockets_tcp_method_tcp_socket_finish_bind(s);
     let start_listen = |h: &mut WasiHost, s| h.wasi_sockets_tcp_method_tcp_socket_start_listen(s);
     let finish_listen = |h: &mut WasiHost, s| h.wasi_sockets_tcp_method_tcp_socket_finish_listen(s);
@@ -206,27 +227,25 @@ fn a_second_bind_to_a_taken_port_is_address_in_use_and_a_retry_is_possible() {
         Err(Net::AddressInUse)
     );
     // the failed bind left the socket unbound: it may try another address
-    assert_eq!(
-        h.wasi_sockets_tcp_method_tcp_socket_start_bind(s, NET, lo(0)),
-        Ok(())
-    );
+    assert_eq!(start_bind_any(&mut h, s, NET), Ok(()));
     assert_eq!(h.wasi_sockets_tcp_method_tcp_socket_finish_bind(s), Ok(()));
 }
 
 #[test]
 fn connecting_to_a_closed_port_is_refused_at_finish_connect() {
     let mut h = host(NetworkPolicy::Loopback);
-    let port = {
-        let (server, port) = listener(&mut h);
-        h.wasi_sockets_tcp_resource_drop_tcp_socket(server);
-        port
-    };
+    // `connect` runs inside `start-connect`: until then no other listener may take the freed
+    // port, or the connection would reach it (and the other test would accept this one)
+    let window = port_window();
+    let (server, port) = listener_in_window(&mut h);
+    h.wasi_sockets_tcp_resource_drop_tcp_socket(server);
     let c = tcp(&mut h);
     assert_eq!(
         h.wasi_sockets_tcp_method_tcp_socket_start_connect(c, NET, lo(port)),
         Ok(()),
         "the refusal shows in finish-connect"
     );
+    drop(window);
     assert_eq!(
         h.wasi_sockets_tcp_method_tcp_socket_finish_connect(c)
             .map(|_| ()),
@@ -279,8 +298,7 @@ fn start_connect_validates_the_peer_address_before_connecting() {
     );
     // a socket with a bind in progress cannot connect
     let b = tcp(&mut h);
-    h.wasi_sockets_tcp_method_tcp_socket_start_bind(b, NET, lo(0))
-        .unwrap();
+    start_bind_any(&mut h, b, NET).unwrap();
     assert_eq!(
         h.wasi_sockets_tcp_method_tcp_socket_start_connect(b, NET, lo(9)),
         Err(Net::NotSupported)
@@ -1213,10 +1231,7 @@ fn the_instance_network_is_one_handle_that_can_be_dropped() {
     let n = h.wasi_sockets_instance_network_instance_network();
     // the address policy is the host's: the handle itself is not looked at
     let s = tcp(&mut h);
-    assert_eq!(
-        h.wasi_sockets_tcp_method_tcp_socket_start_bind(s, n, lo(0)),
-        Ok(())
-    );
+    assert_eq!(start_bind_any(&mut h, s, n), Ok(()));
     h.wasi_sockets_network_resource_drop_network(n);
     // dropping a socket frees its slot for the next one
     let t = tcp(&mut h);
