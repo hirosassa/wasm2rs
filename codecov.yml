@@ -1,6 +1,6 @@
 coverage:
   status:
-    # クレートごとの component status に任せ、全体 status は重複を避けるため無効化する
+    # Per-crate component statuses cover this; disable the global one to avoid duplicate checks
     project: off
     patch:
       default:
@@ -11,11 +11,11 @@ component_management:
   default_rules:
     statuses:
       - type: project
-        target: auto # 個別に target を指定しない component は base commit を下回らないこと
-        threshold: 1% # 微小な変動では落とさない
+        target: auto # Components without an explicit target must not drop below the base commit
+        threshold: 1% # Tolerate tiny fluctuations
   individual_components:
     - component_id: core
-      # 実測 95.24% (2026-11-13) の少し下を下限にする
+      # Floor set slightly below the measured 95.24% (2026-11-13)
       statuses:
         - type: project
           target: 94%
@@ -24,7 +24,7 @@ component_management:
       paths:
         - src/**
     - component_id: macros
-      # 実測 92.27% (2026-11-13) の少し下を下限にする
+      # Floor set slightly below the measured 92.27% (2026-11-13)
       statuses:
         - type: project
           target: 90%
@@ -33,7 +33,7 @@ component_management:
       paths:
         - wasm2rs-macros/**
     - component_id: wasi
-      # 実測 83.93% (2026-11-13) の少し下を下限にする
+      # Floor set slightly below the measured 83.93% (2026-11-13)
       statuses:
         - type: project
           target: 82%
