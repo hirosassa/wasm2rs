@@ -109,6 +109,11 @@ fn component_of_packages(io: &str, cli: &str, world_wit: &str, core: &str) -> Ve
 
 /// Runs `cargo run --example wasip2_run -- <component> <args>` with the work dir `tag`.
 fn run_example(component: &[u8], tag: &str, args: &[&str]) -> Output {
+    run_example_at(component, tag, args, "1")
+}
+
+/// Like [`run_example`], with `rustc -C opt-level=<opt_level>` for the program.
+fn run_example_at(component: &[u8], tag: &str, args: &[&str], opt_level: &str) -> Output {
     let dir =
         std::env::temp_dir().join(format!("wasm2rs-run-example-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -120,6 +125,7 @@ fn run_example(component: &[u8], tag: &str, args: &[&str]) -> Output {
         .arg(&wasm)
         .args(args)
         .env("WASIP2_WORK_DIR", dir.join("work"))
+        .env("WASM2RS_EXAMPLE_OPT_LEVEL", opt_level)
         .output()
         .unwrap()
 }
@@ -187,6 +193,24 @@ fn a_real_componentize_py_component_prints_hello() {
     let out = run_example(&std::fs::read(path).unwrap(), "real-py", &[]);
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("hello from python"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success());
+}
+
+/// A component `jco componentize` made (StarlingMonkey, 13.9 MB, one core module of 12,722
+/// functions) prints its greeting. The file is not in the repository: set
+/// `WASM2RS_JS_HELLO_COMPONENT` to it and run with `--ignored`. The program is built at
+/// `opt-level=0`: at 1 LLVM did not finish in 80 minutes (the build takes 73 s at 0, 7.6 GB peak).
+#[test]
+#[ignore = "needs WASM2RS_JS_HELLO_COMPONENT (a jco componentize component) and a long build"]
+fn a_real_jco_component_prints_hello() {
+    let path = std::env::var_os("WASM2RS_JS_HELLO_COMPONENT")
+        .expect("WASM2RS_JS_HELLO_COMPONENT names the component");
+    let out = run_example_at(&std::fs::read(path).unwrap(), "real-js", &[], "0");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("hello from js"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );

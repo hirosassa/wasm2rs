@@ -14,7 +14,7 @@ directory; the commands are below so the survey can be repeated.
 | A | `rustc --target wasm32-wasip2` (std) | 2.7 MB, one core module | **works** (about 16 s with the `wasm2rs-wasi` build), args passed through |
 | B | `wasm32-wasip1` core + `wasm-tools component new --adapt` (command adapter) | 2.2 MB, main + adapter module | **works** (L3 linking; run in 7.0 s with the `wasm2rs-wasi` build, rustc 1.6 s): prints `hello from rust`. The first run failed only in `wasip2_run`, which looked for `wasi:cli/run@0.2.0` while the adapter exports `@0.2.3` |
 | C | Go (`GOOS=wasip1`) + the same adapter | 2.5 MB, main + adapter module | **runs when the environment is empty; fails with an environment, on wasmtime too** (#311): transpiles and builds (about 3 min in total; rustc 168 s, 4.3 GB peak RSS at `-C opt-level=1`). With an inherited environment it traps with `assertion failed at adapter line 2745` (the adapter's `State` magic) because the adapter's two extra pages (36 -> 38) overlap Go's heap range (`bloc` 36 pages, `blocMax` 38 pages). The same failure reproduces on wasmtime v30.0.0 with `-S inherit-env`; `wasmtime run` passes an empty environment by default, and `env -i` makes the wasm2rs program print `hello from go`. Not a wasm2rs defect: a Go + adapter incompatibility |
-| D | `jco componentize` (StarlingMonkey, JS) | 13.9 MB | **fails** in `rustc` (E0046) after about 10 minutes |
+| D | `jco componentize` (StarlingMonkey, JS) | 13.9 MB | **works at `-C opt-level=0`** (2026-11-13, after F3 and F4-1): prints `hello from js`; `wasip2_run` end to end took **88 s** (rustc 73 s, 7.6 GB peak RSS; the binary is 45 MB and starts in 0.8 s). At `-C opt-level=1`, the `wasip2_run` default, LLVM did **not finish in 80 minutes** (single codegen unit, 125 MB `program.rs`; stuck in IR passes / the machine scheduler of one huge function, and `-C llvm-args=-enable-misched=false` did not help in 40 minutes). `WASM2RS_EXAMPLE_OPT_LEVEL=0` selects the level for the example |
 | E | `componentize-py` (CPython 3.14) | 17.6 MB, 14 core modules (12 without the shim and fixup) | **works** (F2-1 to F2-4, 2026-11-13): transpiles in 1.1 s to a 122 MB source, builds and runs `wasi:cli/run` printing `hello from python`; `wasip2_run` end to end took **337 s** (`rustc -C opt-level=1`, 7.5 GB peak RSS) after F4-1 removed the redundant parentheses. `run` works without calling `exports#init` first (the build-time init transform already ran). See [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md), section 9 |
 
 ## Findings
@@ -53,7 +53,7 @@ blocker was F4; with F4-1 (#321) and the F2-1 to F2-4 link stages (#322, #324, #
 
 ### F3. A function imported twice makes the glue incomplete (D)
 
-The JS component's program module imports the same WIT function twice (for example
+(Fixed: D now builds, see the table.) The JS component's program module imports the same WIT function twice (for example
 `wasi:cli/environment@0.2.12#get-arguments`; why it is imported twice is not yet investigated).
 `named_imports` gives the second one the name `..._81`; the generated `Imports` trait has
 both methods, but the `Glue` impl only emits the first, so `rustc` fails with E0046 "missing
@@ -75,6 +75,11 @@ opt-level, `-Z time-passes`) once F3 lets D build at all.
 
 Measured in [f4-rustc-time-spike.md](f4-rustc-time-spike.md): the time is a quadratic `rustc` early-lint
 cost on redundant parentheses in one huge file (587 s -> 61 s on the JS `program.rs` without them), not a large function and not LLVM.
+
+After F3 and F4-1 the remaining cost for D is in **LLVM at `-C opt-level=1`**, which the metadata-only
+F4 measurements above did not cover: more than 80 minutes without finishing on the JS `program.rs`
+(the Python component, 122 MB, takes 337 s). `opt-level=0` takes 73 s. Cause not isolated (the
+three 40 K-line flattened state machines are the suspects); follow-up in a separate issue.
 
 ### F5. Things that worked and need no work
 
