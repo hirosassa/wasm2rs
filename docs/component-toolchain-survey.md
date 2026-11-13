@@ -16,6 +16,9 @@ directory; the commands are below so the survey can be repeated.
 | C | Go (`GOOS=wasip1`) + the same adapter | 2.5 MB, main + adapter module | **runs when the environment is empty; fails with an environment, on wasmtime too** (#311): transpiles and builds (about 3 min in total; rustc 168 s, 4.3 GB peak RSS at `-C opt-level=1`). With an inherited environment it traps with `assertion failed at adapter line 2745` (the adapter's `State` magic) because the adapter's two extra pages (36 -> 38) overlap Go's heap range (`bloc` 36 pages, `blocMax` 38 pages). The same failure reproduces on wasmtime v30.0.0 with `-S inherit-env`; `wasmtime run` passes an empty environment by default, and `env -i` makes the wasm2rs program print `hello from go`. Not a wasm2rs defect: a Go + adapter incompatibility |
 | D | `jco componentize` (StarlingMonkey, JS) | 13.9 MB | **works at `-C opt-level=0`** (2026-11-13, after F3 and F4-1): prints `hello from js`; `wasip2_run` end to end took **88 s** (rustc 73 s, 7.6 GB peak RSS; the binary is 45 MB and starts in 0.8 s). At `-C opt-level=1`, the `wasip2_run` default, LLVM did **not finish in 80 minutes** (single codegen unit, 125 MB `program.rs`; stuck in IR passes / the machine scheduler of one huge function, and `-C llvm-args=-enable-misched=false` did not help in 40 minutes). `WASM2RS_EXAMPLE_OPT_LEVEL=0` selects the level for the example |
 | E | `componentize-py` (CPython 3.14) | 17.6 MB, 14 core modules (12 without the shim and fixup) | **works** (F2-1 to F2-4, 2026-11-13): transpiles in 1.1 s to a 122 MB source, builds and runs `wasi:cli/run` printing `hello from python`; `wasip2_run` end to end took **337 s** (`rustc -C opt-level=1`, 7.5 GB peak RSS) after F4-1 removed the redundant parentheses. `run` works without calling `exports#init` first (the build-time init transform already ran). See [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md), section 9 |
+| F | Rust `wasm32-wasip2` + `wasi` 0.14 crate, `wasi:http` handler | 114 KB, one core module | **works** (2026-11-14): `wasip2_serve` answers `200`, a header, a body naming the request path and a trailer (`curl -i` shows it after the last chunk); build and start 8 s with the `wasm2rs-wasi` build. It exports `incoming-handler@0.2.12`, which `wasip2_serve` refused until it accepted any patch version (see G1). `#[ignore]` test: `WASM2RS_HTTP_HELLO_COMPONENT` |
+| G | `jco componentize` (StarlingMonkey, JS), `fetch` event | 13.0 MB | **works at `-C opt-level=0`** (2026-11-14): `200`, header and body over `wasip2_serve`; 86 s from start to listening. `-C opt-level=1` is the known F4 problem (#331) |
+| H | `componentize-py`, `IncomingHandler` | 18.4 MB | **works at `-C opt-level=0`** (2026-11-14): `200`, header and body over `wasip2_serve`, also for a second request; 75 s from start to listening |
 
 ## Findings
 
@@ -81,6 +84,19 @@ F4 measurements above did not cover: more than 80 minutes without finishing on t
 (the Python component, 122 MB, takes 337 s). `opt-level=0` takes 73 s. Cause not isolated (the
 three 40 K-line flattened state machines are the suspects); follow-up in a separate issue.
 
+### G1. `wasip2_serve` refused handlers exported at a newer patch version (F)
+
+Real toolchains export `wasi:http/incoming-handler` at the version of their WASI bindings (the
+`wasi` 0.14 crate: `@0.2.12`), not `@0.2.0`. `examples/wasip2_serve.rs` matched the interface at
+any patch version but then rejected anything but `@0.2.0`, and `server.rs` named the generated
+`export_wasi_http_incoming_handler_0_2_0_handle` method. Fixed: the method name now takes the
+version of the interface the component exports. This was the only wall for F, G and H.
+
+jco and componentize-py need the WIT of the version they target: `jco componentize` falls back to
+an old componentize-js (which has no `wasi:http` export) when given WASI WIT older than 0.2.10,
+and `wasm-tools component wit --out-dir` output from a component is not accepted by jco. Use the
+`proposals/*/wit` directories of the `v0.2.10` tag of `WebAssembly/WASI` (below).
+
 ### F5. Things that worked and need no work
 
 - `wasm32-wasip2` std output, including arguments (A).
@@ -95,8 +111,8 @@ three 40 K-line flattened state machines are the suspects); follow-up in a separ
 4. F4 measurement after F3.
 5. F2 only after F1 step 2: done as an investigation; F4 first for the end-to-end goal, see the F2 design.
 
-Not covered yet: TinyGo, `cargo-component` with a custom world, wasi-sdk C/C++ `wasm32-wasip2`
-and `wasi:http` incoming-handler guests in other languages. Add a row to the table when one is
+Not covered yet: TinyGo, `cargo-component` with a custom world and wasi-sdk C/C++ `wasm32-wasip2`
+(and `wasi:http` guests built with them). Add a row to the table when one is
 tried.
 
 ## Reproduction
@@ -116,4 +132,14 @@ npx @bytecodealliance/jco componentize app.js --wit wit --world-name w -o js-hel
 uvx componentize-py -d wit -w w componentize app -o py-hello.wasm   # componentize-py 0.25.1
 # run
 cargo run --release --example wasip2_run -- <component>.wasm
+
+# F (handler = `wasi::http::proxy::export!`; `wasi = "0.14"`, crate-type cdylib)
+cargo build --release --target wasm32-wasip2
+# G, H (wit/: proposals/{cli,clocks,filesystem,http,io,random,sockets}/wit of the v0.2.10 tag of
+# WebAssembly/WASI as wit/deps/<name>/, plus world.wit: `world w { include wasi:http/proxy@0.2.10; }`;
+# G uses `w`, H the same file with the world renamed to `proxy`, as `-w` below)
+npx @bytecodealliance/jco componentize app.js --wit wit --world-name w -o js-handler.wasm
+uvx componentize-py -d wit -w proxy bindings . && uvx componentize-py -d wit -w proxy componentize app -o py-handler.wasm
+# serve, then curl -i http://127.0.0.1:8080/foo?x=1  (WASM2RS_EXAMPLE_OPT_LEVEL=0 for G and H)
+cargo run --release --example wasip2_serve -- <handler>.wasm --listen 127.0.0.1:8080
 ```

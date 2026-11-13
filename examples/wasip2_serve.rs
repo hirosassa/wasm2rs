@@ -19,7 +19,7 @@
 //! created anew and the server keeps going. Instance state otherwise lasts across requests.
 //!
 //! Exit codes: 2 when the build fails or the component does not lift
-//! `wasi:http/incoming-handler@0.2.0#handle` directly (or the address cannot be bound). The
+//! `wasi:http/incoming-handler#handle` directly, at any `0.2.x` patch version (or the address cannot be bound). The
 //! build goes in `$WASIP2_WORK_DIR` (default: a temporary directory). Outgoing `wasi:http`
 //! calls are not implemented by this program's host (no `HttpClient`) and the network stays
 //! loopback-only, as in `wasip2_run`. See `docs/wasi-http-design.md`.
@@ -49,13 +49,16 @@ fn main() {
     let (generated, interface) =
         common::transpile_exporting(&component, HANDLER_INTERFACE, "handle")
             .unwrap_or_else(|err| fail(err));
-    // `server.rs` calls the `0.2.0` method by name.
-    if interface != HANDLER_INTERFACE {
-        fail(format!(
-            "the component exports `{interface}`, not `{HANDLER_INTERFACE}`"
-        ));
-    }
-    let server = include_str!("wasip2_serve/server.rs");
+    // `server.rs` names the method by version; a toolchain may export a newer patch (`@0.2.12`).
+    let version = interface
+        .rsplit('@')
+        .next()
+        .unwrap_or_default()
+        .replace(['.', '-'], "_");
+    let server = include_str!("wasip2_serve/server.rs").replace(
+        "export_wasi_http_incoming_handler_0_2_0_handle",
+        &format!("export_wasi_http_incoming_handler_{version}_handle"),
+    );
     let source = format!("{generated}\n{server}\n");
     let Some(bin) = common::build_program(&dir, &source) else {
         fail(

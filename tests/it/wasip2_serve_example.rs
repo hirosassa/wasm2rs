@@ -3,6 +3,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -30,23 +31,33 @@ fn serve(core: &str, tag: &str) -> Server {
     serve_with(core, tag, &[])
 }
 
-#[allow(
-    clippy::panic,
-    reason = "a test helper: a server that does not start fails the test"
-)]
 fn serve_with(core: &str, tag: &str, extra: &[&str]) -> Server {
+    let dir = work_dir(tag);
+    let wasm = dir.join("component.wasm");
+    std::fs::write(&wasm, proxy_component(core)).unwrap();
+    serve_component(&wasm, &dir, extra)
+}
+
+fn work_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "wasm2rs-serve-example-{}-{tag}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let wasm = dir.join("component.wasm");
-    std::fs::write(&wasm, proxy_component(core)).unwrap();
+    dir
+}
+
+/// Serves the component file `wasm`, building in `dir`.
+#[allow(
+    clippy::panic,
+    reason = "a test helper: a server that does not start fails the test"
+)]
+fn serve_component(wasm: &Path, dir: &Path, extra: &[&str]) -> Server {
     // `cargo run` and the example both `exec` the next program on unix: the child is the server
     let mut child = Command::new(env!("CARGO"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(["run", "--quiet", "--example", "wasip2_serve", "--"])
-        .arg(&wasm)
+        .arg(wasm)
         .args(["--listen", "127.0.0.1:0"])
         .args(extra)
         .env("WASIP2_WORK_DIR", dir.join("work"))
@@ -355,4 +366,26 @@ fn the_body_limit_is_inclusive_and_the_head_limit_holds_either_side() {
     };
     assert_eq!(parse(&exchange(&server, head(60_000).as_bytes())).0, 200);
     assert_eq!(parse(&exchange(&server, head(70_000).as_bytes())).0, 413);
+}
+
+/// A component built by a real toolchain, not by this repository's tests: `wasm32-wasip2` Rust
+/// (the `wasi` crate) exporting `wasi:http/incoming-handler@0.2.12`, which answers `200` with a
+/// header, a body naming the request path, and a trailer. The file is not in the repository:
+/// set `WASM2RS_HTTP_HELLO_COMPONENT` to it and run with `--ignored` (see
+/// `docs/component-toolchain-survey.md`, "Reproduction").
+#[test]
+#[ignore = "needs WASM2RS_HTTP_HELLO_COMPONENT (a wasm32-wasip2 http handler component)"]
+fn a_real_toolchain_http_handler_answers_with_its_header_body_and_trailer() {
+    let path = std::env::var_os("WASM2RS_HTTP_HELLO_COMPONENT")
+        .expect("WASM2RS_HTTP_HELLO_COMPONENT names the component");
+    let server = serve_component(Path::new(&path), &work_dir("real-handler"), &[]);
+    let request = "GET /foo?x=1 HTTP/1.1\r\nHost: example.test\r\n\r\n";
+    let (status, head, body) = parse(&exchange(&server, request.as_bytes()));
+    assert_eq!(status, 200, "{head}");
+    assert!(head.contains("x-handler: rust-wasip2"), "{head}");
+    assert!(head.contains("transfer-encoding: chunked"), "{head}");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("hello from rust, path=/foo?x=1"), "{body}");
+    // the trailer follows the last chunk
+    assert!(body.contains("0\r\nx-trailer: done\r\n\r\n"), "{body}");
 }
