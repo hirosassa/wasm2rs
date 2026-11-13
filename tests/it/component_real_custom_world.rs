@@ -15,11 +15,12 @@ fn a_real_cargo_component_custom_world_is_called_through_the_typed_exports() {
         .expect("WASM2RS_CARGO_COMPONENT_CALC names the component");
     let component = std::fs::read(path).unwrap();
     let code = transpile_component(&component, &ComponentOptions::default()).unwrap();
-    // The record is named after its type index in the component, which no toolchain promises.
+    // The glue names the record by its type index (the exported name is not carried here), and
+    // the index depends on the toolchain; accept the WIT name too, should the glue use it.
     let record = code
         .split("pub struct ")
         .filter_map(|s| s.split_whitespace().next())
-        .find(|name| name.starts_with("Record"))
+        .find(|name| *name == "Point" || name.starts_with("Record"))
         .expect("the glue declares the point record");
     let program = format!(
         "{code}\n\

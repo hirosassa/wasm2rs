@@ -22,7 +22,7 @@ directory; the commands are below so the survey can be repeated.
 | I | TinyGo 0.44 `tinygo build -target=wasip2` (Go `fmt.Println`) | 773 KB, one core module, `wasi:cli/run@0.2.0` | **works** (2026-11-14): prints `hello from tinygo`, exit 0; `wasip2_run` end to end 24 s (rustc at `-C opt-level=1`, 480 MB peak RSS). No wall. `#[ignore]` test: `WASM2RS_TINYGO_HELLO_COMPONENT` |
 | J | wasi-sdk 34 `clang --target=wasm32-wasip2`, C `puts` | 227 KB, one core module, `wasi:cli/run@0.2.12` | **works** (2026-11-14): prints `hello from wasi-sdk C`, exit 0; 5.3 s end to end with a warm `wasm2rs-wasi` build (290 MB peak RSS). `#[ignore]` test: `WASM2RS_WASISDK_C_HELLO_COMPONENT` |
 | K | wasi-sdk 34 `clang++ --target=wasm32-wasip2 -fno-exceptions`, `std::cout` | 3.2 MB | **does not build** (2026-11-14): the program imports `wasi:cli/exit@0.2.12`'s `exit-with-code`, which the 0.2.0 `Host` trait does not have, so `rustc` fails with E0599 (`no method named wasi_cli_exit_exit_with_code`) and `wasip2_run` exits 2. Without `-fno-exceptions` the link fails in `wasm-ld` (`__cxa_throw`; wasi-sdk has no C++ exceptions), not a wasm2rs matter. See F6 (#339) |
-| L | `cargo component build` 0.21.1, custom world (`export ops` with a record, a string and integers; no `wasi:cli/run`) | 72 KB, `wasm32-wasip1` + adapter (one core module after linking) | **works** (2026-11-14): `wasip2_run` does not apply (no `run`), so a small program calls the typed `Exports` (`test_calc_ops_add(40, 2)` = 42, `greet`, `shift` on a record); 3 s for the test with a warm library build (430 MB peak RSS). `#[ignore]` test: `WASM2RS_CARGO_COMPONENT_CALC` |
+| L | `cargo component build` 0.21.1, custom world (`export ops` with a record, a string and integers; no `wasi:cli/run`) | 72 KB, `wasm32-wasip1` + adapter (main + adapter module, as B) | **works** (2026-11-14): `wasip2_run` does not apply (no `run`), so a small program calls the typed `Exports` (`test_calc_ops_add(40, 2)` = 42, `greet`, `shift` on a record); 3 s for the test with a warm library build (430 MB peak RSS). `#[ignore]` test: `WASM2RS_CARGO_COMPONENT_CALC` |
 
 ## Findings
 
@@ -125,8 +125,8 @@ freshness and every-method-overridden tests), so it is a separate issue (#339) r
 4. F4 measurement after F3.
 5. F2 only after F1 step 2: done as an investigation; F4 first for the end-to-end goal, see the F2 design.
 
-Not covered yet: `wasi:http` guests built with TinyGo, wasi-sdk or `cargo-component`, and wasi-sdk
-C++ (blocked by F6). Add a row to the table when one is tried.
+Not covered yet: `wasi:http` guests built with TinyGo, wasi-sdk or `cargo-component`. wasi-sdk C++
+runs once F6 (#339) is fixed. Add a row to the table when one is tried.
 
 ## Reproduction
 
@@ -148,9 +148,12 @@ tinygo build -target=wasip2 -o tg-hello.wasm .
 # J, K (wasi-sdk 34; K needs -fno-exceptions to link)
 $WASI_SDK/bin/clang --target=wasm32-wasip2 -O2 hello.c -o c-hello.wasm
 $WASI_SDK/bin/clang++ --target=wasm32-wasip2 -O2 -fno-exceptions hello.cpp -o cpp-hello.wasm
-# L (cargo install cargo-component --locked; wit/world.wit: interface ops { record point {..} add greet shift }, world calc { export ops; })
-cargo component new --lib calc --namespace test && cargo component build --release   # target/wasm32-wasip1/release/calc.wasm
-WASM2RS_CARGO_COMPONENT_CALC=calc.wasm cargo test --test it component_real_custom_world -- --ignored
+# L (cargo install cargo-component --locked; wit/world.wit: interface ops { record point { x: s32, y: s32 }
+#   add: func(a: s32, b: s32) -> s32; greet: func(name: string) -> string; shift: func(p: point, dx: s32) -> point; }
+#   world calc { export ops; }; impl: add = a + b, greet = "hello, {name}", shift = point with x + dx, same y)
+cargo component new --lib calc --namespace test && (cd calc && cargo component build --release)
+# from the wasm2rs checkout (an absolute path: tests run in the package root)
+WASM2RS_CARGO_COMPONENT_CALC="$SCRATCH/calc/target/wasm32-wasip1/release/calc.wasm" cargo test --test it component_real_custom_world -- --ignored
 # run
 cargo run --release --example wasip2_run -- <component>.wasm
 
