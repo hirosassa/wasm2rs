@@ -38,6 +38,7 @@ mod component_input;
 mod component_link_adapter;
 mod component_link_dylink;
 mod component_link_exports;
+mod component_local_types;
 mod component_wit_edges;
 mod condition_simplify;
 mod cont;

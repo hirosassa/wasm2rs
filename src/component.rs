@@ -29,8 +29,8 @@ pub struct ComponentOptions {
     /// without them. Every other field is used as given.
     pub transpile: TranspileOptions,
     /// The Rust path of a library that declares `Host` and the interface types, which the
-    /// glue then refers to (see [`WitOptions::external_types`]). `None` makes the glue
-    /// declare its own `Host` trait and types. Default: `Some("wasm2rs_wasi")`.
+    /// glue then refers to (see [`WitOptions::external_types`]); types only the exports use are
+    /// declared by the glue. `None` makes the glue declare its own `Host` trait and types. Default: `Some("wasm2rs_wasi")`.
     pub external_types: Option<String>,
     /// Also generate the typed `Exports` trait (see [`WitOptions::exports`]). Default: `true`.
     pub exports: bool,
@@ -116,8 +116,15 @@ pub fn transpile_component_with_exports(
         &wit,
         &core_imports,
         None,
+        has_imports_trait(&out),
     )?);
     Ok((out, exports))
+}
+
+/// Whether the transpiled module declares a host (`pub trait Imports`) at the start of a
+/// line (data segments are byte strings on one line, so their contents cannot match).
+fn has_imports_trait(code: &str) -> bool {
+    code.starts_with("pub trait Imports") || code.contains("\npub trait Imports")
 }
 
 /// What the component's program is.

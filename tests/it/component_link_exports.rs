@@ -89,7 +89,7 @@ fn internal_wiring_exports_are_not_exported() {
                 (func (export "run") (result i32)
                     call $start
                     (i32.add (i32.load (i32.const 8)) (i32.add (call $f) (i32.const 1)))))
-            (core instance $m (instantiate $main (with "t:t/i" (instance $host))))
+            (core instance $m (instantiate $main))
             (alias core export $m "memory" (core memory $mem))
             (alias core export $m "_start" (core func $start))
             (core instance $env (export "memory" (memory $mem)))
@@ -220,12 +220,7 @@ fn several_unused_reallocs_of_one_module_do_not_clash() {
 }
 
 const DYLINK_MEMORY: &str = r#"(component
-    (import "t:t/i" (instance $i (export "f" (func (result u32)))))
-    (alias export $i "f" (func $hf))
-    (core func $lowered (canon lower (func $hf)))
-    (core instance $host (export "f" (func $lowered)))
     (core module $main
-        (import "t:t/i" "f" (func (result i32)))
         (memory (export "memory") 1)
         (data (i32.const 32) "hi"))
     (core module $other (memory (export "memory") 1))
@@ -235,7 +230,7 @@ const DYLINK_MEMORY: &str = r#"(component
             (i32.store (i32.const 16) (i32.const 32))
             (i32.store (i32.const 20) (i32.const 2))
             (i32.const 16)))
-    (core instance $m (instantiate $main (with "t:t/i" (instance $host))))
+    (core instance $m (instantiate $main))
     (alias core export $m "memory" (core memory $mem))
     UNRELATED
     (core instance $env (export "memory" (memory $mem)))
@@ -253,11 +248,15 @@ fn lift_memory_option_resolves_through_the_link() {
     )
     .unwrap();
     let code = transpile_component(&component, &own_host()).unwrap();
-    let out = run(
-        "component_link_memory_option",
-        &code,
-        "println!(\"{}\", Exports::f(&mut inst));",
+    // No module imports anything: the unit has no host, so `Instance` takes none.
+    let program = format!(
+        "{code}\nfn main() {{\n    let mut inst = Instance::new();\n    \
+         println!(\"{{}}\", Exports::f(&mut inst));\n}}\n"
     );
+    let bin = common::build("component_link_memory_option", &program);
+    let out = Command::new(bin).output().unwrap();
+    assert!(out.status.success());
+    let out = String::from_utf8_lossy(&out.stdout).trim().to_string();
     assert_eq!(out, "hi");
 }
 
