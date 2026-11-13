@@ -100,16 +100,20 @@ fn build_wasi_rlib(dir: &Path) -> (PathBuf, Option<PathBuf>, Vec<PathBuf>) {
     )
 }
 
-/// Writes `source` to `dir/program.rs` and builds it with `rustc -C opt-level=1`, linked against
-/// the `wasm2rs-wasi` library (built with `cargo` into `dir` first). Returns the binary, or
+/// Writes `source` to `dir/program.rs` and builds it with `rustc -C opt-level=1` (or the level in
+/// `$WASM2RS_EXAMPLE_OPT_LEVEL`: LLVM does not finish the 125 MB JS component at 1 in 80 minutes,
+/// at 0 it takes 73 s), linked against the `wasm2rs-wasi` library (built with `cargo` into `dir` first). Returns the binary, or
 /// `None` when `rustc` failed (its errors are on stderr).
 pub fn build_program(dir: &Path, source: &str) -> Option<PathBuf> {
     let src = dir.join("program.rs");
     let bin = dir.join("program");
     std::fs::write(&src, source).expect("write source");
     let (rlib, rmeta, deps) = build_wasi_rlib(dir);
+    let opt_level = std::env::var("WASM2RS_EXAMPLE_OPT_LEVEL").unwrap_or_else(|_| "1".into());
     let status = Command::new("rustc")
-        .args(["--edition", "2024", "-C", "opt-level=1", "-A", "warnings"])
+        .args(["--edition", "2024", "-A", "warnings"])
+        .arg("-C")
+        .arg(format!("opt-level={opt_level}"))
         .arg("--extern")
         .arg(format!("wasm2rs_wasi={}", rlib.display()))
         .args(rmeta.iter().flat_map(|m| {
