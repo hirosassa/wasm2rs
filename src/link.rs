@@ -470,7 +470,7 @@ fn operator_origin(op: &Operator<'_>) -> (&'static str, &'static str) {
 fn allowed_proposal(proposal: &str) -> bool {
     matches!(
         proposal,
-        "mvp" | "sign_extension" | "bulk_memory" | "reference_types"
+        "mvp" | "sign_extension" | "bulk_memory" | "reference_types" | "saturating_float_to_int"
     )
 }
 
@@ -881,16 +881,45 @@ fn copy_table(t: &codegen::TableInfo, init: Option<codegen::TableFill>) -> codeg
     }
 }
 
-fn copy_offset(
+/// An appended module's segment offset in the merged module. An offset that reads an
+/// imported global (`__table_base`, `__memory_base`) is folded to a constant when the global
+/// resolves to an immutable integer constant of another module, which is how a dynamic
+/// library is placed by the program that loads it; any other such offset is refused.
+fn merged_offset(
+    layout: &Layout,
+    ir: &ModuleIr<'_>,
+    m: usize,
     offset: &Option<codegen::SegOffset>,
     what: &str,
 ) -> Result<Option<codegen::SegOffset>, TranspileError> {
     match offset {
         None => Ok(None),
         Some(codegen::SegOffset::Const(v)) => Ok(Some(codegen::SegOffset::Const(*v))),
-        Some(codegen::SegOffset::Runtime(_)) => Err(unsupported(format!(
-            "{what} offset of a linked module that reads an imported global"
-        ))),
+        Some(codegen::SegOffset::Runtime { expr, wide, .. }) => {
+            let bytes = rewrite_const(layout, m, &ConstExpr::new(BinaryReader::new(expr, 0)))?;
+            let values = codegen::IntGlobals {
+                imported: ir.imported_globals.len(),
+                values: &ir.global_ints,
+            };
+            let value = codegen::const_expr_u64_for(
+                &ConstExpr::new(BinaryReader::new(&bytes, 0)),
+                what,
+                values,
+            )
+            .map_err(|_| {
+                unsupported(format!(
+                    "{what} offset of linked module {m} reads a global that is not an immutable \
+                     integer constant of the module that provides it"
+                ))
+            })?;
+            // A 32-bit offset wraps like the runtime expression does.
+            let value = if *wide {
+                value
+            } else {
+                value & u64::from(u32::MAX)
+            };
+            Ok(Some(codegen::SegOffset::Const(value)))
+        }
     }
 }
 
@@ -1151,6 +1180,15 @@ fn merge_globals(
                 &ir.imported_globals,
                 &ir.globals,
             )?;
+            let value = codegen::const_int_value(
+                &ConstExpr::new(BinaryReader::new(&bytes, 0)),
+                codegen::IntGlobals {
+                    imported: ir.imported_globals.len(),
+                    values: &ir.global_ints,
+                },
+            )
+            .filter(|_| !info.mutable);
+            ir.global_ints.push(value);
             ir.globals.push(codegen::GlobalInfo {
                 ty: info.ty,
                 mutable: info.mutable,
@@ -1242,7 +1280,7 @@ fn merge_segments(
             };
             ir.elements.push(codegen::ElemSegment {
                 table,
-                offset: copy_offset(&seg.offset, "element segment")?,
+                offset: merged_offset(layout, ir, m, &seg.offset, "element segment")?,
                 declared: seg.declared,
                 funcs,
                 imported_items: Vec::new(),
@@ -1255,7 +1293,7 @@ fn merge_segments(
                 0
             };
             ir.data.push(codegen::DataSegment {
-                offset: copy_offset(&seg.offset, "data segment")?,
+                offset: merged_offset(layout, ir, m, &seg.offset, "data segment")?,
                 mem_index,
                 bytes: seg.bytes.clone(),
             });
@@ -1657,9 +1695,13 @@ mod tests {
     }
 
     #[test]
-    fn typed_references_and_runtime_offsets_in_an_appended_module_are_refused() {
+    fn typed_references_and_unfoldable_offsets_in_an_appended_module_are_refused() {
         let main = r#"(module (global (export "g") i32 (i32.const 1)) (func (export "f")))"#;
         let typed = r#"(module (type $t (func)) (func (local (ref null $t))))"#;
+        // The provider's global is immutable but reads a host global: not a constant.
+        let host_based = r#"(module
+            (import "env" "h" (global i32))
+            (global (export "g") i32 (global.get 0)))"#;
         let runtime = r#"(module
             (import "a" "g" (global i32))
             (memory 1)
@@ -1668,7 +1710,32 @@ mod tests {
         let what = link_error(&[wasm(main), wasm(typed)], none());
         assert!(what.contains("typed reference"), "{what}");
         let what = link_error(
-            &[wasm(main), wasm(runtime)],
+            &[wasm(host_based), wasm(runtime)],
+            vec![
+                ImportSources::default(),
+                ImportSources {
+                    globals: vec![Source::Global {
+                        module: 0,
+                        index: 1,
+                    }],
+                    ..ImportSources::default()
+                },
+            ],
+        );
+        assert!(what.contains("not an immutable integer constant"), "{what}");
+    }
+
+    #[test]
+    fn a_data_offset_reading_a_constant_global_of_another_module_is_folded() {
+        let main = r#"(module (global (export "base") i32 (i32.const 5)) (memory (export "m") 1)
+            (func (export "peek") (param i32) (result i32) local.get 0 i32.load8_u))"#;
+        let lib = r#"(module
+            (import "a" "base" (global i32))
+            (import "a" "m" (memory 1))
+            (data (global.get 0) "\2a"))"#;
+        link_and_run(
+            "folded_data_offset",
+            &[wasm(main), wasm(lib)],
             vec![
                 ImportSources::default(),
                 ImportSources {
@@ -1676,11 +1743,15 @@ mod tests {
                         module: 0,
                         index: 0,
                     }],
+                    memory: Some(Source::Memory {
+                        module: 0,
+                        index: 0,
+                    }),
                     ..ImportSources::default()
                 },
             ],
+            "let mut inst = Instance::new();\n    assert_eq!(inst.func0(5), 42);\n    assert_eq!(inst.func0(4), 0);",
         );
-        assert!(what.contains("imported global"), "{what}");
     }
 
     #[test]

@@ -96,6 +96,9 @@ pub(crate) struct ModuleIr<'a> {
     /// The initializer expression of each defined global, so the linker can render it
     /// again after renumbering. Empty in a linked module.
     pub(crate) global_inits: Vec<wasmparser::ConstExpr<'a>>,
+    /// The integer value of each defined global that is an immutable integer constant
+    /// (`None` for any other), so the linker can fold a segment offset that reads one.
+    pub(crate) global_ints: Vec<Option<codegen::ConstInt>>,
 }
 
 impl<'a> ModuleIr<'a> {
@@ -696,6 +699,7 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
             global_funcs: self.global_funcs,
             memory_imports: self.memory_imports,
             global_inits: self.global_inits,
+            global_ints: self.global_ints,
         })
     }
 }
@@ -927,11 +931,18 @@ fn segment_offset(
     }
     check_offset_width(expr, wide, imported_globals, globals)?;
     let rust = codegen::const_expr_to_rust(expr, type_kinds, imported_globals, globals)?;
-    Ok(codegen::SegOffset::Runtime(if wide {
-        format!("({rust}) as u64")
-    } else {
-        format!("({rust}) as u32 as u64")
-    }))
+    let mut reader = expr.get_binary_reader();
+    let len = reader.bytes_remaining();
+    let bytes = reader.read_bytes(len)?.to_vec();
+    Ok(codegen::SegOffset::Runtime {
+        rust: if wide {
+            format!("({rust}) as u64")
+        } else {
+            format!("({rust}) as u32 as u64")
+        },
+        expr: bytes,
+        wide,
+    })
 }
 
 /// What a constant reference expression denotes: a function index (`u32::MAX`

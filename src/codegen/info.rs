@@ -74,8 +74,16 @@ pub(crate) enum TableFill {
 pub(crate) enum SegOffset {
     /// A 64-bit table's or memory's segment can lie above 4 GiB, so it is a `u64`.
     Const(u64),
-    /// A Rust expression of type `u64` that reads the host as `imports`.
-    Runtime(String),
+    /// A constant expression that reads an imported global.
+    Runtime {
+        /// A Rust expression of type `u64` that reads the host as `imports`.
+        rust: String,
+        /// The expression's bytes (a constant expression, as in the module), so the
+        /// linker can evaluate it once the global resolves to one of another module.
+        expr: Vec<u8>,
+        /// Whether the offset is an `i64` (a 64-bit memory or table).
+        wide: bool,
+    },
 }
 
 impl SegOffset {
@@ -84,7 +92,7 @@ impl SegOffset {
     pub(crate) fn split(offset: Option<&Self>) -> (u64, Option<&str>) {
         match offset {
             Some(Self::Const(value)) => (*value, None),
-            Some(Self::Runtime(expr)) => (0, Some(expr.as_str())),
+            Some(Self::Runtime { rust, .. }) => (0, Some(rust.as_str())),
             None => (0, None),
         }
     }
