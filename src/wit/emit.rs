@@ -832,7 +832,7 @@ pub fn wit_host_glue_with_options(
     component: &[u8],
     options: &WitOptions,
 ) -> Result<String, TranspileError> {
-    glue_text(component, options, None, None, None)
+    glue_text(component, options, None, None)
 }
 
 /// A function import of the program core module that its `Imports` trait declares.
@@ -841,6 +841,9 @@ pub(crate) struct CoreImport {
     pub field: String,
     /// The name of its `Imports` method (`named_imports`).
     pub ident: String,
+    /// The export of the linked program this import allocates through (see
+    /// `glue::Method::realloc`); `None` for the lifts' `cabi_realloc`.
+    pub realloc: Option<String>,
 }
 
 /// [`wit_host_glue_with_options`] for a component whose program module has the function
@@ -849,31 +852,23 @@ pub(crate) struct CoreImport {
 /// name the interface by another compatible version than the component's own import, or import
 /// one function under several versions; the glue then still has one method per module import.
 ///
-/// `import_realloc` is the export of the program that the lowered imports allocate through
-/// when it is not the lifts' `cabi_realloc` (a linked adapter's `cabi_import_realloc`).
+/// Each [`CoreImport`] says which export of the program its results are allocated through
+/// when that is not the lifts' `cabi_realloc` (a linked adapter's `cabi_import_realloc`).
 /// `lifts` replaces the exports read from the component: a linked unit names the core exports
 /// of its lifts itself (see `component::link`).
 pub(crate) fn wit_host_glue_for_module(
     component: &[u8],
     options: &WitOptions,
     core_imports: &[CoreImport],
-    import_realloc: Option<&str>,
     lifts: Option<Vec<WitExport>>,
 ) -> Result<String, TranspileError> {
-    glue_text(
-        component,
-        options,
-        Some(core_imports),
-        import_realloc,
-        lifts,
-    )
+    glue_text(component, options, Some(core_imports), lifts)
 }
 
 fn glue_text(
     component: &[u8],
     options: &WitOptions,
     core_imports: Option<&[CoreImport]>,
-    import_realloc: Option<&str>,
     lifts: Option<Vec<WitExport>>,
 ) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
@@ -920,10 +915,11 @@ fn glue_text(
                 func,
                 name,
                 host: name,
+                realloc: None,
             })
             .collect(),
     };
-    glue::write(&mut out, &methods, &records, exported, import_realloc)?;
+    glue::write(&mut out, &methods, &records, exported)?;
     Ok(out)
 }
 
@@ -947,6 +943,7 @@ fn core_methods<'a>(
             func,
             name: &import.ident,
             host,
+            realloc: import.realloc.as_deref(),
         });
     }
     Ok(methods)

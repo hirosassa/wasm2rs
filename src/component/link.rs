@@ -16,9 +16,17 @@ use crate::{
     TranspileError, TranspileOptions, WitExport, WitOptions, transpile_ir_with_host_imports,
 };
 
-/// The name the linked unit exports an adapter's lowering `realloc` under. It is not the
-/// adapter's own export name, which may be the `cabi_realloc` of the lifts as well.
+/// The name the linked unit exports the first lowering `realloc` that is not the lifts' under
+/// (an adapter's `cabi_import_realloc`); the n-th (n > 0) is `cabi_import_realloc_{n}`. It is
+/// not the module's own export name, which may be the `cabi_realloc` of the lifts as well.
 const IMPORT_REALLOC: &str = "cabi_import_realloc";
+
+fn import_realloc_name(n: usize) -> String {
+    match n {
+        0 => IMPORT_REALLOC.to_string(),
+        n => format!("{IMPORT_REALLOC}_{n}"),
+    }
+}
 
 fn unsupported(what: impl Into<String>) -> TranspileError {
     TranspileError::Unsupported(what.into())
@@ -133,7 +141,9 @@ pub(super) fn transpile_linked(
         .map(|(k, m)| (m.instance, k))
         .collect();
 
-    let mut reallocs: Vec<(u32, String)> = Vec::new();
+    // The `realloc` of each function import the host provides, in the order of the linked
+    // unit's host imports (the program's, then each appended module's).
+    let mut host_reallocs: Vec<Option<(u32, String)>> = Vec::new();
     let mut modules = Vec::with_capacity(members.len());
     for (k, member) in members.iter().enumerate() {
         let mut ir = parse_module(member.bytes, transpile)?;
@@ -159,14 +169,17 @@ pub(super) fn transpile_linked(
             match ty {
                 TypeRef::Func(_) | TypeRef::FuncExact(_) => {
                     if let Some(Supplier::Host(host)) = &supplier {
-                        if let Some(r) = host.realloc.as_ref().filter(|r| !reallocs.contains(r)) {
-                            reallocs.push(r.clone());
-                        }
                         // The module's own name for the import (`actual` `1` of the fixup)
                         // says nothing: the WIT function it lowers is the host's name for it.
                         if k > 0 {
                             rename(&mut ir, func_import, host)?;
                         }
+                    }
+                    if source == Source::Host {
+                        host_reallocs.push(match &supplier {
+                            Some(Supplier::Host(host)) => host.realloc.clone(),
+                            _ => None,
+                        });
                     }
                     func_import = func_import.saturating_add(1);
                     sources.funcs.push(source);
@@ -190,18 +203,29 @@ pub(super) fn transpile_linked(
 
     let mut plan = UnitExports::default();
     let (lifts, lift_realloc) = name_lifts(&members, exports, &mut plan)?;
-    let import_realloc = import_realloc(&at, &reallocs, lift_realloc.as_ref(), &mut plan)?;
+    let import_reallocs = import_reallocs(&at, &host_reallocs, lift_realloc.as_ref(), &mut plan)?;
     plan.apply(&mut modules)?;
 
     let rewritten = rewrite_bodies(&modules)?;
     let ir: ModuleIr<'_> = link(modules, &rewritten)?;
-    let (mut out, core_imports) = transpile_ir_with_host_imports(ir, transpile)?;
+    let (mut out, mut core_imports) = transpile_ir_with_host_imports(ir, transpile)?;
+    // A host import the transpiler runs as native WASI is not in `core_imports`; that is
+    // harmless while no import allocates through a `realloc` of its own.
+    if core_imports.len() != import_reallocs.len() && import_reallocs.iter().any(Option::is_some) {
+        return Err(TranspileError::Internal(
+            "the linked unit's host imports do not match the component's lowered imports".into(),
+        ));
+    }
+    if core_imports.len() == import_reallocs.len() {
+        for (import, realloc) in core_imports.iter_mut().zip(import_reallocs) {
+            import.realloc = realloc;
+        }
+    }
     out.push('\n');
     out.push_str(&wit_host_glue_for_module(
         component,
         wit,
         &core_imports,
-        import_realloc.as_deref(),
         Some(lifts),
     )?);
     Ok(out)
@@ -245,37 +269,61 @@ fn rename(
     Ok(())
 }
 
-/// The export of the linked program that the lowered imports allocate through, or `None` when
-/// it is the lifts' `cabi_realloc` (or nothing allocates). Otherwise it is exported under
-/// [`IMPORT_REALLOC`].
-fn import_realloc(
+/// For each host function import (`host_reallocs`, with the `realloc` its lowering names),
+/// the export of the linked program it allocates its results through, or `None` for the lifts'
+/// `cabi_realloc` (or when it does not allocate). Each distinct other `realloc` is exported
+/// under [`import_realloc_name`].
+///
+/// An import whose lowering names no `realloc` takes the one `realloc` all the others share,
+/// if there is exactly one.
+fn import_reallocs(
     at: &BTreeMap<u32, usize>,
-    reallocs: &[(u32, String)],
+    host_reallocs: &[Option<(u32, String)>],
     lift_realloc: Option<&Realloc>,
     plan: &mut UnitExports,
-) -> Result<Option<String>, TranspileError> {
-    let [(instance, name)] = reallocs else {
-        return if reallocs.is_empty() {
-            Ok(None)
+) -> Result<Vec<Option<String>>, TranspileError> {
+    let mut distinct: Vec<&(u32, String)> = Vec::new();
+    for r in host_reallocs.iter().flatten() {
+        if !distinct.contains(&r) {
+            distinct.push(r);
+        }
+    }
+    let mut exported = 0usize;
+    let mut resolved: Vec<Option<String>> = Vec::with_capacity(distinct.len());
+    for (instance, name) in &distinct {
+        let provider = at.get(instance).copied().ok_or_else(|| {
+            unsupported("the `realloc` of a lowered import is not an export of a core module")
+        })?;
+        let unit = if lift_realloc.is_some_and(|(k, own)| *k == provider && own == name) {
+            None
+        } else if lift_realloc.is_none() && provider == 0 && name == "cabi_realloc" {
+            // The program's own export: the glue's default allocator.
+            plan.add(provider, name, "cabi_realloc");
+            None
         } else {
-            Err(unsupported(
-                "the component's imports are lowered with different `realloc` functions",
-            ))
+            let unit = import_realloc_name(exported);
+            exported = exported.saturating_add(1);
+            plan.add(provider, name, &unit);
+            Some(unit)
         };
+        resolved.push(unit);
+    }
+    let sole = match resolved.as_slice() {
+        [only] => only.clone(),
+        _ => None,
     };
-    let provider = at.get(instance).copied().ok_or_else(|| {
-        unsupported("the `realloc` of a lowered import is not an export of a core module")
-    })?;
-    if lift_realloc.is_some_and(|(k, own)| *k == provider && own == name) {
-        return Ok(None);
-    }
-    if lift_realloc.is_none() && provider == 0 && name == "cabi_realloc" {
-        // The program's own export: the glue's default allocator.
-        plan.add(provider, name, "cabi_realloc");
-        return Ok(None);
-    }
-    plan.add(provider, name, IMPORT_REALLOC);
-    Ok(Some(IMPORT_REALLOC.to_string()))
+    Ok(host_reallocs
+        .iter()
+        .map(|r| match r {
+            Some(r) => distinct
+                .iter()
+                .position(|d| *d == r)
+                .and_then(|i| resolved.get(i))
+                .cloned()
+                .flatten(),
+            None => sole.clone(),
+        })
+        .collect())
 }
 
 /// The name the unit exports the core function of a lift under: the lift's own WIT name
