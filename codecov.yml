@@ -1,0 +1,39 @@
+coverage:
+  status:
+    project: off
+    patch:
+      default:
+        target: auto
+        threshold: 1%
+
+component_management:
+  default_rules:
+    statuses:
+      - type: project
+        target: auto
+        threshold: 1%
+  individual_components:
+    - component_id: core
+      statuses:
+        - type: project
+          target: 94%
+          threshold: 1%
+      name: wasm2rs (core)
+      paths:
+        - src/**
+    - component_id: macros
+      statuses:
+        - type: project
+          target: 90%
+          threshold: 1%
+      name: wasm2rs-macros
+      paths:
+        - wasm2rs-macros/**
+    - component_id: wasi
+      statuses:
+        - type: project
+          target: 82%
+          threshold: 1%
+      name: wasm2rs-wasi
+      paths:
+        - wasm2rs-wasi/**
