@@ -73,6 +73,9 @@ minutes (user 270 s, sys 332 s: the system time points at memory pressure). Not 
 issue, but it makes large guests impractical. Worth a separate measurement (`--split`, lower
 opt-level, `-Z time-passes`) once F3 lets D build at all.
 
+Measured in [f4-rustc-time-spike.md](f4-rustc-time-spike.md): the time is a quadratic `rustc` early-lint
+cost on redundant parentheses in one huge file (587 s -> 61 s on the JS `program.rs` without them), not a large function and not LLVM.
+
 ### F5. Things that worked and need no work
 
 - `wasm32-wasip2` std output, including arguments (A).
