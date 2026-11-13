@@ -5,6 +5,7 @@
 mod common;
 
 use common::{builder, traps};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use wasm2rs_wasi::wasi_io_streams::{InputStream, OutputStream, StreamError};
 use wasm2rs_wasi::wasi_sockets_network::{
@@ -52,8 +53,23 @@ fn tcp(host: &mut WasiHost) -> TcpSocket {
         .unwrap()
 }
 
+/// Held while a test needs a loopback port nobody else may take: the tests run in parallel
+/// and an OS (Windows above all) hands a freed ephemeral port to the next listener at once.
+static PORT_WINDOW: Mutex<()> = Mutex::new(());
+
+fn port_window() -> MutexGuard<'static, ()> {
+    // a test that panicked inside the window leaves nothing to repair
+    PORT_WINDOW.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// A listener on an ephemeral loopback port: the socket and its port.
 fn listener(host: &mut WasiHost) -> (TcpSocket, u16) {
+    let _window = port_window();
+    listener_in_window(host)
+}
+
+/// For a caller that already holds `port_window` (the lock is not reentrant).
+fn listener_in_window(host: &mut WasiHost) -> (TcpSocket, u16) {
     let s = tcp(host);
     host.wasi_sockets_tcp_method_tcp_socket_start_bind(s, NET, lo(0))
         .unwrap();
@@ -119,6 +135,8 @@ fn pair() -> Pair {
 
 #[test]
 fn a_tcp_socket_must_go_through_bind_listen_in_order() {
+    // its listener takes an ephemeral port: see `port_window`
+    let _window = port_window();
     let mut h = host(NetworkPolicy::Loopback);
     let s = tcp(&mut h);
     let start_bind =
@@ -198,6 +216,8 @@ fn accept_without_a_pending_connection_would_block_and_a_non_listener_is_invalid
 fn a_second_bind_to_a_taken_port_is_address_in_use_and_a_retry_is_possible() {
     let mut h = host(NetworkPolicy::Loopback);
     let (_server, port) = listener(&mut h);
+    // the retry binds an ephemeral port: see `port_window`
+    let _window = port_window();
     let s = tcp(&mut h);
     h.wasi_sockets_tcp_method_tcp_socket_start_bind(s, NET, lo(port))
         .unwrap();
@@ -216,17 +236,18 @@ fn a_second_bind_to_a_taken_port_is_address_in_use_and_a_retry_is_possible() {
 #[test]
 fn connecting_to_a_closed_port_is_refused_at_finish_connect() {
     let mut h = host(NetworkPolicy::Loopback);
-    let port = {
-        let (server, port) = listener(&mut h);
-        h.wasi_sockets_tcp_resource_drop_tcp_socket(server);
-        port
-    };
+    // `connect` runs inside `start-connect`: until then no other listener may take the freed
+    // port, or the connection would reach it (and the other test would accept this one)
+    let window = port_window();
+    let (server, port) = listener_in_window(&mut h);
+    h.wasi_sockets_tcp_resource_drop_tcp_socket(server);
     let c = tcp(&mut h);
     assert_eq!(
         h.wasi_sockets_tcp_method_tcp_socket_start_connect(c, NET, lo(port)),
         Ok(()),
         "the refusal shows in finish-connect"
     );
+    drop(window);
     assert_eq!(
         h.wasi_sockets_tcp_method_tcp_socket_finish_connect(c)
             .map(|_| ()),
@@ -1276,7 +1297,10 @@ fn splice_into_a_full_send_queue_moves_nothing_and_leaves_the_source_alone() {
 /// A host connected to a plain `std` peer that has not read anything yet, with the send queue
 /// filled until `check-write` permits nothing; returns the bytes written.
 fn filled_connection() -> (WasiHost, TcpSocket, std::net::TcpStream, usize) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = {
+        let _window = port_window();
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap()
+    };
     let port = listener.local_addr().unwrap().port();
     let mut host = host(NetworkPolicy::Loopback);
     let client = tcp(&mut host);
