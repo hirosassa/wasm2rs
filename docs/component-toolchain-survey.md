@@ -33,7 +33,8 @@ adapter, which imports its memory, and `reentrant_imports` rejects that.
 This is the shape of every component made from a preview1 toolchain (older `cargo-component`,
 Go, wasi-sdk C/C++ through the adapter). It is the most likely thing a user hits.
 
-Ways out, cheapest first:
+(Fixed: B and C now transpile by linking the core modules, see the table and
+[core-module-linking-design.md](core-module-linking-design.md).) Ways out, cheapest first:
 1. A clear error that names the cause ("the module that lifts the exports imports its memory from
    another core module; linking several core modules is not supported") instead of the options
    error. Tiny, and worth doing regardless.

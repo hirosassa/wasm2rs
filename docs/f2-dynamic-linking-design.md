@@ -1,7 +1,8 @@
 # F2: dynamically linked components (componentize-py), survey and design (stage F2-0)
 
-Status: investigation and design only, no code. Written 2026-11-13 against wasm2rs 0.4.0
-(L1-L5, #307-#315, merged).
+Status: implemented (F2-1 to F2-5, see section 9 for the result; the CHANGELOG has the
+user-visible entries). Sections 1 to 8 are the investigation as written on 2026-11-13 against
+wasm2rs 0.4.0 (L1-L5, #307-#315, merged) and are kept as the record of that decision.
 
 Background: [component-toolchain-survey.md](component-toolchain-survey.md) (case E, F2, F4),
 [core-module-linking-design.md](core-module-linking-design.md) (the linker, decision Q8),

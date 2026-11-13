@@ -4,6 +4,14 @@ Spike for F4 of [component-toolchain-survey.md](component-toolchain-survey.md), 
 [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md). **Docs only; no product code
 changed.** Tags: **[verified]** = measured here, **[inferred]** = reasoned, not measured.
 
+Status: done. Recommendation A was implemented as F4-1 (#321, the CHANGELOG entry of #316); the
+JS component then transpiles (F2-2 lifted the per-import `realloc` refusal that section 5 and
+"Not measured" mention as #314; #314 now covers only lifts that allocate through different
+`realloc`s) and builds at `-C opt-level=0`. The time that remained there is in LLVM at
+`-C opt-level=1`, which this metadata-only spike did not cover: tracked in #331, see
+[component-toolchain-survey.md](component-toolchain-survey.md) (F4 and case D). The numbers
+below are as measured at the time.
+
 ## Result in one paragraph
 
 The cost is **not** a giant function, not LLVM, and not the opt level. It is a `rustc` early-lint
