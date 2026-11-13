@@ -10,8 +10,8 @@ component_management:
   default_rules:
     statuses:
       - type: project
-        target: auto # Components without an explicit target must not drop below the base commit
-        threshold: 1% # Tolerate tiny fluctuations
+        target: auto
+        threshold: 1%
   individual_components:
     - component_id: core
       statuses:
