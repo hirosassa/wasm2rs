@@ -68,13 +68,7 @@ fn listener(host: &mut WasiHost) -> (TcpSocket, u16) {
     listener_in_window(host)
 }
 
-/// `start-bind` of a TCP socket to an ephemeral loopback port, which the OS may pick from
-/// the ports `port_window` protects.
-fn start_bind_any(host: &mut WasiHost, s: TcpSocket, net: Network) -> Result<(), Net> {
-    let _window = port_window();
-    host.wasi_sockets_tcp_method_tcp_socket_start_bind(s, net, lo(0))
-}
-
+/// For a caller that already holds `port_window` (the lock is not reentrant).
 fn listener_in_window(host: &mut WasiHost) -> (TcpSocket, u16) {
     let s = tcp(host);
     host.wasi_sockets_tcp_method_tcp_socket_start_bind(s, NET, lo(0))
@@ -141,9 +135,12 @@ fn pair() -> Pair {
 
 #[test]
 fn a_tcp_socket_must_go_through_bind_listen_in_order() {
+    // its listener takes an ephemeral port: see `port_window`
+    let _window = port_window();
     let mut h = host(NetworkPolicy::Loopback);
     let s = tcp(&mut h);
-    let start_bind = |h: &mut WasiHost, s| start_bind_any(h, s, NET);
+    let start_bind =
+        |h: &mut WasiHost, s| h.wasi_sockets_tcp_method_tcp_socket_start_bind(s, NET, lo(0));
     let finish_bind = |h: &mut WasiHost, s| h.wasi_sockets_tcp_method_tcp_socket_finish_bind(s);
     let start_listen = |h: &mut WasiHost, s| h.wasi_sockets_tcp_method_tcp_socket_start_listen(s);
     let finish_listen = |h: &mut WasiHost, s| h.wasi_sockets_tcp_method_tcp_socket_finish_listen(s);
@@ -219,6 +216,8 @@ fn accept_without_a_pending_connection_would_block_and_a_non_listener_is_invalid
 fn a_second_bind_to_a_taken_port_is_address_in_use_and_a_retry_is_possible() {
     let mut h = host(NetworkPolicy::Loopback);
     let (_server, port) = listener(&mut h);
+    // the retry binds an ephemeral port: see `port_window`
+    let _window = port_window();
     let s = tcp(&mut h);
     h.wasi_sockets_tcp_method_tcp_socket_start_bind(s, NET, lo(port))
         .unwrap();
@@ -227,7 +226,10 @@ fn a_second_bind_to_a_taken_port_is_address_in_use_and_a_retry_is_possible() {
         Err(Net::AddressInUse)
     );
     // the failed bind left the socket unbound: it may try another address
-    assert_eq!(start_bind_any(&mut h, s, NET), Ok(()));
+    assert_eq!(
+        h.wasi_sockets_tcp_method_tcp_socket_start_bind(s, NET, lo(0)),
+        Ok(())
+    );
     assert_eq!(h.wasi_sockets_tcp_method_tcp_socket_finish_bind(s), Ok(()));
 }
 
@@ -298,7 +300,8 @@ fn start_connect_validates_the_peer_address_before_connecting() {
     );
     // a socket with a bind in progress cannot connect
     let b = tcp(&mut h);
-    start_bind_any(&mut h, b, NET).unwrap();
+    h.wasi_sockets_tcp_method_tcp_socket_start_bind(b, NET, lo(0))
+        .unwrap();
     assert_eq!(
         h.wasi_sockets_tcp_method_tcp_socket_start_connect(b, NET, lo(9)),
         Err(Net::NotSupported)
@@ -1231,7 +1234,10 @@ fn the_instance_network_is_one_handle_that_can_be_dropped() {
     let n = h.wasi_sockets_instance_network_instance_network();
     // the address policy is the host's: the handle itself is not looked at
     let s = tcp(&mut h);
-    assert_eq!(start_bind_any(&mut h, s, n), Ok(()));
+    assert_eq!(
+        h.wasi_sockets_tcp_method_tcp_socket_start_bind(s, n, lo(0)),
+        Ok(())
+    );
     h.wasi_sockets_network_resource_drop_network(n);
     // dropping a socket frees its slot for the next one
     let t = tcp(&mut h);
@@ -1291,7 +1297,10 @@ fn splice_into_a_full_send_queue_moves_nothing_and_leaves_the_source_alone() {
 /// A host connected to a plain `std` peer that has not read anything yet, with the send queue
 /// filled until `check-write` permits nothing; returns the bytes written.
 fn filled_connection() -> (WasiHost, TcpSocket, std::net::TcpStream, usize) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = {
+        let _window = port_window();
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap()
+    };
     let port = listener.local_addr().unwrap().port();
     let mut host = host(NetworkPolicy::Loopback);
     let client = tcp(&mut host);
