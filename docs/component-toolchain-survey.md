@@ -136,7 +136,8 @@ cargo run --release --example wasip2_run -- <component>.wasm
 # F (handler = `wasi::http::proxy::export!`; `wasi = "0.14"`, crate-type cdylib)
 cargo build --release --target wasm32-wasip2
 # G, H (wit/: proposals/{cli,clocks,filesystem,http,io,random,sockets}/wit of the v0.2.10 tag of
-# WebAssembly/WASI as wit/deps/<name>/, plus world.wit: `world w { include wasi:http/proxy@0.2.10; }`)
+# WebAssembly/WASI as wit/deps/<name>/, plus world.wit: `world w { include wasi:http/proxy@0.2.10; }`;
+# G uses `w`, H the same file with the world renamed to `proxy`, as `-w` below)
 npx @bytecodealliance/jco componentize app.js --wit wit --world-name w -o js-handler.wasm
 uvx componentize-py -d wit -w proxy bindings . && uvx componentize-py -d wit -w proxy componentize app -o py-handler.wasm
 # serve, then curl -i http://127.0.0.1:8080/foo?x=1  (WASM2RS_EXAMPLE_OPT_LEVEL=0 for G and H)

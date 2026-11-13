@@ -3,6 +3,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -37,7 +38,7 @@ fn serve_with(core: &str, tag: &str, extra: &[&str]) -> Server {
     serve_component(&wasm, &dir, extra)
 }
 
-fn work_dir(tag: &str) -> std::path::PathBuf {
+fn work_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "wasm2rs-serve-example-{}-{tag}",
         std::process::id()
@@ -51,7 +52,7 @@ fn work_dir(tag: &str) -> std::path::PathBuf {
     clippy::panic,
     reason = "a test helper: a server that does not start fails the test"
 )]
-fn serve_component(wasm: &std::path::Path, dir: &std::path::Path, extra: &[&str]) -> Server {
+fn serve_component(wasm: &Path, dir: &Path, extra: &[&str]) -> Server {
     // `cargo run` and the example both `exec` the next program on unix: the child is the server
     let mut child = Command::new(env!("CARGO"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -377,7 +378,7 @@ fn the_body_limit_is_inclusive_and_the_head_limit_holds_either_side() {
 fn a_real_toolchain_http_handler_answers_with_its_header_body_and_trailer() {
     let path = std::env::var_os("WASM2RS_HTTP_HELLO_COMPONENT")
         .expect("WASM2RS_HTTP_HELLO_COMPONENT names the component");
-    let server = serve_component(std::path::Path::new(&path), &work_dir("real-handler"), &[]);
+    let server = serve_component(Path::new(&path), &work_dir("real-handler"), &[]);
     let request = "GET /foo?x=1 HTTP/1.1\r\nHost: example.test\r\n\r\n";
     let (status, head, body) = parse(&exchange(&server, request.as_bytes()));
     assert_eq!(status, 200, "{head}");
