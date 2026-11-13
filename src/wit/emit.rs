@@ -53,6 +53,9 @@ pub(super) struct Placed {
     module: Option<String>,
     /// The type's name inside that scope.
     name: String,
+    /// The type is declared by the external library (`WitOptions::external_types`), not by
+    /// the output: the library declares what the imports use.
+    external: bool,
 }
 
 /// The records, variants, enums, flags and resources the trait's functions use, with the
@@ -62,9 +65,11 @@ pub(super) struct Records {
     /// Types live in one `pub mod` per defining interface and are named by interface and WIT
     /// name only, never by a counter.
     qualified: bool,
-    /// What goes before `<module>::<Type>` where the trait and the glue spell a type: empty,
-    /// or the path of the library that defines the types.
+    /// The path of the library that declares the types of the component's imports (the output
+    /// declares the types only its exports use), or empty when there is none.
     prefix: String,
+    /// The imports' types are registered: a type first seen now is the exports' own.
+    exports_phase: bool,
     /// The module of every defining interface seen (`None` = no interface defines it).
     modules: HashMap<Option<String>, String>,
     /// Resource ids and where they are named.
@@ -143,10 +148,11 @@ pub(super) fn module_ident(interface: Option<&str>) -> String {
         return "component".to_string();
     };
     let ident = interface_ident(interface);
-    const TOP_LEVEL: [&str; 9] = [
+    const TOP_LEVEL: [&str; 10] = [
         "glue_abi",
         "glue_mem",
         "glue_alloc",
+        "glue_core",
         "std",
         "core",
         "alloc",
@@ -154,7 +160,10 @@ pub(super) fn module_ident(interface: Option<&str>) -> String {
         "self",
         "super",
     ];
-    if TOP_LEVEL.contains(&ident.as_str()) || plain_ident(&ident) != ident {
+    if TOP_LEVEL.contains(&ident.as_str())
+        || ident.starts_with("glue_alloc_import")
+        || plain_ident(&ident) != ident
+    {
         format!("{ident}_")
     } else {
         ident
@@ -269,6 +278,7 @@ impl Records {
         Placed {
             name: self.fresh_name(module.as_deref(), wit_name),
             module,
+            external: !self.prefix.is_empty() && !self.exports_phase,
         }
     }
 
@@ -319,8 +329,14 @@ impl Records {
         }
     }
 
-    /// How `placed` is spelled after `prefix`.
-    pub(super) fn path(placed: &Placed, prefix: &str) -> String {
+    /// How `placed` is spelled: after the library's path when the library declares it, else
+    /// after `prefix` (where the output's own types are in scope).
+    pub(super) fn path(&self, placed: &Placed, prefix: &str) -> String {
+        let prefix = if placed.external {
+            &self.prefix
+        } else {
+            prefix
+        };
         match &placed.module {
             Some(module) => format!("{prefix}{module}::{}", placed.name),
             None => placed.name.clone(),
@@ -330,14 +346,14 @@ impl Records {
     /// The Rust name of an already registered declared type, spelled after `prefix`.
     pub(super) fn declared(&self, decl: Decl, prefix: &str) -> Result<String, TranspileError> {
         Ok(match self.names.get(&self.key(&decl)?) {
-            Some(placed) => Self::path(placed, prefix),
+            Some(placed) => self.path(placed, prefix),
             None => type_name(decl.name()),
         })
     }
 
     /// The type as the trait and the glue spell it.
     pub(super) fn rust(&self, ty: &WitType) -> Result<String, TranspileError> {
-        self.rust_in(ty, &self.prefix)
+        self.rust_in(ty, "")
     }
 
     /// The type as spelled from inside a type's own module (`super::` reaches the others).
@@ -383,7 +399,7 @@ impl Records {
             WitType::Enum(e) => self.declared(Decl::Enum(e.clone()), prefix)?,
             WitType::Flags(f) => self.declared(Decl::Flags(f.clone()), prefix)?,
             WitType::Own(r) | WitType::Borrow(r) => match self.resource_names.get(&r.id) {
-                Some(placed) => Self::path(placed, prefix),
+                Some(placed) => self.path(placed, prefix),
                 None => type_name(&r.name),
             },
         })
@@ -541,7 +557,9 @@ pub struct WitOptions {
     /// Glue only: the Rust path of a library that already declares the types and `trait Host`
     /// (the output of [`WitNaming::Qualified`] for a component with at least these imports).
     /// The glue then declares neither, and refers to `<path>::Host` and
-    /// `<path>::<interface module>::<Type>`. Implies [`WitNaming::Qualified`].
+    /// `<path>::<interface module>::<Type>` (so the path must be absolute: a crate name or
+    /// `crate::..`). Types that only the component's exports use are not the library's: the
+    /// glue declares them. Implies [`WitNaming::Qualified`].
     pub external_types: Option<String>,
     /// Trait only: every method gets a default body that traps (a panic naming the method,
     /// like the glue's other traps), so a host implements just the methods it supports and a
@@ -609,7 +627,12 @@ pub(super) fn register(
     options: &WitOptions,
 ) -> Result<(Records, Vec<String>), TranspileError> {
     let mut records = options.records();
-    for f in funcs.iter().chain(exports.iter().map(|e| &e.func)) {
+    for (i, f) in funcs
+        .iter()
+        .chain(exports.iter().map(|e| &e.func))
+        .enumerate()
+    {
+        records.exports_phase = i >= funcs.len();
         for (_, ty) in &f.params {
             records.add_in(ty)?;
         }
@@ -699,7 +722,7 @@ pub(super) fn write_types(out: &mut String, records: &Records) -> Result<(), Tra
     let mut modules: Vec<&String> = records.modules.values().collect();
     modules.sort();
     for module in modules {
-        let in_module = |p: &Placed| p.module.as_deref() == Some(module.as_str());
+        let in_module = |p: &Placed| !p.external && p.module.as_deref() == Some(module.as_str());
         let mut resources: Vec<&Placed> =
             records.resources.iter().filter(|p| in_module(p)).collect();
         resources.sort_by(|a, b| a.name.cmp(&b.name));
@@ -832,7 +855,7 @@ pub fn wit_host_glue_with_options(
     component: &[u8],
     options: &WitOptions,
 ) -> Result<String, TranspileError> {
-    glue_text(component, options, None, None)
+    glue_text(component, options, None, None, true)
 }
 
 /// A function import of the program core module that its `Imports` trait declares.
@@ -852,6 +875,9 @@ pub(crate) struct CoreImport {
 /// name the interface by another compatible version than the component's own import, or import
 /// one function under several versions; the glue then still has one method per module import.
 ///
+/// `imports_trait` says whether the transpiled module has a host (`Imports` trait), else its
+/// `Instance` takes none and the glue is plain functions over it.
+///
 /// Each [`CoreImport`] says which export of the program its results are allocated through
 /// when that is not the lifts' `cabi_realloc` (a linked adapter's `cabi_import_realloc`).
 /// `lifts` replaces the exports read from the component: a linked unit names the core exports
@@ -861,8 +887,9 @@ pub(crate) fn wit_host_glue_for_module(
     options: &WitOptions,
     core_imports: &[CoreImport],
     lifts: Option<Vec<WitExport>>,
+    imports_trait: bool,
 ) -> Result<String, TranspileError> {
-    glue_text(component, options, Some(core_imports), lifts)
+    glue_text(component, options, Some(core_imports), lifts, imports_trait)
 }
 
 fn glue_text(
@@ -870,6 +897,7 @@ fn glue_text(
     options: &WitOptions,
     core_imports: Option<&[CoreImport]>,
     lifts: Option<Vec<WitExport>>,
+    imports_trait: bool,
 ) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
     let exports = if options.exports {
@@ -882,7 +910,15 @@ fn glue_text(
     };
     let (records, names) = register(&funcs, &exports, options)?;
     let mut out = match &options.external_types {
-        Some(path) => format!("// Generated by wasm2rs --wit-host.\nuse {path}::Host;\n"),
+        Some(path) => {
+            // The library declares the WASI types; the component's own are declared here.
+            let mut out = String::from("// Generated by wasm2rs --wit-host.\n");
+            if imports_trait {
+                let _ = writeln!(out, "use {path}::Host;");
+            }
+            write_types(&mut out, &records)?;
+            out
+        }
         None => write_declarations(&funcs, &records, &names, false)?,
     };
     let mut export_names = Vec::new();
@@ -919,7 +955,7 @@ fn glue_text(
             })
             .collect(),
     };
-    glue::write(&mut out, &methods, &records, exported)?;
+    glue::write(&mut out, &methods, &records, exported, imports_trait)?;
     Ok(out)
 }
 

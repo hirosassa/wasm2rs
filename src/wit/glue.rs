@@ -783,7 +783,14 @@ pub(super) fn write(
     methods: &[Method<'_>],
     records: &Records,
     exports: Option<(&[WitExport], &[String])>,
+    generic: bool,
 ) -> Result<(), TranspileError> {
+    if !generic && !methods.is_empty() {
+        return Err(TranspileError::Internal(
+            "a glue method for a module without an `Imports` trait".into(),
+        ));
+    }
+    let start = out.len();
     let mut sig_budget = Budget::new();
     let mut gen_ = Gen {
         records,
@@ -798,13 +805,15 @@ pub(super) fn write(
     let mut reallocs: Vec<(&str, bool)> = Vec::new();
     let mut default_allocates = false;
     out.push_str(HELPERS);
-    out.push_str(
-        "\n/// Lowers a typed `Host` to the flat `Imports` of the core module (transpiled with\n\
-         /// `named_imports`, `reentrant_imports` and `named_exports`): `Instance<Glue<H>>`.\n\
-         pub struct Glue<H: Host>(pub H);\n\n\
-         #[allow(unused_variables, unused_parens)]\n\
-         impl<H: Host> Imports for Glue<H> {\n",
-    );
+    if generic {
+        out.push_str(
+            "\n/// Lowers a typed `Host` to the flat `Imports` of the core module (transpiled with\n\
+             /// `named_imports`, `reentrant_imports` and `named_exports`): `Instance<Glue<H>>`.\n\
+             pub struct Glue<H: Host>(pub H);\n\n\
+             #[allow(unused_variables, unused_parens)]\n\
+             impl<H: Host> Imports for Glue<H> {\n",
+        );
+    }
     for &Method {
         func: f,
         name,
@@ -909,7 +918,9 @@ pub(super) fn write(
             None => default_allocates |= allocated,
         }
     }
-    out.push_str("}\n");
+    if generic {
+        out.push_str("}\n");
+    }
     // The lifts' own results go through `cabi_realloc`.
     gen_.alloc = ALLOC_MODULE.to_string();
     if let Some((exports, export_names)) = exports {
@@ -925,6 +936,17 @@ pub(super) fn write(
     }
     if default_allocates || gen_.allocates {
         out.push_str(ALLOC_HELPERS);
+    }
+    if !generic {
+        // A module with no host imports has no `Imports` trait: its `Instance` takes no host,
+        // so the glue is plain functions over `Instance`.
+        let tail = out.split_off(start);
+        out.push_str(
+            &tail
+                .replace("use super::{Glue, Host, Instance};", "use super::Instance;")
+                .replace("<H: Host>", "")
+                .replace("Instance<Glue<H>>", "Instance"),
+        );
     }
     Ok(())
 }
