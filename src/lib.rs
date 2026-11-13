@@ -468,6 +468,7 @@ pub(crate) fn transpile_ir_with_host_imports(
                     module: im.module.clone(),
                     field: im.field.clone(),
                     ident: im.ident.clone()?,
+                    realloc: None,
                 })
             })
             .collect();

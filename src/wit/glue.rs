@@ -171,8 +171,16 @@ mod glue_mem {
 /// The module of [`ALLOC_HELPERS`], which allocates through `cabi_realloc`.
 const ALLOC_MODULE: &str = "glue_alloc";
 
-/// The module of [`ALLOC_HELPERS`] with an import's `realloc` in place of `cabi_realloc`.
+/// The module of [`ALLOC_HELPERS`] with the first import `realloc` in place of
+/// `cabi_realloc`; the n-th (n > 0) is `{IMPORT_ALLOC_MODULE}_{n}`.
 const IMPORT_ALLOC_MODULE: &str = "glue_alloc_import";
+
+fn import_alloc_module(n: usize) -> String {
+    match n {
+        0 => IMPORT_ALLOC_MODULE.to_string(),
+        n => format!("{IMPORT_ALLOC_MODULE}_{n}"),
+    }
+}
 
 /// Allocating in the guest; present only when a `string` or `list` is returned.
 const ALLOC_HELPERS: &str = r#"
@@ -207,13 +215,10 @@ mod glue_alloc {
 "#;
 
 /// [`ALLOC_HELPERS`] calling the guest's `realloc` export instead of `cabi_realloc`, in the
-/// module [`IMPORT_ALLOC_MODULE`].
-fn import_alloc_helpers(realloc: &str) -> String {
+/// module `module`.
+fn import_alloc_helpers(realloc: &str, module: &str) -> String {
     ALLOC_HELPERS
-        .replace(
-            &format!("mod {ALLOC_MODULE} "),
-            &format!("mod {IMPORT_ALLOC_MODULE} "),
-        )
+        .replace(&format!("mod {ALLOC_MODULE} "), &format!("mod {module} "))
         .replace("g.cabi_realloc(", &format!("g.{realloc}("))
         .replace("`cabi_realloc`", &format!("`{realloc}`"))
 }
@@ -328,7 +333,7 @@ struct Gen<'a> {
     /// Some result is a `string` or `list`, allocated through `cabi_realloc`.
     allocates: bool,
     /// The module of allocation helpers the generated code calls (see [`ALLOC_MODULE`]).
-    alloc: &'static str,
+    alloc: String,
 }
 
 impl Gen<'_> {
@@ -607,7 +612,7 @@ impl Gen<'_> {
                 self.allocates = true;
                 self.writes_memory = true;
                 let next = base.saturating_add(1);
-                let al = self.alloc;
+                let al = self.alloc.clone();
                 format!(
                     "{{ let v = {value}; let b = v.as_bytes(); \
                      let p = {al}::alloc(g, 1, b.len() as u64, 1); glue_mem::st(g, p, b); \
@@ -618,7 +623,7 @@ impl Gen<'_> {
                 self.allocates = true;
                 self.writes_memory = true;
                 let next = base.saturating_add(1);
-                let al = self.alloc;
+                let al = self.alloc.clone();
                 if matches!(**t, WitType::U8) {
                     return Ok(format!(
                         "{{ let v = {value}; let p = {al}::alloc(g, 1, v.len() as u64, 1); \
@@ -698,12 +703,12 @@ impl Gen<'_> {
             }
             WitType::String => {
                 self.allocates = true;
-                let al = self.alloc;
+                let al = self.alloc.clone();
                 format!("{al}::put_bytes(g, {at}, ({value}).as_bytes());")
             }
             WitType::List(t) => {
                 self.allocates = true;
-                let al = self.alloc;
+                let al = self.alloc.clone();
                 if matches!(**t, WitType::U8) {
                     return Ok(format!("{al}::put_bytes(g, {at}, &({value}));"));
                 }
@@ -761,6 +766,9 @@ pub(super) struct Method<'a> {
     pub func: &'a WitFunc,
     pub name: &'a str,
     pub host: &'a str,
+    /// The export of the program that this import allocates its string and list results
+    /// through, or `None` for the lifts' `cabi_realloc`.
+    pub realloc: Option<&'a str>,
 }
 
 /// Appends the glue to `out`: the helpers, `Glue` and its `Imports` impl with one method per
@@ -775,7 +783,6 @@ pub(super) fn write(
     methods: &[Method<'_>],
     records: &Records,
     exports: Option<(&[WitExport], &[String])>,
-    import_realloc: Option<&str>,
 ) -> Result<(), TranspileError> {
     let mut sig_budget = Budget::new();
     let mut gen_ = Gen {
@@ -784,12 +791,12 @@ pub(super) fn write(
         fresh: 0,
         writes_memory: false,
         allocates: false,
-        alloc: if import_realloc.is_some() {
-            IMPORT_ALLOC_MODULE
-        } else {
-            ALLOC_MODULE
-        },
+        alloc: ALLOC_MODULE.to_string(),
     };
+    // The distinct import `realloc`s in first-use order, and whether an import allocates
+    // through each (the last entry: through the lifts' `cabi_realloc`).
+    let mut reallocs: Vec<(&str, bool)> = Vec::new();
+    let mut default_allocates = false;
     out.push_str(HELPERS);
     out.push_str(
         "\n/// Lowers a typed `Host` to the flat `Imports` of the core module (transpiled with\n\
@@ -802,8 +809,17 @@ pub(super) fn write(
         func: f,
         name,
         host,
+        realloc,
     } in methods
     {
+        let slot = realloc.map(|r| match reallocs.iter().position(|(n, _)| *n == r) {
+            Some(at) => at,
+            None => {
+                reallocs.push((r, false));
+                reallocs.len().saturating_sub(1)
+            }
+        });
+        gen_.alloc = slot.map_or_else(|| ALLOC_MODULE.to_string(), import_alloc_module);
         let sig = core_signature(f, &mut sig_budget)?;
         let _ = writeln!(out, "    /// {:?} {:?}", f.interface, f.name);
         let mut head = format!("    fn {name}(&mut self, g: &mut Instance<Self>");
@@ -886,32 +902,29 @@ pub(super) fn write(
             }
         }
         out.push_str("    }\n");
+        // Results of an import allocate through the import's `realloc`.
+        let allocated = std::mem::replace(&mut gen_.allocates, false);
+        match slot.and_then(|at| reallocs.get_mut(at)) {
+            Some(entry) => entry.1 |= allocated,
+            None => default_allocates |= allocated,
+        }
     }
     out.push_str("}\n");
-    // Results of imports allocate through the import's `realloc`; the lifts' own go through
-    // `cabi_realloc`.
-    let import_allocates = std::mem::replace(&mut gen_.allocates, false);
-    gen_.alloc = ALLOC_MODULE;
+    // The lifts' own results go through `cabi_realloc`.
+    gen_.alloc = ALLOC_MODULE.to_string();
     if let Some((exports, export_names)) = exports {
         write_exports(out, &mut gen_, exports, export_names)?;
     }
     if gen_.writes_memory {
         out.push_str(MEM_HELPERS);
     }
-    match import_realloc {
-        Some(realloc) => {
-            if import_allocates {
-                out.push_str(&import_alloc_helpers(realloc));
-            }
-            if gen_.allocates {
-                out.push_str(ALLOC_HELPERS);
-            }
+    for (n, (realloc, allocates)) in reallocs.iter().enumerate() {
+        if *allocates {
+            out.push_str(&import_alloc_helpers(realloc, &import_alloc_module(n)));
         }
-        None => {
-            if import_allocates || gen_.allocates {
-                out.push_str(ALLOC_HELPERS);
-            }
-        }
+    }
+    if default_allocates || gen_.allocates {
+        out.push_str(ALLOC_HELPERS);
     }
     Ok(())
 }

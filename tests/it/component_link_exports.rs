@@ -273,3 +273,72 @@ fn lift_memory_option_of_an_unrelated_memory_is_rejected() {
     let err = transpile_component(&component, &own_host()).unwrap_err();
     assert!(err.to_string().contains("its memory is neither"), "{err}");
 }
+
+/// Two lowered imports return a string, each lowered with the `realloc` of a different
+/// module (as in a dylink component: the adapter's, `libc`'s, a binding library's). Each result
+/// is allocated through its own `realloc`, so the guest sees the two pointers those return.
+#[test]
+fn imports_allocate_through_their_own_reallocs() {
+    let component = wat::parse_str(
+        r#"(component
+            (import "t:t/i" (instance $i
+                (export "a" (func (result string)))
+                (export "b" (func (result string)))))
+            (alias export $i "a" (func $ha))
+            (alias export $i "b" (func $hb))
+            (core module $memory (memory (export "memory") 1))
+            (core module $r1
+                (import "env" "memory" (memory 1))
+                (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 100))
+            (core module $r2
+                (import "env" "memory" (memory 1))
+                (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 200))
+            (core module $main
+                (import "env" "memory" (memory 1))
+                (import "host" "a" (func $a (param i32)))
+                (import "host" "b" (func $b (param i32)))
+                (func (export "run") (result i32)
+                    (call $a (i32.const 0))
+                    (call $b (i32.const 16))
+                    (i32.add
+                        (i32.mul (i32.load (i32.const 0)) (i32.const 1000))
+                        (i32.load (i32.const 16)))))
+            (core instance $m (instantiate $memory))
+            (alias core export $m "memory" (core memory $mem))
+            (core instance $env (export "memory" (memory $mem)))
+            (core instance $i1 (instantiate $r1 (with "env" (instance $env))))
+            (core instance $i2 (instantiate $r2 (with "env" (instance $env))))
+            (alias core export $i1 "realloc" (core func $ra))
+            (alias core export $i2 "realloc" (core func $rb))
+            (core func $la (canon lower (func $ha) (memory $mem) (realloc $ra)))
+            (core func $lb (canon lower (func $hb) (memory $mem) (realloc $rb)))
+            (core instance $host (export "a" (func $la)) (export "b" (func $lb)))
+            (core instance $mn (instantiate $main
+                (with "env" (instance $env))
+                (with "host" (instance $host))))
+            (func (export "run") (result u32) (canon lift (core func $mn "run"))))"#,
+    )
+    .unwrap();
+    let code = transpile_component(&component, &own_host()).unwrap();
+    assert!(code.contains("cabi_import_realloc_1"), "{code}");
+    let program = format!(
+        "{code}\n\
+         struct H;\n\
+         impl Host for H {{\n\
+             fn t_t_i_a(&mut self) -> String {{ \"x\".into() }}\n\
+             fn t_t_i_b(&mut self) -> String {{ \"y\".into() }}\n\
+         }}\n\
+         fn main() {{\n\
+             let mut inst = Instance::new(Glue(H));\n\
+             println!(\"{{}}\", Exports::run(&mut inst));\n\
+         }}\n"
+    );
+    let bin = common::build("component_link_import_reallocs", &program);
+    let out = Command::new(bin).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "100200");
+}

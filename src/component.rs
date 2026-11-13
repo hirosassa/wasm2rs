@@ -116,7 +116,6 @@ pub fn transpile_component_with_exports(
         &wit,
         &core_imports,
         None,
-        None,
     )?);
     Ok((out, exports))
 }
