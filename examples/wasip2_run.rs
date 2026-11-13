@@ -4,7 +4,8 @@
 //! Usage: `cargo run --release --example wasip2_run -- <component.wasm> [args...]`
 //!
 //! `wasm2rs::transpile_component` turns the component into one Rust source: the program core
-//! module (the one that lifts the component's exports), transpiled with `named_imports`,
+//! module (the one that lifts the component's exports; the linked modules of a component made
+//! with a preview1 adapter), transpiled with `named_imports`,
 //! `named_exports` and `reentrant_imports`, then the `Glue` that lowers the library's `Host`
 //! trait to the module's imports and the typed `Exports` trait. A `main` calling the typed
 //! `wasi:cli/run` export is appended, and the result is built with
@@ -14,8 +15,8 @@
 //! line (like a real process's), followed by `args`.
 //!
 //! Exit codes: 0 when `run` returns ok, 1 on an error result or `wasi:cli/exit` with an
-//! error, 2 when the build fails or the component does not lift `wasi:cli/run@0.2.0#run`
-//! directly (no such export, or a shape `wasm2rs::transpile_component` does not read: the
+//! error, 2 when the build fails or the component does not lift `wasi:cli/run#run` at
+//! `0.2.0` or a later `0.2.x` patch (no such export, or a shape `wasm2rs::transpile_component` does not read: the
 //! message says which), 134 when a panic occurs during the `run` call (a guest trap, or a
 //! panic inside a host import it calls: the panic message is printed, then `wasip2_run: the
 //! program trapped`); panics outside the call (host setup) stay 101. The build goes in

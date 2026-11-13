@@ -693,7 +693,7 @@ impl<'a> FuncGen<'a> {
             // (trapping on null); `br_on_null`/`br_on_non_null` branch on
             // nullness (only the latter carries the ref, dropping it otherwise).
             // Bridge the `extern` and `any` hierarchies (forces the module
-            // stateful; see `uses_extern_convert`).
+            // stateful; see `uses_extern_box` in `scan_bodies`).
             Operator::ExternConvertAny => self.extern_convert_any()?,
             Operator::AnyConvertExtern => self.any_convert_extern()?,
             Operator::RefEq => self.ref_eq()?,

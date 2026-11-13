@@ -263,7 +263,8 @@ impl Host for WasiHost {
         self.http_new_fields(view)
     }
 
-    /// The response's body, buffered until `take_response`; it can be asked for once.
+    /// The response's body, buffered for the `ServedBody` that `take_response` returns; it can be
+    /// asked for once.
     fn wasi_http_types_method_outgoing_response_body(
         &mut self,
         self_: OutgoingResponse,
