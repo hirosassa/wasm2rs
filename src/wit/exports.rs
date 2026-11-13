@@ -27,7 +27,8 @@ pub struct WitExport {
     /// The name under which that module exports the lifted function, e.g.
     /// `wasi:cli/run@0.2.0#run`.
     pub core_export: String,
-    /// The module's memory export named by the lift, if any.
+    /// The memory export named by the lift, if any: of the module itself, or, in a linked
+    /// component, of the module that defines the memory the lifted module imports.
     pub memory: Option<String>,
     /// The module's export of the `realloc` function named by the lift, if any.
     pub realloc: Option<String>,
@@ -165,6 +166,8 @@ struct TopModule {
     /// export or an alias of a module also grows).
     ordinal: usize,
     exports: Vec<(String, ExternalKind)>,
+    /// The `(module, name)` of each memory the module imports.
+    memory_imports: Vec<(String, String)>,
 }
 
 /// The module or component being skipped through, with its nesting depth.
@@ -173,8 +176,15 @@ struct Inner {
     kind: InnerKind,
 }
 
+/// What is read of a top-level core module before it gets its ordinal.
+#[derive(Default)]
+struct ModuleItems {
+    exports: Vec<(String, ExternalKind)>,
+    memory_imports: Vec<(String, String)>,
+}
+
 enum InnerKind {
-    Module(Vec<(String, ExternalKind)>),
+    Module(ModuleItems),
     Component(ShimBuilder),
 }
 
@@ -226,7 +236,7 @@ impl Reader {
             Payload::ModuleSection { .. } => {
                 self.inner = Some(Inner {
                     depth: 1,
-                    kind: InnerKind::Module(Vec::new()),
+                    kind: InnerKind::Module(ModuleItems::default()),
                 });
             }
             Payload::ComponentSection { .. } => {
@@ -442,10 +452,11 @@ impl Reader {
                 inner.depth = inner.depth.saturating_sub(1);
                 if inner.depth == 0 {
                     match self.inner.take().map(|i| i.kind) {
-                        Some(InnerKind::Module(exports)) => {
+                        Some(InnerKind::Module(items)) => {
                             self.modules.push(Some(TopModule {
                                 ordinal: self.top_modules,
-                                exports,
+                                exports: items.exports,
+                                memory_imports: items.memory_imports,
                             }));
                             self.top_modules = self.top_modules.saturating_add(1);
                         }
@@ -457,10 +468,22 @@ impl Reader {
             // Only the direct children of the module or component are read.
             _ if inner.depth > 1 => {}
             Payload::ExportSection(reader) => {
-                if let InnerKind::Module(exports) = &mut inner.kind {
+                if let InnerKind::Module(items) = &mut inner.kind {
                     for export in reader.clone() {
                         let export = export?;
-                        exports.push((export.name.to_string(), export.kind));
+                        items.exports.push((export.name.to_string(), export.kind));
+                    }
+                }
+            }
+            Payload::ImportSection(reader) => {
+                if let InnerKind::Module(items) = &mut inner.kind {
+                    for import in reader.clone().into_imports() {
+                        let import = import?;
+                        if matches!(import.ty, wasmparser::TypeRef::Memory(_)) {
+                            items
+                                .memory_imports
+                                .push((import.module.to_string(), import.name.to_string()));
+                        }
                     }
                 }
             }
@@ -680,13 +703,22 @@ impl Reader {
                 }
                 CanonicalOption::Memory(i) => {
                     let found = index(*i).and_then(|i| self.core_memories.get(i));
-                    let Some((_, name)) = found.filter(|(from, _)| *from == instance) else {
+                    let Some((from, name)) = found.filter(|(from, name)| {
+                        *from == instance || self.imports_memory(module, instance, *from, name)
+                    }) else {
                         return Err(unsupported(format!(
-                            "export `{label}`: its memory is not an export of the same core \
-                             instance as the function"
+                            "export `{label}`: its memory is neither an export of the same core \
+                             instance as the function nor the memory that instance imports"
                         )));
                     };
-                    self.check_exists(&label, module, name, ExternalKind::Memory)?;
+                    // Through the link the memory is another instance's export: check it there.
+                    let Some(owner) = self.instance_module(*from) else {
+                        return Err(unsupported(format!(
+                            "export `{label}`: its memory is exported by a core instance made \
+                             from exports, not by a core module"
+                        )));
+                    };
+                    self.check_exists(&label, owner, name, ExternalKind::Memory)?;
                     export.memory = Some(name.clone());
                 }
                 CanonicalOption::Realloc(i) => {
@@ -708,6 +740,29 @@ impl Reader {
             }
         }
         Ok(export)
+    }
+
+    /// The index in the module index space of the module that core instance `instance`
+    /// instantiates.
+    fn instance_module(&self, instance: u32) -> Option<usize> {
+        match index(instance).and_then(|i| self.core_instances.get(i)) {
+            Some(&CoreInstance::Module { module, .. }) => Some(module),
+            _ => None,
+        }
+    }
+
+    /// Whether the module `module`, instantiated as `instance`, imports a memory that the
+    /// core instance `from` exports as `name`: it then uses the very memory a lift option
+    /// names (a library linked to the program's memory).
+    fn imports_memory(&self, module: usize, instance: u32, from: u32, name: &str) -> bool {
+        let Some(top) = self.modules.get(module).and_then(Option::as_ref) else {
+            return false;
+        };
+        let wiring = self.wiring();
+        let wanted = Some(Supplier::export(from, name));
+        top.memory_imports
+            .iter()
+            .any(|(m, n)| wiring.supplier(instance, m, n) == wanted)
     }
 
     /// The export name of the `what` option's core function `at`, which must come from

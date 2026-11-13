@@ -89,7 +89,7 @@ fn internal_wiring_exports_are_not_exported() {
                 (func (export "run") (result i32)
                     call $start
                     (i32.add (i32.load (i32.const 8)) (i32.add (call $f) (i32.const 1)))))
-            (core instance $m (instantiate $main))
+            (core instance $m (instantiate $main (with "t:t/i" (instance $host))))
             (alias core export $m "memory" (core memory $mem))
             (alias core export $m "_start" (core func $start))
             (core instance $env (export "memory" (memory $mem)))
@@ -217,4 +217,59 @@ fn several_unused_reallocs_of_one_module_do_not_clash() {
     )
     .unwrap();
     transpile_component(&component, &own_host()).unwrap();
+}
+
+const DYLINK_MEMORY: &str = r#"(component
+    (import "t:t/i" (instance $i (export "f" (func (result u32)))))
+    (alias export $i "f" (func $hf))
+    (core func $lowered (canon lower (func $hf)))
+    (core instance $host (export "f" (func $lowered)))
+    (core module $main
+        (import "t:t/i" "f" (func (result i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 32) "hi"))
+    (core module $other (memory (export "memory") 1))
+    (core module $lib
+        (import "env" "memory" (memory 1))
+        (func (export "f") (result i32)
+            (i32.store (i32.const 16) (i32.const 32))
+            (i32.store (i32.const 20) (i32.const 2))
+            (i32.const 16)))
+    (core instance $m (instantiate $main (with "t:t/i" (instance $host))))
+    (alias core export $m "memory" (core memory $mem))
+    UNRELATED
+    (core instance $env (export "memory" (memory $mem)))
+    (core instance $l (instantiate $lib (with "env" (instance $env))))
+    (func (export "f") (result string) (canon lift (core func $l "f") (memory MEMORY))))"#;
+
+/// A library imports the program's memory, and its lift names that memory (an export of the
+/// program, not of the library): the option resolves through the link.
+#[test]
+fn lift_memory_option_resolves_through_the_link() {
+    let component = wat::parse_str(
+        DYLINK_MEMORY
+            .replace("MEMORY", "$mem")
+            .replace("UNRELATED", ""),
+    )
+    .unwrap();
+    let code = transpile_component(&component, &own_host()).unwrap();
+    let out = run(
+        "component_link_memory_option",
+        &code,
+        "println!(\"{}\", Exports::f(&mut inst));",
+    );
+    assert_eq!(out, "hi");
+}
+
+/// A memory option naming a memory the function's module does not use stays rejected.
+#[test]
+fn lift_memory_option_of_an_unrelated_memory_is_rejected() {
+    let component = wat::parse_str(DYLINK_MEMORY.replace("MEMORY", "$unrelated").replace(
+        "UNRELATED",
+        r#"(core instance $o (instantiate $other))
+                (alias core export $o "memory" (core memory $unrelated))"#,
+    ))
+    .unwrap();
+    let err = transpile_component(&component, &own_host()).unwrap_err();
+    assert!(err.to_string().contains("its memory is neither"), "{err}");
 }
