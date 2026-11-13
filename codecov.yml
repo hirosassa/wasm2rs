@@ -1,0 +1,43 @@
+coverage:
+  status:
+    # クレートごとの component status に任せ、全体 status は重複を避けるため無効化する
+    project: off
+    patch:
+      default:
+        target: auto
+        threshold: 1%
+
+component_management:
+  default_rules:
+    statuses:
+      - type: project
+        target: auto # 個別に target を指定しない component は base commit を下回らないこと
+        threshold: 1% # 微小な変動では落とさない
+  individual_components:
+    - component_id: core
+      # 実測 95.24% (2026-11-13) の少し下を下限にする
+      statuses:
+        - type: project
+          target: 94%
+          threshold: 1%
+      name: wasm2rs (core)
+      paths:
+        - src/**
+    - component_id: macros
+      # 実測 92.27% (2026-11-13) の少し下を下限にする
+      statuses:
+        - type: project
+          target: 90%
+          threshold: 1%
+      name: wasm2rs-macros
+      paths:
+        - wasm2rs-macros/**
+    - component_id: wasi
+      # 実測 83.93% (2026-11-13) の少し下を下限にする
+      statuses:
+        - type: project
+          target: 82%
+          threshold: 1%
+      name: wasm2rs-wasi
+      paths:
+        - wasm2rs-wasi/**
