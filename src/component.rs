@@ -6,11 +6,13 @@ mod link;
 use std::collections::{BTreeMap, BTreeSet};
 
 use wasmparser::{
-    ComponentAlias, ComponentExternalKind, ComponentOuterAliasKind, ComponentTypeRef, Encoding,
-    ExternalKind, Instance, Parser, Payload, TypeRef,
+    ComponentAlias, ComponentExternalKind, ComponentOuterAliasKind, ComponentTypeRef, DataKind,
+    ElementKind, Encoding, ExternalKind, Instance, Parser, Payload, TypeRef,
 };
 
-use crate::wit::{Supplier, core_wiring, is_wit_function, wit_functions, wit_host_glue_for_module};
+use crate::wit::{
+    CoreWiring, Supplier, core_wiring, is_wit_function, wit_functions, wit_host_glue_for_module,
+};
 use crate::{
     TranspileError, TranspileOptions, WitExport, WitOptions, transpile_with_host_imports,
     wit_exports,
@@ -160,7 +162,137 @@ fn select_program<'a>(
     {
         return Ok(Program::Linked);
     }
+    if drops_initialization(component, layout, index)? {
+        return Ok(Program::Linked);
+    }
     Ok(Program::Module(module))
+}
+
+/// Whether the single-module path would drop what another instantiated module initializes: a
+/// start function, or an active data or element segment in a memory or table the module at
+/// `index` shares (a dylink library filling the table its main module calls through). A
+/// segment in a table of its own, such as `wit-component`'s fixup filling the shim table, is
+/// left out: the glue stands in for what that table serves.
+fn drops_initialization(
+    component: &[u8],
+    layout: &Layout,
+    index: usize,
+) -> Result<bool, TranspileError> {
+    // Built on the first segment found: reading the wiring is only needed then.
+    let mut shared = None;
+    for &other in layout.instantiated.iter().filter(|&&i| i != index) {
+        let Some(module) = layout.modules.get(other) else {
+            continue;
+        };
+        match initializer(module)? {
+            None => {}
+            Some(Initializer::Start) => return Ok(true),
+            Some(Initializer::Segments) => {
+                let shared = match &mut shared {
+                    Some(shared) => shared,
+                    None => shared.insert(SharedState::of(component, layout, index)?),
+                };
+                if shared.is_shared_with(layout, other)? {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+enum Initializer {
+    Start,
+    Segments,
+}
+
+/// What a module initializes on instantiation: a start function (which wins), or an active
+/// data or element segment.
+fn initializer(module: &[u8]) -> Result<Option<Initializer>, TranspileError> {
+    let mut found = None;
+    for payload in Parser::new(0).parse_all(module) {
+        match payload? {
+            Payload::StartSection { .. } => return Ok(Some(Initializer::Start)),
+            Payload::DataSection(reader) => {
+                for data in reader {
+                    if matches!(data?.kind, DataKind::Active { .. }) {
+                        found = Some(Initializer::Segments);
+                    }
+                }
+            }
+            Payload::ElementSection(reader) => {
+                for element in reader {
+                    if matches!(element?.kind, ElementKind::Active { .. }) {
+                        found = Some(Initializer::Segments);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(found)
+}
+
+/// The core instances that provide a memory, table or global to the lifted module, and the
+/// lifted module's own instance: where another module's segment can be seen from it.
+struct SharedState {
+    wiring: CoreWiring,
+    instances: BTreeSet<u32>,
+}
+
+impl SharedState {
+    fn of(component: &[u8], layout: &Layout, index: usize) -> Result<Self, TranspileError> {
+        let wiring = core_wiring(component)?;
+        let mut instances = BTreeSet::new();
+        if let (Some(instance), Some(module)) =
+            (wiring.module_instance(index), layout.modules.get(index))
+        {
+            instances.insert(instance);
+            instances.extend(state_suppliers(&wiring, instance, module)?);
+        }
+        Ok(Self { wiring, instances })
+    }
+
+    fn is_shared_with(&self, layout: &Layout, other: usize) -> Result<bool, TranspileError> {
+        let (Some(instance), Some(module)) = (
+            self.wiring.module_instance(other),
+            layout.modules.get(other),
+        ) else {
+            return Ok(false);
+        };
+        Ok(state_suppliers(&self.wiring, instance, module)?
+            .iter()
+            .any(|supplier| self.instances.contains(supplier)))
+    }
+}
+
+/// The core instances that supply the module's memory, table and global imports.
+fn state_suppliers(
+    wiring: &CoreWiring,
+    instance: u32,
+    module: &[u8],
+) -> Result<BTreeSet<u32>, TranspileError> {
+    let mut suppliers = BTreeSet::new();
+    for payload in Parser::new(0).parse_all(module) {
+        let Payload::ImportSection(reader) = payload? else {
+            continue;
+        };
+        for import in reader.into_imports() {
+            let import = import?;
+            if !matches!(
+                import.ty,
+                TypeRef::Memory(_) | TypeRef::Table(_) | TypeRef::Global(_)
+            ) {
+                continue;
+            }
+            if let Some(Supplier::Export { instance, .. }) =
+                wiring.supplier(instance, import.module, import.name)
+            {
+                suppliers.insert(instance);
+            }
+        }
+    }
+    Ok(suppliers)
 }
 
 /// Whether the lifted exports come from more than one core module.
@@ -291,6 +423,8 @@ struct Layout {
     /// that holds a memory, table or global (an instantiated module, or an export bundle
     /// with one).
     core_linked: BTreeMap<usize, BTreeSet<String>>,
+    /// The modules the component instantiates (a module may be declared and never used).
+    instantiated: BTreeSet<usize>,
 }
 
 /// Reads the top-level structure of `component`, skipping the content of nested modules and
@@ -300,6 +434,7 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
         modules: Vec::new(),
         receivers: BTreeSet::new(),
         core_linked: BTreeMap::new(),
+        instantiated: BTreeSet::new(),
     };
     // The module index space: the ordinal among top-level modules, or `None` for a module
     // that came from an alias or an import (not read).
@@ -408,6 +543,7 @@ fn scan(component: &[u8]) -> Result<Layout, TranspileError> {
                                 layout.receivers.insert(module);
                             }
                             if let Some(module) = module {
+                                layout.instantiated.insert(module);
                                 for arg in args
                                     .iter()
                                     .filter(|a| at(&holds_state, a.index).unwrap_or(false))
@@ -452,4 +588,96 @@ fn is_drivable(module: &[u8]) -> bool {
                 .any(|e| e.is_ok_and(|e| e.kind == ExternalKind::Func)),
             _ => false,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A component whose only lift is `main`'s `call_at`; `lib` is a second instantiated core
+    /// module that shares `main`'s memory and table, with `lib_body` as its items.
+    fn component(lib_body: &str) -> Vec<u8> {
+        wat::parse_str(format!(
+            r#"(component
+    (core module $main
+        (memory (export "memory") 1)
+        (table (export "table") 16 funcref)
+        (type $t (func (result i32)))
+        (func (export "call_at") (param i32) (result i32) (call_indirect (type $t) (local.get 0))))
+    (core module $lib
+        (import "env" "memory" (memory 1))
+        (import "env" "table" (table 16 funcref))
+        {lib_body})
+    (core instance $m (instantiate $main))
+    (alias core export $m "memory" (core memory $mem))
+    (alias core export $m "table" (core table $tbl))
+    (core instance $env (export "memory" (memory $mem)) (export "table" (table $tbl)))
+    (core instance $l (instantiate $lib (with "env" (instance $env))))
+    (func $call_at (param "i" s32) (result s32) (canon lift (core func $m "call_at")))
+    (export "call-at" (func $call_at)))"#
+        ))
+        .unwrap()
+    }
+
+    fn is_linked(component: &[u8]) -> bool {
+        let layout = scan(component).unwrap();
+        let exports = wit_exports(component).unwrap();
+        matches!(
+            select_program(component, &layout, &exports).unwrap(),
+            Program::Linked
+        )
+    }
+
+    #[test]
+    fn a_sibling_that_fills_the_shared_table_is_linked() {
+        let lib = r#"(func $g (result i32) i32.const 77) (elem (i32.const 7) $g)"#;
+        assert!(is_linked(&component(lib)));
+    }
+
+    #[test]
+    fn a_sibling_with_an_active_data_segment_is_linked() {
+        assert!(is_linked(&component(r#"(data (i32.const 8) "\2a")"#)));
+    }
+
+    #[test]
+    fn a_sibling_with_a_start_function_is_linked() {
+        let lib = r#"(func $s (i32.store8 (i32.const 0) (i32.const 1))) (start $s)"#;
+        assert!(is_linked(&component(lib)));
+    }
+
+    #[test]
+    fn a_sibling_without_segments_or_start_stays_a_single_module() {
+        let lib = r#"(func (export "nop"))"#;
+        assert!(!is_linked(&component(lib)));
+    }
+
+    #[test]
+    fn a_passive_segment_does_not_force_linking() {
+        let lib = r#"(data "\2a") (func $g) (elem func $g)"#;
+        assert!(!is_linked(&component(lib)));
+    }
+
+    /// `wit-component`'s shim/fixup: a table of its own that a second module fills, which the
+    /// lifted module never sees.
+    #[test]
+    fn a_fixup_filling_a_table_of_its_own_stays_a_single_module() {
+        let component = wat::parse_str(
+            r#"(component
+    (core module $main (func (export "f") (result i32) i32.const 1))
+    (core module $shim (table (export "$imports") 1 funcref))
+    (core module $fixup
+        (import "" "$imports" (table 1 funcref))
+        (func $g)
+        (elem (i32.const 0) $g))
+    (core instance $shim_i (instantiate $shim))
+    (alias core export $shim_i "$imports" (core table $t))
+    (core instance $args (export "$imports" (table $t)))
+    (core instance $fixup_i (instantiate $fixup (with "" (instance $args))))
+    (core instance $m (instantiate $main))
+    (func $f (result s32) (canon lift (core func $m "f")))
+    (export "f" (func $f)))"#,
+        )
+        .unwrap();
+        assert!(!is_linked(&component));
+    }
 }

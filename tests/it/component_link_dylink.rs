@@ -239,3 +239,58 @@ fn a_library_without_a_table_base_import_is_not_affected() {
     );
     assert_eq!(out, "3");
 }
+
+/// A component that lifts only from `main`, with one library that shares its memory and table
+/// and has `lib_body` as its items. The library exports nothing lifted.
+fn main_only_component(lib_body: &str) -> Vec<u8> {
+    let wat = format!(
+        r#"(component
+    (import "t:t/i" (instance $i (export "f" (func (result u32)))))
+    (alias export $i "f" (func $hf))
+    (core func $lowered (canon lower (func $hf)))
+    (core instance $host (export "f" (func $lowered)))
+    (core module $main
+        (import "t:t/i" "f" (func (result i32)))
+        (memory (export "memory") 1)
+        (table (export "table") 16 funcref)
+        (type $t (func (result i32)))
+        (func (export "call_at") (param i32) (result i32) (call_indirect (type $t) (local.get 0)))
+        (func (export "peek") (param i32) (result i32) (i32.load8_u (local.get 0))))
+    (core module $lib
+        (import "env" "memory" (memory 1))
+        (import "env" "table" (table 16 funcref))
+        {lib_body})
+    (core instance $m (instantiate $main (with "t:t/i" (instance $host))))
+    (alias core export $m "memory" (core memory $mem))
+    (alias core export $m "table" (core table $tbl))
+    (core instance $env (export "memory" (memory $mem)) (export "table" (table $tbl)))
+    (core instance $l (instantiate $lib (with "env" (instance $env))))
+    {LIFT_CALL_AT}
+    {LIFT_PEEK})"#
+    );
+    wat::parse_str(wat).unwrap()
+}
+
+/// A library that is instantiated but not lifted from still fills the shared table.
+#[test]
+fn an_unlifted_library_still_fills_the_shared_table() {
+    let lib = r#"(func $g (result i32) i32.const 77) (elem (i32.const 7) $g)"#;
+    let out = run(
+        "dylink_main_only_table",
+        &main_only_component(lib),
+        "println!(\"{}\", Exports::call_at(&mut inst, 7));",
+    );
+    assert_eq!(out, "77");
+}
+
+/// A library that is instantiated but not lifted from still runs its start function.
+#[test]
+fn an_unlifted_librarys_start_function_runs() {
+    let lib = r#"(func $s (i32.store8 (i32.const 0) (i32.const 9))) (start $s)"#;
+    let out = run(
+        "dylink_main_only_start",
+        &main_only_component(lib),
+        "println!(\"{}\", Exports::peek(&mut inst, 0));",
+    );
+    assert_eq!(out, "9");
+}
