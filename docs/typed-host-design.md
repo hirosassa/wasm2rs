@@ -10,13 +10,13 @@ README. Each section names the code or test that backs it.
 ## Structure
 
 - `wasm2rs-wasi/src/generated.rs` holds the `Host` trait (all 199 methods of the official WASI
-  0.2.0 WIT, each defaulting to a trap) and its types, one module per defining interface
+  0.2.0 WIT plus `wasi:cli/exit`'s `exit-with-code` from `tests/wasi_p2_wit/overlay/`, each defaulting to a trap) and its types, one module per defining interface
   (`wasi_filesystem_types::ErrorCode`, `wasi_sockets_network::ErrorCode`, ...). It is generated
   (`WitNaming::Qualified` + `default_trap`) and checked in; `tests/it/wasi_generated.rs`
   regenerates it and fails on any difference.
 - `wasm2rs-wasi/src/host.rs` is `WasiHost` and the pure logic around it (slabs, streams, send
   queue, path resolution, socket helpers); `host/impl_host.rs` is `impl Host for WasiHost`
-  (all 199 methods, no canonical-ABI code: the glue does all of that, `wasi:http` included, see
+  (all 200 methods, no canonical-ABI code: the glue does all of that, `wasi:http` included, see
   `docs/wasi-http-design.md`); `tests/it/wasip2_wit_regression.rs` pins that none is left at the
   trapping default.
 - **Per-component glue.** The glue still depends on the component, so it is generated per

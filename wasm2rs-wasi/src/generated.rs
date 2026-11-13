@@ -901,6 +901,11 @@ pub trait Host {
         let _ = (status,);
         panic!("wasm2rs wit host: not implemented: wasi_cli_exit_exit")
     }
+    /// "wasi:cli/exit@0.2.0" "exit-with-code"
+    fn wasi_cli_exit_exit_with_code(&mut self, status_code: u8) {
+        let _ = (status_code,);
+        panic!("wasm2rs wit host: not implemented: wasi_cli_exit_exit_with_code")
+    }
     /// "wasi:cli/stdin@0.2.0" "get-stdin"
     fn wasi_cli_stdin_get_stdin(&mut self) -> wasi_io_streams::InputStream {
         let _ = ();

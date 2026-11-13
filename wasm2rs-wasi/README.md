@@ -4,17 +4,17 @@ The typed WASI 0.2.0 host for programs transpiled by [wasm2rs](https://github.co
 one fixed `Host` trait for the whole 0.2.0 surface, whose methods trap unless a host implements
 them, and the types it uses (`wasi_filesystem_types::ErrorCode`, ...).
 
-`src/generated.rs` is generated from the official WIT in `tests/wasi_p2_wit/` and checked in;
+`src/generated.rs` is generated from the official 0.2.0 WIT in `tests/wasi_p2_wit/` plus its `overlay/` (later additions that toolchains import: `exit-with-code`, see `docs/wasi-post-0.2.0-additions.md`) and checked in;
 a test regenerates it and fails on any difference. To refresh it after a generator change, run
 `WASM2RS_BLESS=1 cargo test --test it wasi_generated`.
 
 ## Coverage
 
-`WasiHost` implements every method of WASI 0.2.0 (199, generated from the official WIT):
+`WasiHost` implements every method of WASI 0.2.0 and the overlay (200, generated from the official WIT):
 
 | Package | Methods | Notes |
 |---|---|---|
-| `wasi:cli` | 12 | arguments, environment, exit, stdio, terminal types |
+| `wasi:cli` | 13 | arguments, environment, exit, stdio, terminal types |
 | `wasi:clocks` | 6 | monotonic and wall clocks, replaceable with `.clock(..)` |
 | `wasi:filesystem` | 32 | preopens only, confined below each preopen (Unix; see the limits below) |
 | `wasi:http` | 63 | client (needs an `HttpClient`) and incoming-handler side, with trailers |

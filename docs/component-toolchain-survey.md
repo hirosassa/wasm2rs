@@ -21,7 +21,7 @@ directory; the commands are below so the survey can be repeated.
 | H | `componentize-py`, `IncomingHandler` | 18.4 MB | **works at `-C opt-level=0`** (2026-11-14): `200`, header and body over `wasip2_serve`, also for a second request; 75 s from start to listening |
 | I | TinyGo 0.44 `tinygo build -target=wasip2` (Go `fmt.Println`) | 773 KB, one core module, `wasi:cli/run@0.2.0` | **works** (2026-11-14): prints `hello from tinygo`, exit 0; `wasip2_run` end to end 24 s (rustc at `-C opt-level=1`, 480 MB peak RSS). No wall. `#[ignore]` test: `WASM2RS_TINYGO_HELLO_COMPONENT` |
 | J | wasi-sdk 34 `clang --target=wasm32-wasip2`, C `puts` | 227 KB, one core module, `wasi:cli/run@0.2.12` | **works** (2026-11-14): prints `hello from wasi-sdk C`, exit 0; 5.3 s end to end with a warm `wasm2rs-wasi` build (290 MB peak RSS). `#[ignore]` test: `WASM2RS_WASISDK_C_HELLO_COMPONENT` |
-| K | wasi-sdk 34 `clang++ --target=wasm32-wasip2 -fno-exceptions`, `std::cout` | 3.2 MB | **does not build** (2026-11-14): the program imports `wasi:cli/exit@0.2.12`'s `exit-with-code`, which the 0.2.0 `Host` trait does not have, so `rustc` fails with E0599 (`no method named wasi_cli_exit_exit_with_code`) and `wasip2_run` exits 2. Without `-fno-exceptions` the link fails in `wasm-ld` (`__cxa_throw`; wasi-sdk has no C++ exceptions), not a wasm2rs matter. See F6 (#339) |
+| K | wasi-sdk 34 `clang++ --target=wasm32-wasip2 -fno-exceptions`, `std::cout` | 3.2 MB | **works** (2026-11-14, after #339): prints `hello from wasi-sdk C++`, exit 0; 10 s end to end with a warm `wasm2rs-wasi` build. The program imports `wasi:cli/exit@0.2.12`'s `exit-with-code`; before the overlay added it to the 0.2.0 `Host` trait, `rustc` failed with E0599 (`no method named wasi_cli_exit_exit_with_code`). `#[ignore]` test: `WASM2RS_WASISDK_CPP_HELLO_COMPONENT`. Without `-fno-exceptions` the link fails in `wasm-ld` (`__cxa_throw`; wasi-sdk has no C++ exceptions), not a wasm2rs matter. See F6 (#339) |
 | L | `cargo component build` 0.21.1, custom world (`export ops` with a record, a string and integers; no `wasi:cli/run`) | 72 KB, `wasm32-wasip1` + adapter (main + adapter module, as B) | **works** (2026-11-14): `wasip2_run` does not apply (no `run`), so a small program calls the typed `Exports` (`test_calc_ops_add(40, 2)` = 42, `greet`, `shift` on a record); 3 s for the test with a warm library build (430 MB peak RSS). `#[ignore]` test: `WASM2RS_CARGO_COMPONENT_CALC` |
 
 ## Findings
@@ -107,14 +107,15 @@ and `wasm-tools component wit --out-dir` output from a component is not accepted
 - `wasm32-wasip2` std output, including arguments (A).
 - Newer patch versions of the WASI 0.2 interfaces (D's imports at 0.2.10 / 0.2.12).
 
-### F6. `exit-with-code` is outside the generated `Host` trait (K)
+### F6. `exit-with-code` was outside the generated `Host` trait (K, fixed by #339)
 
 wasi-sdk's libc++ (`std::cout`) pulls in `wasi:cli/exit@0.2.12`'s `exit-with-code: func(status-code: u8)`,
 a function added after 0.2.0 (it is not in `tests/wasi_p2_wit`, the fixture `wasm2rs-wasi`'s
 generated `Host` is made from). The glue calls `Host::wasi_cli_exit_exit_with_code`, which does not exist,
-so the build fails with E0599. Rust, TinyGo and wasi-sdk C do not import it. A fix needs a decision
-(an overlay on the 0.2.0 WIT, or a default-provided method outside the generated trait, plus the
-freshness and every-method-overridden tests), so it is a separate issue (#339) rather than part of this survey.
+so the build failed with E0599. Rust, TinyGo and wasi-sdk C do not import it. Fixed with an overlay on the
+0.2.0 WIT (`tests/wasi_p2_wit/overlay/cli/exit.wit`, the generated trait gains this one method, `WasiHost`
+exits with `status-code`); `docs/wasi-post-0.2.0-additions.md` lists the other 0.2.1 to 0.2.12 differences
+(all `@unstable` or a type alias, none imported by a surveyed toolchain).
 
 ## Suggested order
 
@@ -125,8 +126,8 @@ freshness and every-method-overridden tests), so it is a separate issue (#339) r
 4. F4 measurement after F3.
 5. F2 only after F1 step 2: done as an investigation; F4 first for the end-to-end goal, see the F2 design.
 
-Not covered yet: `wasi:http` guests built with TinyGo, wasi-sdk or `cargo-component`. wasi-sdk C++
-runs once F6 (#339) is fixed. Add a row to the table when one is tried.
+Not covered yet: `wasi:http` guests built with TinyGo, wasi-sdk or `cargo-component`. Add a row to the
+table when one is tried.
 
 ## Reproduction
 
