@@ -277,3 +277,12 @@ Reproduction: `wasm2rs --extract-core c.wasm d/`; `wasm2rs --named-imports --nam
 --reentrant-imports d/module0.wasm out.rs [funcs_per_file [max_bytes_per_file]]`;
 `rustc --edition 2021 --crate-type lib -C opt-level=1 out.rs` (or `split/lib.rs`); `sample
 <rustc pid> 8` while it runs to see the lint frames.
+
+## Follow-up: F4-1 implemented (2026-11-13)
+
+Option A is in: `src/codegen/parens.rs` strips redundant parentheses per generated function
+(arguments, `= (..);` values, block tails without a top-level comma; receivers, operands, casts and
+block-like tails are kept). The output differs from before only by parentheses (checked by deleting
+every `(` and `)` from both outputs: identical). Measured with the same inputs: JS core
+`--emit=metadata` 54.6 s (was 587 s at O1 full build, 181 s metadata-only before the steps in
+section 4A), Go component O1 66.1 s -> 11.8 s, rlib size unchanged (76.47 MB).
