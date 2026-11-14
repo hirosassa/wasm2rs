@@ -10,7 +10,7 @@
 
 use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, StorageType, ValType};
 
-use super::super::{CompositeKind, FieldInfo, Val, is_bottom_u32_heap, is_exn_hierarchy};
+use super::super::{CompositeKind, FieldInfo, Rt, Val, is_bottom_u32_heap, is_exn_hierarchy};
 use crate::TranspileError;
 
 /// Which slot variant backs a storage type, and how to wrap/unwrap it.
@@ -336,7 +336,11 @@ impl super::FuncGen<'_> {
         self.freeze_survivors(2)?;
         let index = self.pop()?;
         let r = self.pop()?;
-        let (read, ty) = shape.read("&__b[(__i) as usize]")?;
+        let slot = match self.typed_trap(Rt::TrapArrayOob) {
+            Some(trap) => format!("__b.get((__i) as usize).unwrap_or_else(|| {trap}())"),
+            None => "&__b[(__i) as usize]".to_string(),
+        };
+        let (read, ty) = shape.read(&slot)?;
         let bind = bind_obj("__g", "__o", &r.code);
         let inner = format!(
             "{{ {bind} let __i = {}; let __b = __o.borrow(); {read} }}",
@@ -355,10 +359,14 @@ impl super::FuncGen<'_> {
         let r = self.pop()?;
         let slot = shape.wrap(&value.code)?;
         let bind = bind_obj("__g", "__o", &r.code);
-        self.line(format!(
-            "{{ {bind} __o.borrow_mut()[({}) as usize] = {slot}; }}",
-            index.code
-        ));
+        let place = match self.typed_trap(Rt::TrapArrayOob) {
+            Some(trap) => format!(
+                "*__o.borrow_mut().get_mut(({}) as usize).unwrap_or_else(|| {trap}())",
+                index.code
+            ),
+            None => format!("__o.borrow_mut()[({}) as usize]", index.code),
+        };
+        self.line(format!("{{ {bind} {place} = {slot}; }}"));
         Ok(())
     }
 
@@ -438,6 +446,7 @@ impl super::FuncGen<'_> {
         let r = self.pop()?;
         let slot = shape.wrap(&value.code)?;
         let bind = bind_obj("__g", "__o", &r.code);
+        let arr = self.typed_trap(Rt::TrapArrayOob);
         self.line(format!(
             "{{ {bind} let mut __b = __o.borrow_mut(); \
              let __off = ({}) as u32 as usize; let __n = ({}) as u32 as usize; let __v = {slot}; \
@@ -445,7 +454,7 @@ impl super::FuncGen<'_> {
              for __e in &mut __b[__off..__end] {{ *__e = __v.clone(); }} }}",
             offset.code,
             size.code,
-            range_end("__off", "__n", "__b.len()")
+            range_end("__off", "__n", "__b.len()", arr)
         ));
         Ok(())
     }
@@ -468,6 +477,7 @@ impl super::FuncGen<'_> {
         let destref = self.pop()?;
         let bind_src = bind_obj("__sg", "__so", &srcref.code);
         let bind_dst = bind_obj("__dg", "__do", &destref.code);
+        let arr = self.typed_trap(Rt::TrapArrayOob);
         self.line(format!(
             "{{ {bind_src} let __sb = __so.borrow(); \
              let __si = ({}) as u32 as usize; let __n = ({}) as u32 as usize; \
@@ -479,9 +489,9 @@ impl super::FuncGen<'_> {
              __db[__di..__dend].clone_from_slice(&__seg); }}",
             src_offset.code,
             size.code,
-            range_end("__si", "__n", "__sb.len()"),
+            range_end("__si", "__n", "__sb.len()", arr),
             dest_offset.code,
-            range_end("__di", "__n", "__db.len()")
+            range_end("__di", "__n", "__db.len()", arr)
         ));
         Ok(())
     }
@@ -501,6 +511,7 @@ impl super::FuncGen<'_> {
         self.freeze_survivors(2)?;
         let size = self.pop()?;
         let offset = self.pop()?;
+        let seg = self.typed_trap(Rt::TrapMemoryOob);
         let code = format!(
             "{{ let __seg = self.data{data_index}; \
              let __off = ({}) as u32 as usize; let __n = ({}) as u32 as usize; \
@@ -512,7 +523,7 @@ impl super::FuncGen<'_> {
              slots: std::rc::Rc::new(std::cell::RefCell::new(__v)) }} }}",
             offset.code,
             size.code,
-            range_check("__off", "__bytes", "__seg.len()")
+            range_check("__off", "__bytes", "__seg.len()", seg)
         );
         self.materialize(code, Self::concrete_ref_ty(type_index)?)
     }
@@ -535,6 +546,8 @@ impl super::FuncGen<'_> {
         let dest = self.pop()?;
         let r = self.pop()?;
         let bind = bind_obj("__g", "__o", &r.code);
+        let arr = self.typed_trap(Rt::TrapArrayOob);
+        let seg = self.typed_trap(Rt::TrapMemoryOob);
         self.line(format!(
             "{{ {bind} let mut __b = __o.borrow_mut(); \
              let __seg = self.data{data_index}; \
@@ -546,8 +559,8 @@ impl super::FuncGen<'_> {
             dest.code,
             src.code,
             size.code,
-            range_check("__d", "__n", "__b.len()"),
-            range_check("__s", "__bytes", "__seg.len()")
+            range_check("__d", "__n", "__b.len()", arr),
+            range_check("__s", "__bytes", "__seg.len()", seg)
         ));
         Ok(())
     }
@@ -566,6 +579,7 @@ impl super::FuncGen<'_> {
         self.freeze_survivors(2)?;
         let size = self.pop()?;
         let offset = self.pop()?;
+        let seg = self.typed_trap(Rt::TrapTableOob);
         let code = format!(
             "{{ let __seg = self.elem{elem_index}; \
              let __off = ({}) as u32 as usize; let __n = ({}) as u32 as usize; \
@@ -576,7 +590,7 @@ impl super::FuncGen<'_> {
              slots: std::rc::Rc::new(std::cell::RefCell::new(__v)) }} }}",
             offset.code,
             size.code,
-            range_check("__off", "__n", "__seg.len()")
+            range_check("__off", "__n", "__seg.len()", seg)
         );
         self.materialize(code, Self::concrete_ref_ty(type_index)?)
     }
@@ -598,6 +612,8 @@ impl super::FuncGen<'_> {
         let dest = self.pop()?;
         let r = self.pop()?;
         let bind = bind_obj("__g", "__o", &r.code);
+        let arr = self.typed_trap(Rt::TrapArrayOob);
+        let seg = self.typed_trap(Rt::TrapTableOob);
         self.line(format!(
             "{{ {bind} let mut __b = __o.borrow_mut(); \
              let __seg = self.elem{elem_index}; \
@@ -608,8 +624,8 @@ impl super::FuncGen<'_> {
             dest.code,
             src.code,
             size.code,
-            range_check("__d", "__n", "__b.len()"),
-            range_check("__s", "__n", "__seg.len()")
+            range_check("__d", "__n", "__b.len()", arr),
+            range_check("__s", "__n", "__seg.len()", seg)
         ));
         Ok(())
     }
@@ -830,8 +846,9 @@ impl super::FuncGen<'_> {
     ) -> Result<(), TranspileError> {
         let r = self.pop()?;
         let test = self.gc_heap_test("__r", hty, null_matches)?;
+        let fail = self.trap_or_panic(Rt::TrapCastFailure, "ref.cast failed");
         let code = format!(
-            "{{ let __r = ({}); if {test} {{ __r }} else {{ panic!(\"ref.cast failed\") }} }}",
+            "{{ let __r = ({}); if {test} {{ __r }} else {{ {fail} }} }}",
             r.code
         );
         self.materialize(code, Self::cast_result_ty(hty, null_matches)?)
@@ -964,9 +981,10 @@ impl super::FuncGen<'_> {
         let r = self.pop()?;
         let ty = r.ty;
         let (is_null, _) = self.null_test(ty, "__r")?;
+        let fail = self.trap_or_panic(Rt::TrapNullReference, "ref.as_non_null on null");
         let code = format!(
             "{{ let __r = ({}); \
-             if {is_null} {{ panic!(\"ref.as_non_null on null\") }} else {{ __r }} }}",
+             if {is_null} {{ {fail} }} else {{ __r }} }}",
             r.code
         );
         self.materialize(code, ty)
@@ -1098,16 +1116,21 @@ fn top_of_exn(hty: HeapType) -> bool {
 /// `off`, trapping unless it lies within `len`. All operands are `usize`
 /// (already zero-extended from the wasm `i32`), so the sum cannot wrap on
 /// 64-bit hosts and the check also rejects `n == 0` with `off > len`.
-fn range_end(off: &str, n: &str, len: &str) -> String {
-    format!(
-        "{off}.checked_add({n}).filter(|__e| *__e <= {len}).unwrap_or_else(|| panic!(\"out of bounds array access\"))"
-    )
+///
+/// `trap` is the cold typed trap function to call (`typed_traps`); `None` keeps the
+/// string `panic!`.
+fn range_end(off: &str, n: &str, len: &str, trap: Option<&str>) -> String {
+    let fail = match trap {
+        Some(trap) => format!("{trap}()"),
+        None => "panic!(\"out of bounds array access\")".to_string(),
+    };
+    format!("{off}.checked_add({n}).filter(|__e| *__e <= {len}).unwrap_or_else(|| {fail})")
 }
 
 /// Generated-code statement: the [`range_end`] trap check alone, for ops that
 /// index element by element and so need the up-front validation but not the end.
-fn range_check(off: &str, n: &str, len: &str) -> String {
-    format!("let _ = {};", range_end(off, n, len))
+fn range_check(off: &str, n: &str, len: &str, trap: Option<&str>) -> String {
+    format!("let _ = {};", range_end(off, n, len, trap))
 }
 
 /// Generated-code statements: bind `obj` to the `&RefCell` slots of the managed

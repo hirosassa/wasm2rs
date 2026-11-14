@@ -702,6 +702,7 @@ fn generate_module_pieces_with(
         deps.rt.insert(Rt::TrapIndirectTypeMismatch);
     }
     add_shared_memory_traps(&mut deps, &ctx);
+    add_gc_traps(&mut deps, &ctx);
 
     // Free-function runtime helpers live at module scope, above the functions
     // (or the `struct Instance`) that call them, in both module shapes.
@@ -715,12 +716,7 @@ fn generate_module_pieces_with(
         out.push('\n');
     }
     if ctx.needs_gc_types {
-        out.push_str(GCREF_DEF);
-        out.push('\n');
-        if deps.uses_eh {
-            out.push_str(EXN_REF_DEF);
-            out.push('\n');
-        }
+        push_gc_defs(&mut out, ctx.typed_traps, deps.uses_eh);
     }
     // Shared state structs from split flattened methods, at module scope ahead of
     // the `struct Instance`/functions that reference them (a field may be a
@@ -785,6 +781,35 @@ fn add_shared_memory_traps(deps: &mut ModuleDeps, ctx: &ModuleCtx<'_>) {
     if ctx.typed_traps && ctx.memory_shared {
         deps.rt.extend([Rt::TrapMemoryOob, Rt::TrapUnalignedAtomic]);
     }
+}
+
+/// The managed value model is emitted whole, and under `typed_traps` its null
+/// dereference calls the cold `trap_null_reference`.
+fn add_gc_traps(deps: &mut ModuleDeps, ctx: &ModuleCtx<'_>) {
+    if ctx.typed_traps && ctx.needs_gc_types {
+        deps.rt.insert(Rt::TrapNullReference);
+    }
+}
+
+/// Append the managed value model ([`GCREF_DEF`], and the `exnref` helpers when the
+/// module also throws) to `out`. Under `typed_traps` its string `panic!`s of a null
+/// dereference become the cold typed trap; the other panic is an internal invariant.
+fn push_gc_defs(out: &mut String, typed: bool, uses_eh: bool) {
+    let mut defs = GCREF_DEF.to_string();
+    if uses_eh {
+        defs.push('\n');
+        defs.push_str(EXN_REF_DEF);
+    }
+    if typed {
+        defs = defs
+            .replace("panic!(\"null reference\")", "trap_null_reference()")
+            .replace(
+                "panic!(\"null exception reference\")",
+                "trap_null_reference()",
+            );
+    }
+    out.push_str(&defs);
+    out.push('\n');
 }
 
 fn split_at_ends<'a>(buf: &'a str, ends: &[usize]) -> Vec<&'a str> {
@@ -905,6 +930,7 @@ pub(crate) fn generate_module_split(
         deps.rt.insert(Rt::TrapIndirectTypeMismatch);
     }
     add_shared_memory_traps(&mut deps, &ctx);
+    add_gc_traps(&mut deps, &ctx);
 
     // The root is emitted last, once the used-helper/dispatch sets are complete.
     let root_deps = render::RootDeps {
@@ -936,12 +962,7 @@ pub(crate) fn generate_module_split(
         prefix.push('\n');
     }
     if ctx.needs_gc_types {
-        prefix.push_str(GCREF_DEF);
-        prefix.push('\n');
-        if deps.uses_eh {
-            prefix.push_str(EXN_REF_DEF);
-            prefix.push('\n');
-        }
+        push_gc_defs(&mut prefix, ctx.typed_traps, deps.uses_eh);
     }
     if !deps.state_structs.is_empty() {
         prefix.push_str(&deps.state_structs.join("\n"));

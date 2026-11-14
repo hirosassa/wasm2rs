@@ -7,8 +7,9 @@
 //! Stage 2 adds integer division/remainder and linear-memory / table out-of-bounds
 //! traps (explicit checks in place of Rust's `/` and slice indexing). Stage 3a adds
 //! the shared-memory atomics (a misaligned or out-of-bounds atomic access) and the
-//! plain accesses of a shared memory. The remaining traps (GC, continuations,
-//! `exnref`, glue) keep their string payload, and the option is off by default.
+//! plain accesses of a shared memory. Stage 3b adds the GC traps (null reference,
+//! cast failure, array bounds) and a null `exnref`. The remaining traps
+//! (continuations, glue) keep their string payload, and the option is off by default.
 
 use std::process::Command;
 use wasm2rs::TranspileOptions;
@@ -173,8 +174,11 @@ fn try_catch_all_does_not_catch_a_typed_trap() {
 fn traps_outside_stage_two_keep_their_string_payload() {
     compile_run_typed(
         "typed_traps_other_panics",
-        r#"(module (global (mut i32) (i32.const 0))
-            (func (export "i31") (result i32) (i31.get_s (ref.null i31))))"#,
+        // On an unshared memory a `wait` whose value matches would block forever, a
+        // still-untyped string panic.
+        r#"(module (memory 1)
+            (func (export "wait") (result i32)
+              (memory.atomic.wait32 (i32.const 0) (i32.const 0) (i64.const -1))))"#,
         &format!(
             r#"{CATCH}
             let mut inst = Instance::new();
@@ -222,18 +226,6 @@ fn a_typed_trap_in_a_spawned_thread_reports_its_cause() {
     let stderr = run_trapping_child("typed_trap_thread_cause", "unreachable");
     assert!(stderr.contains("thread 1 trapped"), "{stderr}");
     assert!(stderr.contains("unreachable"), "{stderr}");
-}
-
-#[test]
-fn a_string_panic_in_a_typed_spawned_thread_still_reaches_the_hook() {
-    // A null `i31.get_s` is a still-untyped string panic; the wrapper must still
-    // forward it to the hook even though this shared module defines `Wasm2RsTrap`.
-    let stderr = run_trapping_child(
-        "typed_trap_thread_string",
-        "(if (i31.get_s (ref.null i31)) (then nop))",
-    );
-    assert!(stderr.contains("thread 1 trapped"), "{stderr}");
-    assert!(stderr.contains("null"), "{stderr}");
 }
 
 #[test]
@@ -582,12 +574,21 @@ fn shared_memory_traps_stay_rust_panics_when_off() {
 
 #[test]
 fn a_split_shared_module_defines_its_typed_traps_and_compiles() {
-    let wasm = wat::parse_str(
+    compile_run_split_typed(
+        "typed-traps-split-shared",
         r#"(module (memory 1 1 shared)
             (func (export "a") (param i32) (result i32) (i32.atomic.load (local.get 0)))
             (func (export "b") (param i32) (result i32) (i32.load (local.get 0))))"#,
-    )
-    .expect("valid wat");
+        "let mut inst = Instance::new();\n\
+         assert!(matches!(trap_of(|| inst.a(1)), Wasm2RsTrap::UnalignedAtomicAccess));\n\
+         assert!(matches!(trap_of(|| inst.b(65536)), Wasm2RsTrap::OutOfBoundsMemoryAccess));",
+    );
+}
+
+/// Transpile `wat` split one function per file with typed traps, append [`CATCH`]
+/// and a `main` running `main_body` to the crate root, then compile and run it.
+fn compile_run_split_typed(dir_name: &str, wat: &str, main_body: &str) {
+    let wasm = wat::parse_str(wat).expect("valid wat");
     let split = wasm2rs::SplitOptions {
         funcs_per_file: 1,
         max_bytes_per_file: 0,
@@ -599,15 +600,11 @@ fn a_split_shared_module_defines_its_typed_traps_and_compiles() {
     })
     .expect("transpile ok");
     assert!(files.len() > 1, "expected a split output");
-    let dir = common::scratch_dir("typed-traps-split-shared");
+    let dir = common::scratch_dir(dir_name);
     for f in &files {
         let mut code = f.code.clone();
         if f.name == "lib.rs" {
-            code.push_str(&format!(
-                "{CATCH}\nfn main() {{ let mut inst = Instance::new();\n\
-                 assert!(matches!(trap_of(|| inst.a(1)), Wasm2RsTrap::UnalignedAtomicAccess));\n\
-                 assert!(matches!(trap_of(|| inst.b(65536)), Wasm2RsTrap::OutOfBoundsMemoryAccess)); }}\n"
-            ));
+            code.push_str(&format!("{CATCH}\nfn main() {{\n{main_body} }}\n"));
         }
         std::fs::write(dir.join(&f.name), code).expect("write generated file");
     }
@@ -833,5 +830,187 @@ fn unshared_atomic_store_evaluates_its_value_before_the_alignment_trap() {
             assert!(matches!(trap_of(|| inst.st(65536)), Wasm2RsTrap::OutOfBoundsMemoryAccess));
             assert!(matches!(trap_of(|| inst.st(0)), Wasm2RsTrap::UnalignedAtomicAccess));"#
         ),
+    );
+}
+
+/// Stage 3b: GC (null reference, cast failure, array bounds, `i31`) and `exnref` traps.
+const GC_TRAPS: &str = r#"(module
+    (type $s (struct (field (mut i32))))
+    (type $a (array (mut i32)))
+    (type $b (struct (field i64)))
+    (tag $e)
+    (elem $seg func $f)
+    (data $d "\01\02\03\04")
+    (func $f)
+    (func (export "s_get") (param (ref null $s)) (result i32) (struct.get $s 0 (local.get 0)))
+    (func (export "s_set") (param (ref null $s)) (struct.set $s 0 (local.get 0) (i32.const 1)))
+    (func (export "a_len") (param (ref null $a)) (result i32) (array.len (local.get 0)))
+    (func (export "a_new") (result (ref $a)) (array.new_default $a (i32.const 2)))
+    (func (export "a_get") (param (ref null $a) i32) (result i32)
+      (array.get $a (local.get 0) (local.get 1)))
+    (func (export "a_set") (param (ref null $a) i32)
+      (array.set $a (local.get 0) (local.get 1) (i32.const 7)))
+    (func (export "a_fill") (param (ref null $a) i32 i32)
+      (array.fill $a (local.get 0) (local.get 1) (i32.const 7) (local.get 2)))
+    (func (export "a_copy") (param (ref null $a) i32 i32)
+      (array.copy $a $a (local.get 0) (local.get 1) (local.get 0) (i32.const 0) (local.get 2)))
+    (func (export "a_init_data") (param (ref null $a) i32 i32 i32)
+      (array.init_data $a $d (local.get 0) (local.get 1) (local.get 2) (local.get 3)))
+    (func (export "a_new_data") (param i32 i32) (result (ref $a))
+      (array.new_data $a $d (local.get 0) (local.get 1)))
+    (func (export "cast") (param anyref) (result (ref $s)) (ref.cast (ref $s) (local.get 0)))
+    (func (export "mk_b") (result anyref) (struct.new $b (i64.const 1)))
+    (func (export "mk_null") (result anyref) (ref.null any))
+    (func (export "non_null") (param anyref) (result (ref any)) (ref.as_non_null (local.get 0)))
+    (func (export "i31_get") (param i31ref) (result i32) (i31.get_s (local.get 0)))
+    (func (export "i31_get_u") (param i31ref) (result i32) (i31.get_u (local.get 0)))
+    (func (export "throw_null") (throw_ref (ref.null exn)))
+    (func (export "c_null") (result i32)
+      try (result i32) (i32.const 1) (call $nul) (drop) catch_all i32.const 0 end)
+    (func $nul (result i32) (struct.get $s 0 (ref.null $s))))"#;
+
+#[test]
+fn gc_off_by_default_keeps_string_traps() {
+    let plain = transpile_with(
+        GC_TRAPS,
+        TranspileOptions::default().with_named_exports(true),
+    );
+    assert!(!plain.contains("Wasm2RsTrap"), "{plain}");
+    assert_eq!(
+        plain,
+        transpile_with(
+            GC_TRAPS,
+            TranspileOptions::default()
+                .with_named_exports(true)
+                .with_typed_traps(false)
+        )
+    );
+}
+
+#[test]
+fn gc_null_dereferences_are_typed() {
+    compile_run_with(
+        "typed_gc_null",
+        GC_TRAPS,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            let null = || GcRef::Null;
+            let t = trap_of(|| inst.s_get(null()));
+            assert!(matches!(t, Wasm2RsTrap::NullReference));
+            assert_eq!(t.to_string(), "null reference");
+            assert!(matches!(trap_of(|| inst.s_set(null())), Wasm2RsTrap::NullReference));
+            assert!(matches!(trap_of(|| inst.a_len(null())), Wasm2RsTrap::NullReference));
+            assert!(matches!(trap_of(|| inst.a_get(null(), 0)), Wasm2RsTrap::NullReference));
+            assert!(matches!(trap_of(|| inst.a_set(null(), 0)), Wasm2RsTrap::NullReference));
+            assert!(matches!(trap_of(|| inst.a_fill(null(), 0, 0)), Wasm2RsTrap::NullReference));
+            assert!(matches!(trap_of(|| inst.a_copy(null(), 0, 0)), Wasm2RsTrap::NullReference));
+            assert!(matches!(trap_of(|| inst.a_init_data(null(), 0, 0, 0)), Wasm2RsTrap::NullReference));
+            assert!(matches!(trap_of(|| inst.non_null(null())), Wasm2RsTrap::NullReference));
+            assert!(matches!(trap_of(|| inst.i31_get(null())), Wasm2RsTrap::NullReference));
+            assert!(matches!(trap_of(|| inst.i31_get_u(null())), Wasm2RsTrap::NullReference));
+            assert!(matches!(trap_of(|| inst.throw_null()), Wasm2RsTrap::NullReference));
+            // A typed trap is not caught by `catch_all`, and the hook never ran.
+            assert!(matches!(trap_of(|| inst.c_null()), Wasm2RsTrap::NullReference));
+            assert!(!HOOK_RAN.load(std::sync::atomic::Ordering::SeqCst));"#
+        ),
+    );
+}
+
+#[test]
+fn gc_cast_failure_and_array_bounds_are_typed() {
+    compile_run_with(
+        "typed_gc_cast_array",
+        GC_TRAPS,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            let b = inst.mk_b();
+            let t = trap_of(|| inst.cast(b));
+            assert!(matches!(t, Wasm2RsTrap::CastFailure));
+            assert_eq!(t.to_string(), "cast failure");
+            let nul = inst.mk_null();
+            assert!(matches!(trap_of(|| inst.cast(nul)), Wasm2RsTrap::CastFailure));
+            let arr = inst.a_new();
+            assert_eq!(inst.a_get(arr.clone(), 1), 0);
+            let t = trap_of(|| inst.a_get(arr.clone(), 2));
+            assert!(matches!(t, Wasm2RsTrap::OutOfBoundsArrayAccess));
+            assert_eq!(t.to_string(), "out of bounds array access");
+            assert!(matches!(trap_of(|| inst.a_get(arr.clone(), -1)), Wasm2RsTrap::OutOfBoundsArrayAccess));
+            assert!(matches!(trap_of(|| inst.a_set(arr.clone(), 2)), Wasm2RsTrap::OutOfBoundsArrayAccess));
+            inst.a_fill(arr.clone(), 1, 1);
+            assert!(matches!(trap_of(|| inst.a_fill(arr.clone(), 1, 2)), Wasm2RsTrap::OutOfBoundsArrayAccess));
+            assert!(matches!(trap_of(|| inst.a_fill(arr.clone(), 3, 0)), Wasm2RsTrap::OutOfBoundsArrayAccess));
+            assert!(matches!(trap_of(|| inst.a_copy(arr.clone(), 1, 2)), Wasm2RsTrap::OutOfBoundsArrayAccess));
+            // The array range is checked first, then the segment range.
+            assert!(matches!(trap_of(|| inst.a_init_data(arr.clone(), 2, 0, 1)), Wasm2RsTrap::OutOfBoundsArrayAccess));
+            // A data segment overrun is the memory trap, not an array one.
+            assert!(matches!(trap_of(|| inst.a_init_data(arr.clone(), 0, 0, 2)), Wasm2RsTrap::OutOfBoundsMemoryAccess));
+            assert!(matches!(trap_of(|| inst.a_new_data(0, 2)), Wasm2RsTrap::OutOfBoundsMemoryAccess));
+            assert!(!HOOK_RAN.load(std::sync::atomic::Ordering::SeqCst));"#
+        ),
+    );
+}
+
+#[test]
+fn gc_elem_segment_overrun_is_the_table_trap() {
+    compile_run_with(
+        "typed_gc_elem",
+        r#"(module
+            (type $a (array (mut funcref)))
+            (elem $seg func $f)
+            (func $f)
+            (func (export "new_elem") (param i32 i32) (result (ref $a))
+              (array.new_elem $a $seg (local.get 0) (local.get 1)))
+            (func (export "init_elem") (param (ref null $a) i32 i32 i32)
+              (array.init_elem $a $seg (local.get 0) (local.get 1) (local.get 2) (local.get 3))))"#,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            let arr = inst.new_elem(0, 1);
+            assert!(matches!(trap_of(|| inst.new_elem(0, 2)), Wasm2RsTrap::OutOfBoundsTableAccess));
+            assert!(matches!(trap_of(|| inst.init_elem(arr.clone(), 0, 0, 2)), Wasm2RsTrap::OutOfBoundsArrayAccess));
+            assert!(matches!(trap_of(|| inst.init_elem(arr.clone(), 0, 1, 1)), Wasm2RsTrap::OutOfBoundsTableAccess));"#
+        ),
+    );
+}
+
+#[test]
+fn gc_traps_only_emit_the_used_variants() {
+    let out = transpile_typed(
+        r#"(module (type $s (struct (field i32)))
+            (func (export "g") (param (ref null $s)) (result i32) (struct.get $s 0 (local.get 0))))"#,
+        true,
+    );
+    assert!(out.contains("NullReference"), "{out}");
+    for unused in ["CastFailure", "OutOfBoundsArrayAccess"] {
+        assert!(!out.contains(unused), "{unused} emitted: {out}");
+    }
+}
+
+#[test]
+fn a_typed_gc_trap_in_a_spawned_thread_reports_its_cause() {
+    let stderr = run_trapping_child(
+        "typed_trap_thread_gc",
+        "(if (i31.get_s (ref.null i31)) (then nop))",
+    );
+    assert!(stderr.contains("thread 1 trapped"), "{stderr}");
+    assert!(stderr.contains("null reference"), "{stderr}");
+}
+
+#[test]
+fn a_split_gc_module_defines_its_typed_traps_and_compiles() {
+    // The managed value model is emitted at the crate root of a split output, so the
+    // cold `trap_null_reference` it calls must be defined there too.
+    compile_run_split_typed(
+        "typed-traps-split-gc",
+        r#"(module (type $s (struct (field i32)))
+            (func (export "a") (param (ref null $s)) (result i32) (struct.get $s 0 (local.get 0)))
+            (func (export "b") (param anyref) (result (ref $s)) (ref.cast (ref $s) (local.get 0))))"#,
+        "assert!(matches!(trap_of(|| a(GcRef::Null)), Wasm2RsTrap::NullReference));\n\
+         assert!(matches!(trap_of(|| b(GcRef::Null)), Wasm2RsTrap::CastFailure));",
     );
 }
