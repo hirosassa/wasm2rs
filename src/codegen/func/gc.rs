@@ -359,14 +359,16 @@ impl super::FuncGen<'_> {
         let r = self.pop()?;
         let slot = shape.wrap(&value.code)?;
         let bind = bind_obj("__g", "__o", &r.code);
+        // The operands are bound before `borrow_mut()` since they may read the
+        // same array (as in `array.get`).
         let place = match self.typed_trap(Rt::TrapArrayOob) {
-            Some(trap) => format!(
-                "*__o.borrow_mut().get_mut(({}) as usize).unwrap_or_else(|| {trap}())",
-                index.code
-            ),
-            None => format!("__o.borrow_mut()[({}) as usize]", index.code),
+            Some(trap) => format!("*__o.borrow_mut().get_mut(__i).unwrap_or_else(|| {trap}())"),
+            None => "__o.borrow_mut()[__i]".to_string(),
         };
-        self.line(format!("{{ {bind} {place} = {slot}; }}"));
+        self.line(format!(
+            "{{ {bind} let __i = ({}) as usize; let __v = {slot}; {place} = __v; }}",
+            index.code
+        ));
         Ok(())
     }
 
@@ -448,8 +450,9 @@ impl super::FuncGen<'_> {
         let bind = bind_obj("__g", "__o", &r.code);
         let arr = self.typed_trap(Rt::TrapArrayOob);
         self.line(format!(
-            "{{ {bind} let mut __b = __o.borrow_mut(); \
+            "{{ {bind} \
              let __off = ({}) as u32 as usize; let __n = ({}) as u32 as usize; let __v = {slot}; \
+             let mut __b = __o.borrow_mut(); \
              let __end = {}; \
              for __e in &mut __b[__off..__end] {{ *__e = __v.clone(); }} }}",
             offset.code,
@@ -461,10 +464,12 @@ impl super::FuncGen<'_> {
 
     /// `array.copy $t_dst $t_src`: operand stack
     /// `[destref, dest_offset, srcref, src_offset, size]` (`size` on top). Copy
-    /// `size` elements from the source range to the destination range. The source
-    /// range is snapshotted before the destination is borrowed mutably so a
-    /// self-copy (both handles backed by the same `Rc`) neither double-borrows nor
-    /// corrupts on overlap. Out-of-range indexing traps.
+    /// `size` elements from the source range to the destination range. All operands
+    /// are evaluated in wasm push order, then both refs are null-checked before
+    /// either range; they are bound before any borrow since they may read the
+    /// arrays. The source range is snapshotted before the destination is borrowed
+    /// mutably so a self-copy (both handles backed by the same `Rc`) neither
+    /// double-borrows nor corrupts on overlap. Out-of-range indexing traps.
     pub(super) fn array_copy(&mut self, type_index_dst: u32) -> Result<(), TranspileError> {
         // Validate the destination element type is representable; the whole
         // `GcSlot`s are copied, so no per-element rewrap is needed.
@@ -475,22 +480,23 @@ impl super::FuncGen<'_> {
         let srcref = self.pop()?;
         let dest_offset = self.pop()?;
         let destref = self.pop()?;
-        let bind_src = bind_obj("__sg", "__so", &srcref.code);
-        let bind_dst = bind_obj("__dg", "__do", &destref.code);
         let arr = self.typed_trap(Rt::TrapArrayOob);
         self.line(format!(
-            "{{ {bind_src} let __sb = __so.borrow(); \
-             let __si = ({}) as u32 as usize; let __n = ({}) as u32 as usize; \
+            "{{ let __dg = &({}); let __di = ({}) as u32 as usize; \
+             let __sg = &({}); let __si = ({}) as u32 as usize; let __n = ({}) as u32 as usize; \
+             let __do = __dg.obj(); let __so = __sg.obj(); \
+             let __sb = __so.borrow(); \
              let __send = {}; \
              let __seg: Vec<GcSlot> = __sb[__si..__send].to_vec(); drop(__sb); \
-             {bind_dst} let mut __db = __do.borrow_mut(); \
-             let __di = ({}) as u32 as usize; \
+             let mut __db = __do.borrow_mut(); \
              let __dend = {}; \
              __db[__di..__dend].clone_from_slice(&__seg); }}",
+            destref.code,
+            dest_offset.code,
+            srcref.code,
             src_offset.code,
             size.code,
             range_end("__si", "__n", "__sb.len()", arr),
-            dest_offset.code,
             range_end("__di", "__n", "__db.len()", arr)
         ));
         Ok(())
@@ -549,10 +555,11 @@ impl super::FuncGen<'_> {
         let arr = self.typed_trap(Rt::TrapArrayOob);
         let seg = self.typed_trap(Rt::TrapMemoryOob);
         self.line(format!(
-            "{{ {bind} let mut __b = __o.borrow_mut(); \
+            "{{ {bind} \
              let __seg = self.data{data_index}; \
              let __d = ({}) as u32 as usize; let __s = ({}) as u32 as usize; \
              let __n = ({}) as u32 as usize; \
+             let mut __b = __o.borrow_mut(); \
              let __bytes = __n.checked_mul({esize}).unwrap_or(usize::MAX); \
              {} {} \
              for __k in 0..__n {{ let __base = __s + __k * {esize}; __b[__d + __k] = {slot}; }} }}",
@@ -615,10 +622,11 @@ impl super::FuncGen<'_> {
         let arr = self.typed_trap(Rt::TrapArrayOob);
         let seg = self.typed_trap(Rt::TrapTableOob);
         self.line(format!(
-            "{{ {bind} let mut __b = __o.borrow_mut(); \
+            "{{ {bind} \
              let __seg = self.elem{elem_index}; \
              let __d = ({}) as u32 as usize; let __s = ({}) as u32 as usize; \
              let __n = ({}) as u32 as usize; \
+             let mut __b = __o.borrow_mut(); \
              {} {} \
              for __k in 0..__n {{ __b[__d + __k] = GcSlot::Func(__seg[__s + __k]); }} }}",
             dest.code,
