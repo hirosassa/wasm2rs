@@ -36,6 +36,12 @@ pub(crate) enum Line {
     Edges(Vec<Piece>),
 }
 
+impl From<&str> for Line {
+    fn from(text: &str) -> Self {
+        Line::Text(text.to_string())
+    }
+}
+
 impl From<String> for Line {
     fn from(text: String) -> Self {
         Line::Text(text)
@@ -61,12 +67,12 @@ impl Line {
 
     /// Every state this line can transfer control to.
     pub(crate) fn targets(&self) -> impl Iterator<Item = usize> + '_ {
-        let (goto, pieces): (Option<usize>, &[Piece]) = match self {
-            Line::Text(_) => (None, &[]),
-            Line::Goto(target) => (Some(*target), &[]),
-            Line::Edges(pieces) => (None, pieces),
+        let pieces: &[Piece] = match self {
+            Line::Edges(pieces) => pieces,
+            _ => &[],
         };
-        goto.into_iter()
+        self.as_goto()
+            .into_iter()
             .chain(pieces.iter().filter_map(|piece| match piece {
                 Piece::Jump(target) => Some(*target),
                 Piece::Text(_) => None,
@@ -522,7 +528,7 @@ impl Flattener {
                         }
                         let br = self.structured_branch(label, is_loop, "");
                         out.push((depth + 1, br));
-                        out.push((depth, "}".to_string().into()));
+                        out.push((depth, "}".into()));
                     }
                 }
                 Node::BrTable { selector, arms } => {
@@ -543,7 +549,7 @@ impl Flattener {
                                 .build(),
                         ));
                     }
-                    out.push((depth, "}".to_string().into()));
+                    out.push((depth, "}".into()));
                 }
                 Node::Region(region) => self.render_structured_region(region, depth, out),
                 Node::Try(_) => unreachable!("is_structurable_loop rejects `try` subtrees"),
@@ -616,10 +622,10 @@ impl Flattener {
                 out.push((inner_depth, format!("if {cond} {{").into()));
                 self.render_structured(body, inner_depth + 1, out);
                 if let Some(els) = els {
-                    out.push((inner_depth, "} else {".to_string().into()));
+                    out.push((inner_depth, "} else {".into()));
                     self.render_structured(els, inner_depth + 1, out);
                 }
-                out.push((inner_depth, "}".to_string().into()));
+                out.push((inner_depth, "}".into()));
             }
         }
         if targeted {
@@ -628,7 +634,7 @@ impl Flattener {
             if kind == FrameKind::Loop && reachable_at_end {
                 out.push((inner_depth, format!("break 'l{label};").into()));
             }
-            out.push((depth, "}".to_string().into()));
+            out.push((depth, "}".into()));
         }
     }
 
@@ -675,24 +681,7 @@ impl Flattener {
     pub(crate) fn render_dispatch(mut self, pc_init: String) -> Vec<Node> {
         self.arms.sort_by_key(|(state, _)| *state);
 
-        let mut decls: Vec<String> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut rewritten: Vec<(usize, Vec<ArmLine>)> = Vec::with_capacity(self.arms.len());
-        for (state, stmts) in self.arms {
-            let mut arm = Vec::with_capacity(stmts.len());
-            for (indent, stmt) in stmts {
-                match stmt.as_text().and_then(hoist_decl) {
-                    Some((decl, assign)) => {
-                        if seen.insert(decl.clone()) {
-                            decls.push(decl);
-                        }
-                        arm.push((indent, Line::Text(assign)));
-                    }
-                    None => arm.push((indent, stmt)),
-                }
-            }
-            rewritten.push((state, arm));
-        }
+        let (decls, rewritten) = hoist_typed_lets(self.arms);
 
         let mut out = Vec::new();
         let mut push = |depth: usize, text: String| {
@@ -740,24 +729,7 @@ impl Flattener {
 
         // Hoist typed `let`s just as `render_dispatch` hoists them above the loop
         // (dedup by full declaration text); each becomes a state-struct field.
-        let mut decls: Vec<String> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut hoisted: Vec<(usize, Vec<ArmLine>)> = Vec::with_capacity(arms.len());
-        for (state, stmts) in arms {
-            let mut arm = Vec::with_capacity(stmts.len());
-            for (indent, stmt) in stmts {
-                match stmt.as_text().and_then(hoist_decl) {
-                    Some((decl, assign)) => {
-                        if seen.insert(decl.clone()) {
-                            decls.push(decl);
-                        }
-                        arm.push((indent, Line::Text(assign)));
-                    }
-                    None => arm.push((indent, stmt)),
-                }
-            }
-            hoisted.push((state, arm));
-        }
+        let (decls, hoisted) = hoist_typed_lets(arms);
 
         // Renumber the surviving states to a dense `0..N` in sorted order, so part
         // `k` owns the contiguous range `[k*max, (k+1)*max)` and `pc / max` selects
@@ -931,6 +903,29 @@ impl Flattener {
             state_struct,
         }
     }
+}
+/// Hoist every typed `let` of `arms` to a declaration (deduplicated by full text,
+/// first-seen order) while leaving its initialising assignment in place.
+fn hoist_typed_lets(arms: Vec<(usize, Vec<ArmLine>)>) -> (Vec<String>, Vec<(usize, Vec<ArmLine>)>) {
+    let mut decls: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut hoisted = Vec::with_capacity(arms.len());
+    for (state, stmts) in arms {
+        let mut arm = Vec::with_capacity(stmts.len());
+        for (indent, stmt) in stmts {
+            match stmt.as_text().and_then(hoist_decl) {
+                Some((decl, assign)) => {
+                    if seen.insert(decl.clone()) {
+                        decls.push(decl);
+                    }
+                    arm.push((indent, Line::Text(assign)));
+                }
+                None => arm.push((indent, stmt)),
+            }
+        }
+        hoisted.push((state, arm));
+    }
+    (decls, hoisted)
 }
 /// Parse a hoisted declaration into the `(name, type)` of every local it binds.
 /// [`hoist_decl`] emits two shapes: a single `let mut <name>: <type> = <default>;`
@@ -1151,7 +1146,6 @@ pub(crate) fn contract_pc_edges(arms: &mut Vec<(usize, Vec<ArmLine>)>, start: us
         if resolved.contains_key(&s0) {
             continue;
         }
-        let mut path = Vec::new();
         let mut on_path: HashSet<usize> = HashSet::new();
         let mut cur = s0;
         let dest = loop {
@@ -1160,14 +1154,13 @@ pub(crate) fn contract_pc_edges(arms: &mut Vec<(usize, Vec<ArmLine>)>, start: us
             }
             match fwd.get(&cur) {
                 Some(&next) if on_path.insert(cur) => {
-                    path.push(cur);
                     cur = next;
                 }
                 // A cycle closes at `cur` (keep it), or `cur` is terminal.
                 _ => break cur,
             }
         };
-        for p in path {
+        for p in on_path {
             resolved.insert(p, dest);
         }
     }
@@ -1600,7 +1593,10 @@ mod tests {
             (3, vec![line("pc = 1;")]),
         ];
         let start = contract_pc_edges(&mut arms, 0);
-        assert!(arms.iter().any(|(s, _)| *s == start));
-        assert!(arms.len() <= 2, "only the cycle survives");
+        // Every chain member resolves to the cycle entry (1), which becomes a
+        // self-loop and the only surviving state.
+        assert_eq!(start, 1);
+        assert_eq!(arms.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [1]);
+        assert_eq!(arms[0].1[0].1.as_goto(), Some(1));
     }
 }
