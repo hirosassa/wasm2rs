@@ -2,7 +2,7 @@ use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, ValType};
 
 use super::super::helpers::{checked_place, mem_accessor, table_accessor};
 use super::super::{
-    CompositeKind, Helper, Val, is_bottom_u32_heap, is_cont_heap, is_gc_table_element,
+    CompositeKind, Helper, Rt, Val, is_bottom_u32_heap, is_cont_heap, is_gc_table_element,
     table_elem_rust,
 };
 use crate::TranspileError;
@@ -15,6 +15,9 @@ pub(super) enum BulkCheck {
     Panic,
     Unchecked,
     Typed(&'static str),
+    /// Typed segment source only: the destination is a shared memory's bytes, whose
+    /// indexing already raises the typed trap.
+    TypedSegment(&'static str),
 }
 
 impl<'a> super::FuncGen<'a> {
@@ -323,6 +326,10 @@ impl<'a> super::FuncGen<'a> {
                 format!("(*unsafe {{ {dst}.get_unchecked_mut(d..d + n) }})"),
                 "unsafe { seg.get_unchecked(s..s + n) }".to_string(),
             ),
+            BulkCheck::TypedSegment(trap) => (
+                format!("{dst}[d..d + n]"),
+                format!("&{}", checked_place("seg.get(s..s + n)", trap)),
+            ),
             // `typed_traps`: the destination is checked first, then the segment.
             BulkCheck::Typed(trap) => (
                 checked_place(&format!("{dst}.get_mut(d..d + n)"), trap),
@@ -360,6 +367,9 @@ impl<'a> super::FuncGen<'a> {
         };
         let check = if unchecked {
             BulkCheck::Unchecked
+        } else if self.ctx.typed_traps && self.ctx.memory_shared {
+            self.used_rt.insert(Rt::TrapMemoryOob);
+            BulkCheck::TypedSegment("trap_memory_oob")
         } else {
             self.typed_memory_trap()
                 .map_or(BulkCheck::Panic, BulkCheck::Typed)

@@ -5,9 +5,10 @@
 //! unwind with a `Wasm2RsTrap` payload (`resume_unwind`, so the panic hook never
 //! runs) instead of a message string, the same mechanism a wasm exception uses.
 //! Stage 2 adds integer division/remainder and linear-memory / table out-of-bounds
-//! traps (explicit checks in place of Rust's `/` and slice indexing). The remaining
-//! traps (GC, continuations, atomics, `exnref`, glue) keep their string payload, and
-//! the option is off by default.
+//! traps (explicit checks in place of Rust's `/` and slice indexing). Stage 3a adds
+//! the shared-memory atomics (a misaligned or out-of-bounds atomic access) and the
+//! plain accesses of a shared memory. The remaining traps (GC, continuations,
+//! `exnref`, glue) keep their string payload, and the option is off by default.
 
 use std::process::Command;
 use wasm2rs::TranspileOptions;
@@ -225,14 +226,29 @@ fn a_typed_trap_in_a_spawned_thread_reports_its_cause() {
 
 #[test]
 fn a_string_panic_in_a_typed_spawned_thread_still_reaches_the_hook() {
-    // A misaligned atomic is a stage-3 string panic, and no helper defines
-    // `Wasm2RsTrap` in this module, so the wrapper must compile without the type.
+    // A null `i31.get_s` is a still-untyped string panic; the wrapper must still
+    // forward it to the hook even though this shared module defines `Wasm2RsTrap`.
     let stderr = run_trapping_child(
         "typed_trap_thread_string",
+        "(if (i31.get_s (ref.null i31)) (then nop))",
+    );
+    assert!(stderr.contains("thread 1 trapped"), "{stderr}");
+    assert!(stderr.contains("null"), "{stderr}");
+}
+
+#[test]
+fn a_typed_atomic_trap_in_a_spawned_thread_reports_its_cause() {
+    let stderr = run_trapping_child(
+        "typed_trap_thread_atomic",
         "(drop (i32.atomic.load (i32.const 1)))",
     );
     assert!(stderr.contains("thread 1 trapped"), "{stderr}");
     assert!(stderr.contains("unaligned atomic access"), "{stderr}");
+    let stderr = run_trapping_child(
+        "typed_trap_thread_atomic_oob",
+        "(drop (i32.atomic.load (i32.const 65536)))",
+    );
+    assert!(stderr.contains("out of bounds memory access"), "{stderr}");
 }
 
 /// Typed traps with named exports, so the stage-2 modules are driven by export name.
@@ -476,5 +492,155 @@ fn cross_memory_copy_and_shared_module_table_helpers_are_typed() {
     assert!(
         !shared.contains("copy_within(s..s + len as usize, d);\n"),
         "{shared}"
+    );
+}
+
+const SHARED_ATOMICS: &str = r#"(module
+    (import "env" "memory" (memory 1 1 shared))
+    (func (export "ld32") (param i32) (result i32) (i32.atomic.load (local.get 0)))
+    (func (export "ld64") (param i32) (result i64) (i64.atomic.load (local.get 0)))
+    (func (export "ld16") (param i32) (result i32) (i32.atomic.load16_u (local.get 0)))
+    (func (export "st32") (param i32) (i32.atomic.store (local.get 0) (i32.const 1)))
+    (func (export "rmw") (param i32) (result i32) (i32.atomic.rmw.add (local.get 0) (i32.const 1)))
+    (func (export "cas") (param i32) (result i32)
+      (i32.atomic.rmw.cmpxchg (local.get 0) (i32.const 0) (i32.const 1)))
+    (func (export "wait") (param i32) (result i32)
+      (memory.atomic.wait32 (local.get 0) (i32.const 1) (i64.const 0)))
+    (func (export "plain_ld") (param i32) (result i32) (i32.load (local.get 0)))
+    (func (export "plain_st") (param i32) (i32.store (local.get 0) (i32.const 1)))
+    (func (export "catch_ld") (param i32) (result i32)
+      try (result i32) (i32.atomic.load (local.get 0)) catch_all i32.const -1 end))"#;
+
+#[test]
+fn shared_memory_atomics_and_plain_accesses_trap_with_typed_variants() {
+    compile_run_with(
+        "typed_traps_shared_atomics",
+        SHARED_ATOMICS,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new(SharedMemory::new(65536));
+            macro_rules! unaligned {{ ($e:expr) => {{
+                let t = trap_of(|| $e);
+                assert!(matches!(t, Wasm2RsTrap::UnalignedAtomicAccess));
+                assert_eq!(t.to_string(), "unaligned atomic access");
+            }} }}
+            macro_rules! oob {{ ($e:expr) => {{
+                let t = trap_of(|| $e);
+                assert!(matches!(t, Wasm2RsTrap::OutOfBoundsMemoryAccess));
+                assert_eq!(t.to_string(), "out of bounds memory access");
+            }} }}
+            // In-bounds, aligned accesses are unaffected.
+            assert_eq!(inst.ld32(4), 0);
+            inst.st32(8);
+            assert_eq!(inst.rmw(8), 1);
+            assert_eq!(inst.cas(12), 0);
+            assert_eq!(inst.wait(8), 1);
+            assert_eq!(inst.ld16(2), 0);
+            assert_eq!(inst.plain_ld(8), 2);
+            // Misaligned: every atomic family, and `wait` (which checks first).
+            unaligned!(inst.ld32(1)); unaligned!(inst.ld64(4)); unaligned!(inst.ld16(1));
+            unaligned!(inst.st32(2)); unaligned!(inst.rmw(3)); unaligned!(inst.cas(6));
+            unaligned!(inst.wait(1));
+            // Out of bounds, including a far-out address; alignment is checked first.
+            oob!(inst.ld32(65536)); oob!(inst.ld64(65536)); oob!(inst.st32(65540));
+            oob!(inst.rmw(0xffff_fffc_u32 as i32)); oob!(inst.cas(65536)); oob!(inst.wait(65536));
+            unaligned!(inst.ld32(65537));
+            // Plain accesses to a shared memory are typed too.
+            oob!(inst.plain_ld(65535)); oob!(inst.plain_st(65535));
+            oob!(inst.plain_ld(-1));
+            // A catch_all does not catch a typed trap, and no message is printed.
+            assert!(matches!(trap_of(|| inst.catch_ld(1)), Wasm2RsTrap::UnalignedAtomicAccess));
+            assert!(!HOOK_RAN.load(std::sync::atomic::Ordering::SeqCst));"#
+        ),
+    );
+}
+
+#[test]
+fn shared_memory_traps_stay_rust_panics_when_off() {
+    let plain = transpile_typed(SHARED_ATOMICS, false);
+    for absent in [
+        "Wasm2RsTrap",
+        "trap_memory_oob",
+        "trap_unaligned_atomic_access",
+    ] {
+        assert!(!plain.contains(absent), "{absent} in the untyped output");
+    }
+    assert!(
+        plain.contains(r#"panic!("unaligned atomic access")"#),
+        "{plain}"
+    );
+    assert!(
+        plain.contains(r#"panic!("out of bounds atomic access")"#),
+        "{plain}"
+    );
+    let typed = transpile_typed(SHARED_ATOMICS, true);
+    assert!(!typed.contains("panic!("), "{typed}");
+    assert!(typed.contains("UnalignedAtomicAccess"), "{typed}");
+    assert!(typed.contains("OutOfBoundsMemoryAccess"), "{typed}");
+}
+
+#[test]
+fn a_split_shared_module_defines_its_typed_traps_and_compiles() {
+    let wasm = wat::parse_str(
+        r#"(module (memory 1 1 shared)
+            (func (export "a") (param i32) (result i32) (i32.atomic.load (local.get 0)))
+            (func (export "b") (param i32) (result i32) (i32.load (local.get 0))))"#,
+    )
+    .expect("valid wat");
+    let split = wasm2rs::SplitOptions {
+        funcs_per_file: 1,
+        max_bytes_per_file: 0,
+    };
+    let mut files = Vec::new();
+    wasm2rs::transpile_split_with_options(&wasm, &split, &typed_named(), |f| {
+        files.push(f);
+        Ok(())
+    })
+    .expect("transpile ok");
+    assert!(files.len() > 1, "expected a split output");
+    let dir = common::scratch_dir("typed-traps-split-shared");
+    for f in &files {
+        let mut code = f.code.clone();
+        if f.name == "lib.rs" {
+            code.push_str(&format!(
+                "{CATCH}\nfn main() {{ let mut inst = Instance::new();\n\
+                 assert!(matches!(trap_of(|| inst.a(1)), Wasm2RsTrap::UnalignedAtomicAccess));\n\
+                 assert!(matches!(trap_of(|| inst.b(65536)), Wasm2RsTrap::OutOfBoundsMemoryAccess)); }}\n"
+            ));
+        }
+        std::fs::write(dir.join(&f.name), code).expect("write generated file");
+    }
+    let bin = dir.join("gen");
+    let out = Command::new("rustc")
+        .current_dir(&dir)
+        .args(["lib.rs", "--edition", "2024", "-o"])
+        .arg(&bin)
+        .output()
+        .expect("run rustc");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(Command::new(&bin).status().expect("run").success());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn memory_init_on_a_shared_memory_traps_typed_for_both_ranges() {
+    compile_run_with(
+        "typed_traps_shared_init",
+        r#"(module (memory 1 1 shared) (data $d "abcd")
+            (func (export "init") (param i32 i32 i32)
+              (memory.init $d (local.get 0) (local.get 1) (local.get 2))))"#,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            inst.init(0, 0, 4);
+            assert!(matches!(trap_of(|| inst.init(0, 1, 4)), Wasm2RsTrap::OutOfBoundsMemoryAccess));
+            assert!(matches!(trap_of(|| inst.init(65535, 0, 4)), Wasm2RsTrap::OutOfBoundsMemoryAccess));"#
+        ),
     );
 }
