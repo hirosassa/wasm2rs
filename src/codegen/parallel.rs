@@ -29,7 +29,8 @@ const WORKER_STACK: usize = 256 << 20;
 const WINDOW_PER_JOB: usize = 256;
 /// Generated source a job may have parked, unconsumed, before it is throttled
 /// regardless of the window. Keeps the memory in flight proportional to the
-/// thread count even when single functions are megabytes.
+/// thread count even when single functions are megabytes. A throttle point, not
+/// a hard cap: it is checked before generating, so in-flight pieces add to it.
 const PARKED_BYTES_PER_JOB: usize = 16 << 20;
 /// Functions claimed per `fetch_add`: with ~40k tiny functions a claim per
 /// function makes the shared counter a hot cache line.
@@ -352,12 +353,7 @@ fn take_piece(shared: &Shared, k: usize, wake_every: usize, byte_budget: usize) 
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::indexing_slicing,
-    clippy::panic,
-    reason = "test code"
-)]
+#[allow(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
     use std::collections::HashSet;
@@ -380,21 +376,20 @@ mod tests {
         format!("f{k};").repeat(1 + k % 7)
     }
 
-    fn collect(total: usize, jobs: usize, limits: Limits) -> Vec<String> {
+    fn write_body(k: usize, out: &mut String) -> Result<GenMeta, TranspileError> {
+        out.push_str(&body(k));
+        Ok(meta())
+    }
+
+    fn collect<G>(total: usize, jobs: usize, limits: Limits, generate: G) -> Vec<String>
+    where
+        G: Fn(usize, &mut String) -> Result<GenMeta, TranspileError> + Sync,
+    {
         let mut got = Vec::new();
-        run_ordered(
-            total,
-            jobs,
-            limits,
-            &|k, out: &mut String| {
-                out.push_str(&body(k));
-                Ok(meta())
-            },
-            &mut |src, _| {
-                got.push(src.to_string());
-                Ok(())
-            },
-        )
+        run_ordered(total, jobs, limits, &generate, &mut |src, _| {
+            got.push(src.to_string());
+            Ok(())
+        })
         .unwrap();
         got
     }
@@ -412,7 +407,7 @@ mod tests {
                     byte_budget,
                 };
                 assert_eq!(
-                    collect(300, jobs, limits),
+                    collect(300, jobs, limits, write_body),
                     expected(300),
                     "{window}/{byte_budget}/{jobs}"
                 );
@@ -422,27 +417,16 @@ mod tests {
 
     #[test]
     fn a_slow_head_function_does_not_change_the_output() {
-        let mut got = Vec::new();
-        run_ordered(
-            200,
-            4,
-            Limits {
-                window: 8,
-                byte_budget: 64,
-            },
-            &|k, out: &mut String| {
-                if k == 0 {
-                    thread::sleep(Duration::from_millis(30));
-                }
-                out.push_str(&body(k));
-                Ok(meta())
-            },
-            &mut |src, _| {
-                got.push(src.to_string());
-                Ok(())
-            },
-        )
-        .unwrap();
+        let limits = Limits {
+            window: 8,
+            byte_budget: 64,
+        };
+        let got = collect(200, 4, limits, |k, out: &mut String| {
+            if k == 0 {
+                thread::sleep(Duration::from_millis(30));
+            }
+            write_body(k, out)
+        });
         assert_eq!(got, expected(200));
     }
 
@@ -459,8 +443,7 @@ mod tests {
                 if k == 40 || k == 70 {
                     return Err(TranspileError::Internal(k.to_string()));
                 }
-                out.push_str(&body(k));
-                Ok(meta())
+                write_body(k, out)
             },
             &mut |_, _| Ok(()),
         );
@@ -477,10 +460,7 @@ mod tests {
                 window: 16,
                 byte_budget: 32,
             },
-            &|k, out: &mut String| {
-                out.push_str(&body(k));
-                Ok(meta())
-            },
+            &write_body,
             &mut |_, _| {
                 seen += 1;
                 if seen == 10 {
@@ -496,7 +476,6 @@ mod tests {
 
     #[test]
     fn the_byte_budget_bounds_how_far_workers_run_ahead() {
-        use std::sync::atomic::AtomicUsize;
         let generated = AtomicUsize::new(0);
         let mut consumed = 0usize;
         let mut max_ahead = 0usize;
