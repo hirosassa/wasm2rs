@@ -50,6 +50,7 @@ mod cont;
 mod control_flow;
 mod convert;
 mod data;
+mod data_compact;
 mod dispatch_targets;
 mod dump;
 mod elem_exprs;

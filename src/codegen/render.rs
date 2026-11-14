@@ -172,7 +172,8 @@ pub(super) fn render_module_head(
         lines.push(String::new());
     }
     // Module-scope statics backing the data and element segments.
-    lines.extend(segment_statics(parts.data, parts.elements));
+    let trimmed = trimmed_data(parts, ctx, &layout);
+    lines.extend(segment_statics(parts.data, &trimmed, parts.elements));
     // Typed-continuations runtime: the step result, the per-continuation frame
     // structs and the tagged object stored in the instance's `conts` table.
     if !ctx.cont.bodies.is_empty() {
@@ -264,15 +265,89 @@ fn push_function_source(out: &mut String, src: &str) {
     }
 }
 
+/// The part of an active data segment that is actually copied: `bytes` is the
+/// segment without its leading and trailing zeros, `start` its offset into the
+/// segment. An empty `bytes` means nothing needs copying at all.
+struct TrimmedData<'a> {
+    start: usize,
+    bytes: &'a [u8],
+}
+
+/// Which active data segments can skip their zero edges, indexed like
+/// `parts.data` (`None` = copy the whole segment).
+///
+/// A segment's zeros are only unobservable when they land on the fresh,
+/// zero-filled buffer of a memory the module creates, so a host-owned
+/// (imported or shared) memory is never trimmed. The segment must also lie
+/// fully inside that buffer (a segment that overruns it has to keep trapping at
+/// instantiation, however many of its bytes are zero), have a constant offset,
+/// and no earlier segment of the same memory may overlap it or have an unknown
+/// offset (a later zero must still overwrite an earlier byte).
+fn trimmed_data<'a>(
+    parts: &ModuleParts<'a>,
+    ctx: &ModuleCtx<'_>,
+    layout: &Layout,
+) -> Vec<Option<TrimmedData<'a>>> {
+    let mut written: Vec<(u32, u64, u64)> = Vec::new();
+    let mut unknown: HashSet<u32> = HashSet::new();
+    let host_owned = layout.mem_imported || ctx.memory_shared;
+    parts
+        .data
+        .iter()
+        .map(|seg| {
+            seg.offset.as_ref()?;
+            let (base, runtime) = SegOffset::split(seg.offset.as_ref());
+            if runtime.is_some() {
+                unknown.insert(seg.mem_index);
+                return None;
+            }
+            let len = u64::try_from(seg.bytes.len()).ok()?;
+            let end = base.checked_add(len)?;
+            let overlaps = written
+                .iter()
+                .any(|&(m, s, e)| m == seg.mem_index && s < end && base < e);
+            written.push((seg.mem_index, base, end));
+            let mem = parts.memories.get(usize::try_from(seg.mem_index).ok()?)?;
+            let buffer = mem.min_pages.checked_mul(WASM_PAGE_SIZE)?;
+            if host_owned
+                || mem.imported
+                || mem.shared
+                || overlaps
+                || unknown.contains(&seg.mem_index)
+                || end > buffer
+            {
+                return None;
+            }
+            let start = seg.bytes.iter().position(|&b| b != 0).unwrap_or(0);
+            let stop = seg
+                .bytes
+                .iter()
+                .rposition(|&b| b != 0)
+                .map_or(start, |i| i.saturating_add(1));
+            let bytes = seg.bytes.get(start..stop)?;
+            Some(TrimmedData { start, bytes })
+        })
+        .collect()
+}
+
 /// Module-scope `static`s backing the data and element segments. Every data
 /// segment's bytes live in `DATA{d}`: an active one is copied from it when the
-/// instance is built, a passive one is kept as a `&'static` slice of it so
-/// `memory.init` can copy from it on demand. Passive element segments likewise
-/// back `table.init`.
-fn segment_statics(data: &[DataSegment], elements: &[ElemSegment]) -> Vec<String> {
+/// instance is built (only its non-zero core, see [`trimmed_data`], and nothing
+/// at all when that is empty), a passive one is kept as a `&'static` slice of it
+/// so `memory.init` can copy from it on demand. Passive element segments
+/// likewise back `table.init`.
+fn segment_statics(
+    data: &[DataSegment],
+    trimmed: &[Option<TrimmedData<'_>>],
+    elements: &[ElemSegment],
+) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for (d, seg) in data.iter().enumerate() {
-        lines.push(data_static_line(d, &seg.bytes));
+        match trimmed.get(d).and_then(Option::as_ref) {
+            Some(t) if t.bytes.is_empty() => {}
+            Some(t) => lines.push(data_static_line(d, t.bytes)),
+            None => lines.push(data_static_line(d, &seg.bytes)),
+        }
     }
     for (e, seg) in elements.iter().enumerate() {
         if seg.offset.is_none() && !seg.declared {
@@ -471,6 +546,9 @@ struct CtorPlan<'a> {
     /// segment names the memory it initialises.
     active: Vec<(usize, &'a DataSegment)>,
     active_elem: Vec<&'a ElemSegment>,
+    /// The zero-trimmed copy of each data segment that has one (see
+    /// [`trimmed_data`]), indexed like `parts.data`.
+    trimmed: Vec<Option<TrimmedData<'a>>>,
     /// Imported memory/table are host-owned, so their active data/elements cannot
     /// be written into a `memory`/`table` field literal; instead the instance is
     /// bound and the segments are copied into the host storage through
@@ -519,6 +597,7 @@ impl<'a> CtorPlan<'a> {
             layout,
             active,
             active_elem,
+            trimmed: trimmed_data(parts, ctx, layout),
             data_in_module_order,
             post_init_data,
             post_init_elem,
@@ -564,12 +643,22 @@ impl<'a> CtorPlan<'a> {
         lines: &mut Vec<String>,
         d: usize,
         seg: &DataSegment,
+        trimmed: Option<&TrimmedData<'_>>,
         target: &str,
         host: &str,
         indent: &str,
     ) {
-        let len = u64::try_from(seg.bytes.len()).unwrap_or(u64::MAX);
         let (base, runtime) = SegOffset::split(seg.offset.as_ref());
+        // A trimmed segment is in bounds and has a constant offset, so skipping
+        // its zero edges (or the whole copy) cannot change a trap or a byte.
+        let (base, len) = match trimmed {
+            Some(t) if t.bytes.is_empty() => return,
+            Some(t) => (
+                base.saturating_add(u64::try_from(t.start).unwrap_or(u64::MAX)),
+                u64::try_from(t.bytes.len()).unwrap_or(u64::MAX),
+            ),
+            None => (base, u64::try_from(seg.bytes.len()).unwrap_or(u64::MAX)),
+        };
         if let Some(expr) = runtime {
             open_runtime_offset(lines, expr, host, indent);
             let copy =
@@ -597,7 +686,8 @@ impl<'a> CtorPlan<'a> {
         indent: &str,
     ) {
         for (d, seg) in self.active_for(mem) {
-            Self::copy_data_seg(lines, d, seg, target, host, indent);
+            let trimmed = self.trimmed.get(d).and_then(Option::as_ref);
+            Self::copy_data_seg(lines, d, seg, trimmed, target, host, indent);
         }
     }
 
@@ -963,7 +1053,16 @@ impl<'a> CtorPlan<'a> {
                     } else {
                         format!("instance.mem{}_mut()", seg.mem_index)
                     };
-                    Self::copy_data_seg(inner, *d, seg, &target, "instance.imports", "    ");
+                    let trimmed = self.trimmed.get(*d).and_then(Option::as_ref);
+                    Self::copy_data_seg(
+                        inner,
+                        *d,
+                        seg,
+                        trimmed,
+                        &target,
+                        "instance.imports",
+                        "    ",
+                    );
                 }
             } else if self.post_init_data {
                 self.copy_active_data(inner, 0, "instance.mem_mut()", "instance.imports", "    ");
