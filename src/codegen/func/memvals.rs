@@ -315,6 +315,43 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
+    /// On an unshared memory an atomic access lowers to the plain helper, but the
+    /// threads proposal still makes it trap when misaligned. Emits that trap for
+    /// the address `above` operands below the stack top, and rebinds the operand to
+    /// the checked temp. Byte accesses cannot be misaligned and are left untouched.
+    fn check_unshared_atomic_align(
+        &mut self,
+        helper: Helper,
+        memarg: MemArg,
+        above: usize,
+    ) -> Result<(), TranspileError> {
+        let width = Self::atomic_access_width(helper);
+        if width == 1 {
+            return Ok(());
+        }
+        self.require_memory()?;
+        let mem = self.memarg_memory(memarg)?;
+        let off_lit = self.offset_lit(memarg, mem)?;
+        // The trap is a statement of its own: keep it after any earlier pending
+        // operand that may trap, and freeze the operands so they run before it.
+        self.spill_nonstable()?;
+        let top = self.stack.len();
+        let idx = top
+            .checked_sub(above + 1)
+            .ok_or(TranspileError::StackUnderflow)?;
+        let addr_code = self
+            .stack
+            .get(idx)
+            .ok_or(TranspileError::StackUnderflow)?
+            .code
+            .clone();
+        let tmp = self.bind_addr_checked_aligned(mem, &addr_code, &off_lit, width);
+        if let Some(addr) = self.stack.get_mut(idx) {
+            addr.code = tmp;
+        }
+        Ok(())
+    }
+
     /// An atomic load. On a shared memory it is a real (sequentially consistent)
     /// atomic access that traps when misaligned; otherwise the instance owns its
     /// memory and it is the plain load.
@@ -325,6 +362,7 @@ impl<'a> super::FuncGen<'a> {
         memarg: MemArg,
     ) -> Result<(), TranspileError> {
         if !self.ctx.memory_shared {
+            self.check_unshared_atomic_align(helper, memarg, 0)?;
             return self.load(helper, ty, memarg);
         }
         self.require_memory()?;
@@ -337,7 +375,7 @@ impl<'a> super::FuncGen<'a> {
         let addr = self.pop()?;
         let name = self.fresh_temp();
         self.line(format!(
-            "let {name} = self.memory.atomic_load(usize::try_from(({}) as u32 as u64 + {offset}u64).unwrap_or(usize::MAX), {}) as {};",
+            "let {name} = self.memory.atomic_load(({}) as u32 as u64 + {offset}u64, {}) as {};",
             addr.code,
             Self::atomic_access_width(helper),
             shared_result_ty(ty)
@@ -358,6 +396,7 @@ impl<'a> super::FuncGen<'a> {
         memarg: MemArg,
     ) -> Result<(), TranspileError> {
         if !self.ctx.memory_shared {
+            self.check_unshared_atomic_align(helper, memarg, 1)?;
             return self.store(helper, memarg);
         }
         self.require_memory()?;
@@ -367,7 +406,7 @@ impl<'a> super::FuncGen<'a> {
         let value = self.pop()?;
         let addr = self.pop()?;
         self.line(format!(
-            "self.memory.atomic_store(usize::try_from(({}) as u32 as u64 + {offset}u64).unwrap_or(usize::MAX), {}, ({}) as u64);",
+            "self.memory.atomic_store(({}) as u32 as u64 + {offset}u64, {}, ({}) as u64);",
             addr.code,
             Self::atomic_access_width(helper),
             value.code
@@ -455,7 +494,6 @@ impl<'a> super::FuncGen<'a> {
         let (load, store, ty, _mask) = width.parts();
         let offset = self.shared_offset(memarg)?;
         let off_lit = self.offset_lit(memarg, mem)?;
-        let addr_ty = self.addr_rust_ty(mem);
         // Memory is about to change; fix any operand that reads from it.
         self.spill_nonstable()?;
         let value = self.pop()?;
@@ -470,7 +508,7 @@ impl<'a> super::FuncGen<'a> {
             let rust_ty = shared_result_ty(ty);
             let old = self.fresh_temp();
             self.line(format!(
-                "let {old} = self.memory.atomic_rmw(usize::try_from(({}) as u32 as u64 + {offset}u64).unwrap_or(usize::MAX), {byte}, {code}, ({}) as u64) as {rust_ty};",
+                "let {old} = self.memory.atomic_rmw(({}) as u32 as u64 + {offset}u64, {byte}, {code}, ({}) as u64) as {rust_ty};",
                 addr.code, value.code
             ));
             self.push(Val {
@@ -483,9 +521,9 @@ impl<'a> super::FuncGen<'a> {
         }
         self.used_helpers.insert((load, mem));
         self.used_helpers.insert((store, mem));
-        // `addr` feeds both the load and the store, so bind it once.
-        let addr_tmp = self.fresh_temp();
-        self.line(format!("let {addr_tmp}: {addr_ty} = {};", addr.code));
+        // `addr` feeds both the load and the store, so bind it once (checked first).
+        let addr_tmp =
+            self.bind_addr_checked_aligned(mem, &addr.code, &off_lit, width.byte_width());
         let old = self.fresh_temp();
         self.line(format!(
             "let {old} = self.{}({addr_tmp}, {off_lit});",
@@ -521,7 +559,6 @@ impl<'a> super::FuncGen<'a> {
         let (load, store, ty, mask) = width.parts();
         let offset = self.shared_offset(memarg)?;
         let off_lit = self.offset_lit(memarg, mem)?;
-        let addr_ty = self.addr_rust_ty(mem);
         // Memory may change; fix any operand that reads from it.
         self.spill_nonstable()?;
         let replacement = self.pop()?;
@@ -535,7 +572,7 @@ impl<'a> super::FuncGen<'a> {
             let rust_ty = shared_result_ty(ty);
             let old = self.fresh_temp();
             self.line(format!(
-                "let {old} = self.memory.atomic_cmpxchg(usize::try_from(({}) as u32 as u64 + {offset}u64).unwrap_or(usize::MAX), {byte}, ({}) as u64, ({}) as u64) as {rust_ty};",
+                "let {old} = self.memory.atomic_cmpxchg(({}) as u32 as u64 + {offset}u64, {byte}, ({}) as u64, ({}) as u64) as {rust_ty};",
                 addr.code, expected.code, replacement.code
             ));
             self.push(Val {
@@ -548,8 +585,8 @@ impl<'a> super::FuncGen<'a> {
         }
         self.used_helpers.insert((load, mem));
         self.used_helpers.insert((store, mem));
-        let addr_tmp = self.fresh_temp();
-        self.line(format!("let {addr_tmp}: {addr_ty} = {};", addr.code));
+        let addr_tmp =
+            self.bind_addr_checked_aligned(mem, &addr.code, &off_lit, width.byte_width());
         let old = self.fresh_temp();
         self.line(format!(
             "let {old} = self.{}({addr_tmp}, {off_lit});",
@@ -590,7 +627,7 @@ impl<'a> super::FuncGen<'a> {
             let addr = self.pop()?;
             let name = self.fresh_temp();
             self.line(format!(
-                "let {name}: i32 = self.memory.notify(usize::try_from(({}) as u32 as u64 + {offset}u64).unwrap_or(usize::MAX), ({}) as u32) as i32;",
+                "let {name}: i32 = self.memory.notify(({}) as u32 as u64 + {offset}u64, ({}) as u32) as i32;",
                 addr.code, count.code
             ));
             self.push(Val {
@@ -652,7 +689,7 @@ impl<'a> super::FuncGen<'a> {
             let addr = self.pop()?;
             let name = self.fresh_temp();
             self.line(format!(
-                "let {name}: i32 = self.memory.wait(usize::try_from(({}) as u32 as u64 + {offset}u64).unwrap_or(usize::MAX), ({}) as u64, {byte}, ({}) as i64);",
+                "let {name}: i32 = self.memory.wait(({}) as u32 as u64 + {offset}u64, ({}) as u64, {byte}, ({}) as i64);",
                 addr.code, expected.code, timeout.code
             ));
             self.push(Val {
@@ -693,7 +730,8 @@ impl<'a> super::FuncGen<'a> {
     }
 
     /// Binds `addr` to a temp and emits the alignment trap of an atomic access of
-    /// `width` bytes at `addr + offset` (the bounds trap is the load helper's).
+    /// `width` bytes at `addr + offset` (the bounds trap is the load helper's); a
+    /// byte access needs no trap.
     /// The sum is taken in `u64`, so it cannot overflow for a 32-bit address; for
     /// a 64-bit one only its low bits matter, so a wrapping add keeps the answer.
     fn bind_addr_checked_aligned(
@@ -701,11 +739,14 @@ impl<'a> super::FuncGen<'a> {
         mem: u32,
         addr: &str,
         off_lit: &str,
-        width: u32,
+        width: usize,
     ) -> String {
         let addr_ty = self.addr_rust_ty(mem);
         let addr_tmp = self.fresh_temp();
         self.line(format!("let {addr_tmp}: {addr_ty} = {addr};"));
+        if width == 1 {
+            return addr_tmp;
+        }
         let ea = if self.is_memory64(mem) {
             format!("({addr_tmp} as u64).wrapping_add({off_lit})")
         } else {

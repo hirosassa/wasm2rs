@@ -124,7 +124,7 @@ impl std::ops::IndexMut<std::ops::Range<usize>> for SharedBytes {
 #[derive(Default)]
 struct SharedPark {
     // addr -> FIFO of tickets of the waiters still parked there
-    queues: std::collections::HashMap<usize, std::collections::VecDeque<u64>>,
+    queues: std::collections::HashMap<u64, std::collections::VecDeque<u64>>,
     // tickets a `notify` has chosen to wake but whose waiter has not yet resumed
     woken: std::collections::HashSet<u64>,
     next_ticket: u64,
@@ -241,22 +241,28 @@ impl SharedMemory {
         }
     }
 
-    // The cell of an atomic access: traps (panics) when out of bounds or not
-    // aligned to its width, as the threads proposal requires.
-    fn atomic_cell(&self, addr: usize, width: usize) -> *mut u8 {
+    // The cell of an atomic access at the effective address `addr` (a 32-bit
+    // address plus the static offset, so it can exceed `usize` on a 32-bit host):
+    // traps (panics) when not aligned to its width or out of bounds, as the threads
+    // proposal requires. Alignment is judged on the full address, so an
+    // out-of-range one is never misreported as misaligned.
+    fn atomic_cell(&self, addr: u64, width: usize) -> *mut u8 {
         let len = self.0.len.load(std::sync::atomic::Ordering::Relaxed);
-        if addr % width != 0 {
+        if addr % width as u64 != 0 {
             panic!("unaligned atomic access");
         }
-        if addr.checked_add(width).is_none_or(|end| end > len) {
+        let in_bounds = usize::try_from(addr)
+            .ok()
+            .filter(|start| start.checked_add(width).is_some_and(|end| end <= len));
+        let Some(start) = in_bounds else {
             panic!("out of bounds atomic access");
-        }
-        // SAFETY: `addr + width <= len <= cap`.
-        unsafe { self.0.base.add(addr) }
+        };
+        // SAFETY: `start + width <= len <= cap`.
+        unsafe { self.0.base.add(start) }
     }
 
     // Sequentially consistent atomic load of `width` bytes, zero-extended.
-    fn atomic_load(&self, addr: usize, width: usize) -> u64 {
+    fn atomic_load(&self, addr: u64, width: usize) -> u64 {
         use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::SeqCst};
         let p = self.atomic_cell(addr, width);
         // SAFETY: `p` is in bounds and aligned for `width` (checked above).
@@ -271,7 +277,7 @@ impl SharedMemory {
     }
 
     // Sequentially consistent atomic store of the low `width` bytes of `val`.
-    fn atomic_store(&self, addr: usize, width: usize, val: u64) {
+    fn atomic_store(&self, addr: u64, width: usize, val: u64) {
         use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::SeqCst};
         let p = self.atomic_cell(addr, width);
         // SAFETY: `p` is in bounds and aligned for `width` (checked above).
@@ -287,7 +293,7 @@ impl SharedMemory {
 
     // Atomic read-modify-write (a compare-exchange loop, so one routine serves
     // every width and op). Returns the (zero-extended) old value.
-    fn atomic_rmw(&self, addr: usize, width: usize, op: u8, val: u64) -> u64 {
+    fn atomic_rmw(&self, addr: u64, width: usize, op: u8, val: u64) -> u64 {
         use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::SeqCst};
         let p = self.atomic_cell(addr, width);
         let val = val & shared_width_mask(width);
@@ -315,7 +321,7 @@ impl SharedMemory {
 
     // Stores `replacement` only if the (masked) current value equals `expected`.
     // Returns the (zero-extended) old value either way.
-    fn atomic_cmpxchg(&self, addr: usize, width: usize, expected: u64, replacement: u64) -> u64 {
+    fn atomic_cmpxchg(&self, addr: u64, width: usize, expected: u64, replacement: u64) -> u64 {
         use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::SeqCst};
         let p = self.atomic_cell(addr, width);
         let expected = expected & shared_width_mask(width);
@@ -340,7 +346,7 @@ impl SharedMemory {
     // Wakes the `count` longest-parked waiters on `addr` (at most), by ticket.
     // Like a wait, it traps on a misaligned or out-of-bounds address, before taking
     // the lock.
-    fn notify(&self, addr: usize, count: u32) -> u32 {
+    fn notify(&self, addr: u64, count: u32) -> u32 {
         self.atomic_cell(addr, 4);
         let mut park = self.0.park.lock().unwrap();
         let mut n = 0;
@@ -361,7 +367,7 @@ impl SharedMemory {
 
     // Returns 0 (woken), 1 (value mismatch - did not block), or 2 (timed out).
     // `timeout_ns < 0` means wait forever. `width` is 4 (wait32) or 8 (wait64).
-    fn wait(&self, addr: usize, expected: u64, width: usize, timeout_ns: i64) -> i32 {
+    fn wait(&self, addr: u64, expected: u64, width: usize, timeout_ns: i64) -> i32 {
         // The bounds/alignment trap comes first, outside the lock, so a trapping
         // wait cannot poison it for the other threads.
         self.atomic_cell(addr, width);

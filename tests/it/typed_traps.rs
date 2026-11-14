@@ -673,3 +673,146 @@ fn notify_traps_are_typed_on_shared_and_unshared_memory() {
         );
     }
 }
+
+/// Every atomic access family and width, on an unshared memory of either address
+/// width. Returns the wat and `(export name, access bytes)` of each function; all
+/// take one address parameter.
+fn unshared_atomics(memory64: bool) -> (String, Vec<(String, u32)>) {
+    let aty = if memory64 { "i64" } else { "i32" };
+    let mut funcs = String::new();
+    let mut names = Vec::new();
+    for (vty, bytes, load, store, rmw, cas) in [
+        (
+            "i32",
+            1,
+            "load8_u",
+            "store8",
+            "rmw8.add_u",
+            "rmw8.cmpxchg_u",
+        ),
+        (
+            "i32",
+            2,
+            "load16_u",
+            "store16",
+            "rmw16.add_u",
+            "rmw16.cmpxchg_u",
+        ),
+        ("i32", 4, "load", "store", "rmw.add", "rmw.cmpxchg"),
+        (
+            "i64",
+            1,
+            "load8_u",
+            "store8",
+            "rmw8.add_u",
+            "rmw8.cmpxchg_u",
+        ),
+        (
+            "i64",
+            2,
+            "load16_u",
+            "store16",
+            "rmw16.add_u",
+            "rmw16.cmpxchg_u",
+        ),
+        (
+            "i64",
+            4,
+            "load32_u",
+            "store32",
+            "rmw32.add_u",
+            "rmw32.cmpxchg_u",
+        ),
+        ("i64", 8, "load", "store", "rmw.add", "rmw.cmpxchg"),
+    ] {
+        for (kind, op) in [("ld", load), ("st", store), ("rmw", rmw), ("cas", cas)] {
+            let name = format!("{kind}_{vty}_{}", op.replace('.', "_"));
+            let access = format!("{vty}.atomic.{op}");
+            let body = match kind {
+                "ld" => format!("(drop ({access} (local.get 0)))"),
+                "st" => format!("({access} (local.get 0) ({vty}.const 1))"),
+                "rmw" => format!("(drop ({access} (local.get 0) ({vty}.const 1)))"),
+                _ => format!("(drop ({access} (local.get 0) ({vty}.const 0) ({vty}.const 1)))"),
+            };
+            funcs.push_str(&format!(
+                "(func (export \"{name}\") (param {aty}) {body})\n"
+            ));
+            names.push((name, bytes));
+        }
+    }
+    let mem = if memory64 {
+        "(memory i64 1 1)"
+    } else {
+        "(memory 1 1)"
+    };
+    (format!("(module {mem}\n{funcs})"), names)
+}
+
+fn unshared_atomic_main(names: &[(String, u32)], typed: bool) -> String {
+    // `CATCH` names `Wasm2RsTrap`, which only a typed build defines.
+    let mut body = String::from(if typed {
+        CATCH
+    } else {
+        r#"
+fn msg_of<R>(f: impl FnOnce() -> R) -> String {
+    let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).err().expect("a trap");
+    p.downcast_ref::<&str>().map(|s| s.to_string())
+        .or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default()
+}
+"#
+    });
+    body.push_str("let mut inst = Instance::new();\n");
+    for (name, bytes) in names {
+        // An aligned access is unaffected; a byte access can never be misaligned.
+        body.push_str(&format!("inst.{name}(8);\n"));
+        if *bytes == 1 {
+            body.push_str(&format!("inst.{name}(9);\n"));
+            continue;
+        }
+        let bad = 8 + bytes / 2;
+        body.push_str(&if typed {
+            format!(
+                "assert!(matches!(trap_of(|| inst.{name}({bad})), Wasm2RsTrap::UnalignedAtomicAccess), \"{name}\");\n"
+            )
+        } else {
+            format!(
+                "assert_eq!(msg_of(|| inst.{name}({bad})), \"unaligned atomic access\", \"{name}\");\n"
+            )
+        });
+    }
+    body
+}
+
+#[test]
+fn unshared_memory_atomics_trap_when_misaligned_at_every_width() {
+    // The threads proposal requires the alignment trap on every atomic access,
+    // shared memory or not; an aligned access keeps working.
+    for (memory64, typed) in [(false, false), (false, true), (true, false), (true, true)] {
+        let (wat, names) = unshared_atomics(memory64);
+        let opts = TranspileOptions::default()
+            .with_typed_traps(typed)
+            .with_named_exports(true);
+        compile_run_with(
+            &format!("unshared_atomic_align_{memory64}_{typed}"),
+            &wat,
+            opts,
+            &unshared_atomic_main(&names, typed),
+        );
+    }
+}
+
+#[test]
+fn unshared_atomic_alignment_includes_the_static_offset() {
+    compile_run_with(
+        "unshared_atomic_align_offset",
+        r#"(module (memory 1 1)
+            (func (export "ld") (param i32) (result i32) (i32.atomic.load offset=2 (local.get 0))))"#,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            assert_eq!(inst.ld(2), 0);
+            assert!(matches!(trap_of(|| inst.ld(0)), Wasm2RsTrap::UnalignedAtomicAccess));"#
+        ),
+    );
+}
