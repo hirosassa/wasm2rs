@@ -4,8 +4,10 @@
 
 use super::NetworkPolicy;
 use super::slab::to_u64;
-use super::sources::{HttpClient, HttpClientError, HttpRequest, HttpResponse, ResponseTrailers};
-use crate::wasi_http_types::{ErrorCode, HeaderError, Method, Scheme};
+use super::sources::{
+    HttpClient, HttpClientError, HttpClientErrorKind, HttpRequest, HttpResponse, ResponseTrailers,
+};
+use crate::wasi_http_types::{DNSErrorPayload, ErrorCode, HeaderError, Method, Scheme};
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read};
 use std::net::IpAddr;
@@ -525,7 +527,27 @@ fn send_when_finished(
     // a client that panics must not leave the guest waiting for ever
     std::panic::catch_unwind(AssertUnwindSafe(|| lock(client).send(request)))
         .unwrap_or_else(|_| Err(HttpClientError::new("the http client panicked")))
-        .map_err(|e| ErrorCode::InternalError(Some(e.to_string())))
+        .map_err(|e| client_error_code(&e))
+}
+
+/// The `error-code` a failed client request is reported as.
+fn client_error_code(error: &HttpClientError) -> ErrorCode {
+    match error.kind() {
+        HttpClientErrorKind::DnsFailure => ErrorCode::DNSError(DNSErrorPayload {
+            rcode: None,
+            info_code: None,
+        }),
+        HttpClientErrorKind::DnsTimeout => ErrorCode::DNSTimeout,
+        HttpClientErrorKind::ConnectionRefused => ErrorCode::ConnectionRefused,
+        HttpClientErrorKind::ConnectionTimeout => ErrorCode::ConnectionTimeout,
+        HttpClientErrorKind::ConnectionTerminated => ErrorCode::ConnectionTerminated,
+        HttpClientErrorKind::TlsCertificate => ErrorCode::TLSCertificateError,
+        HttpClientErrorKind::TlsProtocol => ErrorCode::TLSProtocolError,
+        HttpClientErrorKind::HttpProtocol => ErrorCode::HTTPProtocolError,
+        HttpClientErrorKind::ResponseTimeout => ErrorCode::HTTPResponseTimeout,
+        HttpClientErrorKind::LimitExceeded => ErrorCode::ConnectionLimitReached,
+        HttpClientErrorKind::Other => ErrorCode::InternalError(Some(error.to_string())),
+    }
 }
 
 /// An `incoming-response`: its body is read once `consume` has been called.
@@ -967,5 +989,46 @@ pub(super) fn body_error_code(kind: ErrorKind, why: &str) -> ErrorCode {
             ErrorCode::ConnectionTerminated
         }
         _ => ErrorCode::InternalError(Some(why.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_client_error_kind_is_its_error_code() {
+        use HttpClientErrorKind as K;
+        let code = |kind| client_error_code(&HttpClientError::with_kind(kind, "why"));
+        assert_eq!(
+            code(K::DnsFailure),
+            ErrorCode::DNSError(DNSErrorPayload {
+                rcode: None,
+                info_code: None
+            })
+        );
+        assert_eq!(code(K::DnsTimeout), ErrorCode::DNSTimeout);
+        assert_eq!(code(K::ConnectionRefused), ErrorCode::ConnectionRefused);
+        assert_eq!(code(K::ConnectionTimeout), ErrorCode::ConnectionTimeout);
+        assert_eq!(
+            code(K::ConnectionTerminated),
+            ErrorCode::ConnectionTerminated
+        );
+        assert_eq!(code(K::TlsCertificate), ErrorCode::TLSCertificateError);
+        assert_eq!(code(K::TlsProtocol), ErrorCode::TLSProtocolError);
+        assert_eq!(code(K::HttpProtocol), ErrorCode::HTTPProtocolError);
+        assert_eq!(code(K::ResponseTimeout), ErrorCode::HTTPResponseTimeout);
+        assert_eq!(code(K::LimitExceeded), ErrorCode::ConnectionLimitReached);
+        assert_eq!(code(K::Other), ErrorCode::InternalError(Some("why".into())));
+    }
+
+    #[test]
+    fn new_is_other_with_the_message() {
+        let error = HttpClientError::new("boom");
+        assert_eq!(error.kind(), &HttpClientErrorKind::Other);
+        assert_eq!(
+            client_error_code(&error),
+            ErrorCode::InternalError(Some("boom".into()))
+        );
     }
 }

@@ -1,7 +1,7 @@
 //! [`UreqClient`]: an [`HttpClient`] over `ureq` (feature `http-client`). No `ureq` type is part
 //! of the public API.
 
-use crate::{HttpClient, HttpClientError, HttpRequest, HttpResponse};
+use crate::{HttpClient, HttpClientError, HttpClientErrorKind, HttpRequest, HttpResponse};
 use std::time::Duration;
 
 /// Executes `wasi:http` requests with `ureq`.
@@ -60,6 +60,63 @@ fn client_error(error: impl std::fmt::Display) -> HttpClientError {
     HttpClientError::new(error.to_string())
 }
 
+fn io_kind(kind: std::io::ErrorKind) -> HttpClientErrorKind {
+    use std::io::ErrorKind;
+    match kind {
+        ErrorKind::ConnectionRefused => HttpClientErrorKind::ConnectionRefused,
+        ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::BrokenPipe
+        | ErrorKind::UnexpectedEof => HttpClientErrorKind::ConnectionTerminated,
+        ErrorKind::TimedOut => HttpClientErrorKind::ConnectionTimeout,
+        _ => HttpClientErrorKind::Other,
+    }
+}
+
+/// The kind of a failed `ureq` request, as far as `wasi:http`'s `error-code` tells them apart.
+fn classify(error: &ureq::Error) -> HttpClientErrorKind {
+    match error {
+        ureq::Error::HostNotFound | ureq::Error::Timeout(ureq::Timeout::Resolve) => {
+            HttpClientErrorKind::DnsFailure
+        }
+        ureq::Error::Timeout(ureq::Timeout::Connect) => HttpClientErrorKind::ConnectionTimeout,
+        ureq::Error::Timeout(ureq::Timeout::RecvResponse) => HttpClientErrorKind::ResponseTimeout,
+        // `ureq` passes the resolver's `io::Error` on as it is, and `std` gives a failed lookup
+        // no `ErrorKind` of its own, so only its text tells it from other I/O errors.
+        ureq::Error::Io(e)
+            if e.to_string()
+                .starts_with("failed to lookup address information") =>
+        {
+            HttpClientErrorKind::DnsFailure
+        }
+        // rustls reports a failed handshake or session as an `io::Error` of kind `InvalidData`
+        // wrapping its own error, which `ureq` passes on as `Io`.
+        ureq::Error::Io(e)
+            if e.kind() == std::io::ErrorKind::InvalidData && e.get_ref().is_some() =>
+        {
+            tls_kind(&e.to_string())
+        }
+        ureq::Error::Io(e) => io_kind(e.kind()),
+        ureq::Error::Protocol(_) => HttpClientErrorKind::HttpProtocol,
+        ureq::Error::Tls(_) => HttpClientErrorKind::TlsProtocol,
+        ureq::Error::Rustls(e) => tls_kind(&e.to_string()),
+        _ => HttpClientErrorKind::Other,
+    }
+}
+
+/// rustls words a certificate failure as "invalid peer certificate: ...".
+fn tls_kind(message: &str) -> HttpClientErrorKind {
+    if message.starts_with("invalid peer certificate") {
+        HttpClientErrorKind::TlsCertificate
+    } else {
+        HttpClientErrorKind::TlsProtocol
+    }
+}
+
+fn transport_error(error: ureq::Error) -> HttpClientError {
+    HttpClientError::with_kind(classify(&error), error.to_string())
+}
+
 impl HttpClient for UreqClient {
     fn send(&mut self, request: HttpRequest) -> Result<HttpResponse, HttpClientError> {
         // `ureq` sends whatever body it is given, so a body no server may expect is refused here
@@ -88,7 +145,7 @@ impl HttpClient for UreqClient {
             .timeout_recv_response(nanos(request.first_byte_timeout))
             .timeout_recv_body(nanos(request.between_bytes_timeout))
             .build();
-        let response = self.agent.run(http_request).map_err(client_error)?;
+        let response = self.agent.run(http_request).map_err(transport_error)?;
         let status = response.status().as_u16();
         let headers = response
             .headers()

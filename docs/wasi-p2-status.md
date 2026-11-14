@@ -60,8 +60,11 @@ Host behavior:
   host has no timeout on it.
 - `between-bytes-timeout` is approximated with a limit on the whole body in `UreqClient` (`ureq`
   has no per-read timeout), which is stricter than the specification.
-- `HttpClientError` carries only a string, so the guest sees `internal-error` with a message
-  instead of a structured `error-code` for connection failures.
+- `HttpClientError` has a `#[non_exhaustive]` `HttpClientErrorKind` that maps onto the main
+  `error-code` variants (DNS failure/timeout, connection refused/timeout/terminated, TLS certificate/protocol,
+  HTTP protocol, response timeout, limit); `HttpClientError::new` is `Other`, which is still
+  `internal-error` with the message. `DNS-error` carries no `rcode`/`info-code`, and `UreqClient`
+  tells a failed lookup and a TLS failure from other I/O errors by the text of the `io::Error` (the lookup text is Unix's; on Windows it stays `Other`).
 - File access is confined with `cap-std` (`openat` with `O_NOFOLLOW`). CI runs it on Unix and
   Windows (#205, see [windows.md](windows.md)); only the Unix runs check the symlink escape cases.
 - The confinement above is for `wasm2rs-wasi` only. The native WASI preview1 shim of the generated code uses
@@ -124,7 +127,6 @@ routing) and M3/M4 are a proposal, not a commitment.
 
 - Escape attempts through symlinks and junctions on Windows (everything else of #205 is done, see [windows.md](windows.md)).
 - A4: `resource.new` / `resource.rep` for resources a component defines and exports.
-- A structured `HttpClientError`, to map failures onto the specific `error-code` variants.
 - An `HttpClient` that really sends and receives trailers (the trait supports it; `UreqClient`
   does not).
 - Lifts that allocate through different `realloc` functions of several linked core modules (#314).

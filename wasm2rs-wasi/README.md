@@ -64,7 +64,10 @@ let host = WasiHost::builder().http_client(UreqClient::new()).build()?;
 ```
 
 - Redirects are not followed: a 3xx reaches the guest. 4xx and 5xx are responses, not errors;
-  only a request without a response (connection, lookup, timeout) is an `HttpClientError`.
+  only a request without a response (connection, lookup, timeout) is an `HttpClientError`,
+  whose `kind()` (`HttpClientErrorKind`: DNS failure, connection refused/timeout/terminated, TLS
+  certificate/protocol, HTTP protocol, response timeout, ...) reaches the guest as the matching
+  `wasi:http` `error-code`; `HttpClientError::new` is `Other` (`internal-error` with the message).
 - TLS follows `ureq`'s default: `https` uses rustls with the bundled webpki root certificates.
   Bodies are not decompressed (`ureq`'s `gzip` feature is off).
 - `connect-timeout` and `first-byte-timeout` are applied as given. `ureq` cannot time out each

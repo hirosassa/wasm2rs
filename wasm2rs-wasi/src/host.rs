@@ -110,8 +110,8 @@ use slab::*;
 #[cfg(feature = "os-random")]
 pub use sources::OsRandom;
 pub use sources::{
-    Clock, HttpClient, HttpClientError, HttpRequest, HttpResponse, InsecureRandom, RandomError,
-    RandomSource, SystemClock,
+    Clock, HttpClient, HttpClientError, HttpClientErrorKind, HttpRequest, HttpResponse,
+    InsecureRandom, RandomError, RandomSource, SystemClock,
 };
 use stream::*;
 
