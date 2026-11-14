@@ -193,7 +193,7 @@ pub(super) fn render_module_head(
     // Each section renderer reproduces the blank-line separators it needs, so
     // this is a straight concatenation.
     let mut inner: Vec<String> = Vec::new();
-    inner.extend(constructor_lines(parts, ctx, &layout)?);
+    inner.extend(constructor_lines(parts, ctx, &layout, &trimmed)?);
     if ctx.reentrant_imports {
         inner.extend(with_host_lines());
     }
@@ -295,12 +295,13 @@ fn trimmed_data<'a>(
         .data
         .iter()
         .map(|seg| {
-            seg.offset.as_ref()?;
-            let (base, runtime) = SegOffset::split(seg.offset.as_ref());
-            if runtime.is_some() {
-                unknown.insert(seg.mem_index);
-                return None;
-            }
+            let base = match seg.offset.as_ref()? {
+                SegOffset::Const(value) => *value,
+                SegOffset::Runtime { .. } => {
+                    unknown.insert(seg.mem_index);
+                    return None;
+                }
+            };
             let len = u64::try_from(seg.bytes.len()).ok()?;
             let end = base.checked_add(len)?;
             let overlaps = written
@@ -547,8 +548,9 @@ struct CtorPlan<'a> {
     active: Vec<(usize, &'a DataSegment)>,
     active_elem: Vec<&'a ElemSegment>,
     /// The zero-trimmed copy of each data segment that has one (see
-    /// [`trimmed_data`]), indexed like `parts.data`.
-    trimmed: Vec<Option<TrimmedData<'a>>>,
+    /// [`trimmed_data`]), indexed like `parts.data`; the same one the segment
+    /// statics were sized from.
+    trimmed: &'a [Option<TrimmedData<'a>>],
     /// Imported memory/table are host-owned, so their active data/elements cannot
     /// be written into a `memory`/`table` field literal; instead the instance is
     /// bound and the segments are copied into the host storage through
@@ -569,7 +571,12 @@ struct CtorPlan<'a> {
 }
 
 impl<'a> CtorPlan<'a> {
-    fn new(parts: &'a ModuleParts<'a>, ctx: &'a ModuleCtx<'a>, layout: &'a Layout) -> Self {
+    fn new(
+        parts: &'a ModuleParts<'a>,
+        ctx: &'a ModuleCtx<'a>,
+        layout: &'a Layout,
+        trimmed: &'a [Option<TrimmedData<'a>>],
+    ) -> Self {
         let active: Vec<(usize, &DataSegment)> = parts
             .data
             .iter()
@@ -597,7 +604,7 @@ impl<'a> CtorPlan<'a> {
             layout,
             active,
             active_elem,
-            trimmed: trimmed_data(parts, ctx, layout),
+            trimmed,
             data_in_module_order,
             post_init_data,
             post_init_elem,
@@ -1084,8 +1091,9 @@ fn constructor_lines(
     parts: &ModuleParts<'_>,
     ctx: &ModuleCtx<'_>,
     layout: &Layout,
+    trimmed: &[Option<TrimmedData<'_>>],
 ) -> Result<Vec<String>, TranspileError> {
-    let plan = CtorPlan::new(parts, ctx, layout);
+    let plan = CtorPlan::new(parts, ctx, layout, trimmed);
     let mut inner: Vec<String> = Vec::new();
     if ctx.memory_shared {
         plan.shared_memory_init_lines(&mut inner)?;
