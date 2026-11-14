@@ -900,6 +900,7 @@ fn glue_text(
     imports_trait: bool,
 ) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
+    reject_non_utf8_lowers(component, &funcs)?;
     let exports = if options.exports {
         match lifts {
             Some(lifts) => lifts,
@@ -957,6 +958,37 @@ fn glue_text(
     };
     glue::write(&mut out, &methods, &records, exported, imports_trait)?;
     Ok(out)
+}
+
+/// The glue reads the strings a guest passes to an import as UTF-8, so an import lowered with
+/// another encoding would silently get its strings misread: refuse it, as the lifts do for
+/// `compact-utf16`. (Only a function whose signature holds a string is affected.)
+fn reject_non_utf8_lowers(component: &[u8], funcs: &[WitFunc]) -> Result<(), TranspileError> {
+    for (host, encoding) in super::exports::non_utf8_lowers(component)? {
+        let Some(f) = funcs
+            .iter()
+            .find(|f| f.interface == host.interface && f.name == host.name)
+        else {
+            continue;
+        };
+        let mut budget = crate::wit_abi::Budget::new();
+        let mut holds = false;
+        for ty in f.params.iter().map(|(_, ty)| ty).chain(&f.result) {
+            if crate::wit_abi::holds_string(ty, &mut budget)? {
+                holds = true;
+                break;
+            }
+        }
+        if holds {
+            return Err(unsupported(format!(
+                "import `{}#{}` is lowered with `string-encoding={encoding}`, but strings that a \
+                 guest passes to or receives from an import are only supported as utf8 (exports \
+                 support utf16)",
+                host.interface, host.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// One glue method per core import, in import order.

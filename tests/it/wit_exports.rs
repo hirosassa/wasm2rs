@@ -1,6 +1,6 @@
 //! `wit_exports`: the `canon lift` side of a component, resolved to core module exports.
 
-use wasm2rs::{WitType, wit_exports};
+use wasm2rs::{WitStringEncoding, WitType, wit_exports};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
 
@@ -62,7 +62,7 @@ fn a_cli_run_export_resolves_to_its_core_export() {
     assert_eq!(run.memory, None);
     assert_eq!(run.realloc, None);
     assert_eq!(run.post_return, None);
-    assert!(run.utf8);
+    assert_eq!(run.encoding, WitStringEncoding::Utf8);
 }
 
 #[test]
@@ -194,11 +194,10 @@ fn a_core_function_that_is_a_canon_lower_is_rejected() {
     );
 }
 
-#[test]
-fn a_string_encoding_other_than_utf8_is_rejected() {
-    for encoding in ["utf16", "latin1+utf16"] {
-        let err = rejection(&format!(
-            r#"(component
+/// A component lifting `say` (a string parameter) with `encoding` as its `string-encoding`.
+fn say_with(encoding: &str) -> String {
+    format!(
+        r#"(component
   (core module $b
     (memory (export "mem") 1)
     (func (export "alloc") (param i32 i32 i32 i32) (result i32) i32.const 0)
@@ -210,12 +209,22 @@ fn a_string_encoding_other_than_utf8_is_rejected() {
   (type $t (func (param "s" string)))
   (func $lf (type $t) (canon lift (core func $f) (memory $m) (realloc $r) string-encoding={encoding}))
   (export "say" (func $lf)))"#
-        ));
-        assert!(
-            err.contains("`say`") && err.contains("string encoding"),
-            "{encoding}: {err}"
-        );
-    }
+    )
+}
+
+#[test]
+fn a_utf16_lift_is_resolved_with_its_encoding() {
+    let exports = exports_of(&say_with("utf16")).unwrap();
+    assert_eq!(exports[0].encoding, WitStringEncoding::Utf16);
+}
+
+#[test]
+fn compact_utf16_is_rejected_naming_the_export() {
+    let err = rejection(&say_with("latin1+utf16"));
+    assert!(
+        err.contains("`say`") && err.contains("compact-utf16"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -517,4 +526,54 @@ fn a_callback_async_lift_is_rejected_as_the_callback_abi() {
         err.contains("`go`") && err.contains("callback ABI") && err.contains("WASI 0.3"),
         "{err}"
     );
+}
+
+/// A component whose core module imports `a:b/i#f` through a `canon lower` with `options`; the
+/// function takes `param` (a WIT type).
+fn lowering(param: &str, core_params: &str, options: &str) -> Vec<u8> {
+    wat::parse_str(format!(
+        r#"(component
+  (import "a:b/i" (instance $ii (export "f" (func (param "x" {param})))))
+  (alias export $ii "f" (func $imp))
+  (core module $m
+    (import "h" "f" (func (param {core_params})))
+    (memory (export "mem") 1)
+    (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) i32.const 0))
+  (core module $mem (memory (export "mem") 1)
+    (func (export "alloc") (param i32 i32 i32 i32) (result i32) i32.const 0))
+  (core instance $im (instantiate $mem))
+  (alias core export $im "mem" (core memory $mm))
+  (alias core export $im "alloc" (core func $ra))
+  (core func $lo (canon lower (func $imp) {options}))
+  (core instance $h (export "f" (func $lo)))
+  (core instance (instantiate $m (with "h" (instance $h)))))"#
+    ))
+    .unwrap()
+}
+
+fn glue_error(component: &[u8]) -> String {
+    wasm2rs::wit_host_glue(component).unwrap_err().to_string()
+}
+
+#[test]
+fn an_import_lowered_as_utf16_with_a_string_is_rejected_not_read_as_utf8() {
+    for (encoding, name) in [("utf16", "utf16"), ("latin1+utf16", "compact-utf16")] {
+        let err = glue_error(&lowering(
+            "string",
+            "i32 i32",
+            &format!("(memory $mm) (realloc $ra) string-encoding={encoding}"),
+        ));
+        assert!(
+            err.contains("a:b/i#f") && err.contains(name),
+            "{encoding}: {err}"
+        );
+    }
+}
+
+#[test]
+fn an_import_lowered_as_utf16_without_a_string_is_still_served() {
+    // The encoding option alone is no reason to refuse: nothing here is a string.
+    let component = lowering("u32", "i32", "string-encoding=utf16");
+    let glue = wasm2rs::wit_host_glue(&component);
+    assert!(glue.is_ok(), "{glue:?}");
 }

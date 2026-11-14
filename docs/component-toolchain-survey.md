@@ -23,7 +23,7 @@ directory; the commands are below so the survey can be repeated.
 | J | wasi-sdk 34 `clang --target=wasm32-wasip2`, C `puts` | 227 KB, one core module, `wasi:cli/run@0.2.12` | **works** (2026-11-14): prints `hello from wasi-sdk C`, exit 0; 5.3 s end to end with a warm `wasm2rs-wasi` build (290 MB peak RSS). `#[ignore]` test: `WASM2RS_WASISDK_C_HELLO_COMPONENT` |
 | K | wasi-sdk 34 `clang++ --target=wasm32-wasip2 -fno-exceptions`, `std::cout` | 3.2 MB | **works** (2026-11-14, after #339): prints `hello from wasi-sdk C++`, exit 0; 10 s end to end with a warm `wasm2rs-wasi` build. The program imports `wasi:cli/exit@0.2.12`'s `exit-with-code`; before the overlay added it to the 0.2.0 `Host` trait, `rustc` failed with E0599 (`no method named wasi_cli_exit_exit_with_code`). `#[ignore]` test: `WASM2RS_WASISDK_CPP_HELLO_COMPONENT`. Without `-fno-exceptions` the link fails in `wasm-ld` (`__cxa_throw`; wasi-sdk has no C++ exceptions), not a wasm2rs matter. See F6 (#339) |
 | L | `cargo component build` 0.21.1, custom world (`export ops` with a record, a string and integers; no `wasi:cli/run`) | 72 KB, `wasm32-wasip1` + adapter (main + adapter module, as B) | **works** (2026-11-14): `wasip2_run` does not apply (no `run`), so a small program calls the typed `Exports` (`test_calc_ops_add(40, 2)` = 42, `greet`, `shift` on a record); 3 s for the test with a warm library build (430 MB peak RSS). `#[ignore]` test: `WASM2RS_CARGO_COMPONENT_CALC` |
-| M | MoonBit `moon 0.1.20261104` (`--target wasm`) + `wit-bindgen moonbit` 0.63.0 + `wasm-tools component embed`/`new`, the `calc` world as L | 4.2 KB (3.6 KB without `greet`), one core module, no WASI imports | **works without strings; fails with a string export** (2026-11-14, #344): with `add` and `shift` only, it transpiles, builds and `Exports` returns `42` and `11 2`; With `greet` the transpile stops with `Unsupported("export ... uses a string encoding other than utf8")`, a clear error for lifted exports (lowered imports are not checked, see F7). wasmtime v30.0.0's `wasmtime run --invoke` does not support components, so the expected values come from the sources |
+| M | MoonBit `moon 0.1.20261104` (`--target wasm`) + `wit-bindgen moonbit` 0.63.0 + `wasm-tools component embed`/`new`, the `calc` world as L | 4.2 KB (3.6 KB without `greet`), one core module, no WASI imports | **works, including strings** (2026-11-14; #344 fixed): `add`, `greet` (with a non-BMP emoji, kanji and an empty string) and `shift` transpile, build and return `42`, `hello, wasm2rs`, `hello, 日本語😀`, `hello, ` and `11 2` through `Exports`. Before the fix, `greet` stopped the transpile with `Unsupported("export ... uses a string encoding other than utf8")`. Pinned by the ignored test `a_real_moonbit_component_passes_utf16_strings_through_the_typed_exports` (`WASM2RS_MOONBIT_CALC`). wasmtime v30.0.0's `wasmtime run --invoke` does not support components, so the expected values come from the sources |
 | N | Zig 0.15.2 (`mise`), `wasm32-wasi` + the command adapter (hello); `wasm32-freestanding` `export fn add` + `component embed` | 36 KB (hello, main + adapter module); 313 bytes (`add`) | **works** (2026-11-14): `wasip2_run` prints `hello from zig` as `wasmtime run` does, exit 0, 6.2 s end to end with a warm `wasm2rs-wasi` build (290 MB peak RSS). The `add` component has a root-level function export (no interface); `Exports::add(40, 2)` = 42. Zig 0.15 has no `wasm32-wasip2` target, so every WASI program goes through the adapter, as B |
 | O | AssemblyScript 0.28.20 (`npm`) + `@assemblyscript/wasi-shim`, `--runtime stub`, + the command adapter (hello); `export function add` + `component embed` | 24 KB (hello, main + adapter module); 318 bytes (`add`) | **works** (2026-11-14): `wasip2_run` prints `hello from assemblyscript` as `wasmtime run` does, exit 0, 5.9 s end to end with a warm `wasm2rs-wasi` build (290 MB peak RSS); `Exports::add(40, 2)` = 42. Also preview1-only, so through the adapter |
 
@@ -120,14 +120,19 @@ so the build failed with E0599. Rust, TinyGo and wasi-sdk C do not import it. Fi
 exits with `status-code`); `docs/wasi-post-0.2.0-additions.md` lists the other 0.2.1 to 0.2.12 differences
 (all `@unstable` or a type alias, none imported by a surveyed toolchain).
 
-### F7. UTF-16 components are rejected (M, #344)
+### F7. UTF-16 components (M, #344, fixed)
 
-`transpile_component` accepts only the `utf8` canonical string option for a lifted export. MoonBit
-(`String` is UTF-16) lifts strings as `utf16`, so a MoonBit component with a string in an export
-signature does not transpile. Integers and records of integers work (tested with an export-only world).
-The check covers lifted exports only: `CanonicalFunction::Lower` ignores the string option, so a UTF-16 guest
-that imports a function with a string would be read as UTF-8 without an error (#344). The same limit would hit any
-other UTF-16 guest. Fix: transcode at the boundary in the generated glue (`compact-utf16` needs the tag bit as well).
+MoonBit (`String` is UTF-16) lifts strings as `string-encoding=utf16`, which `transpile_component`
+used to reject, so a MoonBit component with a string in an export signature did not transpile.
+The glue now transcodes at the boundary for a lifted export: a `String` passed to the guest is
+written as code units into memory from the guest's `cabi_realloc` (aligned to 2, the length counts code
+units), and a string the guest returns is read from `(ptr, len)` with `String::from_utf16`. An
+unpaired surrogate or an odd pointer traps (a panic, like invalid UTF-8 on the utf8 path); nothing is
+replaced silently. `compact-utf16` (latin1+utf16) stays `Unsupported`, with a message that says so.
+The import side is the open edge: the glue still reads the strings a guest passes to an import as
+UTF-8, so a function lowered with `utf16` (or `compact-utf16`) whose signature holds a string is
+now rejected with an error naming it, instead of being misread. A UTF-16 guest that imports a
+function with a string (for example MoonBit using WASI paths) therefore does not transpile yet.
 
 ### F8. Notes on the new toolchains (M, N, O)
 

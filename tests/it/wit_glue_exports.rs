@@ -27,6 +27,11 @@ fn with_host_import(core: &str) -> String {
 /// A component of the world `w` in `wit` (which also imports `h:h/host`), around the core
 /// module `core` (to which the matching import is added).
 fn encoded(wit: &str, core: &str) -> Vec<u8> {
+    encoded_as(wit, core, StringEncoding::UTF8)
+}
+
+/// [`encoded`] with the canonical ABI string encoding `encoding`.
+fn encoded_as(wit: &str, core: &str, encoding: StringEncoding) -> Vec<u8> {
     let wit = wit.replacen("world w {", "world w { import h:h/host;", 1);
     let core = with_host_import(core);
     let mut resolve = Resolve::default();
@@ -34,7 +39,7 @@ fn encoded(wit: &str, core: &str) -> Vec<u8> {
     let package = resolve.push_str("test.wit", &wit).unwrap();
     let world = resolve.select_world(&[package], Some("w")).unwrap();
     let mut module = wat::parse_str(core).unwrap();
-    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
+    embed_component_metadata(&mut module, &resolve, world, encoding, false).unwrap();
     ComponentEncoder::default()
         .module(&module)
         .unwrap()
@@ -53,7 +58,18 @@ fn exports_on() -> WitOptions {
 /// Builds the program (transpiled `core`, the glue with exports, then a `main` running
 /// `body` on `inst`) and returns its output.
 fn build_and_run(name: &str, wit: &str, core: &str, body: &str) -> std::process::Output {
-    let component = encoded(wit, core);
+    build_and_run_as(name, StringEncoding::UTF8, wit, core, body)
+}
+
+/// [`build_and_run`] for a component whose lifts use the string encoding `encoding`.
+fn build_and_run_as(
+    name: &str,
+    encoding: StringEncoding,
+    wit: &str,
+    core: &str,
+    body: &str,
+) -> std::process::Output {
+    let component = encoded_as(wit, core, encoding);
     let glue = wit_host_glue_with_options(&component, &exports_on()).unwrap();
     let opts = TranspileOptions::default()
         .with_named_imports(true)
@@ -410,5 +426,134 @@ fn allocating_params_need_the_lift_realloc_to_be_cabi_realloc() {
     assert!(
         err.contains("cabi_realloc") && err.contains("`alloc`"),
         "{err}"
+    );
+}
+
+const ECHO_WIT: &str = "package t:p;
+         world w { export echo: func(s: string) -> string; export len: func(s: string) -> u32; }";
+
+/// A guest that returns its string with one `!` code unit appended, and the length it was given.
+const UTF16_ECHO: &str = r#"(module MEM
+      (func (export "echo") (param i32 i32) (result i32)
+        (i32.store (i32.const 8) (local.get 0))
+        (i32.store (i32.const 12) (i32.add (local.get 1) (i32.const 1)))
+        (i32.store16 (i32.add (local.get 0) (i32.shl (local.get 1) (i32.const 1))) (i32.const 33))
+        (i32.const 8))
+      (func (export "len") (param i32 i32) (result i32) (local.get 1)))"#;
+
+fn utf16_echo() -> String {
+    UTF16_ECHO.replace("MEM", MEM)
+}
+
+#[test]
+fn a_utf16_string_is_transcoded_both_ways_with_surrogate_pairs() {
+    // `😀` is one char, two UTF-16 code units: the length the guest sees counts units.
+    let out = build_and_run_as(
+        "utf16_pairs",
+        StringEncoding::UTF16,
+        ECHO_WIT,
+        &utf16_echo(),
+        r#"assert_eq!(Exports::echo(&mut inst, "hé😀".to_string()), "hé😀!");
+           assert_eq!(Exports::len(&mut inst, "hé😀".to_string()), 4);
+           assert_eq!(Exports::len(&mut inst, "日本語".to_string()), 3);"#,
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn an_empty_utf16_string_round_trips() {
+    let out = build_and_run_as(
+        "utf16_empty",
+        StringEncoding::UTF16,
+        ECHO_WIT,
+        &utf16_echo(),
+        r#"assert_eq!(Exports::echo(&mut inst, String::new()), "!");
+           assert_eq!(Exports::len(&mut inst, String::new()), 0);"#,
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn an_unpaired_surrogate_from_the_guest_traps_instead_of_being_replaced() {
+    // The guest returns the single code unit 0xD800 (a high surrogate with no low one).
+    let core = format!(
+        r#"(module {MEM}
+          (func (export "echo") (param i32 i32) (result i32)
+            (i32.store16 (i32.const 64) (i32.const 0xD800))
+            (i32.store (i32.const 8) (i32.const 64))
+            (i32.store (i32.const 12) (i32.const 1))
+            (i32.const 8))
+          (func (export "len") (param i32 i32) (result i32) (local.get 1)))"#
+    );
+    let out = build_and_run_as(
+        "utf16_lone_surrogate",
+        StringEncoding::UTF16,
+        ECHO_WIT,
+        &core,
+        r#"let _ = Exports::echo(&mut inst, "x".to_string());"#,
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("invalid UTF-16"), "{stderr}");
+}
+
+#[test]
+fn a_utf16_string_at_an_odd_address_traps() {
+    let core = format!(
+        r#"(module {MEM}
+          (func (export "echo") (param i32 i32) (result i32)
+            (i32.store (i32.const 8) (i32.const 65))
+            (i32.store (i32.const 12) (i32.const 1))
+            (i32.const 8))
+          (func (export "len") (param i32 i32) (result i32) (local.get 1)))"#
+    );
+    let out = build_and_run_as(
+        "utf16_odd",
+        StringEncoding::UTF16,
+        ECHO_WIT,
+        &core,
+        r#"let _ = Exports::echo(&mut inst, "x".to_string());"#,
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unaligned pointer"), "{stderr}");
+}
+
+#[test]
+fn utf16_strings_inside_a_list_are_stored_through_memory() {
+    // A `list<string>` param stores each `(ptr, len)` into guest memory (the `store` path); the
+    // guest sums the code-unit lengths: `😀` counts 2.
+    let core = format!(
+        r#"(module {MEM}
+          (func (export "total") (param $p i32) (param $n i32) (result i32)
+            (local $i i32) (local $sum i32)
+            (loop $l
+              (if (i32.lt_u (local.get $i) (local.get $n)) (then
+                (local.set $sum (i32.add (local.get $sum)
+                  (i32.load (i32.add (local.get $p) (i32.add (i32.shl (local.get $i) (i32.const 3)) (i32.const 4))))))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $l))))
+            (local.get $sum)))"#
+    );
+    let out = build_and_run_as(
+        "utf16_list",
+        StringEncoding::UTF16,
+        "package t:p;
+         world w { export total: func(xs: list<string>) -> u32; }",
+        &core,
+        r#"assert_eq!(Exports::total(&mut inst, vec!["😀".to_string(), "ab".to_string(), String::new()]), 4);"#,
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }

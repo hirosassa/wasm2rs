@@ -41,6 +41,7 @@ mod component_link_exports;
 mod component_link_rejections;
 mod component_local_types;
 mod component_real_custom_world;
+mod component_real_moonbit;
 mod component_wit_edges;
 mod condition_simplify;
 mod cont;

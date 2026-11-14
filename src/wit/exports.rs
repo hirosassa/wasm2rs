@@ -34,21 +34,43 @@ pub struct WitExport {
     pub realloc: Option<String>,
     /// The module's export of the `post-return` function named by the lift, if any.
     pub post_return: Option<String>,
-    /// Whether strings are UTF-8, the only encoding read (others are rejected).
-    pub utf8: bool,
+    /// The encoding of the lift's strings (`compact-utf16` is rejected).
+    pub encoding: WitStringEncoding,
+}
+
+/// The canonical ABI string encoding of a `canon lift`. A string crosses the glue as a Rust
+/// `String` either way; the glue transcodes at the boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WitStringEncoding {
+    /// `string-encoding=utf8`, the default.
+    #[default]
+    Utf8,
+    /// `string-encoding=utf16`: the length of a string counts 16-bit code units.
+    Utf16,
 }
 
 /// Every function exported by `component`, in export order.
 ///
 /// Each one is traced to the name of the core module export it lifts (and to those of its
 /// `memory`, `realloc` and `post-return` options). A lift that is not a direct export of
-/// an instantiated top-level core module, a string encoding other than UTF-8, or a type
+/// an instantiated top-level core module, the `compact-utf16` string encoding, or a type
 /// this reader does not model is an [`Unsupported`](TranspileError::Unsupported) error
 /// naming the export. A core module is an error too.
 pub fn wit_exports(component: &[u8]) -> Result<Vec<WitExport>, TranspileError> {
     let mut reader = Reader::default();
     read_component(component, Some(&mut reader))?;
     reader.resolve()
+}
+
+/// The imported functions that `component` lowers with a string encoding other than UTF-8
+/// (`utf16` or `compact-utf16`), with the encoding's name. The glue reads guest strings as
+/// UTF-8 on the import side, so one of these that carries a string cannot be served.
+pub(crate) fn non_utf8_lowers(
+    component: &[u8],
+) -> Result<Vec<(HostFunc, &'static str)>, TranspileError> {
+    let mut reader = Reader::default();
+    read_component(component, Some(&mut reader))?;
+    Ok(reader.non_utf8_lowers)
 }
 
 /// The core instance graph of `component` (see [`CoreWiring`]).
@@ -206,6 +228,8 @@ pub(super) struct Reader {
     components: Vec<Shim>,
     exported: Vec<Exported>,
     inner: Option<Inner>,
+    /// The imported functions lowered with a string encoding other than UTF-8, with its name.
+    non_utf8_lowers: Vec<(HostFunc, &'static str)>,
 }
 
 fn index(i: u32) -> Option<usize> {
@@ -424,13 +448,26 @@ impl Reader {
             CanonicalFunction::Lower {
                 func_index,
                 options,
-            } => self.core_funcs.push(CoreFunc::Lowered {
-                func: func_index,
-                realloc: options.iter().find_map(|o| match o {
-                    CanonicalOption::Realloc(f) => Some(*f),
+            } => {
+                // Whether it matters (a string in the signature) is known only to the glue.
+                let non_utf8 = options.iter().find_map(|o| match o {
+                    CanonicalOption::UTF16 => Some("utf16"),
+                    CanonicalOption::CompactUTF16 => Some("compact-utf16"),
                     _ => None,
-                }),
-            }),
+                });
+                if let (Some(encoding), Some(Func::Imported(host))) =
+                    (non_utf8, index(func_index).and_then(|i| self.funcs.get(i)))
+                {
+                    self.non_utf8_lowers.push((host.clone(), encoding));
+                }
+                self.core_funcs.push(CoreFunc::Lowered {
+                    func: func_index,
+                    realloc: options.iter().find_map(|o| match o {
+                        CanonicalOption::Realloc(f) => Some(*f),
+                        _ => None,
+                    }),
+                });
+            }
             _ => self.core_funcs.push(CoreFunc::Builtin),
         }
         Ok(())
@@ -699,14 +736,16 @@ impl Reader {
             memory: None,
             realloc: None,
             post_return: None,
-            utf8: true,
+            encoding: WitStringEncoding::Utf8,
         };
         for option in &lift.options {
             match option {
                 CanonicalOption::UTF8 => {}
-                CanonicalOption::UTF16 | CanonicalOption::CompactUTF16 => {
+                CanonicalOption::UTF16 => export.encoding = WitStringEncoding::Utf16,
+                CanonicalOption::CompactUTF16 => {
                     return Err(unsupported(format!(
-                        "export `{label}` uses a string encoding other than utf8"
+                        "export `{label}` uses the `compact-utf16` (latin1+utf16) string \
+                         encoding, which is not supported; only `utf8` and `utf16` are"
                     )));
                 }
                 CanonicalOption::Memory(i) => {
