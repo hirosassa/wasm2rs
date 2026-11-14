@@ -44,6 +44,12 @@ jobs:
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Broken intra-doc links and bad rustdoc markup are errors, not silent warnings.
+      - name: Run cargo doc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
       - name: Run cargo clippy with the http-client feature
         run: cargo clippy -p wasm2rs-wasi --all-targets --features http-client -- -D warnings
 
@@ -69,6 +75,26 @@ jobs:
       - name: Build the tests (compile compatibility only)
         if: matrix.rust != 'stable'
         run: cargo test --release --workspace --no-run
+
+  # `rust-version` in the Cargo.toml files is a promise; this keeps it true.
+  # Keep 1.89 in sync with `[workspace.package] rust-version`.
+  msrv:
+    name: MSRV (1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install 1.89
+        run: |
+          rustup toolchain install 1.89 --profile minimal
+          rustup default 1.89
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: msrv
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check every target
+        run: cargo check --workspace --all-targets
 
   # wasm2rs-wasi's preopen confinement (cap-std) has Unix-only code paths and tests; this
   # job verifies the rest on Windows (#205). Only the wasm2rs-wasi crate: the transpiler's

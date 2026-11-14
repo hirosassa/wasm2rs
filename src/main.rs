@@ -25,6 +25,13 @@
 //! bounding peak memory (`max_bytes_per_file` caps chunk size, so a few huge
 //! functions cannot balloon one file).
 
+// Kept in source rather than in `[workspace.lints]`: wasm2rs-wasi still violates these.
+#![deny(
+    clippy::panic,
+    clippy::unwrap_in_result,
+    clippy::cast_possible_truncation
+)]
+
 use std::process::ExitCode;
 
 use wasm2rs::{

@@ -9,6 +9,13 @@
 //! [`transpile_split`] and [`transpile_split_with_options`]; a component goes in through
 //! [`transpile_component`].
 
+// Kept in source rather than in `[workspace.lints]`: wasm2rs-wasi still violates these.
+#![deny(
+    clippy::panic,
+    clippy::unwrap_in_result,
+    clippy::cast_possible_truncation
+)]
+
 pub mod build;
 mod codegen;
 mod component;

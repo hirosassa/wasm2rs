@@ -2,6 +2,7 @@
 name = "wasm2rs-wasi"
 version = "0.1.1"
 edition = "2024"
+rust-version.workspace = true
 description = "Typed WASI 0.2 host for programs transpiled by wasm2rs."
 license = "MIT"
 repository = "https://github.com/hirosassa/wasm2rs"
@@ -33,12 +34,5 @@ ureq = { version = "3.4.3", optional = true, default-features = false, features 
 [target.'cfg(windows)'.dependencies]
 winapi-util = "0.1"
 
-# The root `[lints]` tables are not inherited by workspace members; the hardening
-# lints that this crate's host logic must satisfy are set here once it holds any.
-[lints.rust]
-warnings = "deny"
-unsafe_code = "deny"
-
-[lints.clippy]
-# Suppression hygiene: every `#[allow]`/`#[expect]` must carry a `reason`.
-allow_attributes_without_reason = "deny"
+[lints]
+workspace = true
