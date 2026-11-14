@@ -476,6 +476,8 @@ fn allowed_proposal(proposal: &str) -> bool {
     )
 }
 
+/// Reject a typed reference where the linker copies a value type verbatim (function types,
+/// globals). Body types are checked by [`Remap::heap_type`] instead.
 fn check_val_type(ty: ValType, what: &str) -> Result<(), TranspileError> {
     match ty {
         ValType::Ref(r) if matches!(r.heap_type(), HeapType::Concrete(_)) => Err(unsupported(
@@ -636,9 +638,9 @@ fn rewrite_const(
 fn start_body(targets: &[u32]) -> Vec<u8> {
     let mut func = wasm_encoder::Function::new([]);
     for &t in targets {
-        func.instruction(&wasm_encoder::Instruction::Call(t));
+        func.instructions().call(t);
     }
-    func.instruction(&wasm_encoder::Instruction::End);
+    func.instructions().end();
     func.into_raw_body()
 }
 
