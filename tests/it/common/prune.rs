@@ -14,6 +14,8 @@ use std::time::{Duration, SystemTime};
 const ENTRY_PREFIXES: &[&str] = &["gen-", "ex-"];
 /// Prefix of the per-build working directories that a dead build leaves behind.
 const WORK_PREFIX: &str = "work-";
+/// Prefix of the content-addressed copies of the `wasm2rs-wasi` rlib/rmeta in the cache root.
+const WASI_LIB_PREFIX: &str = "libwasm2rs_wasi-";
 /// Prefix of a checkout's own directory, and the names the same state had at the top level before
 /// it was grouped (a cache restored from an older run still holds those).
 const CHECKOUT_PREFIXES: &[&str] = &["checkout-", "wasi-target-", "example-wasi-target-"];
@@ -143,6 +145,38 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
             report.removed += 1;
         }
         total = total.saturating_sub(len);
+    }
+    report
+}
+
+/// Removes what a run that began at `started` did not use, to shrink the cache before CI saves it:
+/// a hit refreshes an entry's mtime and a new compile is written during the run, so anything older
+/// than `started` is unused, and the next run would only restore it again. Checkout directories
+/// stay (a worktree's `wasm2rs-wasi` build is costly to redo and [`prune`] ages it out).
+pub fn prune_unused(dir: &Path, started: SystemTime) -> Report {
+    let mut report = Report::default();
+    let Ok(read) = fs::read_dir(dir) else {
+        return report;
+    };
+    for item in read.flatten() {
+        let name = item.file_name();
+        let name = name.to_string_lossy();
+        let Ok(meta) = item.metadata() else { continue };
+        if meta.modified().map_or(true, |m| m >= started) {
+            continue;
+        }
+        let is_content_addressed =
+            ENTRY_PREFIXES.iter().any(|p| name.starts_with(p)) || name.starts_with(WASI_LIB_PREFIX);
+        let removed = if name.starts_with(WORK_PREFIX) {
+            fs::remove_dir_all(item.path())
+        } else if meta.is_file() && is_content_addressed {
+            fs::remove_file(item.path())
+        } else {
+            continue;
+        };
+        if removed.is_ok() {
+            report.removed += 1;
+        }
     }
     report
 }
