@@ -86,3 +86,20 @@ fn the_skeleton_with_a_benign_library_links() {
     .unwrap();
     assert!(code.contains("pub fn peek("), "{code}");
 }
+
+#[test]
+fn a_custom_page_size_memory_in_a_component_module_is_refused() {
+    let wat = r#"(component
+        (core module $m (memory (export "memory") 1 (pagesize 1))
+            (func (export "f") (result i32) (i32.const 0)))
+        (core instance $i (instantiate $m))
+        (func $f (result s32) (canon lift (core func $i "f")))
+        (export "f" (func $f)))"#;
+    let err = transpile_component(&wat::parse_str(wat).unwrap(), &ComponentOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(err.root(), TranspileError::Unsupported(_)),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("custom page sizes"), "{err}");
+}
