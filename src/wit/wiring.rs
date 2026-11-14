@@ -8,6 +8,8 @@
 
 use std::collections::BTreeMap;
 
+use super::builtin::Builtin;
+
 /// A function of an imported interface instance. (A top-level imported function is not
 /// traced yet: a `canon lower` of one is `Supplier::Other`.)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +30,9 @@ pub(crate) enum Supplier {
     Export { instance: u32, name: String },
     /// A core function made by `canon lower` of an imported function.
     Host(HostFunc),
-    /// Anything else (another canonical built-in, or an item this reader does not trace).
+    /// A core function made by a canonical built-in (`task.return`, `stream.read`, ...).
+    Builtin(Builtin),
+    /// Anything else (an item this reader does not trace).
     Other,
 }
 

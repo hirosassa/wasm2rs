@@ -11,6 +11,7 @@ use wasmparser::{
 };
 
 use super::WitFunc;
+use super::builtin::Builtin;
 use super::read::{Def, Scope, Sig, Soft, def_at, innermost, read_component, unsupported};
 use super::wiring::{CoreWiring, HostFunc, Supplier, WiredInstance};
 use crate::TranspileError;
@@ -137,7 +138,7 @@ enum CoreFunc {
     /// core function of its `realloc` option.
     Lowered { func: u32, realloc: Option<u32> },
     /// Another canonical built-in.
-    Builtin,
+    Builtin(Builtin),
 }
 
 #[derive(Clone)]
@@ -497,7 +498,13 @@ impl Reader {
                     }),
                 });
             }
-            _ => self.core_funcs.push(CoreFunc::Builtin),
+            other => {
+                // A skipped push would shift every later core function index.
+                let builtin = Builtin::of(&other).ok_or_else(|| {
+                    TranspileError::Internal("a canonical function that is not a built-in".into())
+                })?;
+                self.core_funcs.push(CoreFunc::Builtin(builtin));
+            }
         }
         Ok(())
     }
@@ -648,6 +655,7 @@ impl Reader {
                         _ => None,
                     }
                 }
+                Some(CoreFunc::Builtin(builtin)) => Some(Supplier::Builtin(*builtin)),
                 _ => None,
             },
             ExternalKind::Memory => space(&self.core_memories),

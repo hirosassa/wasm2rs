@@ -156,6 +156,7 @@ fn select_program<'a>(
     layout: &'a Layout,
     exports: &[WitExport],
 ) -> Result<Program<'a>, TranspileError> {
+    reject_unserved_builtins(component, layout)?;
     if lifts_span_modules(exports) {
         return Ok(Program::Linked);
     }
@@ -176,6 +177,39 @@ fn select_program<'a>(
         return Ok(Program::Linked);
     }
     Ok(Program::Module(module))
+}
+
+/// Refuses a component whose core modules import a canonical built-in the glue does not serve
+/// (WASI 0.3's `task.return`, `stream.*`, ...: they need the async runtime, M2). Without this
+/// they would come out as plain host imports that nothing implements.
+fn reject_unserved_builtins(component: &[u8], layout: &Layout) -> Result<(), TranspileError> {
+    let wiring = core_wiring(component)?;
+    for &index in &layout.instantiated {
+        let (Some(module), Some(instance)) =
+            (layout.modules.get(index), wiring.module_instance(index))
+        else {
+            continue;
+        };
+        for payload in Parser::new(0).parse_all(module) {
+            let Payload::ImportSection(reader) = payload? else {
+                continue;
+            };
+            for import in reader.into_imports() {
+                let import = import?;
+                if let Some(Supplier::Builtin(builtin)) =
+                    wiring.supplier(instance, import.module, import.name)
+                    && let Some(feature) = builtin.unsupported_feature()
+                {
+                    return Err(TranspileError::Unsupported(format!(
+                        "the core import `{}` `{}` is the canonical built-in {feature}, which \
+                         needs the WASI 0.3 async runtime (not generated yet)",
+                        import.module, import.name
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether the single-module path would drop what another instantiated module initializes: a
