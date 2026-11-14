@@ -49,7 +49,7 @@ fn main() {
 
     let component = std::fs::read(&input).expect("read component");
     let (generated, interface) =
-        common::transpile_exporting(&component, HANDLER_INTERFACE, "handle")
+        common::transpile_exporting(&component, HANDLER_INTERFACE, "handle", false)
             .unwrap_or_else(|err| fail(err));
     // `server.rs` names the method by version; a toolchain may export a newer patch (`@0.2.12`).
     let version = interface

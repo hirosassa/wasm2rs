@@ -63,7 +63,7 @@ Main flags (all of them are described in [docs/cli-reference.md](docs/cli-refere
 | `--component` | Transpile a WebAssembly component (e.g. `wasm32-wasip2` output) in one step. |
 | `--dump` | Print a summary of the module and generate no code. |
 
-Also available: `--named-exports`, `--named-imports`, `--import-memory`, `--reentrant-imports`, `--split-dispatch`, `--call-depth-limit=N`, `--extract-core`, `--wit-host`, `--glue`, `--external-types`.
+Also available: `--named-exports`, `--named-imports`, `--import-memory`, `--reentrant-imports`, `--split-dispatch`, `--call-depth-limit=N`, `--typed-traps`, `--extract-core`, `--wit-host`, `--glue`, `--external-types`.
 
 ### Examples
 

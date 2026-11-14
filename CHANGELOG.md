@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Opt-in typed guest traps (M6 stage 1): `TranspileOptions::typed_traps` / `--typed-traps` raises `unreachable`, an indirect-call type mismatch, `call stack exhausted` and the two float-to-integer conversion traps as a `Wasm2RsTrap` payload (`resume_unwind`, like a thrown exception) instead of a message string, so a host can classify a trap by type. `resume_unwind` skips the panic hook, so these traps no longer print to stderr. Off by default (generated code unchanged); other traps stay string panics.
 - Split output can keep large data segments in side files (R1(c)): `--data-files` writes each data segment of 4 KiB or more to `data_{n}.bin` next to `lib.rs`, which includes it with `include_bytes!`. Library: `transpile_split_files`, `transpile_split_files_with_options` and `transpile_component_split_files` hand `OutputFile { name, content: FileContent }` values (text or bytes) to the sink; the existing `transpile_split*` keep the inline output.
 - `--component` supports the `utf16` canonical string encoding for lifted exports (MoonBit components with string exports, #344): the glue transcodes between a Rust `String` and UTF-16 guest memory at the boundary. An unpaired surrogate or an unaligned pointer traps (a panic) instead of being replaced.
 

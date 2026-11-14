@@ -105,7 +105,7 @@ pub(super) fn type_name(name: &str) -> String {
     }
     // The std names the generated code uses, and the prelude items a `struct Some(..)` or
     // `trait Default` would shadow in a module that also holds the user's `impl Host`.
-    const RESERVED: [&str; 30] = [
+    const RESERVED: [&str; 31] = [
         "Host",
         // The handle types of `future<T>` and `stream<T>`.
         "WitFuture",
@@ -120,6 +120,7 @@ pub(super) fn type_name(name: &str) -> String {
         "ContFrame",
         "ExternFuncs",
         "Wasm2RsException",
+        "Wasm2RsTrap",
         "Wasm2RsDelegate",
         "String",
         "Vec",

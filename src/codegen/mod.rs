@@ -170,6 +170,15 @@ pub(crate) enum Rt {
     CallDepth,
     /// The out-of-line `call stack exhausted` trap `CallDepth::enter` raises.
     TrapCallStackExhausted,
+    /// The typed trap payload `Wasm2RsTrap` (only under `typed_traps`, only the
+    /// variants the emitted helpers raise); added by the runtime renderer itself.
+    TrapType,
+    /// The out-of-line `invalid conversion to integer` trap of the trapping
+    /// float->int truncations (typed traps only).
+    TrapInvalidConversion,
+    /// The out-of-line `integer overflow` trap of the trapping float->int
+    /// truncations (typed traps only).
+    TrapIntegerOverflow,
     /// The wrapper a `delegate` raises when it must bypass enclosing `try`
     /// bodies: the exception plus how many more bodies to skip.
     DelegateExc,

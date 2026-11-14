@@ -1929,7 +1929,7 @@ pub(super) fn render_lib_root(
     side: Option<&mut DataFiles>,
 ) -> Result<String, TranspileError> {
     let mut out = String::new();
-    let rt_helpers = render_rt_helpers(deps.rt);
+    let rt_helpers = render_rt_helpers(deps.rt, ctx.typed_traps);
     if !rt_helpers.is_empty() {
         out.push_str(&rt_helpers);
         out.push('\n');
