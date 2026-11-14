@@ -380,6 +380,40 @@ fn segment_statics(
     lines
 }
 
+/// The descriptor table behind `wasi_fds`: slot `N - 4` holds descriptor `N`,
+/// and `free` lists the closed slots below the high-water mark so `path_open`
+/// takes the lowest free descriptor (the POSIX rule) without scanning. It
+/// derefs to the slot `Vec` for lookups; only `alloc` and `release` change
+/// which slots are free.
+const WASI_FDS_DEF: &str = "\
+#[allow(dead_code)]
+#[derive(Default)]
+struct WasiFds {
+    slots: Vec<Option<(std::fs::File, std::path::PathBuf)>>,
+    free: std::collections::BTreeSet<usize>,
+}
+#[allow(dead_code)]
+impl WasiFds {
+    fn alloc(&mut self, entry: (std::fs::File, std::path::PathBuf)) -> usize {
+        match self.free.pop_first() {
+            Some(i) => { self.slots[i] = Some(entry); i }
+            None => { self.slots.push(Some(entry)); self.slots.len() - 1 }
+        }
+    }
+    fn release(&mut self, i: usize) {
+        if self.slots.get_mut(i).and_then(Option::take).is_some() {
+            self.free.insert(i);
+        }
+    }
+}
+impl std::ops::Deref for WasiFds {
+    type Target = Vec<Option<(std::fs::File, std::path::PathBuf)>>;
+    fn deref(&self) -> &Self::Target { &self.slots }
+}
+impl std::ops::DerefMut for WasiFds {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.slots }
+}";
+
 /// The `pub struct Instance { … }` declaration: the host handle (when needed),
 /// each defined memory buffer (or the shared handle), the table, the globals,
 /// the WASI fd table, the retained passive-segment slices, the externref box and
@@ -398,10 +432,12 @@ fn instance_field_lines(
     } = *parts;
     let (decl_generics, _) = host_generics(parts);
 
-    let mut lines: Vec<String> = vec![
-        "#[allow(dead_code)]".to_string(),
-        format!("pub struct Instance{decl_generics} {{"),
-    ];
+    let mut lines: Vec<String> = Vec::new();
+    if layout.wasi_files {
+        lines.extend(WASI_FDS_DEF.lines().map(str::to_string));
+    }
+    lines.push("#[allow(dead_code)]".to_string());
+    lines.push(format!("pub struct Instance{decl_generics} {{"));
     if layout.has_imports {
         // A re-entrant host is lent out for the duration of each import call.
         let ty = if ctx.reentrant_imports {
@@ -463,11 +499,10 @@ fn instance_field_lines(
         // Threads of one process share the table (descriptor numbers are
         // process-wide), so it sits behind an `Arc<Mutex<..>>` when the module
         // can spawn them.
-        let table = "Vec<Option<(std::fs::File, std::path::PathBuf)>>";
         lines.push(if layout.wasi_threads {
-            format!("    wasi_fds: std::sync::Arc<std::sync::Mutex<{table}>>,")
+            "    wasi_fds: std::sync::Arc<std::sync::Mutex<WasiFds>>,".to_string()
         } else {
-            format!("    wasi_fds: {table},")
+            "    wasi_fds: WasiFds,".to_string()
         });
     }
     // The single WASI preopen's host root: guest paths resolve within it and its
@@ -849,9 +884,9 @@ impl<'a> CtorPlan<'a> {
         if layout.wasi_files {
             inner.push(
                 if layout.wasi_threads {
-                    "        wasi_fds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),"
+                    "        wasi_fds: std::sync::Arc::new(std::sync::Mutex::new(WasiFds::default())),"
                 } else {
-                    "        wasi_fds: Vec::new(),"
+                    "        wasi_fds: WasiFds::default(),"
                 }
                 .to_string(),
             );

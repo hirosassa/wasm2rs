@@ -573,9 +573,7 @@ impl WasiFn {
             WasiFn::FdClose if files => owned(&[
                 "fn wasi_fd_close(&mut self, a0: i32) -> i32 {",
                 "    let idx = a0 as u32 as usize;",
-                "    if let Some(slot) = @FDS@.get_mut(idx.wrapping_sub(4)) {",
-                "        *slot = None;",
-                "    }",
+                "    @FDS@.release(idx.wrapping_sub(4));",
                 "    0",
                 "}",
             ]),
@@ -787,19 +785,11 @@ impl WasiFn {
                     &[
                         "    let idx = {",
                         "        let mut fds = @FDS@;",
-                        "        match fds.iter().position(|s| s.is_none()) {",
-                        "            Some(i) => { fds[i] = Some((file, full)); i }",
-                        "            None => { fds.push(Some((file, full))); fds.len() - 1 }",
-                        "        }",
+                        "        fds.alloc((file, full))",
                         "    };",
                     ]
                 } else {
-                    &[
-                        "    let idx = match @FDS@.iter().position(|s| s.is_none()) {",
-                        "        Some(i) => { @FDS@[i] = Some((file, full)); i }",
-                        "        None => { @FDS@.push(Some((file, full))); @FDS@.len() - 1 }",
-                        "    };",
-                    ]
+                    &["    let idx = @FDS@.alloc((file, full));"]
                 }));
                 body.extend(owned(&[
                     "    let fd = idx as u32 + 4;",
@@ -1062,8 +1052,8 @@ impl WasiFn {
                 "    if @FDS@.get(to).is_none_or(|s| s.is_none()) {",
                 "        return 8;",
                 "    }",
-                "    let moved = @FDS@[from].take();",
-                "    @FDS@[to] = moved;",
+                "    @FDS@.swap(from, to);",
+                "    @FDS@.release(from);",
                 "    0",
                 "}",
             ]),
@@ -1856,7 +1846,7 @@ mod tests {
         let plain = WasiFn::PathOpen
             .lines(true, WasiAccess::default())
             .join("\n");
-        assert!(plain.contains("match self.wasi_fds.iter().position"));
+        assert!(plain.contains("self.wasi_fds.alloc("));
         assert!(!plain.contains("lock()"));
     }
 }
