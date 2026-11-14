@@ -265,7 +265,9 @@ fn run() -> Result<(), String> {
                 funcs_per_file,
                 max_bytes_per_file,
             };
-            return write_split(&dir, |sink| {
+            // No manifest: the glue refers to the `wasm2rs-wasi` library, which only the
+            // user's own `Cargo.toml` can depend on.
+            return write_split(&dir, None, |sink| {
                 wasm2rs::transpile_component_split(&wasm, &options, &split, sink).map(|_| ())
             });
         }
@@ -343,7 +345,7 @@ fn run() -> Result<(), String> {
             funcs_per_file,
             max_bytes_per_file,
         };
-        return write_split(&dir, |sink| {
+        return write_split(&dir, Some(cargo_manifest(&crate_name(&dir))), |sink| {
             transpile_split_with_options(&wasm, &split, &topts, sink)
         });
     }
@@ -387,6 +389,7 @@ fn parse_usize_arg(arg: Option<String>, name: &str) -> Result<usize, String> {
 /// more than one chunk's worth is held in memory at a time.
 fn write_split(
     dir: &str,
+    manifest: Option<String>,
     transpile: impl FnOnce(
         &mut dyn FnMut(SourceFile) -> Result<(), TranspileError>,
     ) -> Result<(), TranspileError>,
@@ -397,9 +400,11 @@ fn write_split(
     // recommended `Cargo.toml` (size-optimized release profile, `[lib]` pointed
     // at `lib.rs`) next to them so the emitted crate builds compactly out of the
     // box. The package name is derived from the output directory.
-    let manifest_path = std::path::Path::new(dir).join("Cargo.toml");
-    std::fs::write(&manifest_path, cargo_manifest(&crate_name(dir)))
-        .map_err(|e| format!("cannot write {}: {e}", manifest_path.display()))?;
+    if let Some(manifest) = manifest {
+        let manifest_path = std::path::Path::new(dir).join("Cargo.toml");
+        std::fs::write(&manifest_path, manifest)
+            .map_err(|e| format!("cannot write {}: {e}", manifest_path.display()))?;
+    }
 
     let mut write_err: Option<String> = None;
     let result = transpile(&mut |file| {

@@ -491,15 +491,13 @@ where
 {
     generate_from_ir(ir, topts, |parts| {
         let imports = host_core_imports(parts);
-        let mut glue = Some(glue(imports, codegen::needs_host_trait(parts))?);
+        let glue = glue(imports, codegen::needs_host_trait(parts))?;
         codegen::generate_module_split(
             parts,
             split.funcs_per_file,
             split.max_bytes_per_file,
             &mut |name, mut code| {
-                if name == "lib.rs"
-                    && let Some(glue) = glue.take()
-                {
+                if name == "lib.rs" {
                     code.push('\n');
                     code.push_str(&glue);
                 }

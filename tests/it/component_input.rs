@@ -520,5 +520,8 @@ fn the_cli_splits_a_component_into_a_directory() {
     let root = std::fs::read_to_string(out_dir.join("lib.rs")).unwrap();
     assert!(root.contains("mod funcs_0;"), "{root}");
     assert!(root.contains("pub trait Exports"), "{root}");
-    assert!(out_dir.join("Cargo.toml").exists());
+    assert!(
+        !out_dir.join("Cargo.toml").exists(),
+        "the glue needs a manifest with wasm2rs-wasi"
+    );
 }

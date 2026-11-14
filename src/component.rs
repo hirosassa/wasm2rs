@@ -661,7 +661,7 @@ mod tests {
 
     /// A component whose only lift is `main`'s `call_at`; `lib` is a second instantiated core
     /// module that shares `main`'s memory and table, with `lib_body` as its items.
-    pub(super) fn component(lib_body: &str) -> Vec<u8> {
+    fn component(lib_body: &str) -> Vec<u8> {
         wat::parse_str(format!(
             r#"(component
     (core module $main
@@ -788,15 +788,11 @@ mod tests {
                     max_bytes_per_file: 0,
                 },
             );
-            let root = files.last().unwrap();
+            let (root, chunks) = files.split_last().unwrap();
             assert_eq!(root.name, "lib.rs");
             split_seen |= files.len() > 1;
             assert!(root.code.contains("pub trait Exports"));
-            assert!(
-                files[..files.len() - 1]
-                    .iter()
-                    .all(|f| !f.code.contains("pub trait Exports"))
-            );
+            assert!(chunks.iter().all(|f| !f.code.contains("pub trait Exports")));
         }
         assert!(split_seen);
     }
