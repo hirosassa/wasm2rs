@@ -164,6 +164,9 @@ impl<'a> super::FuncGen<'a> {
     /// Signed division. Rust's `/` panics on both a zero divisor and
     /// `iN::MIN / -1`, matching the two wasm `div_s` traps.
     pub(super) fn div_signed(&mut self) -> Result<(), TranspileError> {
+        if self.ctx.typed_traps {
+            return self.typed_div_rem(Rt::I32DivS, Rt::I64DivS, true);
+        }
         let rhs = self.pop()?;
         let lhs = self.pop()?;
         // Parenthesised: this can now be inlined next to a higher-precedence `as`.
@@ -174,6 +177,9 @@ impl<'a> super::FuncGen<'a> {
     /// Signed remainder. `wrapping_rem` panics on a zero divisor and yields 0
     /// for `iN::MIN % -1`, matching wasm `rem_s`.
     pub(super) fn rem_signed(&mut self) -> Result<(), TranspileError> {
+        if self.ctx.typed_traps {
+            return self.typed_div_rem(Rt::I32RemS, Rt::I64RemS, true);
+        }
         let rhs = self.pop()?;
         let lhs = self.pop()?;
         let code = format!("({}).wrapping_rem({})", lhs.code, rhs.code);
@@ -184,6 +190,13 @@ impl<'a> super::FuncGen<'a> {
     /// operands as the unsigned integer of their width, apply `op` (which panics
     /// on a zero divisor), then reinterpret back to the signed type.
     pub(super) fn div_rem_unsigned(&mut self, op: &str) -> Result<(), TranspileError> {
+        if self.ctx.typed_traps {
+            return if op == "/" {
+                self.typed_div_rem(Rt::I32DivU, Rt::I64DivU, false)
+            } else {
+                self.typed_div_rem(Rt::I32RemU, Rt::I64RemU, false)
+            };
+        }
         let rhs = self.pop()?;
         let lhs = self.pop()?;
         let unsigned = unsigned_type(lhs.ty)?;
@@ -193,6 +206,19 @@ impl<'a> super::FuncGen<'a> {
             lhs.code, rhs.code
         );
         self.push_div_rem(code, &lhs, &rhs, false)
+    }
+
+    /// Division/remainder under `typed_traps`: a call to the explicit-check helper of
+    /// the operand width (`i32` or `i64` variant), so the trap is a typed payload
+    /// rather than one of Rust's built-in `/` panics. Materialised like the
+    /// untyped form unless the divisor is a trap-free constant.
+    fn typed_div_rem(&mut self, rt32: Rt, rt64: Rt, signed: bool) -> Result<(), TranspileError> {
+        let rhs = self.pop()?;
+        let lhs = self.pop()?;
+        let rt = if lhs.ty == ValType::I64 { rt64 } else { rt32 };
+        self.used_rt.insert(rt);
+        let code = format!("{}({}, {})", rt_name(rt), lhs.code, rhs.code);
+        self.push_div_rem(code, &lhs, &rhs, signed)
     }
 
     /// A logical (unsigned) shift right: shift the unsigned reinterpretation so

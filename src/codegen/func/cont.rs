@@ -379,8 +379,8 @@ impl super::FuncGen<'_> {
         out.push_str(&src);
 
         Ok(GenMeta {
+            rt: Self::rt_with_oob_traps(self.ctx, &self.used_rt, &self.used_helpers),
             helpers: self.used_helpers,
-            rt: self.used_rt,
             simd: self.used_simd,
             dispatch_sigs: self.dispatch_sigs,
             uses_eh: self.uses_eh,
@@ -574,8 +574,8 @@ impl super::FuncGen<'_> {
         out.push_str(&src);
 
         Ok(GenMeta {
+            rt: Self::rt_with_oob_traps(self.ctx, &self.used_rt, &self.used_helpers),
             helpers: self.used_helpers,
-            rt: self.used_rt,
             simd: self.used_simd,
             dispatch_sigs: self.dispatch_sigs,
             uses_eh: self.uses_eh,

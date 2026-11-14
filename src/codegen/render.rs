@@ -218,6 +218,7 @@ pub(super) fn render_module_head(
         parts.memories,
         ctx.memory_shared,
         ctx.unsafe_memory,
+        ctx.typed_traps,
     ));
     inner.extend(dispatch_method_block(
         ctx,
@@ -1463,6 +1464,7 @@ fn helper_method_lines(
     memories: &[super::MemInfo],
     memory_shared: bool,
     unsafe_memory: bool,
+    typed_traps: bool,
 ) -> Vec<String> {
     let mut inner: Vec<String> = Vec::new();
     let mut mem_indices: Vec<u32> = used.iter().map(|(_, mem)| *mem).collect();
@@ -1472,7 +1474,11 @@ fn helper_method_lines(
         for helper in HELPER_ORDER {
             if used.contains(&(helper, mem)) {
                 inner.push(String::new());
-                if memory_shared {
+                // Table helpers touch no memory, so a shared module renders them
+                // like any other (needed to type their traps); without
+                // `typed_traps` they keep the shared path, unchanged.
+                let table_helper = matches!(helper, Helper::TableCopy | Helper::TableFill);
+                if memory_shared && !(typed_traps && table_helper) {
                     // The shared-memory backend reads `self.memory.bytes()` per
                     // body; unchecked access is not wired through it, so
                     // `unsafe_memory` does not apply to a shared memory.
@@ -1484,7 +1490,14 @@ fn helper_method_lines(
                     let info = memories.get(mem as usize);
                     let is64 = info.is_some_and(|m| m.memory64);
                     let max_pages = info.and_then(|m| m.max_pages);
-                    inner.extend(helper_lines(helper, mem, max_pages, unsafe_memory, is64));
+                    inner.extend(helper_lines(
+                        helper,
+                        mem,
+                        max_pages,
+                        unsafe_memory,
+                        typed_traps,
+                        is64,
+                    ));
                 }
             }
         }

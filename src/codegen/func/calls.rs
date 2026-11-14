@@ -316,12 +316,11 @@ impl<'a> super::FuncGen<'a> {
         // borrows the whole instance (the host), and passing the entry straight
         // into the dispatch call would keep that borrow live across the `&mut
         // self` method call. Copying out the `u32` releases it. An out-of-bounds
-        // index panics on this slice access (a trap).
+        // index traps on this slice access.
         let entry = self.fresh_temp();
-        self.line(format!(
-            "let {entry} = self.{table_get}()[{}];",
-            self.table_index_expr(table_index, &index.code)
-        ));
+        let index_expr = self.table_index_expr(table_index, &index.code);
+        let read = self.table_place(&format!("self.{table_get}()"), &index_expr, false);
+        self.line(format!("let {entry} = {read};"));
         self.dispatch_sigs.insert(type_index);
         if use_tc {
             return self.park_dispatch(type_index, &entry, &arg_list);
@@ -770,8 +769,8 @@ impl<'a> super::FuncGen<'a> {
             out.push('\n');
         }
         Ok(GenMeta {
+            rt: Self::rt_with_oob_traps(self.ctx, &self.used_rt, &self.used_helpers),
             helpers: self.used_helpers,
-            rt: self.used_rt,
             simd: self.used_simd,
             dispatch_sigs: self.dispatch_sigs,
             uses_eh: self.uses_eh,
