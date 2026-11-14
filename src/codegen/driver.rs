@@ -955,8 +955,7 @@ pub(crate) fn generate_function_into(
     let start = out.len();
     let meta = render_function_into(index, input, ctx, line_prefix, out)?;
     // Redundant parentheses are what makes `rustc` quadratic on huge sources.
-    let rendered = out.split_off(start);
-    out.push_str(&super::parens::strip_redundant_parens(&rendered));
+    super::parens::strip_redundant_parens_from(out, start);
     Ok(meta)
 }
 

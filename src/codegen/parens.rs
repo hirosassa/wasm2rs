@@ -24,27 +24,49 @@
 //! literals and comments are skipped; on any imbalance the input is returned
 //! unchanged.
 
+#[cfg(test)]
 use std::borrow::Cow;
 
 /// Remove the redundant parentheses described in the [module docs](self).
+#[cfg(test)]
 pub(crate) fn strip_redundant_parens(src: &str) -> Cow<'_, str> {
     match redundant_pairs(src.as_bytes()) {
-        Some(mut drops) if !drops.is_empty() => {
-            drops.sort_unstable();
-            let bytes = src.as_bytes();
-            let mut out = Vec::with_capacity(bytes.len().saturating_sub(drops.len()));
-            let mut from = 0;
-            for at in drops {
-                out.extend_from_slice(bytes.get(from..at).unwrap_or_default());
-                from = at.saturating_add(1);
-            }
-            out.extend_from_slice(bytes.get(from..).unwrap_or_default());
-            // Only ASCII parentheses were removed from valid UTF-8, so this holds;
-            // fall back to the input rather than panic if it somehow did not.
-            String::from_utf8(out).map_or(Cow::Borrowed(src), Cow::Owned)
-        }
+        Some(drops) if !drops.is_empty() => Cow::Owned(without_offsets(src, drops)),
         _ => Cow::Borrowed(src),
     }
+}
+
+/// [`strip_redundant_parens`] applied to `out[start..]` in place. The common
+/// case of nothing to remove touches no bytes, and otherwise the tail is copied
+/// once to be rebuilt rather than split off, rebuilt and appended back.
+pub(crate) fn strip_redundant_parens_from(out: &mut String, start: usize) {
+    let Some(tail) = out.get(start..) else {
+        return;
+    };
+    match redundant_pairs(tail.as_bytes()) {
+        Some(drops) if !drops.is_empty() => {
+            let stripped = without_offsets(tail, drops);
+            out.truncate(start);
+            out.push_str(&stripped);
+        }
+        _ => {}
+    }
+}
+
+/// `src` without the ASCII parentheses at the byte offsets `drops`.
+fn without_offsets(src: &str, mut drops: Vec<usize>) -> String {
+    drops.sort_unstable();
+    let bytes = src.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len().saturating_sub(drops.len()));
+    let mut from = 0;
+    for at in drops {
+        out.extend_from_slice(bytes.get(from..at).unwrap_or_default());
+        from = at.saturating_add(1);
+    }
+    out.extend_from_slice(bytes.get(from..).unwrap_or_default());
+    // Only ASCII parentheses were removed from valid UTF-8, so this holds;
+    // fall back to the input rather than panic if it somehow did not.
+    String::from_utf8(out).unwrap_or_else(|_| src.to_owned())
 }
 
 /// Byte offsets of the `(` and `)` of every removable pair, or `None` if the
@@ -345,5 +367,15 @@ mod tests {
         assert_eq!(strip(src), src);
         let src = "f((a)));";
         assert_eq!(strip(src), src);
+    }
+
+    #[test]
+    fn in_place_strips_only_the_tail_and_matches_the_pure_form() {
+        let head = "keep((x));\n";
+        for tail in ["f(a, (b + c));", "no parens here", "f((a);", ""] {
+            let mut out = format!("{head}{tail}");
+            super::strip_redundant_parens_from(&mut out, head.len());
+            assert_eq!(out, format!("{head}{}", strip(tail)));
+        }
     }
 }
