@@ -689,8 +689,8 @@ impl WasiHost {
                 Ok(_) => {
                     // not for this stream: take it off the queue; a failure is what the next
                     // peek reports too
-                    if let Err(e) = end.socket.recv_from(&mut byte) {
-                        return e.kind() != std::io::ErrorKind::WouldBlock;
+                    match end.socket.recv_from(&mut byte) {
+                        Ok(_) | Err(_) => {}
                     }
                 }
                 Err(e) => return e.kind() != std::io::ErrorKind::WouldBlock,

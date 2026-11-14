@@ -5,7 +5,7 @@
 //! unsupported interface fails at the call instead of at build time.
 
 // The hardening gates (rust-hardening) for this crate's hand-written code; the shared ones
-// live in `[workspace.lints]`. Traps are raised through `host::slab::trap` alone.
+// live in `[workspace.lints]`. Traps are raised through `host::slab::trap`, or by an `assert!` on a guest contract (check-write limits, empty poll list).
 #![deny(
     clippy::panic,
     clippy::unwrap_in_result,
