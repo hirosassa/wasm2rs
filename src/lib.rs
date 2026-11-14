@@ -264,6 +264,23 @@ pub struct TranspileOptions {
     /// `Some(0)` traps on the first call. `None` (the default) emits no counter, so existing output is unchanged.
     pub call_depth_limit: Option<u32>,
 
+    /// Raise the five runtime-helper traps (`unreachable`, an indirect-call type
+    /// mismatch, `call stack exhausted`, and the two float-to-integer conversion
+    /// traps) as a typed payload instead of a message string, so a host can classify
+    /// a trap by type. The generated source then defines `Wasm2RsTrap` (only the
+    /// variants it uses), a `Send + 'static` enum implementing `Display` (with the
+    /// message the string panic carried) and `std::error::Error`, and each of these
+    /// traps is a `resume_unwind(Box::new(Wasm2RsTrap::..))` — the mechanism a thrown
+    /// wasm exception already uses. Downcast the `catch_unwind` payload to
+    /// `Wasm2RsTrap` to recognise one; `try`/`catch_all` do not catch it.
+    ///
+    /// `resume_unwind` does not run the panic hook, so these traps print nothing to
+    /// stderr; report them from the payload instead. Every other trap (integer
+    /// division, out-of-range memory or table access, GC, continuations, atomics,
+    /// `exnref`, glue) is still a string panic. Off by default, which leaves the
+    /// generated code unchanged.
+    pub typed_traps: bool,
+
     /// Split a flattened `loop { match pc { … } }` dispatch whose surviving arm
     /// count exceeds this cap into several sibling *part* functions over a shared
     /// state struct, so a pathologically large flattened function is emitted as
@@ -339,6 +356,13 @@ impl TranspileOptions {
     #[must_use]
     pub fn with_unsafe_memory(mut self, unsafe_memory: bool) -> Self {
         self.unsafe_memory = unsafe_memory;
+        self
+    }
+
+    /// Set [`TranspileOptions::typed_traps`].
+    #[must_use]
+    pub fn with_typed_traps(mut self, typed_traps: bool) -> Self {
+        self.typed_traps = typed_traps;
         self
     }
 

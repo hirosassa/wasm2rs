@@ -370,12 +370,14 @@ world w {
     let out = run_example(&component_of(world, core), "trap", &[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(134), "{stderr}");
-    assert!(stderr.contains("unreachable"), "{stderr}");
+    // The example transpiles with `typed_traps`: the trap is reported from its payload
+    // (no panic hook run, hence no "panicked" line).
+    assert!(stderr.contains("wasip2_run: trap: unreachable"), "{stderr}");
     assert!(
         stderr.contains("wasip2_run: the program trapped"),
         "{stderr}"
     );
-    assert_eq!(stderr.matches("panicked").count(), 1, "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
 }
 
 #[test]

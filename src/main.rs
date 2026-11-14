@@ -1,5 +1,5 @@
 //! Command-line entry point:
-//! `wasm2rs [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports]
+//! `wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports]
 //! [--import-memory] [--reentrant-imports] [--data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
 //! `wasm2rs --help` / `wasm2rs --version` to print the usage / the version, or
 //! `wasm2rs --dump <input.wasm>` to summarize a module, or
@@ -10,7 +10,7 @@
 //! that lowers it to the flat `Imports` trait; with `--external-types=<path>`, only the `Glue`,
 //! naming the `Host` trait and the interface-qualified types of the library at `<path>`).
 //!
-//! `wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files]
+//! `wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files]
 //! <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]` to write a component's program (its core module, or the linked modules of an adapter component) plus the typed `Glue`
 //! and `Exports` (like `wasm2rs::transpile_component`).
 //!
@@ -55,7 +55,7 @@ use wasm2rs::{FileContent, SplitOptions, TranspileError, TranspileOptions, cargo
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] [--data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files] <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --help | --version\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] [--data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files] <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --help | --version\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -117,6 +117,7 @@ fn run() -> Result<(), String> {
     // order. `--unsafe-memory` opts into unchecked linear-memory access.
     let mut unsafe_memory = false;
     let mut simd_intrinsics = false;
+    let mut typed_traps = false;
     let mut dump = false;
     let mut extract_core = false;
     let mut component = false;
@@ -189,6 +190,7 @@ fn run() -> Result<(), String> {
             }
             "--unsafe-memory" => unsafe_memory = true,
             "--simd-intrinsics" => simd_intrinsics = true,
+            "--typed-traps" => typed_traps = true,
             "--dump" => dump = true,
             "--extract-core" => extract_core = true,
             "--component" => component = true,
@@ -218,6 +220,7 @@ fn run() -> Result<(), String> {
         let code_flags = [
             (unsafe_memory, "--unsafe-memory"),
             (simd_intrinsics, "--simd-intrinsics"),
+            (typed_traps, "--typed-traps"),
             (named_exports, "--named-exports"),
             (named_imports, "--named-imports"),
             (import_memory, "--import-memory"),
@@ -264,6 +267,7 @@ fn run() -> Result<(), String> {
             transpile: TranspileOptions::default()
                 .with_unsafe_memory(unsafe_memory)
                 .with_simd_intrinsics(simd_intrinsics)
+                .with_typed_traps(typed_traps)
                 .with_call_depth_limit(call_depth_limit)
                 .with_split_dispatch(split_dispatch)
                 .with_jobs(jobs),
@@ -355,6 +359,7 @@ fn run() -> Result<(), String> {
     let topts = TranspileOptions::default()
         .with_unsafe_memory(unsafe_memory)
         .with_simd_intrinsics(simd_intrinsics)
+        .with_typed_traps(typed_traps)
         .with_call_depth_limit(call_depth_limit)
         .with_split_dispatch(split_dispatch)
         .with_entry_exports(entry_exports)

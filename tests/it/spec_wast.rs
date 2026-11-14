@@ -56,9 +56,9 @@ fn expect_trap<R>(ctx: &str, needles: &[&str], f: impl FnOnce() -> R) {
         Err(payload) => payload,
         Ok(_) => panic!(\"expected a trap ({})\", ctx),
     };
-    let msg = payload
-        .downcast_ref::<&str>()
-        .map(|s| s.to_string())
+    // A typed trap (`typed_traps`) is a `Wasm2RsTrap`, checked before the string forms.
+    let msg = typed_trap_message(&*payload)
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
         .or_else(|| payload.downcast_ref::<String>().cloned())
         .unwrap_or_default();
     assert!(
@@ -80,14 +80,37 @@ fn expect_exception<R>(ctx: &str, f: impl FnOnce() -> R) {
         Err(payload) => payload,
         Ok(_) => panic!(\"expected an uncaught exception ({})\", ctx),
     };
-    // A trap panics with a message; a thrown exception panics with its own payload.
+    // A trap panics with a message (or a `Wasm2RsTrap`); a thrown exception panics
+    // with its own payload.
     assert!(
-        payload.downcast_ref::<&str>().is_none() && payload.downcast_ref::<String>().is_none(),
+        typed_trap_message(&*payload).is_none()
+            && payload.downcast_ref::<&str>().is_none()
+            && payload.downcast_ref::<String>().is_none(),
         \"expected an uncaught exception, got a trap ({})\",
         ctx
     );
 }
 ";
+
+/// Emitted after [`TRAP_HELPER`] for an untyped module, or one that defines no
+/// `Wasm2RsTrap`: no payload is a typed trap.
+const NO_TYPED_TRAP: &str = "#[allow(dead_code)]
+fn typed_trap_message(_: &(dyn std::any::Any + Send)) -> Option<String> { None }
+";
+
+/// Emitted after [`TRAP_HELPER`] when the generated module defines `Wasm2RsTrap`:
+/// the `Display` message of a typed trap payload.
+const TYPED_TRAP: &str = "#[allow(dead_code)]
+fn typed_trap_message(p: &(dyn std::any::Any + Send)) -> Option<String> {
+    p.downcast_ref::<Wasm2RsTrap>().map(|t| t.to_string())
+}
+";
+
+thread_local! {
+    /// Whether the spec modules replayed on this thread are transpiled with
+    /// `typed_traps` (each test runs on its own thread).
+    static TYPED_TRAPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// Emitted after [`TRAP_HELPER`]: whether a reference result is null, for the
 /// result types the harness cannot name (`u32` handles, and the managed `GcRef`
@@ -494,6 +517,11 @@ fn start_group(wasm: Vec<u8>) -> Result<Group, String> {
     let generated = transpile_module(&wasm).map_err(|e| format!("transpile failed: {e:?}"))?;
     let stateful = generated.contains("pub struct Instance");
     let mut body = String::from(TRAP_HELPER);
+    body.push_str(if generated.contains("enum Wasm2RsTrap") {
+        TYPED_TRAP
+    } else {
+        NO_TYPED_TRAP
+    });
     body.push_str(NULL_REF_HELPER);
     if generated.contains("enum GcRef") {
         body.push_str(
@@ -746,7 +774,9 @@ const SPEC_CALL_DEPTH_LIMIT: u32 = 2_000;
 fn transpile_module(wasm: &[u8]) -> Result<String, wasm2rs::TranspileError> {
     wasm2rs::transpile_with_options(
         wasm,
-        &wasm2rs::TranspileOptions::default().with_call_depth_limit(Some(SPEC_CALL_DEPTH_LIMIT)),
+        &wasm2rs::TranspileOptions::default()
+            .with_call_depth_limit(Some(SPEC_CALL_DEPTH_LIMIT))
+            .with_typed_traps(TYPED_TRAPS.get()),
     )
 }
 
@@ -1194,6 +1224,20 @@ fn a_non_canonical_nan_does_not_satisfy_nan_canonical() {
 }
 
 #[test]
+fn assert_exhaustion_matches_a_typed_trap() {
+    TYPED_TRAPS.set(true);
+    let report = run_wast(
+        "spec_typed_assert_exhaustion",
+        r#"
+(module (func $runaway (export "runaway") (call $runaway)))
+(assert_exhaustion (invoke "runaway") "call stack exhausted")
+"#,
+    );
+    assert_eq!(report.executed, 1);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+}
+
+#[test]
 fn assert_exhaustion_runs_as_a_trap_under_the_call_depth_limit() {
     let report = run_wast(
         "spec_assert_exhaustion",
@@ -1280,6 +1324,36 @@ macro_rules! spec_test {
             assert!(report.executed > 0, "{}: nothing was executed", $file);
         }
     )+};
+}
+
+/// Replay a vendored `tests/spec/<file>.wast` with `typed_traps` on: the traps the
+/// option types (`unreachable`, indirect call type mismatch, call stack exhausted,
+/// float->int conversion) are matched by their `Wasm2RsTrap` message, the rest by
+/// their string payload as before.
+macro_rules! typed_spec_test {
+    ($($name:ident => $file:literal),+ $(,)?) => {$(
+        #[test]
+        fn $name() {
+            TYPED_TRAPS.set(true);
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/spec/", $file, ".wast");
+            let src = std::fs::read_to_string(path).expect("read vendored .wast");
+            let report = run_wast(concat!("spec_typed_", $file), &src);
+            assert!(report.executed > 0, "{}: nothing was executed", $file);
+        }
+    )+};
+}
+
+typed_spec_test! {
+    typed_spec_unreachable => "unreachable",
+    typed_spec_conversions => "conversions",
+    typed_spec_call_indirect => "call_indirect",
+    typed_spec_traps => "traps",
+    typed_spec_call => "call",
+    typed_spec_func => "func",
+    typed_spec_i32 => "i32",
+    typed_spec_float_exprs => "float_exprs",
+    typed_spec_try_table => "try_table",
+    typed_spec_throw => "throw",
 }
 
 /// Files whose module the transpiler rejects today (see `assert_known_gap`).

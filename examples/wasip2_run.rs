@@ -18,7 +18,7 @@
 //! error, 2 when the build fails or the component does not lift `wasi:cli/run#run` at
 //! `0.2.0` or a later `0.2.x` patch (no such export, or a shape `wasm2rs::transpile_component` does not read: the
 //! message says which), 134 when a panic occurs during the `run` call (a guest trap, or a
-//! panic inside a host import it calls: the panic message is printed, then `wasip2_run: the
+//! panic inside a host import it calls: the trap or panic message is printed, then `wasip2_run: the
 //! program trapped`); panics outside the call (host setup) stay 101. The build goes in
 //! `$WASIP2_WORK_DIR` (default: a temporary directory). The program sees the
 //! directory `$WASIP2_PREOPEN`, if set, as its `/`: read-only, or also writable if
@@ -62,14 +62,20 @@ fn main() {
     // `wasm2rs::transpile_component` picks the program module and generates the glue.
     // The default `ComponentOptions` (`exports: true`) make a method for every export of the
     // component, not only `run`: one the glue cannot lower or lift fails here too.
-    let (generated, run_interface) = common::transpile_exporting(&component, RUN_INTERFACE, "run")
-        .unwrap_or_else(|err| {
+    let (generated, run_interface) =
+        common::transpile_exporting(&component, RUN_INTERFACE, "run", true).unwrap_or_else(|err| {
             eprintln!("wasip2_run: {err}");
             std::process::exit(2);
         });
     let run_method = export_method(&run_interface, "run");
     // argv[0] goes in at run time, not into the source: the same component then builds to the
     // same program wherever it lies (see `$WASM2RS_EXAMPLE_CACHE_DIR`)
+    // `Wasm2RsTrap` is defined only when the guest uses one of the typed traps.
+    let report_trap = if generated.contains("enum Wasm2RsTrap") {
+        "if let Some(trap) = payload.downcast_ref::<Wasm2RsTrap>() { eprintln!(\"wasip2_run: trap: {trap}\"); }"
+    } else {
+        "let _ = &payload;"
+    };
     let main = format!(
         "fn main() {{\n    \
          let args = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();\n    \
@@ -79,11 +85,16 @@ fn main() {
          let writable = std::env::var_os(\"WASIP2_PREOPEN_WRITABLE\").is_some_and(|v| v == \"1\");\n        \
          host = if writable {{ host.with_writable_preopen(dir.into()) }} else {{ host.with_preopen(dir.into()) }};\n    }}\n    \
          let mut inst = Instance::new(Glue(host));\n    \
-         // A guest trap is a Rust panic (its message is printed by the panic hook); a panic\n    \
-         // during the `run` call (also inside a host import it calls) becomes the trap exit code.\n    \
+         // The guest is transpiled with `typed_traps`: its `unreachable`, indirect-call, stack and\n    \
+         // conversion traps are a `Wasm2RsTrap` payload, which skips the panic hook, so it is reported\n    \
+         // here. Any other panic (another trap, or one in a host import) is a string payload whose\n    \
+         // message the hook has printed already. Either way it becomes the trap exit code.\n    \
          let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Exports::{run_method}(&mut inst))) {{\n        \
          Ok(result) => result,\n        \
-         Err(_) => {{ eprintln!(\"wasip2_run: the program trapped\"); std::process::exit(134) }}\n    }};\n    \
+         Err(payload) => {{\n            \
+         {report_trap}\n            \
+         eprintln!(\"wasip2_run: the program trapped\");\n            \
+         std::process::exit(134)\n        }}\n    }};\n    \
          drop(inst); // flushes the connections' send queues\n    \
          std::process::exit(if result.is_ok() {{ 0 }} else {{ 1 }});\n    \
          }}"

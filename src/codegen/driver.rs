@@ -149,6 +149,9 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) simd_intrinsics: bool,
     /// Opt-in call-depth limit (see `TranspileOptions::call_depth_limit`).
     pub(crate) call_depth_limit: Option<u32>,
+    /// The five helper traps unwind with a typed `Wasm2RsTrap` (see
+    /// `TranspileOptions::typed_traps`).
+    pub(crate) typed_traps: bool,
     /// Every `Imports` method receives the `Instance` (see
     /// `TranspileOptions::reentrant_imports`); `imports` is then an `Option<Box<H>>`
     /// lent out for each host call.
@@ -609,6 +612,7 @@ pub(crate) fn build_ctx<'a>(
         unsafe_memory: parts.opts.unsafe_memory,
         simd_intrinsics: parts.opts.simd_intrinsics,
         call_depth_limit: parts.opts.call_depth_limit,
+        typed_traps: parts.opts.typed_traps,
         reentrant_imports: parts.reentrant_imports,
         split_dispatch: parts.opts.split_dispatch,
     };
@@ -700,7 +704,7 @@ fn generate_module_pieces_with(
 
     // Free-function runtime helpers live at module scope, above the functions
     // (or the `struct Instance`) that call them, in both module shapes.
-    let rt_helpers = render_rt_helpers(&deps.rt);
+    let rt_helpers = render_rt_helpers(&deps.rt, ctx.typed_traps);
     let simd_helpers = render_simd_helpers(&deps.simd, ctx.simd_intrinsics);
 
     // The exception type, then the runtime helpers, precede the module body.

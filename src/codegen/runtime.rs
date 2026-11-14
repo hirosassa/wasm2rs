@@ -30,6 +30,9 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::Tc => "Tc",
         Rt::CallDepth => "CallDepth",
         Rt::TrapCallStackExhausted => "trap_call_stack_exhausted",
+        Rt::TrapType => "Wasm2RsTrap",
+        Rt::TrapInvalidConversion => "trap_invalid_conversion",
+        Rt::TrapIntegerOverflow => "trap_integer_overflow",
     }
 }
 
@@ -40,13 +43,16 @@ pub(super) fn is_rt_name(name: &str) -> bool {
 
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
-const RT_ORDER: [Rt; 26] = [
+const RT_ORDER: [Rt; 29] = [
+    Rt::TrapType,
     Rt::DelegateExc,
     Rt::CallDepth,
     Rt::TrapCallStackExhausted,
     Rt::Tc,
     Rt::TrapUnreachable,
     Rt::TrapIndirectTypeMismatch,
+    Rt::TrapInvalidConversion,
+    Rt::TrapIntegerOverflow,
     Rt::F32Min,
     Rt::F32Max,
     Rt::F64Min,
@@ -71,11 +77,48 @@ const RT_ORDER: [Rt; 26] = [
 
 /// Render the used runtime helpers as module-scope items, in
 /// [`RT_ORDER`], separated by blank lines. Returns an empty string if none.
-pub(super) fn render_rt_helpers(used: &HashSet<Rt>) -> String {
+///
+/// With `typed` the helper traps raise a `Wasm2RsTrap` payload, so the type (and
+/// the cold trap functions the truncations call) join the helpers that need them.
+pub(super) fn render_rt_helpers(used: &HashSet<Rt>, typed: bool) -> String {
+    let mut used = std::borrow::Cow::Borrowed(used);
+    let mut variants: Vec<TrapVariant> = Vec::new();
+    if typed {
+        let is_trunc = |rt: &Rt| TRUNC_RTS.contains(rt);
+        let has = |rt: Rt| used.contains(&rt);
+        for (variant, needed) in [
+            (TrapVariant::Unreachable, has(Rt::TrapUnreachable)),
+            (
+                TrapVariant::IndirectCallTypeMismatch,
+                has(Rt::TrapIndirectTypeMismatch),
+            ),
+            (
+                TrapVariant::CallStackExhausted,
+                has(Rt::TrapCallStackExhausted),
+            ),
+            (
+                TrapVariant::InvalidConversionToInteger,
+                used.iter().any(is_trunc),
+            ),
+            (TrapVariant::IntegerOverflow, used.iter().any(is_trunc)),
+        ] {
+            if needed {
+                variants.push(variant);
+            }
+        }
+        if !variants.is_empty() {
+            let extra = used.to_mut();
+            extra.insert(Rt::TrapType);
+            if variants.contains(&TrapVariant::InvalidConversionToInteger) {
+                extra.insert(Rt::TrapInvalidConversion);
+                extra.insert(Rt::TrapIntegerOverflow);
+            }
+        }
+    }
     let mut blocks: Vec<String> = Vec::new();
     for rt in RT_ORDER {
         if used.contains(&rt) {
-            blocks.push(rt_lines(rt).join("\n"));
+            blocks.push(rt_lines(rt, typed, &variants).join("\n"));
         }
     }
     let mut out = blocks.join("\n\n");
@@ -85,10 +128,116 @@ pub(super) fn render_rt_helpers(used: &HashSet<Rt>) -> String {
     out
 }
 
+/// The trapping float->int truncation helpers.
+const TRUNC_RTS: [Rt; 8] = [
+    Rt::I32TruncF32S,
+    Rt::I32TruncF32U,
+    Rt::I32TruncF64S,
+    Rt::I32TruncF64U,
+    Rt::I64TruncF32S,
+    Rt::I64TruncF32U,
+    Rt::I64TruncF64S,
+    Rt::I64TruncF64U,
+];
+
+/// A variant of the typed trap payload `Wasm2RsTrap`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrapVariant {
+    Unreachable,
+    IndirectCallTypeMismatch,
+    CallStackExhausted,
+    InvalidConversionToInteger,
+    IntegerOverflow,
+}
+
+impl TrapVariant {
+    fn name(self) -> &'static str {
+        match self {
+            TrapVariant::Unreachable => "Unreachable",
+            TrapVariant::IndirectCallTypeMismatch => "IndirectCallTypeMismatch",
+            TrapVariant::CallStackExhausted => "CallStackExhausted",
+            TrapVariant::InvalidConversionToInteger => "InvalidConversionToInteger",
+            TrapVariant::IntegerOverflow => "IntegerOverflow",
+        }
+    }
+
+    /// The message the string `panic!` of the untyped output carries.
+    fn message(self) -> &'static str {
+        match self {
+            TrapVariant::Unreachable => "unreachable",
+            TrapVariant::IndirectCallTypeMismatch => "indirect call type mismatch",
+            TrapVariant::CallStackExhausted => "call stack exhausted",
+            TrapVariant::InvalidConversionToInteger => "invalid conversion to integer",
+            TrapVariant::IntegerOverflow => "integer overflow",
+        }
+    }
+}
+
+/// The `Wasm2RsTrap` definition with just the `variants` the helpers raise.
+fn trap_type_lines(variants: &[TrapVariant]) -> Vec<String> {
+    let mut lines = vec![
+        "/// The payload of a trap raised by a runtime helper (`typed_traps`). It is raised"
+            .to_string(),
+        "/// with `resume_unwind`, so downcast the `catch_unwind` payload to recognise it."
+            .to_string(),
+        "#[allow(dead_code)]".to_string(),
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]".to_string(),
+        "pub enum Wasm2RsTrap {".to_string(),
+    ];
+    lines.extend(variants.iter().map(|v| format!("    {},", v.name())));
+    lines.push("}".to_string());
+    lines.push("impl ::std::fmt::Display for Wasm2RsTrap {".to_string());
+    lines.push(
+        "    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {".to_string(),
+    );
+    lines.push("        f.write_str(match self {".to_string());
+    lines.extend(variants.iter().map(|v| {
+        format!(
+            "            Wasm2RsTrap::{} => \"{}\",",
+            v.name(),
+            v.message()
+        )
+    }));
+    lines.push("        })".to_string());
+    lines.push("    }".to_string());
+    lines.push("}".to_string());
+    lines.push("impl ::std::error::Error for Wasm2RsTrap {}".to_string());
+    lines
+}
+
+/// An out-of-line trap helper: a string `panic!` or, when typed, a `resume_unwind`
+/// of the `variant` payload (which skips the panic hook).
+fn trap_fn_lines(name: &str, variant: TrapVariant, typed: bool) -> Vec<String> {
+    let raise = if typed {
+        format!(
+            "    ::std::panic::resume_unwind(Box::new(Wasm2RsTrap::{}))",
+            variant.name()
+        )
+    } else {
+        format!("    panic!(\"{}\")", variant.message())
+    };
+    vec![
+        "#[cold]".to_string(),
+        "#[inline(never)]".to_string(),
+        format!("fn {name}() -> ! {{"),
+        raise,
+        "}".to_string(),
+    ]
+}
+
 /// The source lines of one runtime helper, dispatched to the min/max or the
 /// trapping-truncation template.
-fn rt_lines(rt: Rt) -> Vec<String> {
+fn rt_lines(rt: Rt, typed: bool, variants: &[TrapVariant]) -> Vec<String> {
     match rt {
+        Rt::TrapType => trap_type_lines(variants),
+        Rt::TrapInvalidConversion => trap_fn_lines(
+            "trap_invalid_conversion",
+            TrapVariant::InvalidConversionToInteger,
+            typed,
+        ),
+        Rt::TrapIntegerOverflow => {
+            trap_fn_lines("trap_integer_overflow", TrapVariant::IntegerOverflow, typed)
+        }
         Rt::DelegateExc => vec![
             "#[allow(dead_code)]".to_string(),
             "struct Wasm2RsDelegate {".to_string(),
@@ -141,64 +290,78 @@ fn rt_lines(rt: Rt) -> Vec<String> {
             "    }".to_string(),
             "}".to_string(),
         ],
-        Rt::TrapCallStackExhausted => vec![
-            "#[cold]".to_string(),
-            "#[inline(never)]".to_string(),
-            "fn trap_call_stack_exhausted() -> ! {".to_string(),
-            "    panic!(\"call stack exhausted\")".to_string(),
-            "}".to_string(),
-        ],
-        Rt::TrapUnreachable => vec![
-            "#[cold]".to_string(),
-            "#[inline(never)]".to_string(),
-            "fn trap_unreachable() -> ! {".to_string(),
-            "    panic!(\"unreachable\")".to_string(),
-            "}".to_string(),
-        ],
-        Rt::TrapIndirectTypeMismatch => vec![
-            "#[cold]".to_string(),
-            "#[inline(never)]".to_string(),
-            "fn trap_indirect_type_mismatch() -> ! {".to_string(),
-            "    panic!(\"indirect call type mismatch\")".to_string(),
-            "}".to_string(),
-        ],
+        Rt::TrapCallStackExhausted => trap_fn_lines(
+            "trap_call_stack_exhausted",
+            TrapVariant::CallStackExhausted,
+            typed,
+        ),
+        Rt::TrapUnreachable => trap_fn_lines("trap_unreachable", TrapVariant::Unreachable, typed),
+        Rt::TrapIndirectTypeMismatch => trap_fn_lines(
+            "trap_indirect_type_mismatch",
+            TrapVariant::IndirectCallTypeMismatch,
+            typed,
+        ),
         Rt::F32Min | Rt::F32Max | Rt::F64Min | Rt::F64Max => rt_minmax_lines(rt),
         Rt::QuietF32 => rt_quiet_lines("f32"),
         Rt::QuietF64 => rt_quiet_lines("f64"),
-        Rt::I32TruncF32S => {
-            trunc_lines("i32_trunc_f32_s", "f32", "i32", TRUNC_I32_S_F32, "x as i32")
-        }
+        Rt::I32TruncF32S => trunc_lines(
+            typed,
+            "i32_trunc_f32_s",
+            "f32",
+            "i32",
+            TRUNC_I32_S_F32,
+            "x as i32",
+        ),
         Rt::I32TruncF32U => trunc_lines(
+            typed,
             "i32_trunc_f32_u",
             "f32",
             "i32",
             TRUNC_U_F32_32,
             "x as u32 as i32",
         ),
-        Rt::I32TruncF64S => {
-            trunc_lines("i32_trunc_f64_s", "f64", "i32", TRUNC_I32_S_F64, "x as i32")
-        }
+        Rt::I32TruncF64S => trunc_lines(
+            typed,
+            "i32_trunc_f64_s",
+            "f64",
+            "i32",
+            TRUNC_I32_S_F64,
+            "x as i32",
+        ),
         Rt::I32TruncF64U => trunc_lines(
+            typed,
             "i32_trunc_f64_u",
             "f64",
             "i32",
             TRUNC_U_F64_32,
             "x as u32 as i32",
         ),
-        Rt::I64TruncF32S => {
-            trunc_lines("i64_trunc_f32_s", "f32", "i64", TRUNC_I64_S_F32, "x as i64")
-        }
+        Rt::I64TruncF32S => trunc_lines(
+            typed,
+            "i64_trunc_f32_s",
+            "f32",
+            "i64",
+            TRUNC_I64_S_F32,
+            "x as i64",
+        ),
         Rt::I64TruncF32U => trunc_lines(
+            typed,
             "i64_trunc_f32_u",
             "f32",
             "i64",
             TRUNC_U_F32_64,
             "x as u64 as i64",
         ),
-        Rt::I64TruncF64S => {
-            trunc_lines("i64_trunc_f64_s", "f64", "i64", TRUNC_I64_S_F64, "x as i64")
-        }
+        Rt::I64TruncF64S => trunc_lines(
+            typed,
+            "i64_trunc_f64_s",
+            "f64",
+            "i64",
+            TRUNC_I64_S_F64,
+            "x as i64",
+        ),
         Rt::I64TruncF64U => trunc_lines(
+            typed,
             "i64_trunc_f64_u",
             "f64",
             "i64",
@@ -249,14 +412,31 @@ const TRUNC_U_F64_64: &str = "x > -1.0f64 && x < 18446744073709551616.0f64";
 
 /// A non-saturating float->int truncation helper: trap on NaN, trap when the
 /// value is outside `range`, else convert via `cast`.
-fn trunc_lines(name: &str, ft: &str, it: &str, range: &str, cast: &str) -> Vec<String> {
+fn trunc_lines(
+    typed: bool,
+    name: &str,
+    ft: &str,
+    it: &str,
+    range: &str,
+    cast: &str,
+) -> Vec<String> {
+    // The typed output calls the shared cold trap functions; the untyped output
+    // keeps its inline `panic!`s.
+    let (nan_trap, range_trap) = if typed {
+        ("trap_invalid_conversion();", "trap_integer_overflow();")
+    } else {
+        (
+            "panic!(\"invalid conversion to integer\");",
+            "panic!(\"integer overflow\");",
+        )
+    };
     vec![
         format!("fn {name}(x: {ft}) -> {it} {{"),
         "    if x.is_nan() {".to_string(),
-        "        panic!(\"invalid conversion to integer\");".to_string(),
+        format!("        {nan_trap}"),
         "    }".to_string(),
         format!("    if !({range}) {{"),
-        "        panic!(\"integer overflow\");".to_string(),
+        format!("        {range_trap}"),
         "    }".to_string(),
         format!("    {cast}"),
         "}".to_string(),

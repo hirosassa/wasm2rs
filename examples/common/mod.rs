@@ -17,9 +17,12 @@ pub fn transpile_exporting(
     component: &[u8],
     interface: &str,
     func: &str,
+    typed_traps: bool,
 ) -> Result<(String, String), String> {
-    let (code, exports) = transpile_component_with_exports(component, &ComponentOptions::default())
-        .map_err(|e| e.to_string())?;
+    let mut options = ComponentOptions::default();
+    options.transpile.typed_traps = typed_traps;
+    let (code, exports) =
+        transpile_component_with_exports(component, &options).map_err(|e| e.to_string())?;
     let Some(found) = exports
         .iter()
         .find(|e| e.func.name == func && same_minor_version(&e.func.interface, interface))
