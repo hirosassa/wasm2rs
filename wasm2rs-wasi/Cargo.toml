@@ -1,6 +1,6 @@
 [package]
 name = "wasm2rs-wasi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Typed WASI 0.2 host for programs transpiled by wasm2rs."
 license = "MIT"

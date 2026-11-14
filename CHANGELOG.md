@@ -7,10 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-14
+
+`wasm2rs` and `wasm2rs-macros` 0.5.0, `wasm2rs-wasi` 0.1.1 (a `Host` method with a default implementation was added; compatible with 0.1.0). `wasm2rs-macros` has no code change; its version follows `wasm2rs`.
+
+### Highlights
+- Component support now covers real toolchain output: components made with a preview1 adapter (Rust, wasi-sdk C/C++; Go transpiles but runs only with an empty environment) and dynamically linked ones (`componentize-py`, CPython as 14 linked core modules) are transpiled by linking their core modules into one `Instance`.
+- Type-checking (`rustc` metadata) of large components is about 5 to 10 times faster: dropping redundant parentheses from generated code removes `rustc`'s quadratic `unused_parens` pass (124 MB JS component: about 587 s to about 55 s; Go component: 66 s to 12 s).
+- Verified end to end with real toolchains: Rust, Python (`componentize-py`), JavaScript, TinyGo, wasi-sdk C and C++, and `cargo-component`; real `wasi:http` handlers (Rust, JS, Python) are served.
+- `wasm2rs-wasi` gains `wasi:cli/exit`'s `exit-with-code` through a WIT overlay on 0.2.0.
+
 ### Changed
 - The generated source no longer wraps call/method arguments, assigned values and block tails in redundant parentheses (`self.w32((a + b), v)` is now `self.w32(a + b, v)`). `rustc`'s `unused_parens` early lint copies the rest of the file for every such site, which is quadratic on very large modules: the 124 MB JS component core goes from about 587 s to about 55 s (metadata) and the Go component from 66 s to 12 s. Behaviour and machine code are unchanged (F4-1, #316).
 
 ### Added
+- Real-toolchain components are pinned by ignored end-to-end tests: JavaScript (`js-hello`, #330), `wasi:http` handlers from Rust, JS and Python served through `wasip2_serve` (#332), TinyGo, wasi-sdk C and `cargo-component` (#340), plus a test pinning the linker's refusals of unfoldable library shapes (#338). The `wasm2rs-wasi` sockets test no longer flakes on Windows from loopback port reuse (#337). Codecov reports per-crate coverage targets (#319).
 - wasi-sdk C++ components (`clang++ --target=wasm32-wasip2`, `std::cout`) build and run. They import `wasi:cli/exit@0.2.12`'s `exit-with-code`, which the 0.2.0 WIT `wasm2rs-wasi`'s `Host` trait is generated from lacks (`rustc` failed with E0599). `tests/wasi_p2_wit/overlay/` now holds the additions to the 0.2.0 WIT that toolchains import (only `exit-with-code`; the other 0.2.1 to 0.2.12 differences are listed in `docs/wasi-post-0.2.0-additions.md`), `Host` gains `wasi_cli_exit_exit_with_code` and `WasiHost` exits with `status-code`. Output for components that do not import it is unchanged. Pinned by the ignored test `a_real_wasi_sdk_cpp_component_prints_hello` (`WASM2RS_WASISDK_CPP_HELLO_COMPONENT`) (#339).
 - `WASM2RS_EXAMPLE_OPT_LEVEL` selects the `rustc -C opt-level` of `examples/wasip2_run` and `wasip2_serve` (default 1): the 125 MB JS component builds at 0 in about 90 s but LLVM did not finish at 1 in 80 minutes (#331).
 - `componentize-py` components (CPython as dynamically linked libraries, 14 core modules) transpile, build and run: `py-hello.wasm` prints `hello from python` (122 MB source, about 5.5 minutes and 7.5 GB for `rustc -C opt-level=1`). Pinned by the ignored test `a_real_componentize_py_component_prints_hello` (`WASM2RS_PY_HELLO_COMPONENT`) (F2-5).
@@ -676,7 +687,8 @@ bounds checks, and trap behaviour).
   faster code on modules trusted to stay in bounds (an out-of-bounds access
   becomes undefined behaviour instead of a wasm trap).
 
-[Unreleased]: https://github.com/hirosassa/wasm2rs/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/hirosassa/wasm2rs/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/hirosassa/wasm2rs/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/hirosassa/wasm2rs/compare/wasm2rs-macros-v0.3.1...v0.4.0
 [0.3.1]: https://github.com/hirosassa/wasm2rs/compare/v0.3.0...wasm2rs-macros-v0.3.1
 [0.3.0]: https://github.com/hirosassa/wasm2rs/compare/v0.2.0...v0.3.0
