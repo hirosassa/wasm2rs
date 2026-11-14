@@ -22,16 +22,21 @@ fn the_spike_async_guest_transpiles_to_typed_callback_glue() {
         ["double-slow", "sum-stream", "await-future"],
         "the three async exports are read as callback lifts"
     );
-    let (code, _) =
-        transpile_component_with_exports(&component, &ComponentOptions::default()).unwrap();
+    // Its own `Host` (no external types): the guest imports functions that return a stream and a
+    // future, and the library has no handle types for them.
+    let options = ComponentOptions {
+        external_types: None,
+        ..ComponentOptions::default()
+    };
+    let (code, _) = transpile_component_with_exports(&component, &options).unwrap();
     for needle in [
         "pub enum CallbackCode",
         "fn double_slow_start(&mut self, n: u32) -> CallbackCode;",
         "fn double_slow(&mut self, n: u32, events: &mut dyn FnMut(CallbackCode) -> Option<[u32; 3]>) -> u32;",
         "fn sum_stream_start(&mut self, s: WitStream<u32>) -> CallbackCode;",
         "fn await_future_start(&mut self, f: WitFuture<u32>) -> CallbackCode;",
-        // The async-lowered import completes through the host: status RETURNED.
-        "fn test_p3_src_slow(&mut self, g: &mut Instance<Self>",
+        // The async-lowered import is served by the glue.
+        "fn test_p3_src_slow(&mut self, n: u32) -> u32;",
     ] {
         assert!(code.contains(needle), "{needle}");
     }

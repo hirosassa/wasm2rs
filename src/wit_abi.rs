@@ -293,7 +293,7 @@ pub(crate) struct CoreSignature {
 }
 
 /// The core signature of `f`. With `async_lower` (a `canon lower` with the `async` option,
-/// WASI 0.3) at most 4 values are passed flat, a result is always written through a trailing
+/// WASI 0.3) at most [`MAX_FLAT_ASYNC_PARAMS`] values are passed flat, a result is always written through a trailing
 /// pointer, and the function returns an `i32` status.
 pub(crate) fn core_signature(
     f: &WitFunc,

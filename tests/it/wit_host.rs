@@ -1672,3 +1672,36 @@ fn an_async_lowered_import_completes_through_the_host_and_returns_status_returne
     // The host doubled 20 into memory, and each call returned RETURNED (2): 40 + 2 + 2.
     assert_eq!(String::from_utf8_lossy(&out.stdout), "44\n");
 }
+
+#[test]
+fn a_future_in_an_import_is_refused_with_external_types() {
+    let component = component_with_wit(
+        "package a:b; interface c { f: func(x: future<u32>); } world w { import c; }",
+        r#"(module (import "a:b/c" "f" (func (param i32))))"#,
+    );
+    let err = wasm2rs::transpile_component(&component, &wasm2rs::ComponentOptions::default())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("external types"), "{err}");
+}
+
+#[test]
+fn a_function_imported_both_sync_and_async_is_refused() {
+    let component = component_with_wit(
+        "package a:b; interface c { f: async func(); } world w { import c; }",
+        r#"(module
+             (import "a:b/c" "f" (func))
+             (import "a:b/c" "[async-lower]f" (func (result i32))))"#,
+    );
+    let err = wasm2rs::transpile_component(
+        &component,
+        &wasm2rs::ComponentOptions {
+            external_types: None,
+            exports: false,
+            ..wasm2rs::ComponentOptions::default()
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("both with and without"), "{err}");
+}

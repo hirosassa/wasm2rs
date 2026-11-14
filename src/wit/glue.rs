@@ -825,8 +825,7 @@ pub(super) struct Method<'a> {
     pub realloc: Option<&'a str>,
     /// The import is lowered with `string-encoding=utf16`.
     pub utf16: bool,
-    /// The core import is lowered with the `async` option (WASI 0.3): it takes a result
-    /// pointer and returns a subtask status.
+    /// The core import is lowered with the `async` option (see `core_signature`).
     pub async_lower: bool,
 }
 
@@ -1312,7 +1311,6 @@ fn write_export(
             out,
             "        let mut code = Exports::{name}_start(self, {args});"
         );
-        // The result is delivered through `task.return`, which is not routed yet.
         let exit = if f.result.is_some() {
             "unimplemented!(\"wasm2rs wit glue: the result of an async export is delivered through task.return (WASI 0.3), which is not routed yet\")"
         } else {

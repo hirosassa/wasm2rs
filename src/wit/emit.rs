@@ -331,6 +331,14 @@ impl Records {
                 Ok(())
             }
             WitType::Future(t) | WitType::Stream(t) => {
+                // The library's `Host` would name its own handle types, not the ones declared
+                // here; only the exports (declared here as well) agree with them.
+                if !self.prefix.is_empty() && !self.exports_phase {
+                    return Err(unsupported(
+                        "future and stream types in an import with external types (the library \
+                         declares no handle types for them)",
+                    ));
+                }
                 self.uses_async_handles = true;
                 t.as_deref().map_or(Ok(()), |t| self.add_in(t))
             }
@@ -966,9 +974,11 @@ fn glue_text(
     imports_trait: bool,
 ) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
-    let lowers = super::exports::lowers(component)?;
-    let async_lowers = lowers.async_;
-    let utf16 = utf16_lowers(lowers.encodings, &funcs)?;
+    let super::exports::Lowers {
+        encodings,
+        async_: async_lowers,
+    } = super::exports::lowers(component)?;
+    let utf16 = utf16_lowers(encodings, &funcs)?;
     let exports = if options.exports {
         match lifts {
             Some(lifts) => lifts,
@@ -1147,13 +1157,25 @@ fn core_methods<'a>(
                 "a resolved core import is not a component function".into(),
             ));
         };
+        // One function the module imports both ways would get a single signature.
+        let async_lower = is_async_lower(async_lowers, func);
+        if let Some(plain) = import.field.strip_prefix("[async-lower]")
+            && core
+                .iter()
+                .any(|o| o.module == import.module && o.field == plain)
+        {
+            return Err(unsupported(format!(
+                "import `{}#{}` is lowered both with and without the `async` option (WASI 0.3)",
+                func.interface, func.name
+            )));
+        }
         methods.push(glue::Method {
             func,
             name: &import.ident,
             host,
             realloc: import.realloc.as_deref(),
             utf16,
-            async_lower: is_async_lower(async_lowers, func),
+            async_lower,
         });
     }
     Ok(methods)
