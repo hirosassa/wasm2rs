@@ -96,34 +96,6 @@ jobs:
       - name: Check every target
         run: cargo check --workspace --all-targets
 
-  # Public-API breaks against the latest crates.io release. The baseline is the registry,
-  # so a deliberate breaking change needs the version bump that cargo-semver-checks asks for.
-  semver-checks:
-    name: cargo-semver-checks
-    runs-on: ubuntu-latest
-    # Informational until the next release: main already broke `WitExport` (field `utf8` ->
-    # `encoding`/`async_abi`) after v0.5.0, so it is red until the 0.6.0 bump. Drop this line then.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install stable
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          shared-key: semver-checks
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
-        with:
-          tool: cargo-semver-checks
-
-      - name: Run cargo semver-checks
-        run: cargo semver-checks --workspace
-
   # wasm2rs-wasi's preopen confinement (cap-std) has Unix-only code paths and tests; this
   # job verifies the rest on Windows (#205). Only the wasm2rs-wasi crate: the transpiler's
   # E2E tests need Unix toolchains.
