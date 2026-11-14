@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `wasm2rs` and `wasm2rs-macros` 0.5.0, `wasm2rs-wasi` 0.1.1 (a `Host` method with a default implementation was added; compatible with 0.1.0). `wasm2rs-macros` has no code change; its version follows `wasm2rs`.
 
 ### Highlights
-- Component support now covers real toolchain output: components made with a preview1 adapter (Rust, wasi-sdk C/C++, Go) and dynamically linked ones (`componentize-py`, CPython as 14 linked core modules) are transpiled by linking their core modules into one `Instance`.
-- Large components build about 10 times faster: dropping redundant parentheses from generated code removes `rustc`'s quadratic `unused_parens` pass (the 124 MB JS component: about 587 s to about 55 s for metadata).
+- Component support now covers real toolchain output: components made with a preview1 adapter (Rust, wasi-sdk C/C++; Go transpiles but runs only with an empty environment) and dynamically linked ones (`componentize-py`, CPython as 14 linked core modules) are transpiled by linking their core modules into one `Instance`.
+- Type-checking (`rustc` metadata) of large components is about 5 to 10 times faster: dropping redundant parentheses from generated code removes `rustc`'s quadratic `unused_parens` pass (124 MB JS component: about 587 s to about 55 s; Go component: 66 s to 12 s).
 - Verified end to end with real toolchains: Rust, Python (`componentize-py`), JavaScript, TinyGo, wasi-sdk C and C++, and `cargo-component`; real `wasi:http` handlers (Rust, JS, Python) are served.
 - `wasm2rs-wasi` gains `wasi:cli/exit`'s `exit-with-code` through a WIT overlay on 0.2.0.
 
