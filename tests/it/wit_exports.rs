@@ -1,6 +1,6 @@
 //! `wit_exports`: the `canon lift` side of a component, resolved to core module exports.
 
-use wasm2rs::{WitStringEncoding, WitType, wit_exports};
+use wasm2rs::{WitAsyncAbi, WitStringEncoding, WitType, wit_exports};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
 
@@ -485,7 +485,7 @@ fn p3_export(ty: &str, options: &str, core_sig: &str) -> String {
 fn an_async_typed_function_lifted_without_the_async_option_is_rejected() {
     let err = rejection(&p3_export("(func async)", "", ""));
     assert!(
-        err.contains("`go`") && err.contains("async function") && err.contains("WASI 0.3"),
+        err.contains("`go`") && err.contains("async function") && err.contains("without"),
         "{err}"
     );
     assert!(!err.contains("stackful"), "{err}");
@@ -505,33 +505,50 @@ fn error_context_is_rejected_by_name() {
 }
 
 #[test]
-fn a_stackful_async_lift_is_rejected_as_the_stackful_abi() {
-    let err = rejection(&p3_export("(func async)", "async", ""));
-    assert!(
-        err.contains("`go`") && err.contains("stackful") && err.contains("WASI 0.3"),
-        "{err}"
+fn a_callback_async_lift_is_modelled_with_its_callback_export() {
+    let wasm = wat::parse_str(p3_export(
+        "(func async (param \"n\" u32) (result u32))",
+        "async (callback $cb)",
+        "(param i32) (result i32) i32.const 0",
+    ))
+    .unwrap();
+    let exports = wit_exports(&wasm).unwrap();
+    assert!(exports[0].func.is_async);
+    assert_eq!(
+        exports[0].async_abi,
+        Some(WitAsyncAbi::Callback {
+            callback: "cb".into()
+        })
     );
 }
 
 #[test]
-fn a_callback_async_lift_is_rejected_as_the_callback_abi() {
-    let err = rejection(&p3_export(
-        "(func async)",
-        "async (callback $cb)",
-        "(result i32) i32.const 0",
-    ));
-    assert!(
-        err.contains("`go`") && err.contains("callback ABI") && err.contains("WASI 0.3"),
-        "{err}"
-    );
+fn a_stackful_async_lift_is_modelled_as_stackful() {
+    let wasm = wat::parse_str(p3_export("(func async)", "async", "")).unwrap();
+    let exports = wit_exports(&wasm).unwrap();
+    assert!(exports[0].func.is_async);
+    assert_eq!(exports[0].async_abi, Some(WitAsyncAbi::Stackful));
+}
+
+#[test]
+fn a_sync_lift_has_no_async_abi() {
+    let wasm = wat::parse_str(p3_export("(func)", "", "")).unwrap();
+    let exports = wit_exports(&wasm).unwrap();
+    assert!(!exports[0].func.is_async);
+    assert_eq!(exports[0].async_abi, None);
 }
 
 /// A component whose core module imports `a:b/i#f` through a `canon lower` with `options`; the
 /// function takes `param` (a WIT type).
 fn lowering(param: &str, core_params: &str, options: &str) -> Vec<u8> {
+    lowering_of("func", param, core_params, options)
+}
+
+/// [`lowering`] of a function whose type starts with `func_head` (`func` or `func async`).
+fn lowering_of(func_head: &str, param: &str, core_params: &str, options: &str) -> Vec<u8> {
     wat::parse_str(format!(
         r#"(component
-  (import "a:b/i" (instance $ii (export "f" (func (param "x" {param})))))
+  (import "a:b/i" (instance $ii (export "f" ({func_head} (param "x" {param})))))
   (alias export $ii "f" (func $imp))
   (core module $m
     (import "h" "f" (func (param {core_params})))
@@ -610,4 +627,63 @@ fn an_import_lowered_as_utf16_without_a_string_is_still_served() {
     let component = lowering("u32", "i32", "string-encoding=utf16");
     let glue = wasm2rs::wit_host_glue(&component);
     assert!(glue.is_ok(), "{glue:?}");
+}
+
+#[test]
+fn an_import_lowered_with_the_async_option_is_rejected_by_the_glue() {
+    // The core import would be `(param, result pointer) -> status`, not the sync signature.
+    // The core import returns the subtask status (the parameter list closes early to say so).
+    let err = glue_error(&lowering_of(
+        "func async",
+        "u32",
+        "i32) (result i32",
+        "async",
+    ));
+    assert!(
+        err.contains("`a:b/i#f`") && err.contains("lowered with the `async` option"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_async_function_lowered_without_the_async_option_gets_the_sync_glue() {
+    let glue = wasm2rs::wit_host_glue(&lowering_of("func async", "u32", "i32", "")).unwrap();
+    assert!(glue.contains("self.0.a_b_i_f(a0)"), "{glue}");
+}
+
+#[test]
+fn an_async_export_is_rejected_by_the_glue_until_its_entry_is_generated() {
+    let wasm = wat::parse_str(p3_export(
+        "(func async)",
+        "async (callback $cb)",
+        "(result i32) i32.const 0",
+    ))
+    .unwrap();
+    let err = wasm2rs::wit_host_glue_with_options(
+        &wasm,
+        &wasm2rs::WitOptions {
+            exports: true,
+            ..wasm2rs::WitOptions::default()
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("`go`") && err.contains("async export"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_async_export_is_rejected_by_transpile_component_whatever_the_options() {
+    let wasm = wat::parse_str(p3_export(
+        "(func async)",
+        "async (callback $cb)",
+        "(result i32) i32.const 0",
+    ))
+    .unwrap();
+    let err = wasm2rs::transpile_component(&wasm, &wasm2rs::ComponentOptions::default())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("async export `go`"), "{err}");
 }

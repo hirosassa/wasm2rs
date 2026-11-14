@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use super::exports::Lowers;
 use super::read::{unsupported, wit_functions};
 use super::*;
 use crate::TranspileError;
@@ -972,7 +973,9 @@ fn glue_text(
     imports_trait: bool,
 ) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
-    let utf16 = utf16_lowers(component, &funcs)?;
+    let lowers = super::exports::lowers(component)?;
+    reject_async_lowers(&lowers)?;
+    let utf16 = utf16_lowers(lowers.encodings, &funcs)?;
     let exports = if options.exports {
         match lifts {
             Some(lifts) => lifts,
@@ -1034,16 +1037,32 @@ fn glue_text(
     Ok(out)
 }
 
+/// An import lowered with `async` has a different core signature (a result pointer in, a status
+/// out) that the synchronous glue would silently misread: refuse it until its glue is generated.
+fn reject_async_lowers(lowers: &Lowers) -> Result<(), TranspileError> {
+    if let Some(host) = lowers.async_.first() {
+        return Err(unsupported(format!(
+            "import `{}#{}` is lowered with the `async` option (WASI 0.3: its glue is not \
+             generated yet)",
+            host.interface, host.name
+        )));
+    }
+    Ok(())
+}
+
 /// For each of `funcs`, whether the component lowers it with `string-encoding=utf16` (the glue
 /// then transcodes the strings it passes, see `glue::Method::utf16`).
 ///
 /// Only a function whose signature holds a string is affected by the encoding. Such a function
 /// lowered as `compact-utf16`, or lowered with two encodings (the glue has one method per
 /// function), is refused.
-fn utf16_lowers(component: &[u8], funcs: &[WitFunc]) -> Result<Vec<bool>, TranspileError> {
+fn utf16_lowers(
+    lowers: Vec<(HostFunc, &'static str)>,
+    funcs: &[WitFunc],
+) -> Result<Vec<bool>, TranspileError> {
     // The encoding each function is lowered with, once one holding a string is seen.
     let mut encodings: Vec<Option<&'static str>> = vec![None; funcs.len()];
-    for (host, encoding) in super::exports::lowers(component)? {
+    for (host, encoding) in lowers {
         let Some(at) = funcs
             .iter()
             .position(|f| f.interface == host.interface && f.name == host.name)
