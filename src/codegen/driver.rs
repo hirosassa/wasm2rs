@@ -701,6 +701,7 @@ fn generate_module_pieces_with(
     if !deps.dispatch_sigs.is_empty() {
         deps.rt.insert(Rt::TrapIndirectTypeMismatch);
     }
+    add_shared_memory_traps(&mut deps, &ctx);
 
     // Free-function runtime helpers live at module scope, above the functions
     // (or the `struct Instance`) that call them, in both module shapes.
@@ -778,6 +779,14 @@ fn generate_module_pieces_with(
 }
 
 /// Slice `buf` into consecutive pieces ending at each offset in `ends`.
+/// The shared-memory runtime is emitted whole, whatever the functions use, and
+/// under `typed_traps` it raises both memory traps itself.
+fn add_shared_memory_traps(deps: &mut ModuleDeps, ctx: &ModuleCtx<'_>) {
+    if ctx.typed_traps && ctx.memory_shared {
+        deps.rt.extend([Rt::TrapMemoryOob, Rt::TrapUnalignedAtomic]);
+    }
+}
+
 fn split_at_ends<'a>(buf: &'a str, ends: &[usize]) -> Vec<&'a str> {
     let mut start = 0;
     ends.iter()
@@ -895,6 +904,7 @@ pub(crate) fn generate_module_split(
     if !deps.dispatch_sigs.is_empty() {
         deps.rt.insert(Rt::TrapIndirectTypeMismatch);
     }
+    add_shared_memory_traps(&mut deps, &ctx);
 
     // The root is emitted last, once the used-helper/dispatch sets are complete.
     let root_deps = render::RootDeps {

@@ -269,9 +269,12 @@ pub struct TranspileOptions {
     /// type mismatch, `call stack exhausted`, the two float-to-integer conversion
     /// traps, integer division/remainder (divide by zero; `MIN / -1` is the
     /// `IntegerOverflow` of `div_s`), and linear-memory and table out-of-bounds
-    /// accesses. The generated source then defines `Wasm2RsTrap` (only the variants it
-    /// uses), a `Send + 'static` enum implementing `Display` (with the message the
-    /// string panic carried) and `std::error::Error`, and each of these traps is a
+    /// accesses, and on a shared memory a misaligned atomic access
+    /// (`UnalignedAtomicAccess`) or an out-of-bounds atomic or plain access
+    /// (`OutOfBoundsMemoryAccess`, the same trap as on an unshared memory). The
+    /// generated source then defines `Wasm2RsTrap` (only the variants it uses), a
+    /// `Send + 'static` enum implementing `Display` (with the message the string
+    /// panic carried) and `std::error::Error`, and each of these traps is a
     /// `resume_unwind(Box::new(Wasm2RsTrap::..))` — the mechanism a thrown wasm
     /// exception already uses. Downcast the `catch_unwind` payload to `Wasm2RsTrap`
     /// to recognise one; `try`/`catch_all` do not catch it.
@@ -280,12 +283,11 @@ pub struct TranspileOptions {
     /// Rust's `/` and slice indexing (whose panics carry no typed payload); see
     /// `docs/bounds-check-bench.md` for what that costs. Under [`unsafe_memory`]
     /// the linear-memory accesses stay unchecked (undefined behaviour, as without
-    /// this option) while division and table accesses are still typed. A shared
-    /// memory's accesses are not typed yet.
+    /// this option) while division and table accesses are still typed.
     ///
     /// `resume_unwind` does not run the panic hook, so these traps print nothing to
     /// stderr; report them from the payload instead. Every other trap (GC,
-    /// continuations, atomics, `exnref`, glue) is still a string panic. Off by default,
+    /// continuations, `exnref`, glue) is still a string panic. Off by default,
     /// which leaves the generated code unchanged.
     ///
     /// [`unsafe_memory`]: TranspileOptions::unsafe_memory

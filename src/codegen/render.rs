@@ -176,7 +176,7 @@ pub(super) fn render_module_head(
     // A shared module emits the thread-shareable `SharedMemory` runtime once,
     // at module scope, ahead of the `Instance` type that stores it.
     if ctx.memory_shared {
-        lines.extend(shared_memory_runtime_lines());
+        lines.extend(shared_memory_runtime_lines(ctx.typed_traps));
         lines.push(String::new());
     }
     // Module-scope statics backing the data and element segments.
@@ -1876,8 +1876,50 @@ fn dispatch_method_block(
 /// in wasm, two threads racing on the same bytes see unspecified values, which
 /// Rust formally calls a data race. Atomic operations are real atomic
 /// instructions (sequentially consistent) and trap on a misaligned address.
-fn shared_memory_runtime_lines() -> Vec<String> {
-    super::runtime::source_lines(include_str!("rt_src/shared_memory.rs"))
+fn shared_memory_runtime_lines(typed: bool) -> Vec<String> {
+    let lines = super::runtime::source_lines(include_str!("rt_src/shared_memory.rs"));
+    if typed {
+        typed_shared_memory_lines(lines)
+    } else {
+        lines
+    }
+}
+
+/// Under `typed_traps`, each `panic!(..)` of the shared-memory runtime (a misaligned
+/// atomic, or an out-of-range access) becomes a call to its cold typed trap. A bounds
+/// failure of an atomic access is the same trap as one of a plain access, so both
+/// use `trap_memory_oob`.
+fn typed_shared_memory_lines(lines: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(lines.len());
+    // (indent, text so far) of a `panic!(..)` that rustfmt may have split over lines.
+    let mut panic_stmt: Option<(String, String)> = None;
+    for line in lines {
+        let code = line.trim_start();
+        if panic_stmt.is_none() && code.starts_with("panic!(") {
+            let indent = line[..line.len() - code.len()].to_string();
+            panic_stmt = Some((indent, String::new()));
+        }
+        match panic_stmt.as_mut() {
+            Some((indent, text)) => {
+                text.push_str(&line);
+                if line.ends_with(");") {
+                    out.push(typed_trap_call(indent, text));
+                    panic_stmt = None;
+                }
+            }
+            None => out.push(line),
+        }
+    }
+    out
+}
+
+fn typed_trap_call(indent: &str, panic_stmt: &str) -> String {
+    let trap = if panic_stmt.contains("unaligned atomic access") {
+        "trap_unaligned_atomic_access"
+    } else {
+        "trap_memory_oob"
+    };
+    format!("{indent}{trap}();")
 }
 
 /// Whether the module needs the injected `Imports` host trait — i.e. it has a

@@ -37,6 +37,7 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::TrapDivideByZero => "trap_integer_divide_by_zero",
         Rt::TrapMemoryOob => "trap_memory_oob",
         Rt::TrapTableOob => "trap_table_oob",
+        Rt::TrapUnalignedAtomic => "trap_unaligned_atomic_access",
         Rt::I32DivS => "i32_div_s",
         Rt::I32DivU => "i32_div_u",
         Rt::I32RemS => "i32_rem_s",
@@ -55,7 +56,7 @@ pub(super) fn is_rt_name(name: &str) -> bool {
 
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
-const RT_ORDER: [Rt; 40] = [
+const RT_ORDER: [Rt; 41] = [
     Rt::TrapType,
     Rt::DelegateExc,
     Rt::CallDepth,
@@ -68,6 +69,7 @@ const RT_ORDER: [Rt; 40] = [
     Rt::TrapDivideByZero,
     Rt::TrapMemoryOob,
     Rt::TrapTableOob,
+    Rt::TrapUnalignedAtomic,
     Rt::I32DivS,
     Rt::I32DivU,
     Rt::I32RemS,
@@ -168,6 +170,7 @@ fn typed_trap_variants(used: &HashSet<Rt>, typed: bool) -> Vec<TrapVariant> {
         (Rt::TrapDivideByZero, TrapVariant::IntegerDivideByZero),
         (Rt::TrapMemoryOob, TrapVariant::OutOfBoundsMemoryAccess),
         (Rt::TrapTableOob, TrapVariant::OutOfBoundsTableAccess),
+        (Rt::TrapUnalignedAtomic, TrapVariant::UnalignedAtomicAccess),
     ]
     .into_iter()
     .filter(|(rt, _)| used.contains(rt))
@@ -210,6 +213,7 @@ enum TrapVariant {
     IntegerDivideByZero,
     OutOfBoundsMemoryAccess,
     OutOfBoundsTableAccess,
+    UnalignedAtomicAccess,
 }
 
 impl TrapVariant {
@@ -223,6 +227,7 @@ impl TrapVariant {
             TrapVariant::IntegerDivideByZero => "IntegerDivideByZero",
             TrapVariant::OutOfBoundsMemoryAccess => "OutOfBoundsMemoryAccess",
             TrapVariant::OutOfBoundsTableAccess => "OutOfBoundsTableAccess",
+            TrapVariant::UnalignedAtomicAccess => "UnalignedAtomicAccess",
         }
     }
 
@@ -237,6 +242,7 @@ impl TrapVariant {
             TrapVariant::IntegerDivideByZero => "integer divide by zero",
             TrapVariant::OutOfBoundsMemoryAccess => "out of bounds memory access",
             TrapVariant::OutOfBoundsTableAccess => "out of bounds table access",
+            TrapVariant::UnalignedAtomicAccess => "unaligned atomic access",
         }
     }
 }
@@ -327,6 +333,11 @@ fn rt_lines(rt: Rt, typed: bool, variants: &[TrapVariant]) -> Vec<String> {
         Rt::TrapTableOob => {
             trap_fn_lines("trap_table_oob", TrapVariant::OutOfBoundsTableAccess, typed)
         }
+        Rt::TrapUnalignedAtomic => trap_fn_lines(
+            "trap_unaligned_atomic_access",
+            TrapVariant::UnalignedAtomicAccess,
+            typed,
+        ),
         Rt::I32DivS => div_rem_lines("i32_div_s", "i32", DivRem::DivS),
         Rt::I32DivU => div_rem_lines("i32_div_u", "i32", DivRem::DivU),
         Rt::I32RemS => div_rem_lines("i32_rem_s", "i32", DivRem::RemS),
