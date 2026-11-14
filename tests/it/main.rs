@@ -40,6 +40,7 @@ mod component_link_dylink;
 mod component_link_exports;
 mod component_link_rejections;
 mod component_local_types;
+mod component_p3_builtins;
 mod component_real_async_guest;
 mod component_real_custom_world;
 mod component_real_moonbit;

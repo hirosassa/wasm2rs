@@ -111,12 +111,12 @@ so (`unimplemented!`/a panic naming the missing runtime). Nothing is silently mi
 | `core-type` / `gc` canonical options | refused, component-model GC is not modelled | `src/wit/exports.rs` |
 
 The `canon` built-ins of the async ABI (`task.*`, `subtask.*`, `waitable-set.*`, `stream.*`,
-`future.*`, `context.*`) are not implemented: a core module that imports one gets it as a plain
-method of the flat `Imports` trait, which the embedder would have to implement, so the generated
-program of a real 0.3 guest does not build until M2 supplies them. What is tested is the
-transpilation itself: a `wit-bindgen` 0.63 Rust guest (the one of
-[wasi-p3-spike.md](wasi-p3-spike.md)) transpiles (through `transpile_component` with `external_types: None`, since it imports a
-stream and a future), with its callback exports traced through linking. The `wasm2rs-wasi` host is built on `wasi:io` pollables and streams, so a 0.3 host would
+`future.*`, `context.*`, ...) are identified and classified by feature (`src/wit/builtin.rs`), but
+not implemented: a core module that imports one (directly or through the linked shim) is an
+`Unsupported` error naming the feature, since a plain `Imports` method would build into a program
+that nothing implements. They are served by M2. The typed async glue (callback entries,
+async-lowered imports) is tested on hand-written components; the `wit-bindgen` 0.63 Rust guest of
+[wasi-p3-spike.md](wasi-p3-spike.md) is read (`wit_exports`) and refused for its built-ins. The `wasm2rs-wasi` host is built on `wasi:io` pollables and streams, so a 0.3 host would
 be a separate surface. M2 (a single-threaded scheduler for the built-ins above, `task.return`
 routing) and M3/M4 are a proposal, not a commitment.
 

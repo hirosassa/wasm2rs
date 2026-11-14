@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+mod builtin;
 mod emit;
 mod exports;
 mod glue;
