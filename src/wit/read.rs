@@ -231,10 +231,10 @@ pub(super) fn defined(scope: &Scope, d: &ComponentDefinedType<'_>) -> Soft<WitTy
 
 // WASI 0.3 (component-model async) features are named one by one: each needs the async
 // canonical ABI and a task scheduler, which this reader and the generated glue do not have.
-pub(super) const P3_ASYNC_FUNC: &str = "async function (WASI 0.3: needs the async canonical ABI and a task scheduler, which are not implemented)";
-pub(super) const P3_FUTURE: &str = "future type (WASI 0.3: asynchronous values need the async canonical ABI, which is not implemented)";
-pub(super) const P3_STREAM: &str = "stream type (WASI 0.3: asynchronous streams need the async canonical ABI, which is not implemented)";
-pub(super) const P3_ERROR_CONTEXT: &str =
+const P3_ASYNC_FUNC: &str = "async function (WASI 0.3: needs the async canonical ABI and a task scheduler, which are not implemented)";
+const P3_FUTURE: &str = "future type (WASI 0.3: asynchronous values need the async canonical ABI, which is not implemented)";
+const P3_STREAM: &str = "stream type (WASI 0.3: asynchronous streams need the async canonical ABI, which is not implemented)";
+const P3_ERROR_CONTEXT: &str =
     "error-context type (WASI 0.3: part of the async canonical ABI, which is not implemented)";
 
 /// The most flags one `flags` type may have: one `u32` of the canonical ABI.

@@ -736,7 +736,7 @@ impl Reader {
                     export.post_return =
                         Some(self.option_export(&label, *i, "post-return", instance)?);
                 }
-                // Rejected above, before the signature.
+                // `async_abi` returned early for these, before the signature.
                 CanonicalOption::Async | CanonicalOption::Callback(_) => {
                     return Err(TranspileError::Internal("an async lift option".into()));
                 }
@@ -863,8 +863,8 @@ impl Reader {
     }
 }
 
-/// The async ABI a lift's options select: `callback` (the guest returns to an event loop)
-/// or, with `async` alone, the stackful one (the guest blocks inside the host's scheduler).
+/// The async ABI a lift selects. `callback` is checked first: a callback lift also carries
+/// `async`.
 fn async_abi(options: &[CanonicalOption]) -> Option<&'static str> {
     if options
         .iter()
