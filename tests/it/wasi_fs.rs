@@ -1452,3 +1452,53 @@ fn main() {
         let _ = std::fs::remove_file(d.join("d"));
     });
 }
+
+// path_open hands out the lowest free descriptor (POSIX), and a descriptor
+// freed by fd_close or by being the source of an fd_renumber is reused.
+// func3 = open "input.txt" -> its fd, func4 = close(fd), func5 = renumber(from, to).
+const FD_REUSE: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_open"
+        (func $po (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_close"
+        (func $cl (param i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_renumber"
+        (func $rn (param i32 i32) (result i32)))
+      (memory 1)
+      (data (i32.const 100) "input.txt")
+      (func (export "open") (result i32)
+        (drop (call $po (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 9)
+                        (i32.const 0) (i64.const 2) (i64.const 0) (i32.const 0) (i32.const 300)))
+        (i32.load (i32.const 300)))
+      (func (export "close") (param i32) (result i32) (call $cl (local.get 0)))
+      (func (export "renumber") (param i32 i32) (result i32)
+        (call $rn (local.get 0) (local.get 1))))
+    "#;
+
+#[test]
+fn path_open_reuses_the_lowest_freed_descriptor() {
+    let extra = "\
+fn main() {
+    let mut i = Instance::new();
+    assert_eq!((i.func3(), i.func3(), i.func3()), (4, 5, 6));
+    assert_eq!(i.func4(5), 0);
+    assert_eq!(i.func4(4), 0);
+    assert_eq!(i.func4(4), 0, \"closing twice is a no-op, not a second free slot\");
+    assert_eq!(i.func3(), 4, \"the lowest freed descriptor comes back first\");
+    assert_eq!(i.func3(), 5);
+    assert_eq!(i.func3(), 7, \"no gap left: a fresh descriptor\");
+    assert_eq!(i.func5(7, 4), 0);
+    assert_eq!(i.func3(), 7, \"the renumbered source slot is free again\");
+    assert_eq!(i.func4(6), 0);
+    assert_eq!(i.func4(40), 0, \"closing an unopened descriptor frees nothing\");
+    assert_eq!(i.func3(), 6);
+}
+";
+    let (bin, dir) = compile("fd_reuse", FD_REUSE, extra);
+    std::fs::write(dir.join("input.txt"), b"x").expect("write input file");
+    let status = Command::new(&bin)
+        .current_dir(&dir)
+        .status()
+        .expect("run generated binary");
+    assert!(status.success(), "descriptor reuse assertions failed");
+}
