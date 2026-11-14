@@ -6,6 +6,20 @@
 //! cache hit (no recompile) and still yields a runnable binary.
 use crate::common;
 
+/// What tells a recompile from a hit: a recompile publishes a new file, so its inode differs. (The
+/// mtime cannot: a hit refreshes it, so that pruning sees the entry as in use.)
+#[cfg(unix)]
+fn file_identity(path: &std::path::Path) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(path).expect("binary metadata"))
+}
+
+#[cfg(not(unix))]
+fn file_identity(path: &std::path::Path) -> std::time::SystemTime {
+    std::fs::metadata(path)
+        .and_then(|m| m.created())
+        .expect("binary creation time")
+}
+
 /// A second build of a byte-identical program must reuse the cached binary
 /// rather than recompiling: the returned path is stable and its mtime is
 /// unchanged across the two calls.
@@ -16,21 +30,17 @@ pub fn answer() -> i32 { 42 }
 fn main() { assert_eq!(answer(), 42); }
 ";
     let first = common::build("cache_hit_a", program);
-    let m1 = std::fs::metadata(&first)
-        .and_then(|m| m.modified())
-        .expect("first binary mtime");
+    let id1 = file_identity(&first);
 
     let second = common::build("cache_hit_b", program);
-    let m2 = std::fs::metadata(&second)
-        .and_then(|m| m.modified())
-        .expect("second binary mtime");
+    let id2 = file_identity(&second);
 
     assert_eq!(
         first, second,
         "identical programs must map to the same cached binary path"
     );
     assert_eq!(
-        m1, m2,
+        id1, id2,
         "second build of an identical program must be a cache hit (no recompile)"
     );
     assert!(

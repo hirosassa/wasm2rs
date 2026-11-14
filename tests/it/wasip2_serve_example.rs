@@ -54,16 +54,16 @@ fn work_dir(tag: &str) -> PathBuf {
 )]
 fn serve_component(wasm: &Path, dir: &Path, extra: &[&str]) -> Server {
     // `cargo run` and the example both `exec` the next program on unix: the child is the server
-    let mut child = Command::new(env!("CARGO"))
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(["run", "--quiet", "--example", "wasip2_serve", "--"])
         .arg(wasm)
         .args(["--listen", "127.0.0.1:0"])
         .args(extra)
         .env("WASIP2_WORK_DIR", dir.join("work"))
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stdout(Stdio::piped());
+    crate::common::share_example_build(&mut cmd);
+    let mut child = cmd.spawn().unwrap();
     let stdout = child.stdout.take().unwrap();
     let mut server = Server {
         child,
