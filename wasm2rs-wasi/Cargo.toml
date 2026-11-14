@@ -2,7 +2,7 @@
 name = "wasm2rs-wasi"
 version = "0.1.1"
 edition = "2024"
-rust-version = "1.89"
+rust-version.workspace = true
 description = "Typed WASI 0.2 host for programs transpiled by wasm2rs."
 license = "MIT"
 repository = "https://github.com/hirosassa/wasm2rs"

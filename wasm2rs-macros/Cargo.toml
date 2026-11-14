@@ -2,7 +2,7 @@
 name = "wasm2rs-macros"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version.workspace = true
 description = "Procedural macro that embeds a WebAssembly module as Rust source, via wasm2rs."
 license = "MIT"
 repository = "https://github.com/hirosassa/wasm2rs"
