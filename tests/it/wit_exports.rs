@@ -473,6 +473,16 @@ fn p3_export(ty: &str, options: &str, core_sig: &str) -> String {
 }
 
 #[test]
+fn an_async_typed_function_lifted_without_the_async_option_is_rejected() {
+    let err = rejection(&p3_export("(func async)", "", ""));
+    assert!(
+        err.contains("`go`") && err.contains("async function (WASI 0.3"),
+        "{err}"
+    );
+    assert!(!err.contains("stackful"), "{err}");
+}
+
+#[test]
 fn p3_value_types_are_rejected_by_name() {
     for (ty, name) in [
         ("(func (param \"p\" (future u32)))", "future"),

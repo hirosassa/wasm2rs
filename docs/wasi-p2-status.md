@@ -105,7 +105,9 @@ mis-translated.
 | `core-type` / `gc` canonical options | `src/wit/exports.rs` | component-model GC, not modelled |
 
 The `canon` built-ins of the async ABI (`task.*`, `subtask.*`, `waitable-set.*`, `stream.*`,
-`future.*`) are not parsed into the function index space either. The `wasm2rs-wasi` host is
+`future.*`) are not refused on their own: a core module that imports one gets it as a plain
+method of the flat `Imports` trait, which the embedder would have to implement. Real 0.3 guests
+also have async types or lifts, so they are refused by the rows above. The `wasm2rs-wasi` host is
 built on `wasi:io` pollables and streams, so a 0.3 host would be a separate surface. The
 milestone plan (M0 this refusal, M0.5 a spike on what real async guests look like, then reading
 `async func` and generating glue, a callback-ABI scheduler, and a 0.3 host) is a proposal, not a
