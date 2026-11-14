@@ -188,7 +188,12 @@ impl super::FuncGen<'_> {
         // out at `End`.
         let mut checkpoint: Option<u32> = None;
         for op in body.get_operators_reader()? {
-            match op? {
+            let op = op?;
+            if self.skips_dead_in_cont(&op) {
+                self.emit_op(op)?;
+                continue;
+            }
+            match op {
                 Operator::Suspend { tag_index } => {
                     if checkpoint.is_some() {
                         return Err(TranspileError::Unsupported(
@@ -385,6 +390,16 @@ impl super::FuncGen<'_> {
         })
     }
 
+    /// Whether `op` sits in unreachable code the cont step loops must hand to the
+    /// ordinary lowering, which skips it (see `skip_dead`). Otherwise a dead
+    /// `suspend`/`switch`/checkpoint would pop a polymorphic stack and emit
+    /// statements after a diverging one. The function's own outermost `end` (and a
+    /// live frame's `end`, which the loops close themselves) is the exception; an
+    /// `end` of a dead nested region is not.
+    fn skips_dead_in_cont(&self, op: &Operator<'_>) -> bool {
+        !self.reachable && (!matches!(op, Operator::End) || self.dead_nesting > 0)
+    }
+
     /// Whether any control-transfer point (`suspend` or `switch`) in `body` occurs
     /// inside a nested region (control depth > 0). Such a body cannot render each
     /// region as a single straight-line arm — the `pc` machine must thread through
@@ -450,7 +465,12 @@ impl super::FuncGen<'_> {
             self.push_frame_typed(FrameKind::Block, &[], &results, None)?;
         }
         for op in body.get_operators_reader()? {
-            match op? {
+            let op = op?;
+            if self.skips_dead_in_cont(&op) {
+                self.emit_op(op)?;
+                continue;
+            }
+            match op {
                 Operator::Suspend { tag_index } => self.emit_suspend_node(tag_index)?,
                 Operator::Switch {
                     cont_type_index,
