@@ -7,20 +7,6 @@
 //! output carries the part functions and the state struct) and (b) still runs
 //! identically once compiled.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::string_slice,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::unwrap_in_result,
-    reason = "test code"
-)]
-
 use std::process::Command;
 
 use crate::common;

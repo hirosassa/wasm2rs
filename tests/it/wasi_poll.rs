@@ -1,15 +1,6 @@
 //! Native `poll_oneoff`, `sock_*` and `proc_raise`. The generated Rust is
 //! compiled with `rustc -D warnings` and run (no mocking).
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "test code"
-)]
-
 use crate::common;
 
 use common::compile_run;

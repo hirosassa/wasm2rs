@@ -2,22 +2,6 @@
 //! 64-bit integers). Loads, stores, `memory.size`/`grow` and bulk operations on
 //! such a memory take and return `i64` instead of `i32`.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::string_slice,
-    clippy::arithmetic_side_effects,
-    clippy::float_cmp,
-    clippy::lossy_float_literal,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::unwrap_in_result,
-    reason = "test code"
-)]
-
 use crate::common;
 
 use common::compile_run;

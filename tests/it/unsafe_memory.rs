@@ -10,19 +10,6 @@
 //! These tests only exercise *in-bounds* accesses: an out-of-bounds access
 //! under `unsafe_memory` is UB and must never be executed.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::string_slice,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    reason = "test code"
-)]
-
 use std::process::Command;
 use wasm2rs::TranspileOptions;
 

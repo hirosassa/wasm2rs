@@ -6,22 +6,6 @@
 //! compiled with `rustc -D warnings` and exercised. Traps are verified by the
 //! generated binary exiting unsuccessfully.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::string_slice,
-    clippy::arithmetic_side_effects,
-    clippy::float_cmp,
-    clippy::lossy_float_literal,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::unwrap_in_result,
-    reason = "test code"
-)]
-
 use std::process::Command;
 
 /// Run `bin`, assert it traps, and assert the panic text on stderr contains `needle`.

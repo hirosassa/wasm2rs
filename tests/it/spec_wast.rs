@@ -4,14 +4,6 @@
 //! generated Rust program (one `rustc` run): the module is transpiled and a
 //! `main` replays the assertions against `Instance`. Directives the harness
 //! cannot express yet are skipped *explicitly* and reported, never dropped.
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "test code"
-)]
 
 use std::collections::HashMap;
 

@@ -7,6 +7,22 @@
 //! Run a single former file with `cargo test --test it <name>` (the module
 //! name prefixes each test, e.g. `cont::`).
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp,
+    clippy::lossy_float_literal,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::unwrap_in_result,
+    reason = "test code"
+)]
+
 mod bottom_ref_types;
 mod common;
 mod cont_casts;

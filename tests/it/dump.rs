@@ -1,14 +1,6 @@
 //! `wasm2rs::dump` and the `--dump` flag: a summary of a module that does not
 //! generate code, and does not need the module to be transpilable.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    reason = "test code"
-)]
-
 use std::process::Command;
 
 fn summary(wat: &str) -> String {

@@ -3,15 +3,6 @@
 //! need those tools, so each test skips with a message when its tool is
 //! missing; see `docs/wasi-threads-e2e.md` for how to run them.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "test code"
-)]
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

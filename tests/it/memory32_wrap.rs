@@ -3,15 +3,6 @@
 //! as usize`, which wraps on a 32-bit `usize` host (so `0xFFFF_FFFC + 8` read
 //! address 4 instead of trapping). The address is now formed in `u64`.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "test code"
-)]
-
 use std::process::Command;
 
 use crate::common;

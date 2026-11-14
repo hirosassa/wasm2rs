@@ -2,15 +2,6 @@
 //! memory is `shared` (defined or imported), where it is a thread-shareable
 //! `SharedMemory` rather than a host-borrowed `Vec<u8>`.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "test code"
-)]
-
 use crate::common;
 
 use common::compile_run;
