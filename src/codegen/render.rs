@@ -1474,7 +1474,11 @@ fn helper_method_lines(
         for helper in HELPER_ORDER {
             if used.contains(&(helper, mem)) {
                 inner.push(String::new());
-                if memory_shared {
+                // Table helpers touch no memory, so a shared module renders them
+                // like any other (needed to type their traps); without
+                // `typed_traps` they keep the shared path, unchanged.
+                let table_helper = matches!(helper, Helper::TableCopy | Helper::TableFill);
+                if memory_shared && !(typed_traps && table_helper) {
                     // The shared-memory backend reads `self.memory.bytes()` per
                     // body; unchecked access is not wired through it, so
                     // `unsafe_memory` does not apply to a shared memory.

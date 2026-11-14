@@ -449,3 +449,32 @@ fn only_the_used_stage_two_variants_are_emitted() {
         assert!(!mem.contains(unused), "{unused} emitted: {mem}");
     }
 }
+
+#[test]
+fn cross_memory_copy_and_shared_module_table_helpers_are_typed() {
+    compile_run_with(
+        "typed_traps_cross_mem",
+        r#"(module
+            (memory 1 1) (memory $b 1 1)
+            (func (export "xcopy") (param i32 i32 i32)
+              (memory.copy 0 1 (local.get 0) (local.get 1) (local.get 2))))"#,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            inst.xcopy(0, 0, 4);
+            assert!(matches!(trap_of(|| inst.xcopy(65535, 0, 4)), Wasm2RsTrap::OutOfBoundsMemoryAccess));
+            assert!(matches!(trap_of(|| inst.xcopy(0, 65535, 4)), Wasm2RsTrap::OutOfBoundsMemoryAccess));"#
+        ),
+    );
+    let shared = transpile_with(
+        r#"(module (memory 1 1 shared) (table 2 funcref)
+            (func (export "tc") (param i32) (table.copy (local.get 0) (i32.const 0) (i32.const 1))))"#,
+        typed_named(),
+    );
+    assert!(shared.contains("trap_table_oob"), "{shared}");
+    assert!(
+        !shared.contains("copy_within(s..s + len as usize, d);\n"),
+        "{shared}"
+    );
+}

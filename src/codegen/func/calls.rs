@@ -1,6 +1,6 @@
 use wasmparser::ValType;
 
-use super::super::helpers::{checked_place, table_accessor};
+use super::super::helpers::table_accessor;
 use super::super::{
     ALLOW, FLATTEN_DEPTH_THRESHOLD, GenMeta, ModuleCtx, Node, Rt, SplitPlan, Val, can_flatten,
     default_value, estimate_body_len, flatten_body, index_u32, push_body_line, render_body_into,
@@ -316,13 +316,10 @@ impl<'a> super::FuncGen<'a> {
         // borrows the whole instance (the host), and passing the entry straight
         // into the dispatch call would keep that borrow live across the `&mut
         // self` method call. Copying out the `u32` releases it. An out-of-bounds
-        // index panics on this slice access (a trap).
+        // index traps on this slice access.
         let entry = self.fresh_temp();
         let index_expr = self.table_index_expr(table_index, &index.code);
-        let read = match self.typed_table_trap() {
-            Some(trap) => checked_place(&format!("self.{table_get}().get({index_expr})"), trap),
-            None => format!("self.{table_get}()[{index_expr}]"),
-        };
+        let read = self.table_place(&format!("self.{table_get}()"), &index_expr, false);
         self.line(format!("let {entry} = {read};"));
         self.dispatch_sigs.insert(type_index);
         if use_tc {

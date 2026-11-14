@@ -1,6 +1,6 @@
 use wasmparser::{MemArg, MemArgTarget, ValType};
 
-use super::super::helpers::{helper_method_name, index_expr64, mem_accessor};
+use super::super::helpers::{checked_place, helper_method_name, index_expr64, mem_accessor};
 use super::super::{Helper, Val, WASM_PAGE_SIZE, memarg_offset, rust_type};
 use crate::TranspileError;
 
@@ -805,10 +805,20 @@ impl<'a> super::FuncGen<'a> {
                 &len.code,
                 self.is_memory64(src_mem) && self.is_memory64(dst_mem),
             );
+            let (src_range, dst_range) = match self.typed_memory_trap() {
+                Some(trap) => (
+                    checked_place(&format!("self.{src_get}().get(s..s + n)"), trap),
+                    checked_place(&format!("self.{dst_get_mut}().get_mut(d..d + n)"), trap),
+                ),
+                None => (
+                    format!("self.{src_get}()[s..s + n]"),
+                    format!("self.{dst_get_mut}()[d..d + n]"),
+                ),
+            };
             self.line(format!(
                 "{{ let s = {s}; let d = {d}; let n = {n}; \
-                 let seg = self.{src_get}()[s..s + n].to_vec(); \
-                 self.{dst_get_mut}()[d..d + n].copy_from_slice(&seg); }}"
+                 let seg = {src_range}.to_vec(); \
+                 {dst_range}.copy_from_slice(&seg); }}"
             ));
         }
         Ok(())

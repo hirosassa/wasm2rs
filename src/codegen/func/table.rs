@@ -37,6 +37,19 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
+    /// The place expression `{base}[{index}]` of a table slot or range: Rust's
+    /// slice panic by default, or a checked `get`/`get_mut` (per `mutable`)
+    /// raising the cold table trap under `typed_traps`.
+    pub(super) fn table_place(&mut self, base: &str, index: &str, mutable: bool) -> String {
+        match self.typed_table_trap() {
+            Some(trap) => {
+                let method = if mutable { "get_mut" } else { "get" };
+                checked_place(&format!("{base}.{method}({index})"), trap)
+            }
+            None => format!("{base}[{index}]"),
+        }
+    }
+
     /// The wasm value type of a table's indices, sizes and lengths.
     fn table_index_ty(&self, table: u32) -> ValType {
         if self.is_table64(table) {
@@ -107,9 +120,8 @@ impl<'a> super::FuncGen<'a> {
         let src_expr = self.table_index_expr(src_table, &src.code);
         let dest_expr = self.table_index_expr(dst_table, &dest.code);
         let elem = table_elem_rust(self.table_element(dst_table));
-        let trap = self.typed_table_trap();
         let body = if dst_table == src_table && !gc {
-            match trap {
+            match self.typed_table_trap() {
                 // `copy_within` panics on its own, so check the two ranges first.
                 Some(trap) => format!(
                     "let len = self.{dst_mut}().len(); \
@@ -122,16 +134,8 @@ impl<'a> super::FuncGen<'a> {
         } else {
             // A managed entry is not `Copy`, so it is cloned through the temporary
             // (which also covers overlapping ranges within one table).
-            let (src_range, dst_range) = match trap {
-                Some(trap) => (
-                    checked_place(&format!("self.{src_get}().get(s..s + n)"), trap),
-                    checked_place(&format!("self.{dst_mut}().get_mut(d..d + n)"), trap),
-                ),
-                None => (
-                    format!("self.{src_get}()[s..s + n]"),
-                    format!("self.{dst_mut}()[d..d + n]"),
-                ),
-            };
+            let src_range = self.table_place(&format!("self.{src_get}()"), "s..s + n", false);
+            let dst_range = self.table_place(&format!("self.{dst_mut}()"), "d..d + n", true);
             format!(
                 "let tmp: Vec<{elem}> = {src_range}.to_vec(); \
                  {dst_range}.clone_from_slice(&tmp);"
@@ -157,10 +161,7 @@ impl<'a> super::FuncGen<'a> {
             ""
         };
         let index_expr = self.table_index_expr(table, &index.code);
-        let read = match self.typed_table_trap() {
-            Some(trap) => checked_place(&format!("self.{get}().get({index_expr})"), trap),
-            None => format!("self.{get}()[{index_expr}]"),
-        };
+        let read = self.table_place(&format!("self.{get}()"), &index_expr, false);
         self.push_trapping(format!("{read}{clone}"), element)
     }
 
@@ -174,10 +175,7 @@ impl<'a> super::FuncGen<'a> {
         let (_, get_mut) = table_accessor(table);
         let stored = self.table_entry_expr(table, &value)?;
         let index_expr = self.table_index_expr(table, &index.code);
-        let slot = match self.typed_table_trap() {
-            Some(trap) => checked_place(&format!("self.{get_mut}().get_mut({index_expr})"), trap),
-            None => format!("self.{get_mut}()[{index_expr}]"),
-        };
+        let slot = self.table_place(&format!("self.{get_mut}()"), &index_expr, true);
         self.line(format!("{slot} = {stored};"));
         Ok(())
     }
@@ -263,10 +261,7 @@ impl<'a> super::FuncGen<'a> {
         }
         let (_, get_mut) = table_accessor(table);
         let value = self.table_entry_expr(table, &val)?;
-        let range = match self.typed_table_trap() {
-            Some(trap) => checked_place(&format!("self.{get_mut}().get_mut(d..d + n)"), trap),
-            None => format!("self.{get_mut}()[d..d + n]"),
-        };
+        let range = self.table_place(&format!("self.{get_mut}()"), "d..d + n", true);
         self.line(format!(
             "{{ let d = {}; let v = {value}; let n = {}; {range}.fill(v); }}",
             self.table_index_expr(table, &dest.code),
@@ -319,23 +314,20 @@ impl<'a> super::FuncGen<'a> {
         len: &Val,
         check: BulkCheck,
     ) {
-        // `unchecked` (opt-in `unsafe_memory`, memory.init only) drops the slice
-        // bounds check on both the destination memory and the segment source,
-        // turning an out-of-range copy into undefined behaviour rather than a
-        // trap.
-        let (dst_slice, seg_slice) = if let BulkCheck::Unchecked = check {
-            (
+        let (dst_slice, seg_slice) = match check {
+            BulkCheck::Panic => (format!("{dst}[d..d + n]"), "&seg[s..s + n]".to_string()),
+            // `unsafe_memory` (memory.init only) drops the slice bounds check on
+            // both the destination memory and the segment source, turning an
+            // out-of-range copy into undefined behaviour rather than a trap.
+            BulkCheck::Unchecked => (
                 format!("(*unsafe {{ {dst}.get_unchecked_mut(d..d + n) }})"),
                 "unsafe { seg.get_unchecked(s..s + n) }".to_string(),
-            )
-        } else if let BulkCheck::Typed(trap) = check {
+            ),
             // `typed_traps`: the destination is checked first, then the segment.
-            (
+            BulkCheck::Typed(trap) => (
                 checked_place(&format!("{dst}.get_mut(d..d + n)"), trap),
                 format!("&{}", checked_place("seg.get(s..s + n)", trap)),
-            )
-        } else {
-            (format!("{dst}[d..d + n]"), "&seg[s..s + n]".to_string())
+            ),
         };
         self.line(format!(
             "{{ let seg = {src_seg}; let n = ({}) as usize; let s = ({}) as usize; \
@@ -398,16 +390,8 @@ impl<'a> super::FuncGen<'a> {
         if self.is_gc_table(table) {
             // A managed table's segment holds only `ref.null` items, so initialising
             // it writes nulls; the range is still checked against the segment.
-            let (seg_range, dst_range) = match self.typed_table_trap() {
-                Some(trap) => (
-                    checked_place("seg.get(s..s + n)", trap),
-                    checked_place(&format!("self.{get_mut}().get_mut(d..d + n)"), trap),
-                ),
-                None => (
-                    "seg[s..s + n]".to_string(),
-                    format!("self.{get_mut}()[d..d + n]"),
-                ),
-            };
+            let seg_range = self.table_place("seg", "s..s + n", false);
+            let dst_range = self.table_place(&format!("self.{get_mut}()"), "d..d + n", true);
             self.line(format!(
                 "{{ let seg = {seg}; let n = ({}) as usize; let s = ({}) as usize; \
                  let d = ({}) as usize; let _ = &{seg_range}; \
