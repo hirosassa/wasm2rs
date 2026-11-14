@@ -788,7 +788,7 @@ pub(crate) fn flatten_body(
         None if returns_value => "unreachable!();".to_string(),
         None => "return;".to_string(),
     };
-    f.arms.push((exit, vec![(0, exit_stmt)]));
+    f.arms.push((exit, vec![(0, exit_stmt.into())]));
     f.lower(nodes, start, exit);
     f.assemble(start)
 }
@@ -815,7 +815,7 @@ pub(crate) fn flatten_cont_body(nodes: Vec<Node>, exit_stmt: String) -> Vec<Node
     };
     let start = f.alloc();
     let exit = f.alloc();
-    f.arms.push((exit, vec![(0, exit_stmt)]));
+    f.arms.push((exit, vec![(0, exit_stmt.into())]));
     f.lower(nodes, start, exit);
     // The initial state is always 0 (the first `alloc`), matching a fresh
     // frame's `pc == 0`; without contraction the ids never shift.

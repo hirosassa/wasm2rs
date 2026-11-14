@@ -1,12 +1,147 @@
 use super::render_cont;
 use super::*;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// One statement of a dispatch arm: its indent *relative to the arm body* (0 for
 /// an ordinary flat statement; >0 for lines nested inside a structured loop) and
-/// the statement text. [`Flattener::assemble`] adds the arm's base indent.
-pub(crate) type ArmLine = (usize, String);
+/// the statement. [`Flattener::assemble`] adds the arm's base indent.
+pub(crate) type ArmLine = (usize, Line);
+
+/// A fragment of a [`Line::Edges`] statement: opaque text, or a transition to
+/// another dispatch state (rendered `pc = N`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Piece {
+    Text(String),
+    Jump(usize),
+}
+
+/// One dispatch-arm statement. The CFG passes ([`contract_pc_edges`],
+/// [`fuse_linear_chains`], the split renumbering) read and rewrite its state
+/// transitions through this type rather than scanning the rendered text, so a
+/// line that merely mentions `pc = ` can never be mistaken for an edge. Only the
+/// final line rendering ([`Line::render`]) turns it back into Rust source.
+///
+/// A continuation arm (`assemble_cont`) is never analysed, so its transitions
+/// may stay inside opaque [`Line::Text`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Line {
+    /// A statement with no state transition.
+    Text(String),
+    /// The bare unconditional transition `pc = N;`.
+    Goto(usize),
+    /// A statement with one or more transitions embedded in its text (a
+    /// conditional jump, a `br_table` `match`, a `pc = N; continue 'sm;`).
+    Edges(Vec<Piece>),
+}
+
+impl From<String> for Line {
+    fn from(text: String) -> Self {
+        Line::Text(text)
+    }
+}
+
+impl Line {
+    /// The target of a bare `pc = N;` line, if that is what this is.
+    pub(crate) fn as_goto(&self) -> Option<usize> {
+        match self {
+            Line::Goto(target) => Some(*target),
+            _ => None,
+        }
+    }
+
+    /// The text of a transition-free line (the only kind that can be a `let`).
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            Line::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Every state this line can transfer control to.
+    pub(crate) fn targets(&self) -> impl Iterator<Item = usize> + '_ {
+        let (goto, pieces): (Option<usize>, &[Piece]) = match self {
+            Line::Text(_) => (None, &[]),
+            Line::Goto(target) => (Some(*target), &[]),
+            Line::Edges(pieces) => (None, pieces),
+        };
+        goto.into_iter()
+            .chain(pieces.iter().filter_map(|piece| match piece {
+                Piece::Jump(target) => Some(*target),
+                Piece::Text(_) => None,
+            }))
+    }
+
+    /// Redirect every transition through `map`, in place.
+    pub(crate) fn map_targets(&mut self, map: &impl Fn(usize) -> usize) {
+        match self {
+            Line::Text(_) => {}
+            Line::Goto(target) => *target = map(*target),
+            Line::Edges(pieces) => {
+                for piece in pieces {
+                    if let Piece::Jump(target) = piece {
+                        *target = map(*target);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The Rust source of the line; borrowed (no copy) for a transition-free one.
+    pub(crate) fn render(&self) -> Cow<'_, str> {
+        match self {
+            Line::Text(text) => Cow::Borrowed(text),
+            Line::Goto(target) => Cow::Owned(format!("pc = {target};")),
+            Line::Edges(pieces) => {
+                let mut out = String::new();
+                for piece in pieces {
+                    match piece {
+                        Piece::Text(text) => out.push_str(text),
+                        Piece::Jump(target) => out.push_str(&format!("pc = {target}")),
+                    }
+                }
+                Cow::Owned(out)
+            }
+        }
+    }
+}
+
+/// Assembles a [`Line::Edges`] from interleaved text and transitions.
+#[derive(Default)]
+pub(crate) struct LineBuilder(Vec<Piece>);
+
+impl LineBuilder {
+    pub(crate) fn text(mut self, text: &str) -> Self {
+        match self.0.last_mut() {
+            Some(Piece::Text(last)) => last.push_str(text),
+            _ => self.0.push(Piece::Text(text.to_string())),
+        }
+        self
+    }
+
+    /// A transition rendered `pc = N` (the caller supplies any trailing `;`).
+    pub(crate) fn jump(mut self, target: usize) -> Self {
+        self.0.push(Piece::Jump(target));
+        self
+    }
+
+    /// Splice in another line (a bare [`Line::Goto`] keeps its `;`).
+    pub(crate) fn line(self, line: Line) -> Self {
+        match line {
+            Line::Text(text) => self.text(&text),
+            Line::Goto(target) => self.jump(target).text(";"),
+            Line::Edges(pieces) => pieces.into_iter().fold(self, |b, piece| match piece {
+                Piece::Text(text) => b.text(&text),
+                Piece::Jump(target) => b.jump(target),
+            }),
+        }
+    }
+
+    pub(crate) fn build(self) -> Line {
+        Line::Edges(self.0)
+    }
+}
 /// Builds the flat `match pc { … }` arms while linearising a structured body.
 pub(crate) struct Flattener {
     /// Completed dispatch arms: `(state id, its statements)`.
@@ -98,15 +233,15 @@ impl Flattener {
                     continue;
                 }
                 match node {
-                    Node::Line(text) => stmts.push((0, text)),
+                    Node::Line(text) => stmts.push((0, text.into())),
                     Node::Term(text) => {
-                        stmts.push((0, text));
+                        stmts.push((0, text.into()));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         reachable = false;
                     }
                     Node::Br { label, .. } => {
                         let target = self.labels[&label];
-                        stmts.push((0, format!("pc = {target};")));
+                        stmts.push((0, Line::Goto(target)));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         reachable = false;
                     }
@@ -117,13 +252,12 @@ impl Flattener {
                         ..
                     } => {
                         let target = self.labels[&label];
-                        let mut line = format!("if {cond} {{ ");
+                        let mut line = LineBuilder::default().text(&format!("if {cond} {{ "));
                         for (var, value) in assigns {
-                            line.push_str(&format!("{var} = {value}; "));
+                            line = line.text(&format!("{var} = {value}; "));
                         }
-                        line.push_str(&format!("pc = {target}; continue 'sm; }}"));
                         self.uses_continue = true;
-                        stmts.push((0, line));
+                        stmts.push((0, line.jump(target).text("; continue 'sm; }").build()));
                     }
                     Node::Region(region) if region.kind == FrameKind::If => {
                         // Dispatch to the `then`/`else` entry, then rejoin at
@@ -139,7 +273,13 @@ impl Flattener {
                         };
                         stmts.push((
                             0,
-                            format!("if {cond} {{ pc = {then_e}; }} else {{ pc = {else_e}; }}"),
+                            LineBuilder::default()
+                                .text(&format!("if {cond} {{ "))
+                                .jump(then_e)
+                                .text("; } else { ")
+                                .jump(else_e)
+                                .text("; }")
+                                .build(),
                         ));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         worklist.push((body, then_e, cont));
@@ -163,7 +303,7 @@ impl Flattener {
                         // so a branch to it resolves structurally, not to a state.
                         let header = self.alloc();
                         let cont = self.alloc();
-                        stmts.push((0, format!("pc = {header};")));
+                        stmts.push((0, Line::Goto(header)));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         let loop_arm = self.render_structured_loop(region, cont);
                         self.arms.push((header, loop_arm));
@@ -179,7 +319,7 @@ impl Flattener {
                             _ => cont,
                         };
                         self.labels.insert(region.label, branch_target);
-                        stmts.push((0, format!("pc = {inner};")));
+                        stmts.push((0, Line::Goto(inner)));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         worklist.push((region.body, inner, cont));
                         state = cont;
@@ -191,22 +331,22 @@ impl Flattener {
                         // still emitted correctly rather than dropped.
                         let mut buf = String::new();
                         render_try_into(t, 0, "", &mut buf);
-                        stmts.push((0, buf.trim_end().to_string()));
+                        stmts.push((0, buf.trim_end().to_string().into()));
                     }
                     Node::BrTable { selector, arms } => {
                         // Each arm assigns its target's carried variables then
                         // sets `pc`; the whole `match` ends the current arm.
-                        let mut line = format!("match ({selector}) as u32 {{ ");
+                        let mut line =
+                            LineBuilder::default().text(&format!("match ({selector}) as u32 {{ "));
                         for arm in arms {
                             let target = self.labels[&arm.label];
-                            line.push_str(&format!("{} => {{ ", arm.pattern));
+                            line = line.text(&format!("{} => {{ ", arm.pattern));
                             for (var, value) in arm.assigns {
-                                line.push_str(&format!("{var} = {value}; "));
+                                line = line.text(&format!("{var} = {value}; "));
                             }
-                            line.push_str(&format!("pc = {target}; }} "));
+                            line = line.jump(target).text("; } ");
                         }
-                        line.push('}');
-                        stmts.push((0, line));
+                        stmts.push((0, line.text("}").build()));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         reachable = false;
                     }
@@ -223,7 +363,8 @@ impl Flattener {
                                 "{}return {};",
                                 render_cont::park_pc(&save, resume),
                                 render_cont::suspend_result(tag, &payload)
-                            ),
+                            )
+                            .into(),
                         ));
                         // The suspend `return`s out of the whole step function (the
                         // dispatch runs inside a `loop`, so an arm value would be
@@ -252,7 +393,8 @@ impl Flattener {
                                 "{}return {};",
                                 render_cont::park_pc(&save, resume),
                                 render_cont::switch_result(tag, &target, &payload)
-                            ),
+                            )
+                            .into(),
                         ));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         state = resume;
@@ -266,7 +408,7 @@ impl Flattener {
                         // that holds only the callee `match`.
                         let call = self.alloc();
                         let resume = self.alloc();
-                        stmts.push((0, format!("pc = {call};")));
+                        stmts.push((0, Line::Goto(call)));
                         self.arms.push((state, std::mem::take(&mut stmts)));
                         // In the `call` state: drive the callee once, forwarding this
                         // step's `__args`. On the first drive they are ignored (the
@@ -296,7 +438,8 @@ impl Flattener {
                                     },
                                     " ",
                                     &format!("{{ __frame.ostack = __cret; pc = {resume}; }}"),
-                                ),
+                                )
+                                .into(),
                             )],
                         ));
                         state = resume;
@@ -304,7 +447,7 @@ impl Flattener {
                 }
             }
             if reachable {
-                stmts.push((0, format!("pc = {after};")));
+                stmts.push((0, Line::Goto(after)));
                 self.arms.push((state, stmts));
             }
         }
@@ -335,7 +478,7 @@ impl Flattener {
         // back-edges or diverges has no `break`, so the `loop` is `!` and nothing
         // may follow it (an unreachable `pc = cont` would fail `-D warnings`).
         if reachable_at_end {
-            out.push((0, format!("pc = {cont};")));
+            out.push((0, Line::Goto(cont)));
         }
         out
     }
@@ -352,7 +495,7 @@ impl Flattener {
     ) {
         for node in nodes {
             match node {
-                Node::Line(text) | Node::Term(text) => out.push((depth, text)),
+                Node::Line(text) | Node::Term(text) => out.push((depth, text.into())),
                 Node::Br { label, is_loop } => {
                     out.push((depth, self.structured_branch(label, is_loop, "")));
                 }
@@ -364,19 +507,26 @@ impl Flattener {
                 } => {
                     if assigns.is_empty() {
                         let br = self.structured_branch(label, is_loop, "");
-                        out.push((depth, format!("if {cond} {{ {br} }}")));
+                        out.push((
+                            depth,
+                            LineBuilder::default()
+                                .text(&format!("if {cond} {{ "))
+                                .line(br)
+                                .text(" }")
+                                .build(),
+                        ));
                     } else {
-                        out.push((depth, format!("if {cond} {{")));
+                        out.push((depth, format!("if {cond} {{").into()));
                         for (var, value) in assigns {
-                            out.push((depth + 1, format!("{var} = {value};")));
+                            out.push((depth + 1, format!("{var} = {value};").into()));
                         }
                         let br = self.structured_branch(label, is_loop, "");
                         out.push((depth + 1, br));
-                        out.push((depth, "}".to_string()));
+                        out.push((depth, "}".to_string().into()));
                     }
                 }
                 Node::BrTable { selector, arms } => {
-                    out.push((depth, format!("match ({selector}) as u32 {{")));
+                    out.push((depth, format!("match ({selector}) as u32 {{").into()));
                     for arm in arms {
                         let assigns: String = arm
                             .assigns
@@ -384,9 +534,16 @@ impl Flattener {
                             .map(|(var, value)| format!("{var} = {value}; "))
                             .collect();
                         let br = self.structured_branch(arm.label, arm.is_loop, &assigns);
-                        out.push((depth + 1, format!("{} => {{ {br} }},", arm.pattern)));
+                        out.push((
+                            depth + 1,
+                            LineBuilder::default()
+                                .text(&format!("{} => {{ ", arm.pattern))
+                                .line(br)
+                                .text(" },")
+                                .build(),
+                        ));
                     }
-                    out.push((depth, "}".to_string()));
+                    out.push((depth, "}".to_string().into()));
                 }
                 Node::Region(region) => self.render_structured_region(region, depth, out),
                 Node::Try(_) => unreachable!("is_structurable_loop rejects `try` subtrees"),
@@ -409,18 +566,17 @@ impl Flattener {
     /// target is a region in this subtree, or `pc = <state>; continue 'sm` when it
     /// is an enclosing flattened region (a state in `self.labels`). `assigns` is a
     /// prebuilt run of `var = value; ` statements that must precede the branch.
-    pub(crate) fn structured_branch(
-        &mut self,
-        label: usize,
-        is_loop: bool,
-        assigns: &str,
-    ) -> String {
+    pub(crate) fn structured_branch(&mut self, label: usize, is_loop: bool, assigns: &str) -> Line {
         if let Some(&state) = self.labels.get(&label) {
             self.uses_continue = true;
-            format!("{assigns}pc = {state}; continue 'sm;")
+            LineBuilder::default()
+                .text(assigns)
+                .jump(state)
+                .text("; continue 'sm;")
+                .build()
         } else {
             let keyword = if is_loop { "continue" } else { "break" };
-            format!("{assigns}{keyword} 'l{label};")
+            format!("{assigns}{keyword} 'l{label};").into()
         }
     }
 
@@ -451,28 +607,28 @@ impl Flattener {
             } else {
                 format!("'l{label}: {{")
             };
-            out.push((depth, header));
+            out.push((depth, header.into()));
         }
         match kind {
             FrameKind::Block | FrameKind::Loop => self.render_structured(body, inner_depth, out),
             FrameKind::If => {
                 let cond = cond.unwrap_or_default();
-                out.push((inner_depth, format!("if {cond} {{")));
+                out.push((inner_depth, format!("if {cond} {{").into()));
                 self.render_structured(body, inner_depth + 1, out);
                 if let Some(els) = els {
-                    out.push((inner_depth, "} else {".to_string()));
+                    out.push((inner_depth, "} else {".to_string().into()));
                     self.render_structured(els, inner_depth + 1, out);
                 }
-                out.push((inner_depth, "}".to_string()));
+                out.push((inner_depth, "}".to_string().into()));
             }
         }
         if targeted {
             // A `loop` falling through its end needs a trailing `break` to leave
             // it; a `block`/`if` falls through its labelled scope naturally.
             if kind == FrameKind::Loop && reachable_at_end {
-                out.push((inner_depth, format!("break 'l{label};")));
+                out.push((inner_depth, format!("break 'l{label};").into()));
             }
-            out.push((depth, "}".to_string()));
+            out.push((depth, "}".to_string().into()));
         }
     }
 
@@ -525,12 +681,12 @@ impl Flattener {
         for (state, stmts) in self.arms {
             let mut arm = Vec::with_capacity(stmts.len());
             for (indent, stmt) in stmts {
-                match hoist_decl(&stmt) {
+                match stmt.as_text().and_then(hoist_decl) {
                     Some((decl, assign)) => {
                         if seen.insert(decl.clone()) {
                             decls.push(decl);
                         }
-                        arm.push((indent, assign));
+                        arm.push((indent, Line::Text(assign)));
                     }
                     None => arm.push((indent, stmt)),
                 }
@@ -560,7 +716,7 @@ impl Flattener {
             // carries its indent relative to the arm body (0 for ordinary flat
             // statements).
             for (indent, stmt) in stmts {
-                push(3 + indent, stmt);
+                push(3 + indent, stmt.render().into_owned());
             }
             push(2, "}".to_string());
         }
@@ -590,12 +746,12 @@ impl Flattener {
         for (state, stmts) in arms {
             let mut arm = Vec::with_capacity(stmts.len());
             for (indent, stmt) in stmts {
-                match hoist_decl(&stmt) {
+                match stmt.as_text().and_then(hoist_decl) {
                     Some((decl, assign)) => {
                         if seen.insert(decl.clone()) {
                             decls.push(decl);
                         }
-                        arm.push((indent, assign));
+                        arm.push((indent, Line::Text(assign)));
                     }
                     None => arm.push((indent, stmt)),
                 }
@@ -660,10 +816,10 @@ impl Flattener {
             let ns = renum[&state];
             let rewritten: Vec<ArmLine> = stmts
                 .into_iter()
-                .map(|(indent, line)| {
-                    let line = rewrite_pc_targets(&line, &|s| renum[&s]);
-                    let line = rewrite_state_refs(&line, &repl);
-                    (indent, wrap_returns(&line))
+                .map(|(indent, mut line)| {
+                    line.map_targets(&|s| renum[&s]);
+                    let text = rewrite_state_refs(&line.render(), &repl);
+                    (indent, Line::Text(wrap_returns(&text)))
                 })
                 .collect();
             parts[ns / max].push((ns, rewritten));
@@ -728,7 +884,7 @@ impl Flattener {
             for (ns, stmts) in states {
                 siblings.push(format!("            {ns} => {{"));
                 for (indent, stmt) in stmts {
-                    siblings.push(format!("{}{stmt}", "    ".repeat(4 + indent)));
+                    siblings.push(format!("{}{}", "    ".repeat(4 + indent), stmt.render()));
                 }
                 siblings.push("            }".to_string());
             }
@@ -965,35 +1121,7 @@ fn wrap_returns(line: &str) -> String {
 /// dispatch to jump again, so every edge to it can skip straight to `N`.
 pub(crate) fn trivial_pc_target(body: &[ArmLine]) -> Option<usize> {
     let [(_, line)] = body else { return None };
-    line.strip_prefix("pc = ")?.strip_suffix(';')?.parse().ok()
-}
-/// Rewrite every `pc = <state>` target in `s` through `map` (leaving all other
-/// text untouched). `pc = ` and the digits are ASCII, so verbatim spans are
-/// copied at valid UTF-8 boundaries.
-pub(crate) fn rewrite_pc_targets(s: &str, map: &impl Fn(usize) -> usize) -> String {
-    let b = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
-    let mut copied = 0;
-    let mut i = 0;
-    while i + 5 <= b.len() {
-        if &b[i..i + 5] == b"pc = " {
-            let ns = i + 5;
-            let mut j = ns;
-            while j < b.len() && b[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > ns {
-                out.push_str(&s[copied..ns]);
-                out.push_str(&map(s[ns..j].parse::<usize>().unwrap()).to_string());
-                copied = j;
-                i = j;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    out.push_str(&s[copied..]);
-    out
+    line.as_goto()
 }
 /// Contract pure `pc = N;` forwarding states out of a flattened dispatch: every
 /// edge targeting such a state is redirected to the state it forwards to
@@ -1024,13 +1152,14 @@ pub(crate) fn contract_pc_edges(arms: &mut Vec<(usize, Vec<ArmLine>)>, start: us
             continue;
         }
         let mut path = Vec::new();
+        let mut on_path: HashSet<usize> = HashSet::new();
         let mut cur = s0;
         let dest = loop {
             if let Some(&d) = resolved.get(&cur) {
                 break d;
             }
             match fwd.get(&cur) {
-                Some(&next) if !path.contains(&cur) => {
+                Some(&next) if on_path.insert(cur) => {
                     path.push(cur);
                     cur = next;
                 }
@@ -1047,14 +1176,14 @@ pub(crate) fn contract_pc_edges(arms: &mut Vec<(usize, Vec<ArmLine>)>, start: us
     // Redirect all targets, in arm bodies and at the entry.
     for (_, body) in arms.iter_mut() {
         for (_, line) in body.iter_mut() {
-            *line = rewrite_pc_targets(line, &resolve);
+            line.map_targets(&resolve);
         }
     }
     let start = resolve(start);
 
     // Drop states no edge reaches any more (the folded forwarders, plus any
-    // states that were only reachable through them). Reachability walks the `pc =
-    // N` targets in the redirected bodies from the entry.
+    // states that were only reachable through them). Reachability walks the
+    // transitions in the redirected bodies from the entry.
     let index: HashMap<usize, usize> = arms
         .iter()
         .enumerate()
@@ -1070,70 +1199,27 @@ pub(crate) fn contract_pc_edges(arms: &mut Vec<(usize, Vec<ArmLine>)>, start: us
             continue;
         };
         for (_, line) in &arms[i].1 {
-            let b = line.as_bytes();
-            let mut k = 0;
-            while k + 5 <= b.len() {
-                if &b[k..k + 5] == b"pc = " {
-                    let ns = k + 5;
-                    let mut j = ns;
-                    while j < b.len() && b[j].is_ascii_digit() {
-                        j += 1;
-                    }
-                    if j > ns {
-                        stack.push(line[ns..j].parse().unwrap());
-                        k = j;
-                        continue;
-                    }
-                }
-                k += 1;
-            }
+            stack.extend(line.targets());
         }
     }
     arms.retain(|(state, _)| live.contains(state));
     start
 }
-/// Append each `pc = <state>` target found in `line` to `out`.
-fn collect_pc_targets(line: &str, out: &mut Vec<usize>) {
-    let b = line.as_bytes();
-    let mut i = 0;
-    while i + 5 <= b.len() {
-        if &b[i..i + 5] == b"pc = " {
-            let ns = i + 5;
-            let mut j = ns;
-            while j < b.len() && b[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > ns {
-                out.push(line[ns..j].parse().unwrap_or(usize::MAX));
-                i = j;
-                continue;
-            }
-        }
-        i += 1;
-    }
-}
 /// If `body` transfers to exactly one successor, unconditionally, as its final
-/// action — i.e. its whole body mentions a single `pc = T` and the last line is
-/// the bare `pc = T;` — return `T`. Such a state can be fused into a chain: its
+/// action — i.e. the whole body has a single transition and the last line is the
+/// bare `pc = T;` — return `T`. Such a state can be fused into a chain: its
 /// predecessor may run its statements inline and continue straight into `T`
 /// instead of round-tripping through the `match pc` dispatch. A state that
-/// branches (`if …/else …`, a `br_if` plus fall-through, a `br_table`) mentions
-/// two or more targets and is excluded; a `pc = T; continue 'sm;` tail (a `br`
-/// to an enclosing flattened region, emitted only inside a structured loop) does
-/// not match the bare-line shape and is left alone.
+/// branches (`if …/else …`, a `br_if` plus fall-through, a `br_table`) has two
+/// or more transitions and is excluded; a `pc = T; continue 'sm;` tail (a `br`
+/// to an enclosing flattened region, emitted only inside a structured loop) is
+/// not a bare [`Line::Goto`] and is left alone.
 fn linear_single_successor(body: &[ArmLine]) -> Option<usize> {
-    let total: usize = {
-        let mut t = Vec::new();
-        for (_, line) in body {
-            collect_pc_targets(line, &mut t);
-        }
-        t.len()
-    };
+    let total: usize = body.iter().map(|(_, line)| line.targets().count()).sum();
     if total != 1 {
         return None;
     }
-    let (_, last) = body.last()?;
-    last.strip_prefix("pc = ")?.strip_suffix(';')?.parse().ok()
+    body.last()?.1.as_goto()
 }
 /// Fuse single-successor chains in a flattened dispatch: when a state `S` ends in
 /// an unconditional `pc = T;` and `T` is reached from nowhere else, inline `T`'s
@@ -1158,16 +1244,13 @@ pub(crate) fn fuse_linear_chains(arms: &mut Vec<(usize, Vec<ArmLine>)>, start: u
         return;
     }
 
-    // In-degree of each state: one per `pc = N` edge, plus the implicit entry
-    // into `start` (so `start` is never absorbed into a predecessor).
+    // In-degree of each state: one per transition, plus the implicit entry into
+    // `start` (so `start` is never absorbed into a predecessor).
     let mut indeg: HashMap<usize, usize> = HashMap::new();
     *indeg.entry(start).or_insert(0) += 1;
-    let mut targets = Vec::new();
     for (_, body) in arms.iter() {
         for (_, line) in body {
-            targets.clear();
-            collect_pc_targets(line, &mut targets);
-            for &t in &targets {
+            for t in line.targets() {
                 *indeg.entry(t).or_insert(0) += 1;
             }
         }
@@ -1287,12 +1370,29 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        ArmLine, fuse_linear_chains, is_bankable, parse_hoisted_decl, rewrite_state_refs,
-        wrap_returns,
+        ArmLine, Line, LineBuilder, contract_pc_edges, fuse_linear_chains, is_bankable,
+        parse_hoisted_decl, rewrite_state_refs, wrap_returns,
     };
 
+    /// An arm line as the flattener would build it: a bare `pc = N;` is a
+    /// [`Line::Goto`], a line with embedded transitions an [`Line::Edges`] (each
+    /// `pc = N` becomes a jump), anything else opaque text.
     fn line(s: &str) -> ArmLine {
-        (0, s.to_string())
+        if let Some(n) = s.strip_prefix("pc = ").and_then(|r| r.strip_suffix(';'))
+            && let Ok(n) = n.parse()
+        {
+            return (0, Line::Goto(n));
+        }
+        let mut b = LineBuilder::default();
+        let mut rest = s;
+        while let Some(i) = rest.find("pc = ") {
+            let digits = rest[i + 5..].bytes().take_while(u8::is_ascii_digit).count();
+            b = b
+                .text(&rest[..i])
+                .jump(rest[i + 5..i + 5 + digits].parse().unwrap());
+            rest = &rest[i + 5 + digits..];
+        }
+        (0, b.text(rest).build())
     }
 
     /// The name→access map `render_split` feeds [`rewrite_state_refs`]: `pc` and a
@@ -1396,8 +1496,8 @@ mod tests {
         assert!(parse_hoisted_decl("l4 = st.bank_i32[7];").is_empty());
     }
 
-    fn texts(body: &[ArmLine]) -> Vec<&str> {
-        body.iter().map(|(_, s)| s.as_str()).collect()
+    fn texts(body: &[ArmLine]) -> Vec<String> {
+        body.iter().map(|(_, l)| l.render().into_owned()).collect()
     }
 
     #[test]
@@ -1459,5 +1559,48 @@ mod tests {
         assert_eq!(arms.len(), 1);
         assert_eq!(arms[0].0, 0);
         assert_eq!(texts(&arms[0].1), ["a += 1;", "a += 2;", "pc = 0;"]);
+    }
+
+    #[test]
+    fn text_mentioning_pc_is_never_an_edge() {
+        // The old text scan treated any `pc = N` substring as a transition; a
+        // transition-free line must now be invisible to edge analysis and survive
+        // a retarget untouched.
+        let mut l = Line::Text("let s = \"pc = 7\"; st.pc = 7;".to_string());
+        assert_eq!(l.targets().count(), 0);
+        l.map_targets(&|_| 99);
+        assert_eq!(l.render(), "let s = \"pc = 7\"; st.pc = 7;");
+    }
+
+    #[test]
+    fn map_targets_retargets_every_edge_and_renders_back() {
+        let mut l = LineBuilder::default()
+            .text("if c { ")
+            .jump(1)
+            .text("; } else { ")
+            .jump(2)
+            .text("; }")
+            .build();
+        assert_eq!(l.targets().collect::<Vec<_>>(), [1, 2]);
+        l.map_targets(&|s| s + 10);
+        assert_eq!(l.render(), "if c { pc = 11; } else { pc = 12; }");
+        let mut g = Line::Goto(3);
+        g.map_targets(&|s| s * 2);
+        assert_eq!((g.as_goto(), g.render().as_ref()), (Some(6), "pc = 6;"));
+    }
+
+    #[test]
+    fn contract_resolves_forwarding_cycles_and_chains() {
+        // 0 -> 1 -> 2 -> 1 is a side-effect-free cycle: it must be kept (an
+        // infinite loop), not resolved away; 3 forwards through it to the cycle.
+        let mut arms = vec![
+            (0, vec![line("pc = 3;")]),
+            (1, vec![line("pc = 2;")]),
+            (2, vec![line("pc = 1;")]),
+            (3, vec![line("pc = 1;")]),
+        ];
+        let start = contract_pc_edges(&mut arms, 0);
+        assert!(arms.iter().any(|(s, _)| *s == start));
+        assert!(arms.len() <= 2, "only the cycle survives");
     }
 }
