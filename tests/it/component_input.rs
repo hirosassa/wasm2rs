@@ -4,8 +4,8 @@
 use std::process::Command;
 
 use wasm2rs::{
-    ComponentOptions, TranspileError, TranspileOptions, dump, transpile, transpile_component,
-    transpile_component_with_exports, wit_exports,
+    ComponentOptions, SourceFile, SplitOptions, TranspileError, TranspileOptions, dump, transpile,
+    transpile_component, transpile_component_split, transpile_component_with_exports, wit_exports,
 };
 
 use crate::common;
@@ -402,7 +402,7 @@ fn the_cli_component_flag_passes_external_types_to_the_glue() {
 
 #[test]
 fn the_cli_component_flag_names_the_flag_it_cannot_combine_with() {
-    let (dir, input) = cli_component("refuse");
+    let (_dir, input) = cli_component("refuse");
     for flag in [
         "--entry-exports=a",
         "--import-memory",
@@ -423,15 +423,6 @@ fn the_cli_component_flag_names_the_flag_it_cannot_combine_with() {
             "{flag}: {stderr}"
         );
     }
-    // A split needs the `funcs_per_file` positional, which a single source has no use for.
-    let out = cli(&[
-        "--component".as_ref(),
-        input.as_os_str(),
-        dir.join("o.rs").as_os_str(),
-        "10".as_ref(),
-    ]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("--component"));
 }
 
 #[test]
@@ -444,5 +435,93 @@ fn the_cli_component_flag_rejects_a_core_module() {
     assert!(
         stderr.contains("core module") && stderr.contains("transpile"),
         "{stderr}"
+    );
+}
+
+// --- `transpile_component_split` ---
+
+fn split_component(options: &ComponentOptions, split: &SplitOptions) -> Vec<SourceFile> {
+    let mut files = Vec::new();
+    transpile_component_split(&component_of(WORLD, CORE), options, split, |f| {
+        files.push(f);
+        Ok(())
+    })
+    .unwrap();
+    files
+}
+
+#[test]
+fn a_single_file_split_is_the_transpile_component_output() {
+    let options = ComponentOptions::default();
+    let files = split_component(&options, &SplitOptions::single_file());
+    let whole = transpile_component(&component_of(WORLD, CORE), &options).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, "lib.rs");
+    assert_eq!(files[0].code, whole);
+}
+
+#[test]
+fn a_split_component_builds_with_the_glue_in_its_root() {
+    // Without the external library the glue declares its own `Host`, so the crate stands alone.
+    let options = ComponentOptions {
+        external_types: None,
+        ..ComponentOptions::default()
+    };
+    let files = split_component(
+        &options,
+        &SplitOptions {
+            funcs_per_file: 1,
+            max_bytes_per_file: 0,
+        },
+    );
+    assert!(files.len() > 1, "the component has several functions");
+    let (root, chunks) = files.split_last().unwrap();
+    assert_eq!(root.name, "lib.rs");
+    assert!(root.code.contains("pub struct Glue"));
+    assert!(chunks.iter().all(|f| !f.code.contains("pub struct Glue")));
+
+    let dir = std::env::temp_dir().join(format!("wasm2rs_component_split_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in &files {
+        std::fs::write(dir.join(&f.name), &f.code).unwrap();
+    }
+    let out = Command::new("rustc")
+        .current_dir(&dir)
+        .args(["lib.rs", "--crate-type", "lib", "--edition", "2024", "-o"])
+        .arg(dir.join("libgen.rlib"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn the_cli_splits_a_component_into_a_directory() {
+    let dir = std::env::temp_dir().join(format!("wasm2rs_component_cli_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("c.wasm");
+    std::fs::write(&input, component_of(WORLD, CORE)).unwrap();
+    let out_dir = dir.join("out");
+    let out = Command::new(env!("CARGO_BIN_EXE_wasm2rs"))
+        .arg("--component")
+        .arg(&input)
+        .arg(&out_dir)
+        .arg("1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let root = std::fs::read_to_string(out_dir.join("lib.rs")).unwrap();
+    assert!(root.contains("mod funcs_0;"), "{root}");
+    assert!(root.contains("pub trait Exports"), "{root}");
+    assert!(
+        !out_dir.join("Cargo.toml").exists(),
+        "the glue needs a manifest with wasm2rs-wasi"
     );
 }

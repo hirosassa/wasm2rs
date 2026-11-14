@@ -10,12 +10,13 @@ use wasmparser::{
     ElementKind, Encoding, ExternalKind, Instance, Parser, Payload, TypeRef,
 };
 
+use crate::parse::parse_module;
 use crate::wit::{
     CoreWiring, Supplier, core_wiring, is_wit_function, wit_functions, wit_host_glue_for_module,
 };
 use crate::{
-    TranspileError, TranspileOptions, WitExport, WitOptions, transpile_with_host_imports,
-    wit_exports,
+    SourceFile, SplitOptions, TranspileError, TranspileOptions, WitExport, WitOptions,
+    transpile_ir_split_with_glue, wit_exports,
 };
 
 /// Options of [`transpile_component`].
@@ -91,6 +92,34 @@ pub fn transpile_component_with_exports(
     component: &[u8],
     options: &ComponentOptions,
 ) -> Result<(String, Vec<WitExport>), TranspileError> {
+    let mut code = String::new();
+    let exports =
+        transpile_component_split(component, options, &SplitOptions::single_file(), |file| {
+            code.push_str(&file.code);
+            Ok(())
+        })?;
+    Ok((code, exports))
+}
+
+/// [`transpile_component_with_exports`], handing each source file to `sink` as it completes
+/// (see [`transpile_split`](crate::transpile_split)) so the peak memory stays around one file.
+///
+/// The glue (and the typed `Exports`) is appended to the root `lib.rs`, which is emitted last;
+/// the `funcs_{n}.rs` chunks are the program's own. With [`SplitOptions::single_file`] the one
+/// `lib.rs` is byte-identical to [`transpile_component`].
+///
+/// # Errors
+///
+/// As [`transpile_component`], plus whatever `sink` returns.
+pub fn transpile_component_split<F>(
+    component: &[u8],
+    options: &ComponentOptions,
+    split: &SplitOptions,
+    sink: F,
+) -> Result<Vec<WitExport>, TranspileError>
+where
+    F: FnMut(SourceFile) -> Result<(), TranspileError>,
+{
     let layout = scan(component)?;
     let exports = wit_exports(component)?;
     // Without `exports` nothing generates the callback loop that drives an async lift, and its
@@ -114,29 +143,21 @@ pub fn transpile_component_with_exports(
         exports: options.exports,
         ..WitOptions::default()
     };
-    let module = match select_program(component, &layout, &exports)? {
-        Program::Module(module) => module,
+    match select_program(component, &layout, &exports)? {
+        Program::Module(module) => transpile_ir_split_with_glue(
+            parse_module(module, &transpile)?,
+            &transpile,
+            split,
+            |core_imports, imports_trait| {
+                wit_host_glue_for_module(component, &wit, &core_imports, None, imports_trait)
+            },
+            sink,
+        )?,
         Program::Linked => {
-            let code = link::transpile_linked(component, &layout, &exports, &transpile, &wit)?;
-            return Ok((code, exports));
+            link::transpile_linked(component, &layout, &exports, &transpile, &wit, split, sink)?;
         }
-    };
-    let (mut out, core_imports) = transpile_with_host_imports(module, &transpile)?;
-    out.push('\n');
-    out.push_str(&wit_host_glue_for_module(
-        component,
-        &wit,
-        &core_imports,
-        None,
-        has_imports_trait(&out),
-    )?);
-    Ok((out, exports))
-}
-
-/// Whether the transpiled module declares a host (`pub trait Imports`) at the start of a
-/// line (data segments are byte strings on one line, so their contents cannot match).
-fn has_imports_trait(code: &str) -> bool {
-    code.starts_with("pub trait Imports") || code.contains("\npub trait Imports")
+    }
+    Ok(exports)
 }
 
 /// What the component's program is.
@@ -723,5 +744,56 @@ mod tests {
         )
         .unwrap();
         assert!(!is_linked(&component));
+    }
+
+    fn split_files(component: &[u8], split: &SplitOptions) -> Vec<SourceFile> {
+        let mut files = Vec::new();
+        transpile_component_split(component, &ComponentOptions::default(), split, |f| {
+            files.push(f);
+            Ok(())
+        })
+        .unwrap();
+        files
+    }
+
+    const BODIES: [&str; 3] = [
+        r#"(func (export "nop"))"#,
+        r#"(func $g (result i32) i32.const 77) (elem (i32.const 7) $g)"#,
+        r#"(data (i32.const 8) "\2a")"#,
+    ];
+
+    #[test]
+    fn a_single_file_split_is_the_one_string_output() {
+        for body in BODIES {
+            let c = component(body);
+            let files = split_files(&c, &SplitOptions::single_file());
+            assert_eq!(files.len(), 1);
+            let whole = transpile_component(&c, &ComponentOptions::default()).unwrap();
+            assert_eq!(files[0].name, "lib.rs");
+            assert_eq!(files[0].code, whole);
+        }
+    }
+
+    #[test]
+    fn a_split_appends_the_glue_to_the_root_only() {
+        let mut split_seen = false;
+        for body in BODIES {
+            let c = component(body);
+            let whole = transpile_component(&c, &ComponentOptions::default()).unwrap();
+            assert!(whole.contains("pub trait Exports"));
+            let files = split_files(
+                &c,
+                &SplitOptions {
+                    funcs_per_file: 1,
+                    max_bytes_per_file: 0,
+                },
+            );
+            let (root, chunks) = files.split_last().unwrap();
+            assert_eq!(root.name, "lib.rs");
+            split_seen |= files.len() > 1;
+            assert!(root.code.contains("pub trait Exports"));
+            assert!(chunks.iter().all(|f| !f.code.contains("pub trait Exports")));
+        }
+        assert!(split_seen);
     }
 }

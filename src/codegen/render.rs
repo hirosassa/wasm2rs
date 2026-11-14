@@ -1798,7 +1798,7 @@ fn shared_memory_runtime_lines() -> Vec<String> {
 /// non-WASI function import, an imported global, or host-owned memory/table.
 /// Recognised WASI imports are native inherent methods and need no host, so a
 /// module whose imports are all WASI is fully standalone.
-fn needs_host_trait(parts: &ModuleParts<'_>) -> bool {
+pub(crate) fn needs_host_trait(parts: &ModuleParts<'_>) -> bool {
     parts.imports.iter().any(ImportInfo::is_host)
         || !parts.tail_imports.is_empty()
         || !parts.imported_globals.is_empty()

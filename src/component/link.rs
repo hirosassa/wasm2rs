@@ -14,7 +14,8 @@ use crate::link::{ImportSources, LinkModule, Source, link, rewrite_bodies};
 use crate::parse::{ModuleIr, parse_module};
 use crate::wit::{HostFunc, Supplier, WiredInstance, core_wiring, wit_host_glue_for_module};
 use crate::{
-    TranspileError, TranspileOptions, WitExport, WitOptions, transpile_ir_with_host_imports,
+    SourceFile, SplitOptions, TranspileError, TranspileOptions, WitExport, WitOptions,
+    transpile_ir_split_with_glue,
 };
 
 /// The name the linked unit exports the first lowering `realloc` that is not the lifts' under
@@ -98,7 +99,9 @@ pub(super) fn transpile_linked(
     exports: &[WitExport],
     transpile: &TranspileOptions,
     wit: &WitOptions,
-) -> Result<String, TranspileError> {
+    split: &SplitOptions,
+    sink: impl FnMut(SourceFile) -> Result<(), TranspileError>,
+) -> Result<(), TranspileError> {
     let wiring = core_wiring(component)?;
     let mut members = Vec::new();
     for (i, instance) in wiring.instances.iter().enumerate() {
@@ -209,28 +212,30 @@ pub(super) fn transpile_linked(
 
     let rewritten = rewrite_bodies(&modules)?;
     let ir: ModuleIr<'_> = link(modules, &rewritten)?;
-    let (mut out, mut core_imports) = transpile_ir_with_host_imports(ir, transpile)?;
-    // A host import the transpiler runs as native WASI is not in `core_imports`; that is
-    // harmless while no import allocates through a `realloc` of its own.
-    if core_imports.len() != import_reallocs.len() && import_reallocs.iter().any(Option::is_some) {
-        return Err(TranspileError::Internal(
-            "the linked unit's host imports do not match the component's lowered imports".into(),
-        ));
-    }
-    if core_imports.len() == import_reallocs.len() {
-        for (import, realloc) in core_imports.iter_mut().zip(import_reallocs) {
-            import.realloc = realloc;
-        }
-    }
-    out.push('\n');
-    out.push_str(&wit_host_glue_for_module(
-        component,
-        wit,
-        &core_imports,
-        Some(lifts),
-        super::has_imports_trait(&out),
-    )?);
-    Ok(out)
+    transpile_ir_split_with_glue(
+        ir,
+        transpile,
+        split,
+        |mut core_imports, imports_trait| {
+            // A host import the transpiler runs as native WASI is not in `core_imports`; that
+            // is harmless while no import allocates through a `realloc` of its own.
+            if core_imports.len() != import_reallocs.len()
+                && import_reallocs.iter().any(Option::is_some)
+            {
+                return Err(TranspileError::Internal(
+                    "the linked unit's host imports do not match the component's lowered imports"
+                        .into(),
+                ));
+            }
+            if core_imports.len() == import_reallocs.len() {
+                for (import, realloc) in core_imports.iter_mut().zip(import_reallocs) {
+                    import.realloc = realloc;
+                }
+            }
+            wit_host_glue_for_module(component, wit, &core_imports, Some(lifts), imports_trait)
+        },
+        sink,
+    )
 }
 
 /// What an export of a provider module (link index `module`) is, for an import of kind `ty`.

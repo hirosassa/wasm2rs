@@ -19,7 +19,10 @@ mod parse;
 mod wit;
 mod wit_abi;
 
-pub use component::{ComponentOptions, transpile_component, transpile_component_with_exports};
+pub use component::{
+    ComponentOptions, transpile_component, transpile_component_split,
+    transpile_component_with_exports,
+};
 pub use dump::{ModuleSummary, dump};
 pub use extract::extract_core_modules;
 pub use wit::{
@@ -458,20 +461,7 @@ pub(crate) fn transpile_ir_with_host_imports(
     let mut code = None;
     let mut imports = Vec::new();
     generate_from_ir(ir, topts, |parts| {
-        imports = parts
-            .imports
-            .iter()
-            .chain(parts.tail_imports)
-            .filter(|im| im.is_host())
-            .filter_map(|im| {
-                Some(wit::CoreImport {
-                    module: im.module.clone(),
-                    field: im.field.clone(),
-                    ident: im.ident.clone()?,
-                    realloc: None,
-                })
-            })
-            .collect();
+        imports = host_core_imports(parts);
         codegen::generate_module_split(
             parts,
             single.funcs_per_file,
@@ -484,6 +474,54 @@ pub(crate) fn transpile_ir_with_host_imports(
     })?;
     let code = code.ok_or_else(|| TranspileError::Internal("no source emitted".into()))?;
     Ok((code, imports))
+}
+
+/// Split-transpile an already parsed (or linked) module, appending the text `glue` builds to
+/// the root file (`lib.rs`, always emitted last), so the module is never joined with its glue
+/// in memory. `glue` gets the module's host imports and whether it declares an `Imports` trait.
+pub(crate) fn transpile_ir_split_with_glue<F>(
+    ir: parse::ModuleIr<'_>,
+    topts: &TranspileOptions,
+    split: &SplitOptions,
+    glue: impl FnOnce(Vec<wit::CoreImport>, bool) -> Result<String, TranspileError>,
+    mut sink: F,
+) -> Result<(), TranspileError>
+where
+    F: FnMut(SourceFile) -> Result<(), TranspileError>,
+{
+    generate_from_ir(ir, topts, |parts| {
+        let imports = host_core_imports(parts);
+        let glue = glue(imports, codegen::needs_host_trait(parts))?;
+        codegen::generate_module_split(
+            parts,
+            split.funcs_per_file,
+            split.max_bytes_per_file,
+            &mut |name, mut code| {
+                if name == "lib.rs" {
+                    code.push('\n');
+                    code.push_str(&glue);
+                }
+                sink(SourceFile { name, code })
+            },
+        )
+    })
+}
+
+fn host_core_imports(parts: &codegen::ModuleParts<'_>) -> Vec<wit::CoreImport> {
+    parts
+        .imports
+        .iter()
+        .chain(parts.tail_imports)
+        .filter(|im| im.is_host())
+        .filter_map(|im| {
+            Some(wit::CoreImport {
+                module: im.module.clone(),
+                field: im.field.clone(),
+                ident: im.ident.clone()?,
+                realloc: None,
+            })
+        })
+        .collect()
 }
 
 /// Transpile a wasm binary into a single Rust source, returned in three
