@@ -341,3 +341,49 @@ fn imports_allocate_through_their_own_reallocs() {
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "100200");
 }
+
+/// An async export lifted from a module other than the program: the linked unit carries its
+/// callback export too, so the driver reaches both.
+#[test]
+fn an_async_lift_of_an_appended_module_is_driven_through_the_linked_callback() {
+    let component = wat::parse_str(
+        r#"(component
+            (import "t:t/i" (instance $i (export "f" (func (result u32)))))
+            (alias export $i "f" (func $hf))
+            (core func $lowered (canon lower (func $hf)))
+            (core instance $host (export "f" (func $lowered)))
+            (core module $a
+                (import "t:t/i" "f" (func $f (result i32)))
+                (memory (export "memory") 1)
+                (func (export "run") (result i32) (call $f)))
+            (core module $b (import "env" "memory" (memory 1))
+                (func (export "go") (result i32) (i32.const 1))
+                (func (export "cb") (param i32 i32 i32) (result i32)
+                    (i32.store (i32.const 0) (i32.add (local.get 0) (i32.const 40)))
+                    (i32.const 0)))
+            (core instance $ia (instantiate $a (with "t:t/i" (instance $host))))
+            (alias core export $ia "memory" (core memory $mem))
+            (core instance $env (export "memory" (memory $mem)))
+            (core instance $ib (instantiate $b (with "env" (instance $env))))
+            (func $fa (result u32) (canon lift (core func $ia "run")))
+            (alias core export $ib "cb" (core func $cb))
+            (type $async (func async))
+            (func $fb (type $async) (canon lift (core func $ib "go") async (callback $cb)))
+            (export "fa" (func $fa))
+            (export "go" (func $fb)))"#,
+    )
+    .unwrap();
+    let code = transpile_component(&component, &own_host()).unwrap();
+    assert!(
+        code.contains("fn go_start(&mut self) -> CallbackCode;"),
+        "{code}"
+    );
+    let out = run(
+        "link_async_callback",
+        &code,
+        "let mut codes = Vec::new();\n\
+         Exports::go(&mut inst, &mut |c| { codes.push(c); Some([1, 0, 0]) });\n\
+         println!(\"{}\", codes.len());",
+    );
+    assert_eq!(out, "1");
+}

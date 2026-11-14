@@ -2,7 +2,8 @@
 
 This is the M0.5 spike of the WASI 0.3 (p3) plan. It records what a real async guest compiles
 to, so that the design of M1 (reading `async func` and generating glue) and M2 (a scheduler) does
-not rest on guesses. Nothing here is implemented; the current state is in
+not rest on guesses. This page describes the spike only; M1 (reading and typing the async features and the glue's
+shape, no scheduler) has landed since, and the current state is in
 [wasi-p2-status.md](wasi-p2-status.md).
 
 ## Method

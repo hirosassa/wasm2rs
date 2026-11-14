@@ -1619,3 +1619,89 @@ fn a_handle_inside_a_list_or_option_result_is_written_through_memory() {
         "struct H;\nimpl Host for H {\n    fn a_b_i_all(&mut self) -> Vec<Option<WitStream<u8>>> {\n        vec![Some(WitStream::new(1)), None]\n    }\n}",
     );
 }
+
+const ASYNC_LOWER_WIT: &str = "package a:b;
+    interface c { slow: async func(n: u32) -> u32; ping: async func(); }
+    world w { import c; }";
+
+const ASYNC_LOWER_CORE: &str = r#"(module
+  (import "a:b/c" "[async-lower]slow" (func $slow (param i32 i32) (result i32)))
+  (import "a:b/c" "[async-lower]ping" (func $ping (result i32)))
+  (memory (export "memory") 1)
+  (func (export "run") (result i32) (local $ping i32) (local $slow i32)
+    (local.set $ping (call $ping))
+    (local.set $slow (call $slow (i32.const 20) (i32.const 16)))
+    ;; The host completed both calls: status RETURNED (2) each, the result in memory at 16.
+    (i32.add (i32.add (i32.load (i32.const 16)) (local.get $ping)) (local.get $slow))))"#;
+
+#[test]
+fn an_async_lowered_import_completes_through_the_host_and_returns_status_returned() {
+    let component = component_with_wit(ASYNC_LOWER_WIT, ASYNC_LOWER_CORE);
+    let generated = wasm2rs::transpile_component(
+        &component,
+        &wasm2rs::ComponentOptions {
+            external_types: None,
+            exports: false,
+            ..wasm2rs::ComponentOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        generated.contains("Instance<Self>, a0: i32, a1: i32) -> i32;"),
+        "the async lower takes the argument and the result pointer, and returns the status\n{generated}"
+    );
+    let program = format!(
+        "{generated}\n\
+         struct H;\n\
+         impl Host for H {{\n\
+             fn a_b_c_slow(&mut self, n: u32) -> u32 {{ n * 2 }}\n\
+             fn a_b_c_ping(&mut self) {{}}\n\
+         }}\n\
+         fn main() {{\n\
+             let mut inst = Instance::new(Glue(H));\n\
+             println!(\"{{}}\", inst.run());\n\
+         }}\n"
+    );
+    let bin = common::build("wit_host_async_lower", &program);
+    let out = Command::new(bin).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The host doubled 20 into memory, and each call returned RETURNED (2): 40 + 2 + 2.
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "44\n");
+}
+
+#[test]
+fn a_future_in_an_import_is_refused_with_external_types() {
+    let component = component_with_wit(
+        "package a:b; interface c { f: func(x: future<u32>); } world w { import c; }",
+        r#"(module (import "a:b/c" "f" (func (param i32))))"#,
+    );
+    let err = wasm2rs::transpile_component(&component, &wasm2rs::ComponentOptions::default())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("external types"), "{err}");
+}
+
+#[test]
+fn a_function_imported_both_sync_and_async_is_refused() {
+    let component = component_with_wit(
+        "package a:b; interface c { f: async func(); } world w { import c; }",
+        r#"(module
+             (import "a:b/c" "f" (func))
+             (import "a:b/c" "[async-lower]f" (func (result i32))))"#,
+    );
+    let err = wasm2rs::transpile_component(
+        &component,
+        &wasm2rs::ComponentOptions {
+            external_types: None,
+            exports: false,
+            ..wasm2rs::ComponentOptions::default()
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("both with and without"), "{err}");
+}

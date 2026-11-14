@@ -117,14 +117,6 @@ pub fn transpile_component_with_exports(
     let module = match select_program(component, &layout, &exports)? {
         Program::Module(module) => module,
         Program::Linked => {
-            // The linker renames the core exports the glue calls, not the callback's.
-            if has_async {
-                return Err(TranspileError::Unsupported(
-                    "an async export (WASI 0.3) of a component with several core modules \
-                     (the callback export is not traced through linking)"
-                        .into(),
-                ));
-            }
             let code = link::transpile_linked(component, &layout, &exports, &transpile, &wit)?;
             return Ok((code, exports));
         }

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
 
 use super::Layout;
+use crate::WitAsyncAbi;
 use crate::codegen;
 use crate::link::{ImportSources, LinkModule, Source, link, rewrite_bodies};
 use crate::parse::{ModuleIr, parse_module};
@@ -422,6 +423,12 @@ fn name_lifts(
         plan.add(k, &e.core_export, &unit);
         let mut lift = e.clone();
         lift.core_export = unit.clone();
+        if let Some(WitAsyncAbi::Callback { callback }) = &e.async_abi {
+            // Lifts sharing a callback share one export of the unit.
+            let name = format!("cabi_callback_m{}_{callback}", e.core_module);
+            plan.add(k, callback, &name);
+            lift.async_abi = Some(WitAsyncAbi::Callback { callback: name });
+        }
         if let Some(own) = &e.post_return {
             let name = format!("cabi_post_{unit}");
             plan.add(k, own, &name);

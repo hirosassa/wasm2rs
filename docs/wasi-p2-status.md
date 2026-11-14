@@ -89,29 +89,36 @@ Transpilation of a component (errors that say why):
 - The component bytes are parsed several times inside one transpilation (layout scan,
   `wit_exports`, the glue); this only costs time.
 
-## WASI 0.3 (p3): not supported
+## WASI 0.3 (p3): read and typed, not run
 
 WASI 0.3.0 (released 2026-06-11) replaces `wasi:io` with the component model's async features.
-wasm2rs targets 0.2 only: a component that uses any of the features below is refused with an
-`Unsupported` error that names the feature (the error says "WASI 0.3"). Nothing is silently
-mis-translated.
+wasm2rs reads and types them and generates the glue's shape, but **has no scheduler yet**: an
+async guest transpiles, it does not run (milestone M1 done, M2 open). Anything that cannot run is
+either refused with an `Unsupported` error that says "WASI 0.3", or generated as code that says
+so (`unimplemented!`/a panic naming the missing runtime). Nothing is silently mis-translated.
 
-| Feature | Where it is refused | Why it is not there |
+| Feature | State | Where |
 |---|---|---|
-| `async func` types | `src/wit/read.rs` (`P3_ASYNC_FUNC`) | needs the async canonical ABI and a single-threaded task scheduler |
-| `future<T>`, `stream<T>`, `error-context` | `src/wit/read.rs` (`P3_FUTURE`, `P3_STREAM`, `P3_ERROR_CONTEXT`) | values the scheduler owns; no `future.*`/`stream.*` built-ins |
-| `canon lift ... async` (stackful ABI) | `src/wit/exports.rs` | a guest that blocks inside the host's scheduler; needs suspension across `call_indirect`, which the `cont` backend does not support |
-| `canon lift ... async (callback ...)` (callback ABI) | `src/wit/exports.rs` | needs `task.return`, `subtask.*`, `waitable-set.*` and an event loop |
-| `core-type` / `gc` canonical options | `src/wit/exports.rs` | component-model GC, not modelled |
+| `async func` | read (`WitFunc::is_async`); a typed `Host` method, marked in its doc comment, that the host completes before returning | `src/wit/read.rs`, `src/wit/emit.rs` |
+| `future<T>`, `stream<T>` | modelled (`WitType::Future`/`Stream`), typed as the handles `WitFuture<T>`/`WitStream<T>` (a `u32` table index); they have no read/write methods | `src/wit/emit.rs` |
+| `canon lower ... async` of an import | glue calls the host, writes the result through the result pointer and returns the status `RETURNED` (2, no subtask); at most 4 flat parameters, else through memory | `src/wit/glue.rs` |
+| `canon lift ... async (callback ...)` (callback ABI) | read (`WitExport::async_abi`); `Exports` gets `<name>_start`, `<name>_callback` and a driver `<name>` that loops "entry → callback(event) until `Exit`". The caller supplies the events; with none, the driver panics saying the async runtime is not implemented. A result is typed but the driver ends in `unimplemented!` (it arrives through `task.return`, not routed) | `src/wit/exports.rs`, `src/wit/glue.rs` |
+| `canon lift ... async` (stackful ABI) | read; refused by the glue: a guest that blocks inside the host's scheduler needs suspension across `call_indirect`, which the `cont` backend does not support | `src/wit/glue.rs` |
+| async lift with more than 4 flat parameters | refused (they would pass through memory) | `src/wit/glue.rs` |
+| async exports with `exports: false` | refused: nothing would generate the callback loop | `src/component.rs` |
+| `future<T>`/`stream<T>` in an import, with external types (`--component`) | refused: the library declares no handle types; exports are fine | `src/wit/emit.rs` |
+| `error-context` | refused (`P3_ERROR_CONTEXT`) | `src/wit/read.rs` |
+| `core-type` / `gc` canonical options | refused, component-model GC is not modelled | `src/wit/exports.rs` |
 
 The `canon` built-ins of the async ABI (`task.*`, `subtask.*`, `waitable-set.*`, `stream.*`,
-`future.*`) are not refused on their own: a core module that imports one gets it as a plain
-method of the flat `Imports` trait, which the embedder would have to implement. Real 0.3 guests
-also have async types or lifts, so they are refused by the rows above. The `wasm2rs-wasi` host is
-built on `wasi:io` pollables and streams, so a 0.3 host would be a separate surface. The
-milestone plan (M0 this refusal, M0.5 a spike on what real async guests look like, then reading
-`async func` and generating glue, a callback-ABI scheduler, and a 0.3 host) is a proposal, not a
-commitment.
+`future.*`, `context.*`) are not implemented: a core module that imports one gets it as a plain
+method of the flat `Imports` trait, which the embedder would have to implement, so the generated
+program of a real 0.3 guest does not build until M2 supplies them. What is tested is the
+transpilation itself: a `wit-bindgen` 0.63 Rust guest (the one of
+[wasi-p3-spike.md](wasi-p3-spike.md)) transpiles (through `transpile_component` with `external_types: None`, since it imports a
+stream and a future), with its callback exports traced through linking. The `wasm2rs-wasi` host is built on `wasi:io` pollables and streams, so a 0.3 host would
+be a separate surface. M2 (a single-threaded scheduler for the built-ins above, `task.return`
+routing) and M3/M4 are a proposal, not a commitment.
 
 ## Not done yet
 

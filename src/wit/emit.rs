@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use super::exports::Lowers;
 use super::read::{unsupported, wit_functions};
 use super::*;
 use crate::TranspileError;
@@ -332,10 +331,12 @@ impl Records {
                 Ok(())
             }
             WitType::Future(t) | WitType::Stream(t) => {
-                if !self.prefix.is_empty() {
+                // The library's `Host` would name its own handle types, not the ones declared
+                // here; only the exports (declared here as well) agree with them.
+                if !self.prefix.is_empty() && !self.exports_phase {
                     return Err(unsupported(
-                        "future and stream types with external types (the library declares no \
-                         handle types for them)",
+                        "future and stream types in an import with external types (the library \
+                         declares no handle types for them)",
                     ));
                 }
                 self.uses_async_handles = true;
@@ -973,9 +974,11 @@ fn glue_text(
     imports_trait: bool,
 ) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
-    let lowers = super::exports::lowers(component)?;
-    reject_async_lowers(&lowers)?;
-    let utf16 = utf16_lowers(lowers.encodings, &funcs)?;
+    let super::exports::Lowers {
+        encodings,
+        async_: async_lowers,
+    } = super::exports::lowers(component)?;
+    let utf16 = utf16_lowers(encodings, &funcs)?;
     let exports = if options.exports {
         match lifts {
             Some(lifts) => lifts,
@@ -1056,7 +1059,7 @@ fn glue_text(
         .exports
         .then_some((exports.as_slice(), export_names.as_slice()));
     let methods = match core_imports {
-        Some(core) => core_methods(&funcs, &names, &utf16, core)?,
+        Some(core) => core_methods(&funcs, &names, &utf16, core, &async_lowers)?,
         None => funcs
             .iter()
             .zip(&names)
@@ -1067,24 +1070,12 @@ fn glue_text(
                 host: name,
                 realloc: None,
                 utf16,
+                async_lower: is_async_lower(&async_lowers, func),
             })
             .collect(),
     };
     glue::write(&mut out, &methods, &records, exported, imports_trait)?;
     Ok(out)
-}
-
-/// An import lowered with `async` has a different core signature (a result pointer in, a status
-/// out) that the synchronous glue would silently misread: refuse it until its glue is generated.
-fn reject_async_lowers(lowers: &Lowers) -> Result<(), TranspileError> {
-    if let Some(host) = lowers.async_.first() {
-        return Err(unsupported(format!(
-            "import `{}#{}` is lowered with the `async` option (WASI 0.3: its glue is not \
-             generated yet)",
-            host.interface, host.name
-        )));
-    }
-    Ok(())
 }
 
 /// For each of `funcs`, whether the component lowers it with `string-encoding=utf16` (the glue
@@ -1139,12 +1130,20 @@ fn utf16_lowers(
     Ok(encodings.iter().map(|e| *e == Some("utf16")).collect())
 }
 
+/// Whether the component lowers `func` with the `async` option.
+fn is_async_lower(async_lowers: &[HostFunc], func: &WitFunc) -> bool {
+    async_lowers
+        .iter()
+        .any(|h| h.interface == func.interface && h.name == func.name)
+}
+
 /// One glue method per core import, in import order.
 fn core_methods<'a>(
     funcs: &'a [WitFunc],
     host_names: &'a [String],
     utf16: &[bool],
     core: &'a [CoreImport],
+    async_lowers: &[HostFunc],
 ) -> Result<Vec<glue::Method<'a>>, TranspileError> {
     let mut methods = Vec::new();
     for import in core {
@@ -1158,12 +1157,25 @@ fn core_methods<'a>(
                 "a resolved core import is not a component function".into(),
             ));
         };
+        // One function the module imports both ways would get a single signature.
+        let async_lower = is_async_lower(async_lowers, func);
+        if let Some(plain) = import.field.strip_prefix("[async-lower]")
+            && core
+                .iter()
+                .any(|o| o.module == import.module && o.field == plain)
+        {
+            return Err(unsupported(format!(
+                "import `{}#{}` is lowered both with and without the `async` option (WASI 0.3)",
+                func.interface, func.name
+            )));
+        }
         methods.push(glue::Method {
             func,
             name: &import.ident,
             host,
             realloc: import.realloc.as_deref(),
             utf16,
+            async_lower,
         });
     }
     Ok(methods)
@@ -1190,6 +1202,8 @@ fn resolve_core_import(
     module: &str,
     field: &str,
 ) -> Result<Option<usize>, TranspileError> {
+    // A function lowered with `async` is imported as `[async-lower]name`.
+    let field = field.strip_prefix("[async-lower]").unwrap_or(field);
     if let Some(i) = funcs
         .iter()
         .position(|f| f.interface == module && f.name == field)

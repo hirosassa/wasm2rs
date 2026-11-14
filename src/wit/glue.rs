@@ -30,8 +30,8 @@ use super::{WitAsyncAbi, WitExport, WitFunc, WitStringEncoding, WitType};
 use crate::TranspileError;
 use crate::codegen::assign_export_names;
 use crate::wit_abi::{
-    Budget, Flat, core_signature, field_offsets, flatten, needs_memory, record_layout, size_align,
-    variant_layout,
+    Budget, Flat, MAX_FLAT_ASYNC_PARAMS, core_signature, field_offsets, flatten, needs_memory,
+    record_layout, size_align, variant_layout,
 };
 
 /// Helpers the glue calls to validate what the guest passes (a trap is a panic: an
@@ -825,6 +825,8 @@ pub(super) struct Method<'a> {
     pub realloc: Option<&'a str>,
     /// The import is lowered with `string-encoding=utf16`.
     pub utf16: bool,
+    /// The core import is lowered with the `async` option (see `core_signature`).
+    pub async_lower: bool,
 }
 
 /// Appends the glue to `out`: the helpers, `Glue` and its `Imports` impl with one method per
@@ -877,6 +879,7 @@ pub(super) fn write(
         host,
         realloc,
         utf16,
+        async_lower,
     } in methods
     {
         gen_.utf16 = utf16;
@@ -888,7 +891,7 @@ pub(super) fn write(
             }
         });
         gen_.alloc = slot.map_or_else(|| ALLOC_MODULE.to_string(), import_alloc_module);
-        let sig = core_signature(f, &mut sig_budget)?;
+        let sig = core_signature(f, &mut sig_budget, async_lower)?;
         let _ = writeln!(out, "    /// {:?} {:?}", f.interface, f.name);
         let mut head = format!("    fn {name}(&mut self, g: &mut Instance<Self>");
         for (i, flat) in sig.params.iter().enumerate() {
@@ -968,6 +971,11 @@ pub(super) fn write(
             (None, _) => {
                 let _ = writeln!(out, "        {call};");
             }
+        }
+        if async_lower {
+            // The host completed the call before returning: subtask state RETURNED and no
+            // subtask handle (a status of `2 | handle << 4`).
+            out.push_str("        2\n");
         }
         out.push_str("    }\n");
         // Results of an import allocate through the import's `realloc`.
@@ -1056,13 +1064,6 @@ fn write_exports(
         let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
         let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
         if e.async_abi.is_some() {
-            if f.result.is_some() {
-                return Err(unsupported(format!(
-                    "async export {} has a result (WASI 0.3: it is delivered through `task.return`, \
-             which is not routed yet)",
-                    display_name(f)
-                )));
-            }
             let heads = async_heads(gen_.records, name, f, &idents)?;
             for head in [heads.start, heads.callback, heads.run] {
                 let _ = writeln!(out, "{head};");
@@ -1089,9 +1090,6 @@ fn write_exports(
     );
     Ok(())
 }
-
-/// The most core parameters an `async` lift takes before they spill to memory.
-const MAX_FLAT_ASYNC_PARAMS: usize = 4;
 
 /// What an async task asks for next, as `Exports` of an async function reports it: the callback
 /// ABI's code (`EXIT`, `YIELD` or `WAIT` with a waitable set in the upper bits).
@@ -1136,7 +1134,6 @@ fn async_heads(
     f: &WitFunc,
     idents: &[String],
 ) -> Result<AsyncHeads, TranspileError> {
-    // An async export with a result is rejected, so there is none to drop here.
     let no_result = WitFunc {
         result: None,
         ..f.clone()
@@ -1145,6 +1142,9 @@ fn async_heads(
     let mut run = typed_signature(records, name, &no_result, idents)?;
     run.pop();
     run.push_str(", events: &mut dyn FnMut(CallbackCode) -> Option<[u32; 3]>)");
+    if let Some(ty) = &f.result {
+        let _ = write!(run, " -> {}", records.rust(ty)?);
+    }
     Ok(AsyncHeads {
         start: format!("{start} -> CallbackCode"),
         callback: format!(
@@ -1166,7 +1166,7 @@ fn write_export(
     let f = &e.func;
     gen_.utf16 = e.encoding == WitStringEncoding::Utf16;
     let mut sig_budget = Budget::new();
-    let sig = core_signature(f, &mut sig_budget)?;
+    let sig = core_signature(f, &mut sig_budget, false)?;
     // Lifting differs from lowering for the result: it is the pointer the core function
     // returns, not an extra parameter.
     let mut core_params = sig.params.clone();
@@ -1311,10 +1311,18 @@ fn write_export(
             out,
             "        let mut code = Exports::{name}_start(self, {args});"
         );
+        let exit = if f.result.is_some() {
+            "unimplemented!(\"wasm2rs wit glue: the result of an async export is delivered through task.return (WASI 0.3), which is not routed yet\")"
+        } else {
+            "return"
+        };
         out.push_str(
             "        loop {\n\
-             \x20           match code {\n\
-             \x20               CallbackCode::Exit => return,\n\
+             \x20           match code {\n",
+        );
+        let _ = writeln!(out, "                CallbackCode::Exit => {exit},");
+        out.push_str(
+            "\
              \x20               CallbackCode::Yield | CallbackCode::Wait(_) => {\n\
              \x20                   // The scheduler (tasks, subtasks, waitable sets, streams and futures) is\n\
              \x20                   // not part of the glue yet: the caller supplies the events.\n\
