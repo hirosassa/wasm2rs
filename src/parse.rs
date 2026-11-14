@@ -137,6 +137,18 @@ impl<'a> ModuleIr<'a> {
     }
 }
 
+/// Every memory is laid out in 64KiB pages (`memory.size`/`grow`, bounds, data
+/// segments), so a different page size would be silently misinterpreted. The explicit
+/// default (`pagesize 65536`) is the same thing and stays accepted.
+fn reject_custom_page_size(mem: &wasmparser::MemoryType) -> Result<(), TranspileError> {
+    match mem.page_size_log2 {
+        Some(log2) if log2 != 16 => Err(TranspileError::Unsupported(
+            "custom page sizes (memory page size other than 64KiB)".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Validate and parse `wasm` into a [`ModuleIr`].
 pub(crate) fn parse_module<'a>(
     wasm: &'a [u8],
@@ -367,6 +379,7 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
     ) -> Result<(), TranspileError> {
         for mem in reader {
             let mem = mem?;
+            reject_custom_page_size(&mem)?;
             // `shared` memory (threads proposal) is backed by a thread-shareable
             // `SharedMemory` when it is the module's single defined memory (see
             // codegen atomic ops). A shared memory cannot also be 64-bit: the
@@ -793,6 +806,7 @@ fn classify_import(
             Ok(())
         }
         TypeRef::Memory(mem_ty) => {
+            reject_custom_page_size(&mem_ty)?;
             // An imported shared memory is a host-created `SharedMemory` handed
             // to `Instance::new`; like a defined one it is addressed by `u32`.
             if mem_ty.shared && mem_ty.memory64 {

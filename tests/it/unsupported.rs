@@ -761,3 +761,36 @@ fn a_function_body_rejection_is_wrapped_with_its_index() {
     );
     assert!(matches!(err.root(), TranspileError::Unsupported(_)));
 }
+
+// Custom page sizes (#369): a memory whose page size is not 64KiB must be refused, because
+// every memory is laid out in 64KiB pages and would otherwise be silently misinterpreted.
+
+#[test]
+fn custom_page_size_memory_is_rejected() {
+    // The issue's reproduction (#369): previously accepted as 64KiB pages.
+    assert_unsupported(
+        r#"(module (memory 1 (pagesize 1)) (data (i32.const 100) "\00"))"#,
+        "custom page sizes",
+    );
+}
+
+#[test]
+fn custom_page_size_memory_is_rejected_for_every_shape() {
+    for memory in [
+        "(memory 1 (pagesize 1))",
+        "(memory i64 1 (pagesize 1))",
+        "(memory 1 2 shared (pagesize 1))",
+        "(memory $a 1) (memory $b 1 (pagesize 1))",
+        "(import \"env\" \"m\" (memory 1 (pagesize 1)))",
+        "(import \"env\" \"m\" (memory i64 1 (pagesize 1)))",
+        "(import \"env\" \"m\" (memory 1 2 shared (pagesize 1)))",
+    ] {
+        assert_unsupported(&format!("(module {memory})"), "custom page sizes");
+    }
+}
+
+#[test]
+fn explicit_default_page_size_is_still_accepted() {
+    let wasm = wat::parse_str("(module (memory 1 (pagesize 65536)))").expect("valid wat");
+    transpile(&wasm).expect("a 64KiB page size is the default and stays supported");
+}
