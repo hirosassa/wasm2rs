@@ -217,19 +217,61 @@ impl fmt::Debug for HttpResponse {
     }
 }
 
+/// Why an [`HttpClient`] got no response, as far as `wasi:http`'s `error-code` can tell it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HttpClientErrorKind {
+    /// The host name did not resolve (`DNS-error`).
+    DnsFailure,
+    /// The connection was refused (`connection-refused`).
+    ConnectionRefused,
+    /// The connection was not made in time (`connection-timeout`).
+    ConnectionTimeout,
+    /// The connection ended early (`connection-terminated`).
+    ConnectionTerminated,
+    /// The peer's certificate was rejected (`TLS-certificate-error`).
+    TlsCertificate,
+    /// The TLS handshake or session failed (`TLS-protocol-error`).
+    TlsProtocol,
+    /// The response was not valid HTTP (`HTTP-protocol-error`).
+    HttpProtocol,
+    /// The response head did not arrive in time (`HTTP-response-timeout`).
+    ResponseTimeout,
+    /// A connection limit was reached (`connection-limit-reached`).
+    LimitExceeded,
+    /// Anything else; the guest sees `internal-error` with the message.
+    Other,
+}
+
 /// An [`HttpClient`] could not get a response.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HttpClientError(String);
+pub struct HttpClientError {
+    kind: HttpClientErrorKind,
+    message: String,
+}
 
 impl HttpClientError {
+    /// An error of kind [`HttpClientErrorKind::Other`].
     pub fn new(message: impl Into<String>) -> Self {
-        HttpClientError(message.into())
+        Self::with_kind(HttpClientErrorKind::Other, message)
+    }
+
+    /// An error the guest sees as the `error-code` that `kind` stands for.
+    pub fn with_kind(kind: HttpClientErrorKind, message: impl Into<String>) -> Self {
+        HttpClientError {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> &HttpClientErrorKind {
+        &self.kind
     }
 }
 
 impl fmt::Display for HttpClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 

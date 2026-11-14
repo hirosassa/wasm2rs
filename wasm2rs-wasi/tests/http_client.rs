@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use wasm2rs_wasi::{HttpClient, HttpRequest, UreqClient};
+use wasm2rs_wasi::{HttpClient, HttpClientErrorKind, HttpRequest, UreqClient};
 
 /// Serves one connection with `handler`; returns the address and the handler's result.
 fn serve<T: Send + 'static>(
@@ -144,7 +144,51 @@ fn connection_refused_is_a_client_error() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().to_string()
     };
-    assert!(UreqClient::new().send(request("GET", &addr, "/")).is_err());
+    let error = UreqClient::new()
+        .send(request("GET", &addr, "/"))
+        .unwrap_err();
+    assert_eq!(error.kind(), &HttpClientErrorKind::ConnectionRefused);
+}
+
+#[test]
+fn unresolvable_host_is_a_dns_failure() {
+    let mut req = request("GET", "nonexistent.invalid", "/");
+    req.url = "http://nonexistent.invalid/".into();
+    let error = UreqClient::new().send(req).unwrap_err();
+    assert_eq!(error.kind(), &HttpClientErrorKind::DnsFailure);
+}
+
+#[test]
+fn a_connection_closed_before_the_head_is_terminated() {
+    let (addr, server) = serve(|mut s| {
+        read_request(&mut s);
+    });
+    let error = UreqClient::new()
+        .send(request("GET", &addr, "/"))
+        .unwrap_err();
+    assert_eq!(error.kind(), &HttpClientErrorKind::ConnectionTerminated);
+    server.join().unwrap();
+}
+
+#[test]
+fn a_malformed_response_is_an_http_protocol_error() {
+    let (addr, server) = serve(|mut s| {
+        read_request(&mut s);
+        s.write_all(b"not http at all\r\n\r\n").unwrap();
+    });
+    let error = UreqClient::new()
+        .send(request("GET", &addr, "/"))
+        .unwrap_err();
+    assert_eq!(error.kind(), &HttpClientErrorKind::HttpProtocol);
+    server.join().unwrap();
+}
+
+#[test]
+fn a_refused_request_stays_other() {
+    let mut req = request("GET", "127.0.0.1:1", "/");
+    req.trailers.push(("x".into(), b"y".to_vec()));
+    let error = UreqClient::new().send(req).unwrap_err();
+    assert_eq!(error.kind(), &HttpClientErrorKind::Other);
 }
 
 #[test]
@@ -166,7 +210,8 @@ fn first_byte_timeout_fires() {
     let mut req = request("GET", &addr, "/");
     req.first_byte_timeout = Some(200_000_000);
     let started = Instant::now();
-    assert!(UreqClient::new().send(req).is_err());
+    let error = UreqClient::new().send(req).unwrap_err();
+    assert_eq!(error.kind(), &HttpClientErrorKind::ResponseTimeout);
     assert!(started.elapsed() < Duration::from_millis(1200));
     server.join().unwrap();
 }

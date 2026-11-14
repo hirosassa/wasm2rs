@@ -51,7 +51,7 @@ pub use ureq_client::UreqClient;
 #[cfg(feature = "os-random")]
 pub use host::OsRandom;
 pub use host::{
-    Access, Clock, ConfigError, HttpClient, HttpClientError, HttpRequest, HttpResponse,
-    IncomingRequestParts, InsecureRandom, NetworkPolicy, RandomError, RandomSource, ServedBody,
-    ServedResponse, SystemClock, WasiHost, WasiHostBuilder,
+    Access, Clock, ConfigError, HttpClient, HttpClientError, HttpClientErrorKind, HttpRequest,
+    HttpResponse, IncomingRequestParts, InsecureRandom, NetworkPolicy, RandomError, RandomSource,
+    ServedBody, ServedResponse, SystemClock, WasiHost, WasiHostBuilder,
 };
