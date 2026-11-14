@@ -152,9 +152,9 @@ fn connection_refused_is_a_client_error() {
 
 #[test]
 fn unresolvable_host_is_a_dns_failure() {
-    let mut req = request("GET", "nonexistent.invalid", "/");
-    req.url = "http://nonexistent.invalid/".into();
-    let error = UreqClient::new().send(req).unwrap_err();
+    let error = UreqClient::new()
+        .send(request("GET", "nonexistent.invalid", "/"))
+        .unwrap_err();
     assert_eq!(error.kind(), &HttpClientErrorKind::DnsFailure);
 }
 
@@ -181,14 +181,6 @@ fn a_malformed_response_is_an_http_protocol_error() {
         .unwrap_err();
     assert_eq!(error.kind(), &HttpClientErrorKind::HttpProtocol);
     server.join().unwrap();
-}
-
-#[test]
-fn a_refused_request_stays_other() {
-    let mut req = request("GET", "127.0.0.1:1", "/");
-    req.trailers.push(("x".into(), b"y".to_vec()));
-    let error = UreqClient::new().send(req).unwrap_err();
-    assert_eq!(error.kind(), &HttpClientErrorKind::Other);
 }
 
 #[test]

@@ -76,8 +76,9 @@ fn io_kind(kind: std::io::ErrorKind) -> HttpClientErrorKind {
 /// The kind of a failed `ureq` request, as far as `wasi:http`'s `error-code` tells them apart.
 fn classify(error: &ureq::Error) -> HttpClientErrorKind {
     match error {
-        ureq::Error::HostNotFound => HttpClientErrorKind::DnsFailure,
-        ureq::Error::Timeout(ureq::Timeout::Resolve) => HttpClientErrorKind::DnsFailure,
+        ureq::Error::HostNotFound | ureq::Error::Timeout(ureq::Timeout::Resolve) => {
+            HttpClientErrorKind::DnsFailure
+        }
         ureq::Error::Timeout(ureq::Timeout::Connect) => HttpClientErrorKind::ConnectionTimeout,
         ureq::Error::Timeout(ureq::Timeout::RecvResponse) => HttpClientErrorKind::ResponseTimeout,
         // `ureq` passes the resolver's `io::Error` on as it is, and `std` gives a failed lookup
@@ -88,15 +89,27 @@ fn classify(error: &ureq::Error) -> HttpClientErrorKind {
         {
             HttpClientErrorKind::DnsFailure
         }
+        // rustls reports a failed handshake or session as an `io::Error` of kind `InvalidData`
+        // wrapping its own error, which `ureq` passes on as `Io`.
+        ureq::Error::Io(e)
+            if e.kind() == std::io::ErrorKind::InvalidData && e.get_ref().is_some() =>
+        {
+            tls_kind(&e.to_string())
+        }
         ureq::Error::Io(e) => io_kind(e.kind()),
         ureq::Error::Protocol(_) => HttpClientErrorKind::HttpProtocol,
         ureq::Error::Tls(_) => HttpClientErrorKind::TlsProtocol,
-        // rustls words a certificate failure as "invalid peer certificate: ..."
-        ureq::Error::Rustls(e) if e.to_string().starts_with("invalid peer certificate") => {
-            HttpClientErrorKind::TlsCertificate
-        }
-        ureq::Error::Rustls(_) => HttpClientErrorKind::TlsProtocol,
+        ureq::Error::Rustls(e) => tls_kind(&e.to_string()),
         _ => HttpClientErrorKind::Other,
+    }
+}
+
+/// rustls words a certificate failure as "invalid peer certificate: ...".
+fn tls_kind(message: &str) -> HttpClientErrorKind {
+    if message.starts_with("invalid peer certificate") {
+        HttpClientErrorKind::TlsCertificate
+    } else {
+        HttpClientErrorKind::TlsProtocol
     }
 }
 

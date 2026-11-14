@@ -223,6 +223,8 @@ impl fmt::Debug for HttpResponse {
 pub enum HttpClientErrorKind {
     /// The host name did not resolve (`DNS-error`).
     DnsFailure,
+    /// The host name did not resolve in time (`DNS-timeout`).
+    DnsTimeout,
     /// The connection was refused (`connection-refused`).
     ConnectionRefused,
     /// The connection was not made in time (`connection-timeout`).

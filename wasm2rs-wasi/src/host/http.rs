@@ -537,6 +537,7 @@ fn client_error_code(error: &HttpClientError) -> ErrorCode {
             rcode: None,
             info_code: None,
         }),
+        HttpClientErrorKind::DnsTimeout => ErrorCode::DNSTimeout,
         HttpClientErrorKind::ConnectionRefused => ErrorCode::ConnectionRefused,
         HttpClientErrorKind::ConnectionTimeout => ErrorCode::ConnectionTimeout,
         HttpClientErrorKind::ConnectionTerminated => ErrorCode::ConnectionTerminated,
@@ -1006,6 +1007,7 @@ mod tests {
                 info_code: None
             })
         );
+        assert_eq!(code(K::DnsTimeout), ErrorCode::DNSTimeout);
         assert_eq!(code(K::ConnectionRefused), ErrorCode::ConnectionRefused);
         assert_eq!(code(K::ConnectionTimeout), ErrorCode::ConnectionTimeout);
         assert_eq!(

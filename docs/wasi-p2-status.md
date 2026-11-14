@@ -61,10 +61,10 @@ Host behavior:
 - `between-bytes-timeout` is approximated with a limit on the whole body in `UreqClient` (`ureq`
   has no per-read timeout), which is stricter than the specification.
 - `HttpClientError` has a `#[non_exhaustive]` `HttpClientErrorKind` that maps onto the main
-  `error-code` variants (DNS, connection refused/timeout/terminated, TLS certificate/protocol,
+  `error-code` variants (DNS failure/timeout, connection refused/timeout/terminated, TLS certificate/protocol,
   HTTP protocol, response timeout, limit); `HttpClientError::new` is `Other`, which is still
   `internal-error` with the message. `DNS-error` carries no `rcode`/`info-code`, and `UreqClient`
-  tells a failed lookup from other I/O errors by the text of the `io::Error`.
+  tells a failed lookup and a TLS failure from other I/O errors by the text of the `io::Error` (the lookup text is Unix's; on Windows it stays `Other`).
 - File access is confined with `cap-std` (`openat` with `O_NOFOLLOW`). CI runs it on Unix and
   Windows (#205, see [windows.md](windows.md)); only the Unix runs check the symlink escape cases.
 - The confinement above is for `wasm2rs-wasi` only. The native WASI preview1 shim of the generated code uses
