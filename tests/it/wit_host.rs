@@ -1380,7 +1380,7 @@ fn an_async_function_is_unsupported_and_names_the_function() {
     let wasm = component("", "a:b/c", r#"(export "f" (func async (param "a" u8)))"#);
     let err = wit_host_trait(&wasm).unwrap_err().to_string();
     assert!(
-        err.contains("async function in function `f` of `a:b/c`"),
+        err.contains("async function (WASI 0.3") && err.contains("in function `f` of `a:b/c`"),
         "{err}"
     );
 }
@@ -1395,7 +1395,10 @@ fn an_async_function_among_synchronous_ones_fails_the_whole_interface() {
            (export "slow" (func async))"#,
     );
     let err = wit_host_trait(&wasm).unwrap_err().to_string();
-    assert!(err.contains("async function in function `slow`"), "{err}");
+    assert!(
+        err.contains("async function (WASI 0.3") && err.contains("in function `slow`"),
+        "{err}"
+    );
 }
 
 #[test]

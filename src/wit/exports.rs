@@ -671,6 +671,14 @@ impl Reader {
             }
             None => return Err(unsupported(format!("export `{label}` has no function"))),
         };
+        // Name the async ABI before the signature: an async lift always has an async type,
+        // whose own error would hide which ABI the guest was built for.
+        if let Some(abi) = async_abi(&lift.options) {
+            return Err(unsupported(format!(
+                "export `{label}` is an async function lifted with {abi} (WASI 0.3: the async \
+                 canonical ABI and its task scheduler are not implemented)"
+            )));
+        }
         let (params, result) = lift
             .sig
             .clone()
@@ -728,13 +736,14 @@ impl Reader {
                     export.post_return =
                         Some(self.option_export(&label, *i, "post-return", instance)?);
                 }
-                CanonicalOption::Async
-                | CanonicalOption::Callback(_)
-                | CanonicalOption::CoreType(_)
-                | CanonicalOption::Gc => {
+                // `async_abi` returned early for these, before the signature.
+                CanonicalOption::Async | CanonicalOption::Callback(_) => {
+                    return Err(TranspileError::Internal("an async lift option".into()));
+                }
+                CanonicalOption::CoreType(_) | CanonicalOption::Gc => {
                     return Err(unsupported(format!(
-                        "export `{label}` uses a canonical option this reader does not model \
-                         ({option:?})"
+                        "export `{label}` uses a component-model GC canonical option \
+                         ({option:?}), which this reader does not model"
                     )));
                 }
             }
@@ -851,6 +860,21 @@ impl Reader {
                 "export `{label}`: core module {module} has no {kind:?} export `{name}`"
             )))
         }
+    }
+}
+
+/// The async ABI a lift selects. `callback` is checked first: a callback lift also carries
+/// `async`.
+fn async_abi(options: &[CanonicalOption]) -> Option<&'static str> {
+    if options
+        .iter()
+        .any(|o| matches!(o, CanonicalOption::Callback(_)))
+    {
+        Some("the callback ABI")
+    } else if options.iter().any(|o| matches!(o, CanonicalOption::Async)) {
+        Some("the stackful ABI")
+    } else {
+        None
     }
 }
 
