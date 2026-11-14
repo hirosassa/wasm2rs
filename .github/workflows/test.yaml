@@ -66,11 +66,33 @@ jobs:
       # docs/wasi-threads-e2e.md). The wasi-sdk tests skip here; the
       # e2e-wasi-sdk job runs them. The full suite runs on stable only; beta and
       # nightly just have to compile it.
+      # The tests compile each generated program with rustc, which dominates a cold run. The
+      # binaries are content-addressed (the key hashes the generated source, the rustc flags and
+      # the rustc version), so a cache restored from an older generator is never wrongly hit: it
+      # only fails to hit. The restore key is therefore safe to fall back on.
+      - name: Restore the generated-program cache
+        if: matrix.rust == 'stable'
+        id: testcache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/wasm2rs-testcache
+          key: testcache-${{ runner.os }}-${{ hashFiles('src/**', 'Cargo.lock') }}
+          restore-keys: testcache-${{ runner.os }}-
+
       - name: Run cargo test
         if: matrix.rust == 'stable'
         run: cargo test --release --workspace
         env:
           WASM2RS_REQUIRE_E2E: rust
+          WASM2RS_TESTCACHE_DIR: ${{ runner.temp }}/wasm2rs-testcache
+          WASM2RS_TESTCACHE_MAX_GIB: 2
+
+      - name: Save the generated-program cache
+        if: matrix.rust == 'stable' && github.ref == 'refs/heads/main' && steps.testcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/wasm2rs-testcache
+          key: testcache-${{ runner.os }}-${{ hashFiles('src/**', 'Cargo.lock') }}
 
       - name: Build the tests (compile compatibility only)
         if: matrix.rust != 'stable'

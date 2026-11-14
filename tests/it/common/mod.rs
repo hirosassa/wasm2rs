@@ -283,10 +283,19 @@ fn wasi_lib() -> &'static WasiLib {
     })
 }
 
+/// Where the cache lives: `$WASM2RS_TESTCACHE_DIR` when set and non-empty (CI points it at a
+/// directory it persists between runs), else the temp dir.
+pub fn resolve_cache_dir(over: Option<&std::ffi::OsStr>) -> std::path::PathBuf {
+    match over {
+        Some(dir) if !dir.is_empty() => dir.into(),
+        _ => std::env::temp_dir().join("wasm2rs-testcache"),
+    }
+}
+
 /// The shared cache directory, created, and pruned once per process (see [`prune`]).
 fn cache_dir() -> std::path::PathBuf {
     static PRUNED: OnceLock<()> = OnceLock::new();
-    let dir = std::env::temp_dir().join("wasm2rs-testcache");
+    let dir = resolve_cache_dir(std::env::var_os("WASM2RS_TESTCACHE_DIR").as_deref());
     std::fs::create_dir_all(&dir).expect("create cache dir");
     PRUNED.get_or_init(|| {
         // Concurrent test processes would each scan 45k entries for nothing: the stamp's mtime

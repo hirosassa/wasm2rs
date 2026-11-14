@@ -64,3 +64,38 @@ fn distinct_programs_get_distinct_binaries() {
         "different programs must map to different cache keys"
     );
 }
+
+/// CI points the cache at a directory it persists between runs; locally it stays in the temp dir.
+#[test]
+fn cache_dir_honours_override_and_defaults_to_temp_dir() {
+    let over = std::path::Path::new("/ci/persisted/testcache");
+    assert_eq!(common::resolve_cache_dir(Some(over.as_os_str())), over);
+    assert_eq!(
+        common::resolve_cache_dir(None),
+        std::env::temp_dir().join("wasm2rs-testcache")
+    );
+    // An empty variable (unset-by-assignment in a shell or workflow) must not mean "cwd".
+    assert_eq!(
+        common::resolve_cache_dir(Some(std::ffi::OsStr::new(""))),
+        std::env::temp_dir().join("wasm2rs-testcache")
+    );
+}
+
+/// A cache restored from an older generator must never serve a stale binary: the key is derived
+/// from the generated program, so a changed emission maps to a different entry.
+#[test]
+fn changed_generator_output_gets_a_new_cache_entry() {
+    let wat =
+        r#"(module (memory 1) (func (export "f") (param i32) (result i32) local.get 0 i32.load))"#;
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    let mut opts = wasm2rs::TranspileOptions::default();
+    let a = wasm2rs::transpile_with_options(&wasm, &opts).expect("transpile");
+    opts.unsafe_memory = true;
+    let b = wasm2rs::transpile_with_options(&wasm, &opts).expect("transpile");
+    assert_ne!(a, b, "precondition: the option changes the emitted source");
+    let (pa, pb) = (
+        common::build("gen_key_a", &format!("{a}\nfn main() {{}}\n")),
+        common::build("gen_key_b", &format!("{b}\nfn main() {{}}\n")),
+    );
+    assert_ne!(pa, pb);
+}
