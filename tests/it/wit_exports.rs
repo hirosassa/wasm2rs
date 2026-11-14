@@ -556,18 +556,54 @@ fn glue_error(component: &[u8]) -> String {
 }
 
 #[test]
-fn an_import_lowered_as_utf16_with_a_string_is_rejected_not_read_as_utf8() {
-    for (encoding, name) in [("utf16", "utf16"), ("latin1+utf16", "compact-utf16")] {
-        let err = glue_error(&lowering(
-            "string",
-            "i32 i32",
-            &format!("(memory $mm) (realloc $ra) string-encoding={encoding}"),
-        ));
-        assert!(
-            err.contains("a:b/i#f") && err.contains(name),
-            "{encoding}: {err}"
-        );
-    }
+fn an_import_lowered_as_compact_utf16_with_a_string_is_rejected_not_read_as_utf8() {
+    let err = glue_error(&lowering(
+        "string",
+        "i32 i32",
+        "(memory $mm) (realloc $ra) string-encoding=latin1+utf16",
+    ));
+    assert!(
+        err.contains("a:b/i#f") && err.contains("compact-utf16"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_import_lowered_as_utf16_with_a_string_is_served() {
+    let component = lowering(
+        "string",
+        "i32 i32",
+        "(memory $mm) (realloc $ra) string-encoding=utf16",
+    );
+    let glue = wasm2rs::wit_host_glue(&component).unwrap();
+    assert!(glue.contains("glue_abi::string16("), "{glue}");
+}
+
+#[test]
+fn an_import_lowered_both_as_utf8_and_as_utf16_is_rejected() {
+    // The glue has one method per function, so it cannot read the strings both ways.
+    let component = wat::parse_str(
+        r#"(component
+  (import "a:b/i" (instance $ii (export "f" (func (param "x" string)))))
+  (alias export $ii "f" (func $imp))
+  (core module $m
+    (import "h" "f" (func (param i32 i32)))
+    (import "h" "g" (func (param i32 i32)))
+    (memory (export "mem") 1)
+    (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) i32.const 0))
+  (core module $mem (memory (export "mem") 1)
+    (func (export "alloc") (param i32 i32 i32 i32) (result i32) i32.const 0))
+  (core instance $im (instantiate $mem))
+  (alias core export $im "mem" (core memory $mm))
+  (alias core export $im "alloc" (core func $ra))
+  (core func $u8 (canon lower (func $imp) (memory $mm) (realloc $ra) string-encoding=utf8))
+  (core func $u16 (canon lower (func $imp) (memory $mm) (realloc $ra) string-encoding=utf16))
+  (core instance $h (export "f" (func $u8)) (export "g" (func $u16)))
+  (core instance (instantiate $m (with "h" (instance $h)))))"#,
+    )
+    .unwrap();
+    let err = glue_error(&component);
+    assert!(err.contains("a:b/i#f") && err.contains("utf8"), "{err}");
 }
 
 #[test]

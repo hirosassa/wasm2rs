@@ -369,7 +369,7 @@ struct Gen<'a> {
     allocates: bool,
     /// The module of allocation helpers the generated code calls (see [`ALLOC_MODULE`]).
     alloc: String,
-    /// Strings are UTF-16 (the lift being generated says `string-encoding=utf16`).
+    /// Strings are UTF-16 (the lift or lowering being generated says `string-encoding=utf16`).
     utf16: bool,
 }
 
@@ -818,6 +818,8 @@ pub(super) struct Method<'a> {
     /// The export of the program that this import allocates its string and list results
     /// through, or `None` for the lifts' `cabi_realloc`.
     pub realloc: Option<&'a str>,
+    /// The import is lowered with `string-encoding=utf16`.
+    pub utf16: bool,
 }
 
 /// Appends the glue to `out`: the helpers, `Glue` and its `Imports` impl with one method per
@@ -869,8 +871,10 @@ pub(super) fn write(
         name,
         host,
         realloc,
+        utf16,
     } in methods
     {
+        gen_.utf16 = utf16;
         let slot = realloc.map(|r| match reallocs.iter().position(|(n, _)| *n == r) {
             Some(at) => at,
             None => {

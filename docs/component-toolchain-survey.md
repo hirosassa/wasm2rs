@@ -120,7 +120,7 @@ so the build failed with E0599. Rust, TinyGo and wasi-sdk C do not import it. Fi
 exits with `status-code`); `docs/wasi-post-0.2.0-additions.md` lists the other 0.2.1 to 0.2.12 differences
 (all `@unstable` or a type alias, none imported by a surveyed toolchain).
 
-### F7. UTF-16 components (M, #344, fixed)
+### F7. UTF-16 components (M, #344 and #351, fixed)
 
 MoonBit (`String` is UTF-16) lifts strings as `string-encoding=utf16`, which `transpile_component`
 used to reject, so a MoonBit component with a string in an export signature did not transpile.
@@ -129,10 +129,19 @@ written as code units into memory from the guest's `cabi_realloc` (aligned to 2,
 units), and a string the guest returns is read from `(ptr, len)` with `String::from_utf16`. An
 unpaired surrogate or an odd pointer traps (a panic, like invalid UTF-8 on the utf8 path); nothing is
 replaced silently. `compact-utf16` (latin1+utf16) stays `Unsupported`, with a message that says so.
-The import side is the open edge: the glue still reads the strings a guest passes to an import as
-UTF-8, so a function lowered with `utf16` (or `compact-utf16`) whose signature holds a string is
-now rejected with an error naming it, instead of being misread. A UTF-16 guest that imports a
-function with a string (for example MoonBit using WASI paths) therefore does not transpile yet.
+The import side (#351) works the same way per function: a function lowered with `utf16` has the
+strings a guest passes to it read as UTF-16 (`String::from_utf16`; an unpaired surrogate or an odd
+pointer traps) and the strings the host returns written as code units from the lowering's `realloc`,
+so a UTF-16 guest that imports a function with a string (for example MoonBit using WASI paths)
+transpiles. A function lowered with `compact-utf16`, or with both `utf8` and `utf16` (the glue has
+one method per function), whose signature holds a string is `Unsupported`, naming it, instead of being
+misread.
+Pinned on a real MoonBit component (2026-11-14, `moon 0.1.20261104`): `world app { import host; export run: func(name: string) -> string; }`
+with `host { shout: func(s: string) -> string; }` and `run(name) = "got " + shout(name)` (both
+`canon lower` and `canon lift` say `string-encoding=utf16`). With a host that upper-cases and appends `!`,
+`run` returns `got WASM2RS!`, `got 日本語😀X!` and `got !` through `Exports`. The ignored test is
+`a_real_moonbit_component_passes_utf16_strings_through_a_host_import` (`WASM2RS_MOONBIT_IMPORT`); build the
+component as in item M of the reproduction, with that WIT and the one-line body above.
 
 ### F8. Notes on the new toolchains (M, N, O)
 

@@ -900,7 +900,7 @@ fn glue_text(
     imports_trait: bool,
 ) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
-    reject_non_utf8_lowers(component, &funcs)?;
+    let utf16 = utf16_lowers(component, &funcs)?;
     let exports = if options.exports {
         match lifts {
             Some(lifts) => lifts,
@@ -944,15 +944,17 @@ fn glue_text(
         .exports
         .then_some((exports.as_slice(), export_names.as_slice()));
     let methods = match core_imports {
-        Some(core) => core_methods(&funcs, &names, core)?,
+        Some(core) => core_methods(&funcs, &names, &utf16, core)?,
         None => funcs
             .iter()
             .zip(&names)
-            .map(|(func, name)| glue::Method {
+            .zip(&utf16)
+            .map(|((func, name), &utf16)| glue::Method {
                 func,
                 name,
                 host: name,
                 realloc: None,
+                utf16,
             })
             .collect(),
     };
@@ -960,15 +962,23 @@ fn glue_text(
     Ok(out)
 }
 
-/// The glue reads the strings a guest passes to an import as UTF-8, so an import lowered with
-/// another encoding would silently get its strings misread: refuse it, as the lifts do for
-/// `compact-utf16`. (Only a function whose signature holds a string is affected.)
-fn reject_non_utf8_lowers(component: &[u8], funcs: &[WitFunc]) -> Result<(), TranspileError> {
-    for (host, encoding) in super::exports::non_utf8_lowers(component)? {
-        let Some(f) = funcs
+/// For each of `funcs`, whether the component lowers it with `string-encoding=utf16` (the glue
+/// then transcodes the strings it passes, see `glue::Method::utf16`).
+///
+/// Only a function whose signature holds a string is affected by the encoding. Such a function
+/// lowered as `compact-utf16`, or lowered with two encodings (the glue has one method per
+/// function), is refused.
+fn utf16_lowers(component: &[u8], funcs: &[WitFunc]) -> Result<Vec<bool>, TranspileError> {
+    // The encoding each function is lowered with, once one holding a string is seen.
+    let mut encodings: Vec<Option<&'static str>> = vec![None; funcs.len()];
+    for (host, encoding) in super::exports::lowers(component)? {
+        let Some(at) = funcs
             .iter()
-            .find(|f| f.interface == host.interface && f.name == host.name)
+            .position(|f| f.interface == host.interface && f.name == host.name)
         else {
+            continue;
+        };
+        let (Some(f), Some(slot)) = (funcs.get(at), encodings.get_mut(at)) else {
             continue;
         };
         let mut budget = crate::wit_abi::Budget::new();
@@ -979,22 +989,33 @@ fn reject_non_utf8_lowers(component: &[u8], funcs: &[WitFunc]) -> Result<(), Tra
                 break;
             }
         }
-        if holds {
+        if !holds {
+            continue;
+        }
+        if !matches!(encoding, "utf8" | "utf16") {
             return Err(unsupported(format!(
-                "import `{}#{}` is lowered with `string-encoding={encoding}`, but strings that a \
-                 guest passes to or receives from an import are only supported as utf8 (exports \
-                 support utf16)",
+                "import `{}#{}` is lowered with `string-encoding={encoding}`, which is not \
+                 supported; only `utf8` and `utf16` are",
                 host.interface, host.name
             )));
         }
+        if slot.is_some_and(|seen| seen != encoding) {
+            return Err(unsupported(format!(
+                "import `{}#{}` is lowered both as utf8 and as utf16: the glue has one method \
+                 per function",
+                host.interface, host.name
+            )));
+        }
+        *slot = Some(encoding);
     }
-    Ok(())
+    Ok(encodings.iter().map(|e| *e == Some("utf16")).collect())
 }
 
 /// One glue method per core import, in import order.
 fn core_methods<'a>(
     funcs: &'a [WitFunc],
     host_names: &'a [String],
+    utf16: &[bool],
     core: &'a [CoreImport],
 ) -> Result<Vec<glue::Method<'a>>, TranspileError> {
     let mut methods = Vec::new();
@@ -1002,7 +1023,9 @@ fn core_methods<'a>(
         let Some(index) = resolve_core_import(funcs, &import.module, &import.field)? else {
             continue;
         };
-        let (Some(func), Some(host)) = (funcs.get(index), host_names.get(index)) else {
+        let (Some(func), Some(host), Some(&utf16)) =
+            (funcs.get(index), host_names.get(index), utf16.get(index))
+        else {
             return Err(TranspileError::Internal(
                 "a resolved core import is not a component function".into(),
             ));
@@ -1012,6 +1035,7 @@ fn core_methods<'a>(
             name: &import.ident,
             host,
             realloc: import.realloc.as_deref(),
+            utf16,
         });
     }
     Ok(methods)

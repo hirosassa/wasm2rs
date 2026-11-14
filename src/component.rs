@@ -70,7 +70,7 @@ impl Default for ComponentOptions {
 /// nothing tells them apart; plus every error of
 /// [`wit_exports`](crate::wit_exports), [`transpile_with_options`] and
 /// [`wit_host_glue_with_options`] (an export of a nested component, `compact-utf16` strings, an import
-/// lowered as UTF-16 with a string in its signature, a shape the glue cannot lower). A malformed input is a [`TranspileError::Parse`].
+/// lowered both as UTF-8 and as UTF-16, a shape the glue cannot lower). A malformed input is a [`TranspileError::Parse`].
 pub fn transpile_component(
     component: &[u8],
     options: &ComponentOptions,
