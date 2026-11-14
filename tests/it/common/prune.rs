@@ -34,7 +34,7 @@ pub struct Policy {
 
 impl Policy {
     /// 14 days, 10 GiB, 6 hours and 14 days; `$WASM2RS_TESTCACHE_MAX_AGE_DAYS` (which also sets
-    /// the last) and `$WASM2RS_TESTCACHE_MAX_GIB` override the first two.
+    /// the last, at least a day) and `$WASM2RS_TESTCACHE_MAX_GIB` override the first two.
     pub fn from_env() -> Self {
         let var = |name: &str, default: u64| {
             std::env::var(name)
@@ -47,7 +47,9 @@ impl Policy {
             max_age,
             max_bytes: var("WASM2RS_TESTCACHE_MAX_GIB", 10) << 30,
             work_max_age: Duration::from_secs(6 * 60 * 60),
-            checkout_max_age: max_age,
+            // never below a day, so that `MAX_AGE_DAYS=0` (no reuse) cannot remove the build of a
+            // worktree that is running
+            checkout_max_age: max_age.max(Duration::from_secs(24 * 60 * 60)),
         }
     }
 }
@@ -96,6 +98,11 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
     let Ok(read) = fs::read_dir(dir) else {
         return report;
     };
+    // no representable cutoff means nothing is old enough: keep everything rather than remove
+    // the live build of another worktree
+    let checkout_cutoff = now
+        .checked_sub(policy.checkout_max_age)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut live: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
     for item in read.flatten() {
         let name = item.file_name();
@@ -106,8 +113,9 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
         };
         let age = now.duration_since(modified).unwrap_or_default();
         if CHECKOUT_PREFIXES.iter().any(|p| name.starts_with(p)) && meta.is_dir() {
-            let cutoff = now.checked_sub(policy.checkout_max_age).unwrap_or(now);
-            if !modified_since(&item.path(), cutoff) && fs::remove_dir_all(item.path()).is_ok() {
+            if !modified_since(&item.path(), checkout_cutoff)
+                && fs::remove_dir_all(item.path()).is_ok()
+            {
                 report.removed += 1;
             }
         } else if name.starts_with(WORK_PREFIX) {
@@ -124,7 +132,7 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
             }
         }
     }
-    remove_orphaned_locks(&mut report, dir);
+    remove_orphaned_locks(dir, &mut report);
     let mut total: u64 = live.iter().map(|(_, len, _)| len).sum();
     live.sort();
     for (_, len, path) in live {
@@ -141,7 +149,7 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
 
 /// A legacy `<target>.lock` goes with its target directory: the file's own mtime is its creation,
 /// which says nothing about whether the target is in use.
-fn remove_orphaned_locks(report: &mut Report, dir: &Path) {
+fn remove_orphaned_locks(dir: &Path, report: &mut Report) {
     let Ok(read) = fs::read_dir(dir) else { return };
     for item in read.flatten() {
         let name = item.file_name();

@@ -131,7 +131,7 @@ pub fn compile_run_split(
         run.success(),
         "generated program assertions failed:\n{name}"
     );
-    // kept when something above failed, to look at
+    // only on success: a failed build's directory is left behind to inspect
     std::fs::remove_dir_all(&dir).ok();
     names
 }
@@ -364,12 +364,13 @@ fn checkout_dir() -> std::path::PathBuf {
 /// Makes the names of scratch directories unique within the process (the pid covers processes).
 static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// A new, empty scratch directory for `label`, in this checkout's own directory of the cache. Use
-/// this rather than `$TMPDIR/<fixed name>`, which every checkout and process running the same test
-/// shares and overwrites.
+/// A new, empty scratch directory for `label`, unique per call and process. Use this rather than
+/// `$TMPDIR/<fixed name>`, which every checkout and process running the same test shares and
+/// overwrites. Named like the build working directories, so [`prune`] removes what a failed test
+/// left behind after a few hours.
 pub fn scratch_dir(label: &str) -> std::path::PathBuf {
     let uniq = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = checkout_dir().join(format!("{label}-{}-{uniq}", std::process::id()));
+    let dir = cache_dir().join(format!("work-{label}-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create scratch dir");
     dir
 }

@@ -119,14 +119,9 @@ fn files_that_are_not_cache_entries_are_left_alone() {
 /// directory's own mtime says nothing about the use of what is inside.
 fn checkout(dir: &Path, name: &str, now: SystemTime, inner_age: Duration) -> PathBuf {
     let path = dir.join(name);
-    fs::create_dir_all(path.join("wasi-target/debug")).unwrap();
-    entry(
-        &path.join("wasi-target/debug"),
-        "libx.rlib",
-        10,
-        now,
-        inner_age,
-    );
+    let debug = path.join("wasi-target/debug");
+    fs::create_dir_all(&debug).unwrap();
+    entry(&debug, "libx.rlib", 10, now, inner_age);
     // creating the file touched the directories above it
     for sub in ["wasi-target/debug", "wasi-target", ""] {
         set_age(&path.join(sub), now, 100 * DAY);

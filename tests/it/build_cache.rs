@@ -103,15 +103,16 @@ fn changed_generator_output_gets_a_new_cache_entry() {
 /// running at once never write the same path.
 #[test]
 fn checkouts_share_the_cache_root_but_not_their_mutable_dir() {
-    let root = std::path::Path::new("/cache");
-    let a = common::checkout_dir_in(root, std::path::Path::new("/work/wt-a"));
-    let b = common::checkout_dir_in(root, std::path::Path::new("/work/wt-b"));
+    use std::path::Path;
+    let root = Path::new("/cache");
+    let a = common::checkout_dir_in(root, Path::new("/work/wt-a"));
+    let b = common::checkout_dir_in(root, Path::new("/work/wt-b"));
     assert_ne!(a, b);
     assert_eq!(a.parent(), Some(root));
     assert_eq!(b.parent(), Some(root));
     assert_eq!(
         a,
-        common::checkout_dir_in(root, std::path::Path::new("/work/wt-a")),
+        common::checkout_dir_in(root, Path::new("/work/wt-a")),
         "one checkout must always find its own directory again (it holds the warm cargo build)"
     );
     assert!(
