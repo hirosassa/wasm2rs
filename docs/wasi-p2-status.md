@@ -73,7 +73,7 @@ Transpilation of a component (errors that say why):
 
 - `InvalidInput`: a core module as the input, a component with no core module, or an export-less
   component with several candidate modules that nothing tells apart.
-- `Unsupported`: an export of a nested component, and `compact-utf16` strings (UTF-16 lifts are supported); a linked
+- `Unsupported`: an export of a nested component, and `compact-utf16` strings (UTF-16 lifts and lowers are supported); a linked
   component (below) whose lifts allocate through different `realloc` functions of several core
   modules (#314, open); a linked core module other than the program that defines its own memory.
 - Components whose core modules are wired to each other (a preview1 adapter with `wit-component`'s

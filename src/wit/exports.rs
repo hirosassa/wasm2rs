@@ -62,15 +62,12 @@ pub fn wit_exports(component: &[u8]) -> Result<Vec<WitExport>, TranspileError> {
     reader.resolve()
 }
 
-/// The imported functions that `component` lowers with a string encoding other than UTF-8
-/// (`utf16` or `compact-utf16`), with the encoding's name. The glue reads guest strings as
-/// UTF-8 on the import side, so one of these that carries a string cannot be served.
-pub(crate) fn non_utf8_lowers(
-    component: &[u8],
-) -> Result<Vec<(HostFunc, &'static str)>, TranspileError> {
+/// Every `canon lower` of an imported function in `component`, with the name of its string
+/// encoding (`utf8`, `utf16` or `compact-utf16`).
+pub(crate) fn lowers(component: &[u8]) -> Result<Vec<(HostFunc, &'static str)>, TranspileError> {
     let mut reader = Reader::default();
     read_component(component, Some(&mut reader))?;
-    Ok(reader.non_utf8_lowers)
+    Ok(reader.lowers)
 }
 
 /// The core instance graph of `component` (see [`CoreWiring`]).
@@ -228,8 +225,8 @@ pub(super) struct Reader {
     components: Vec<Shim>,
     exported: Vec<Exported>,
     inner: Option<Inner>,
-    /// The imported functions lowered with a string encoding other than UTF-8, with its name.
-    non_utf8_lowers: Vec<(HostFunc, &'static str)>,
+    /// The lowerings of imported functions, with the name of their string encoding.
+    lowers: Vec<(HostFunc, &'static str)>,
 }
 
 fn index(i: u32) -> Option<usize> {
@@ -449,16 +446,19 @@ impl Reader {
                 func_index,
                 options,
             } => {
-                // Whether it matters (a string in the signature) is known only to the glue.
-                let non_utf8 = options.iter().find_map(|o| match o {
-                    CanonicalOption::UTF16 => Some("utf16"),
-                    CanonicalOption::CompactUTF16 => Some("compact-utf16"),
-                    _ => None,
-                });
-                if let (Some(encoding), Some(Func::Imported(host))) =
-                    (non_utf8, index(func_index).and_then(|i| self.funcs.get(i)))
+                // Whether the encoding matters (a string in the signature) is known only to the glue.
+                let encoding = options
+                    .iter()
+                    .find_map(|o| match o {
+                        CanonicalOption::UTF16 => Some("utf16"),
+                        CanonicalOption::CompactUTF16 => Some("compact-utf16"),
+                        _ => None,
+                    })
+                    .unwrap_or("utf8");
+                if let Some(Func::Imported(host)) =
+                    index(func_index).and_then(|i| self.funcs.get(i))
                 {
-                    self.non_utf8_lowers.push((host.clone(), encoding));
+                    self.lowers.push((host.clone(), encoding));
                 }
                 self.core_funcs.push(CoreFunc::Lowered {
                     func: func_index,

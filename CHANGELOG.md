@@ -10,9 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `--component` supports the `utf16` canonical string encoding for lifted exports (MoonBit components with string exports, #344): the glue transcodes between a Rust `String` and UTF-16 guest memory at the boundary. An unpaired surrogate or an unaligned pointer traps (a panic) instead of being replaced.
 
+- `--component` supports the `utf16` canonical string encoding for lowered imports too (#351): the strings a guest passes to a host import are read as UTF-16, and the strings the host returns are written as UTF-16 code units. An unpaired surrogate or an unaligned pointer traps instead of being replaced.
+
 ### Changed
 - Breaking (library): `WitExport::utf8: bool` is replaced by `WitExport::encoding: WitStringEncoding` (`Utf8` or `Utf16`).
-- An import lowered with `string-encoding=utf16` or `compact-utf16` whose signature holds a string is now an `Unsupported` error naming it; its strings used to be read as UTF-8 without any error. `compact-utf16` lifts stay unsupported, with a message naming the encoding.
+- An import lowered with `compact-utf16`, or with both `utf8` and `utf16`, whose signature holds a string is now an `Unsupported` error naming it; its strings used to be read as UTF-8 without any error. `compact-utf16` lifts stay unsupported, with a message naming the encoding.
 
 ## [0.5.0] - 2026-11-14
 

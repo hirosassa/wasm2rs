@@ -900,7 +900,7 @@ fn glue_text(
     imports_trait: bool,
 ) -> Result<String, TranspileError> {
     let funcs = wit_functions(component)?;
-    reject_non_utf8_lowers(component, &funcs)?;
+    let utf16 = utf16_lowers(component, &funcs)?;
     let exports = if options.exports {
         match lifts {
             Some(lifts) => lifts,
@@ -944,15 +944,17 @@ fn glue_text(
         .exports
         .then_some((exports.as_slice(), export_names.as_slice()));
     let methods = match core_imports {
-        Some(core) => core_methods(&funcs, &names, core)?,
+        Some(core) => core_methods(&funcs, &names, &utf16, core)?,
         None => funcs
             .iter()
             .zip(&names)
-            .map(|(func, name)| glue::Method {
+            .zip(&utf16)
+            .map(|((func, name), &utf16)| glue::Method {
                 func,
                 name,
                 host: name,
                 realloc: None,
+                utf16,
             })
             .collect(),
     };
@@ -960,14 +962,24 @@ fn glue_text(
     Ok(out)
 }
 
-/// The glue reads the strings a guest passes to an import as UTF-8, so an import lowered with
-/// another encoding would silently get its strings misread: refuse it, as the lifts do for
-/// `compact-utf16`. (Only a function whose signature holds a string is affected.)
-fn reject_non_utf8_lowers(component: &[u8], funcs: &[WitFunc]) -> Result<(), TranspileError> {
-    for (host, encoding) in super::exports::non_utf8_lowers(component)? {
-        let Some(f) = funcs
+/// For each of `funcs`, whether the component lowers it with `string-encoding=utf16` (the glue
+/// then transcodes the strings it passes, see `glue::Method::utf16`).
+///
+/// Only a function whose signature holds a string is affected by the encoding. Such a function
+/// lowered as `compact-utf16`, or lowered with two encodings (the glue has one method per
+/// function), is refused.
+fn utf16_lowers(component: &[u8], funcs: &[WitFunc]) -> Result<Vec<bool>, TranspileError> {
+    let mut utf16 = vec![false; funcs.len()];
+    let mut utf8 = vec![false; funcs.len()];
+    for (host, encoding) in super::exports::lowers(component)? {
+        let Some(at) = funcs
             .iter()
-            .find(|f| f.interface == host.interface && f.name == host.name)
+            .position(|f| f.interface == host.interface && f.name == host.name)
+        else {
+            continue;
+        };
+        let (Some(f), Some(u16_slot), Some(u8_slot)) =
+            (funcs.get(at), utf16.get_mut(at), utf8.get_mut(at))
         else {
             continue;
         };
@@ -979,22 +991,36 @@ fn reject_non_utf8_lowers(component: &[u8], funcs: &[WitFunc]) -> Result<(), Tra
                 break;
             }
         }
-        if holds {
+        if !holds {
+            continue;
+        }
+        match encoding {
+            "utf16" => *u16_slot = true,
+            "utf8" => *u8_slot = true,
+            _ => {
+                return Err(unsupported(format!(
+                    "import `{}#{}` is lowered with `string-encoding={encoding}`, which is not \
+                     supported; only `utf8` and `utf16` are",
+                    host.interface, host.name
+                )));
+            }
+        }
+        if *u16_slot && *u8_slot {
             return Err(unsupported(format!(
-                "import `{}#{}` is lowered with `string-encoding={encoding}`, but strings that a \
-                 guest passes to or receives from an import are only supported as utf8 (exports \
-                 support utf16)",
+                "import `{}#{}` is lowered both as utf8 and as utf16: the glue has one method \
+                 per function",
                 host.interface, host.name
             )));
         }
     }
-    Ok(())
+    Ok(utf16)
 }
 
 /// One glue method per core import, in import order.
 fn core_methods<'a>(
     funcs: &'a [WitFunc],
     host_names: &'a [String],
+    utf16: &[bool],
     core: &'a [CoreImport],
 ) -> Result<Vec<glue::Method<'a>>, TranspileError> {
     let mut methods = Vec::new();
@@ -1012,6 +1038,7 @@ fn core_methods<'a>(
             name: &import.ident,
             host,
             realloc: import.realloc.as_deref(),
+            utf16: utf16.get(index).copied().unwrap_or(false),
         });
     }
     Ok(methods)
