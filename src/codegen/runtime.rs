@@ -415,6 +415,14 @@ pub(super) fn source_lines(src: &str) -> Vec<String> {
     src.lines().map(str::to_string).collect()
 }
 
+/// The body of the section of a `.tpl` template (see `mem_helpers.tpl`) that starts
+/// at the line `header` (newline included, so `//# r8u\n` never matches the header of
+/// `r8u64`) and runs to the next blank line.
+pub(super) fn tpl_section(src: &'static str, header: &str) -> Option<&'static str> {
+    let (_, section) = src.split_once(header)?;
+    Some(section.split_once("\n\n").map_or(section, |(body, _)| body))
+}
+
 /// The `f64` instance of an `rt_src` helper written for `f32`.
 fn widen(src: &str) -> Vec<String> {
     source_lines(&src.replace("f32", "f64"))
