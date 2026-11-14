@@ -459,3 +459,95 @@ fn a_split_output_directory_that_cannot_be_created_is_reported() {
         "{stderr}"
     );
 }
+
+/// An unknown `--xxx` option must be refused, not silently taken as the output
+/// file name (which would also create a stray file).
+#[test]
+fn unknown_option_is_rejected_and_creates_no_file() {
+    let (dir, input) = write_sample_wasm("unknown_option");
+    let stray = dir.join("--bogus");
+    let _ = std::fs::remove_file(&stray);
+
+    let out = Command::new(wasm2rs_bin())
+        .arg(&input)
+        .arg("--bogus")
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("unknown option") && stderr.contains("--bogus"),
+        "{stderr}"
+    );
+    assert!(!stray.exists(), "a file named after the option was created");
+}
+
+/// Everything after `--` is positional, so a path that starts with `-` is still
+/// reachable.
+#[test]
+fn double_dash_allows_a_dash_prefixed_output_path() {
+    let (dir, input) = write_sample_wasm("double_dash");
+    let out_file = dir.join("-out.rs");
+    let _ = std::fs::remove_file(&out_file);
+
+    let status = Command::new(wasm2rs_bin())
+        .arg(&input)
+        .arg("--")
+        .arg("-out.rs")
+        .current_dir(&dir)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(out_file.exists());
+}
+
+#[test]
+fn help_prints_usage_to_stdout_and_succeeds() {
+    for flag in ["--help", "-h"] {
+        let out = Command::new(wasm2rs_bin()).arg(flag).output().unwrap();
+        assert!(out.status.success(), "{flag} exited nonzero");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(stdout.starts_with("usage: wasm2rs"), "{flag}: {stdout}");
+    }
+}
+
+#[test]
+fn version_prints_the_package_version_and_succeeds() {
+    for flag in ["--version", "-V"] {
+        let out = Command::new(wasm2rs_bin()).arg(flag).output().unwrap();
+        assert!(out.status.success(), "{flag} exited nonzero");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(
+            stdout.trim(),
+            format!("wasm2rs {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+}
+
+/// With several chunk writes failing, the CLI reports the first failure (not the
+/// last) and stops generating: the root `lib.rs`, emitted after every chunk, is
+/// never written.
+#[test]
+fn split_write_keeps_the_first_error_and_stops() {
+    let (dir, input) = write_sample_wasm("first_error");
+    let out_dir = dir.join("out_first_error");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    for name in ["funcs_0.rs", "funcs_2.rs"] {
+        std::fs::create_dir_all(out_dir.join(name)).unwrap();
+    }
+
+    let out = Command::new(wasm2rs_bin())
+        .arg(&input)
+        .arg(&out_dir)
+        .arg("1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("funcs_0.rs") && !stderr.contains("funcs_2.rs"),
+        "{stderr}"
+    );
+    assert!(!out_dir.join("lib.rs").exists(), "generation did not stop");
+}
