@@ -165,12 +165,12 @@ mod i8x16_shuffle {
 
         #[test]
         fn picks_from_the_concatenation_and_zeroes_indices_past_32() {
-            let a = u128::from_le_bytes([1; 16]);
-            let b = u128::from_le_bytes([2; 16]);
+            let a = u128::from_le_bytes(core::array::from_fn(|i| i as u8));
+            let b = u128::from_le_bytes(core::array::from_fn(|i| 100 + i as u8));
             let mut idx = [0u8; 16];
             idx[..5].copy_from_slice(&[0, 15, 16, 31, 32]);
             let r = i8x16_shuffle(a, b, u128::from_le_bytes(idx)).to_le_bytes();
-            assert_eq!(&r[..5], &[1, 1, 2, 2, 0]);
+            assert_eq!(&r[..5], &[0, 15, 100, 115, 0]);
         }
     }
 }
@@ -186,12 +186,12 @@ mod i16x8_relaxed_dot {
         fn sums_adjacent_products_and_saturates_into_i16() {
             let mut a = [0u8; 16];
             let mut b = [0u8; 16];
-            a[..4].copy_from_slice(&[3, 4, 127, 127]);
-            b[..4].copy_from_slice(&[5, 6, 127, 127]);
+            a[..4].copy_from_slice(&[3, 4, 0x80, 0x80]);
+            b[..4].copy_from_slice(&[5, 6, 0x80, 0x80]);
             let r = i16x8_relaxed_dot_i8x16_i7x16_s(u128::from_le_bytes(a), u128::from_le_bytes(b))
                 .to_le_bytes();
             assert_eq!(i16::from_le_bytes([r[0], r[1]]), 39);
-            assert_eq!(i16::from_le_bytes([r[2], r[3]]), 32258);
+            assert_eq!(i16::from_le_bytes([r[2], r[3]]), 32767);
         }
     }
 }

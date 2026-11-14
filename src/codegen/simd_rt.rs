@@ -420,8 +420,7 @@ pub(super) fn render_simd_helpers(used: &HashSet<&'static str>, intrinsics: bool
     // Byte-permute helpers don't fit the tables above (they permute bytes rather
     // than apply a per-lane op), so each is a fixed self-contained function.
     // `i8x16.swizzle`: index the first vector by each byte of the second, yielding
-    // 0 where the (unsigned) index is 16 or more. A byte permute, so unlike the
-    // lane helpers it selects whole bytes rather than applying a per-lane op.
+    // 0 where the (unsigned) index is 16 or more.
     if used.contains("i8x16_swizzle") {
         blocks.push(
             include_str!("rt_src/i8x16_swizzle.rs")
