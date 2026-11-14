@@ -1014,3 +1014,127 @@ fn a_split_gc_module_defines_its_typed_traps_and_compiles() {
          assert!(matches!(trap_of(|| b(GcRef::Null)), Wasm2RsTrap::CastFailure));",
     );
 }
+
+/// #412 / #415: operands left inline that read the same array, and `array.copy`
+/// null-check order. Each export takes the array in a local so the operands stay
+/// unmaterialised expressions.
+const GC_ARRAY_OPERANDS: &str = r#"(module
+    (type $a (array (mut i32)))
+    (type $f (array (mut funcref)))
+    (elem $seg func $fn)
+    (data $d "\01\02\03\04")
+    (memory 1)
+    (func $fn)
+    (func (export "mk") (result (ref $a)) (array.new_default $a (i32.const 4)))
+    (func (export "mk_f") (result (ref $f)) (array.new_default $f (i32.const 4)))
+    (func (export "get") (param (ref $a) i32) (result i32)
+      (array.get $a (local.get 0) (local.get 1)))
+    (func (export "set_last") (param (ref $a))
+      (array.set $a (local.get 0)
+        (i32.sub (array.len (local.get 0)) (i32.const 1)) (i32.const 9)))
+    (func (export "set_val") (param (ref $a))
+      (array.set $a (local.get 0) (i32.const 0) (array.len (local.get 0))))
+    (func (export "fill_all") (param (ref $a))
+      (array.fill $a (local.get 0) (i32.const 0) (i32.const 7) (array.len (local.get 0))))
+    (func (export "copy_len") (param (ref $a) (ref $a))
+      (array.copy $a $a (local.get 0) (i32.sub (array.len (local.get 0)) (i32.const 2))
+        (local.get 1) (i32.const 0) (i32.const 2)))
+    (func (export "init_data_len") (param (ref $a))
+      (array.init_data $a $d (local.get 0) (i32.sub (array.len (local.get 0)) (i32.const 1))
+        (i32.const 0) (i32.const 1)))
+    (func (export "init_elem_len") (param (ref $f))
+      (array.init_elem $f $seg (local.get 0) (i32.sub (array.len (local.get 0)) (i32.const 1))
+        (i32.const 0) (i32.const 1)))
+    (func (export "copy_oob_operand") (param (ref null $a) (ref $a))
+      (array.copy $a $a (local.get 0) (i32.const 0) (local.get 1)
+        (i32.load (i32.const 65536)) (i32.const 1)))
+    (func (export "copy") (param (ref null $a) i32 (ref null $a) i32 i32)
+      (array.copy $a $a (local.get 0) (local.get 1) (local.get 2) (local.get 3) (local.get 4))))"#;
+
+#[test]
+fn gc_array_ops_with_operands_reading_the_array_do_not_double_borrow() {
+    for (typed, name) in [
+        (true, "gc_array_operands_on"),
+        (false, "gc_array_operands_off"),
+    ] {
+        compile_run_with(
+            name,
+            GC_ARRAY_OPERANDS,
+            typed_named().with_typed_traps(typed),
+            r#"let mut inst = Instance::new();
+            let arr = inst.mk();
+            inst.set_last(arr.clone());
+            assert_eq!(inst.get(arr.clone(), 3), 9);
+            inst.set_val(arr.clone());
+            assert_eq!(inst.get(arr.clone(), 0), 4);
+            inst.fill_all(arr.clone());
+            assert_eq!(inst.get(arr.clone(), 3), 7);
+            let src = inst.mk();
+            inst.set_last(src.clone());
+            inst.copy_len(arr.clone(), src.clone());
+            assert_eq!(inst.get(arr.clone(), 2), 0);
+            inst.init_data_len(arr.clone());
+            assert_eq!(inst.get(arr.clone(), 3), 0x0403_0201);
+            let funcs = inst.mk_f();
+            inst.init_elem_len(funcs);"#,
+        );
+    }
+}
+
+#[test]
+fn gc_array_copy_checks_both_nulls_before_any_range() {
+    // A null operand with an out-of-range source/destination is a null trap, not a
+    // bounds trap, whichever operand is null.
+    let calls = r#"let mut inst = Instance::new();
+            let arr = inst.mk();
+            let p = payload_of(|| inst.copy(GcRef::Null, 0, arr.clone(), 100, 1));
+            let p2 = payload_of(|| inst.copy(arr.clone(), 0, GcRef::Null, 100, 1));
+            let p3 = payload_of(|| inst.copy(GcRef::Null, 100, arr.clone(), 0, 1));"#;
+    compile_run_with(
+        "gc_copy_null_on",
+        GC_ARRAY_OPERANDS,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            {calls}
+            for p in [p, p2, p3] {{
+                assert!(matches!(
+                    *p.downcast::<Wasm2RsTrap>().expect("typed"),
+                    Wasm2RsTrap::NullReference
+                ));
+            }}
+            // Operands are evaluated first: a trapping operand wins over the null dest.
+            let arr = inst.mk();
+            assert!(matches!(
+                trap_of(|| inst.copy_oob_operand(GcRef::Null, arr.clone())),
+                Wasm2RsTrap::OutOfBoundsMemoryAccess
+            ));"#
+        ),
+    );
+    compile_run_with(
+        "gc_copy_null_off",
+        GC_ARRAY_OPERANDS,
+        typed_named().with_typed_traps(false),
+        // `CATCH` references `Wasm2RsTrap`, which is not generated with typed traps off.
+        &format!(
+            r#"
+            fn payload_of<R>(f: impl FnOnce() -> R) -> Box<dyn std::any::Any + Send> {{
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {{
+                    Err(p) => p,
+                    Ok(_) => panic!("expected a trap"),
+                }}
+            }}
+            {calls}
+            for p in [p, p2, p3] {{
+                let m = p.downcast_ref::<&str>().map(|s| s.to_string())
+                    .or_else(|| p.downcast_ref::<String>().cloned()).expect("message");
+                assert_eq!(m, "null reference");
+            }}
+            let arr = inst.mk();
+            let p = payload_of(|| inst.copy_oob_operand(GcRef::Null, arr.clone()));
+            let m = p.downcast_ref::<&str>().map(|s| s.to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned()).expect("message");
+            assert_ne!(m, "null reference");"#
+        ),
+    );
+}
