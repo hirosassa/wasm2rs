@@ -97,3 +97,48 @@ fn changed_generator_output_gets_a_new_cache_entry() {
     let pb = common::build("gen_key_b", &format!("{b}\nfn main() {{}}\n"));
     assert_ne!(pa, pb);
 }
+
+/// Worktrees share the content-addressed entries but not what is mutable: each checkout's
+/// `wasm2rs-wasi` build and scratch files live in a directory of their own, so that two checkouts
+/// running at once never write the same path.
+#[test]
+fn checkouts_share_the_cache_root_but_not_their_mutable_dir() {
+    use std::path::Path;
+    let root = Path::new("/cache");
+    let a = common::checkout_dir_in(root, Path::new("/work/wt-a"));
+    let b = common::checkout_dir_in(root, Path::new("/work/wt-b"));
+    assert_ne!(a, b);
+    assert_eq!(a.parent(), Some(root));
+    assert_eq!(b.parent(), Some(root));
+    assert_eq!(
+        a,
+        common::checkout_dir_in(root, Path::new("/work/wt-a")),
+        "one checkout must always find its own directory again (it holds the warm cargo build)"
+    );
+    assert!(
+        a.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("checkout-")),
+        "the name is what pruning recognises: {a:?}"
+    );
+}
+
+/// The multi-file helper used a fixed `$TMPDIR/wasm2rs_<name>` directory: two checkouts (or two
+/// processes) running the same test wrote the same sources and linked the same binary. Each call
+/// now has a directory of its own, so concurrent runs of one test do not interfere.
+#[test]
+fn concurrent_split_builds_of_one_test_name_do_not_interfere() {
+    let wat = r#"(module
+        (func (export "f") (result i32) i32.const 7)
+        (func (export "g") (result i32) i32.const 8))"#;
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            std::thread::spawn(move || {
+                common::compile_run_split("split_isolation", wat, 1, "assert_eq!(func0(), 7);")
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().expect("a split build interfered with another");
+    }
+}

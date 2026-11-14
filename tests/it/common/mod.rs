@@ -97,8 +97,7 @@ pub fn compile_run_split(
     let files = transpile_files(wat, funcs_per_file);
     let names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
 
-    let dir = std::env::temp_dir().join(format!("wasm2rs_{name}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = scratch_dir(&format!("split-{name}"));
     for f in &files {
         let mut code = f.code.clone();
         // The crate root is turned into a runnable binary by appending `main`.
@@ -132,6 +131,8 @@ pub fn compile_run_split(
         run.success(),
         "generated program assertions failed:\n{name}"
     );
+    // only on success: a failed build's directory is left behind to inspect
+    std::fs::remove_dir_all(&dir).ok();
     names
 }
 
@@ -218,7 +219,7 @@ fn wasi_lib() -> &'static WasiLib {
     LIB.get_or_init(|| {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let cache_dir = cache_dir();
-        let target = cache_dir.join(format!("wasi-target-{}", checkout_id()));
+        let target = checkout_dir().join("wasi-target");
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let out = Command::new(cargo)
             .args([
@@ -293,6 +294,11 @@ pub fn resolve_cache_dir(over: Option<&std::ffi::OsStr>) -> std::path::PathBuf {
 }
 
 /// The shared cache directory, created, and pruned once per process (see [`prune`]).
+///
+/// Shared by every checkout on purpose: what it holds directly (`gen-*`, `ex-*`, the
+/// `wasm2rs-wasi` rlib copies) is content-addressed and published by atomic rename, so concurrent
+/// runs from different worktrees only ever agree on a file's bytes, and each reuses the others'
+/// compiles. What a checkout writes in place lives in [`checkout_dir`] instead.
 fn cache_dir() -> std::path::PathBuf {
     static PRUNED: OnceLock<()> = OnceLock::new();
     let dir = resolve_cache_dir(std::env::var_os("WASM2RS_TESTCACHE_DIR").as_deref());
@@ -322,20 +328,51 @@ fn cache_dir() -> std::path::PathBuf {
 /// `wasm2rs-wasi` build of the example is made once per checkout instead of once per run, and the
 /// program it builds is reused when its inputs are the same.
 pub fn share_example_build(cmd: &mut Command) -> &mut Command {
-    let dir = cache_dir();
     cmd.env(
         "WASM2RS_EXAMPLE_WASI_TARGET",
-        dir.join(format!("example-wasi-target-{}", checkout_id())),
+        checkout_dir().join("example-wasi-target"),
     )
-    .env("WASM2RS_EXAMPLE_CACHE_DIR", &dir)
+    .env("WASM2RS_EXAMPLE_CACHE_DIR", cache_dir())
 }
 
-/// Names a target directory per checkout: worktrees with different host sources must not
-/// overwrite each other's rlib.
-fn checkout_id() -> String {
+/// The directory of the cache root that belongs to the checkout at `manifest_dir`: worktrees with
+/// different host sources must not overwrite each other's `wasm2rs-wasi` build, nor write the same
+/// scratch file. [`prune`] recognises it by the `checkout-` prefix.
+pub fn checkout_dir_in(
+    root: &std::path::Path,
+    manifest_dir: &std::path::Path,
+) -> std::path::PathBuf {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).hash(&mut h);
-    format!("{:016x}", h.finish())
+    manifest_dir.hash(&mut h);
+    root.join(format!("checkout-{:016x}", h.finish()))
+}
+
+/// This checkout's own directory in the cache (see [`checkout_dir_in`]), created, and marked as
+/// used once per process so that [`prune`] does not take a checkout that is being worked in for an
+/// abandoned one.
+fn checkout_dir() -> std::path::PathBuf {
+    static USED: OnceLock<()> = OnceLock::new();
+    let dir = checkout_dir_in(
+        &cache_dir(),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+    );
+    std::fs::create_dir_all(&dir).expect("create checkout dir");
+    USED.get_or_init(|| std::fs::write(dir.join(".used"), b"").expect("mark checkout dir used"));
+    dir
+}
+
+/// Makes the names of scratch directories unique within the process (the pid covers processes).
+static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A new, empty scratch directory for `label`, unique per call and process. Use this rather than
+/// `$TMPDIR/<fixed name>`, which every checkout and process running the same test shares and
+/// overwrites. Named like the build working directories, so [`prune`] removes what a failed test
+/// left behind after a few hours.
+pub fn scratch_dir(label: &str) -> std::path::PathBuf {
+    let uniq = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = cache_dir().join(format!("work-{label}-{}-{uniq}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    dir
 }
 
 fn build_with(name: &str, program: &str, wasi: Option<&WasiLib>) -> std::path::PathBuf {
@@ -351,8 +388,7 @@ fn build_with(name: &str, program: &str, wasi: Option<&WasiLib>) -> std::path::P
     // never share codegen-unit temp objects, then atomically publish the binary
     // into the shared cache. Concurrent misses of the same key both compile and
     // rename; the last rename wins and every waiter observes a complete binary.
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let uniq = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
     let work = cache_dir.join(format!("work-{name}-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&work).expect("create work dir");
     let src = work.join("gen.rs");
