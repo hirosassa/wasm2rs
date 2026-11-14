@@ -130,8 +130,11 @@ pub struct SourceFile {
 /// The content of an [`OutputFile`]: source text, or raw bytes for a side file
 /// that the source pulls in with `include_bytes!`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FileContent {
+    /// Rust source text.
     Text(String),
+    /// A binary side file.
     Bytes(Vec<u8>),
 }
 
@@ -551,7 +554,8 @@ where
             split.max_bytes_per_file,
             data_files,
             &mut |mut file| {
-                if let (true, FileContent::Text(code)) = (file.name == "lib.rs", &mut file.content)
+                if file.name == "lib.rs"
+                    && let FileContent::Text(code) = &mut file.content
                 {
                     code.push('\n');
                     code.push_str(&glue);

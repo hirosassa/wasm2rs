@@ -6,7 +6,7 @@ use std::process::Command;
 
 use wasm2rs::{FileContent, OutputFile, SplitOptions, TranspileOptions};
 
-/// `n` non-zero bytes as a WAT string body (`\01\02...`), a pattern that is easy to spot-check.
+/// `n` non-zero bytes (`1, 2, …, 251, 1, …`), a pattern that is easy to spot-check.
 fn pattern(n: usize) -> Vec<u8> {
     (0..n)
         .map(|i| u8::try_from(i % 251 + 1).expect("fits"))
@@ -72,6 +72,7 @@ fn compile_run(name: &str, files: &[OutputFile], main_body: &str) {
                 std::fs::write(dir.join(&f.name), code).expect("write source");
             }
             FileContent::Bytes(bytes) => std::fs::write(dir.join(&f.name), bytes).expect("write"),
+            _ => panic!("unknown file kind"),
         }
     }
     let bin = dir.join("gen");

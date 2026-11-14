@@ -383,9 +383,7 @@ fn run() -> Result<(), String> {
         });
     }
     if data_files {
-        return Err(
-            "--data-files needs a split output (funcs_per_file or max_bytes_per_file)".to_string(),
-        );
+        return Err(DATA_FILES_NEEDS_SPLIT.to_string());
     }
 
     let pieces =
@@ -423,6 +421,9 @@ fn parse_usize_arg(arg: Option<String>, name: &str) -> Result<usize, String> {
     }
 }
 
+const DATA_FILES_NEEDS_SPLIT: &str =
+    "--data-files needs a split output (funcs_per_file or max_bytes_per_file)";
+
 /// Receives each generated file as `(name, bytes)`.
 type FileSink<'a> = dyn FnMut(&str, &[u8]) -> Result<(), TranspileError> + 'a;
 
@@ -431,6 +432,9 @@ fn sink_file(sink: &mut FileSink<'_>, file: wasm2rs::OutputFile) -> Result<(), T
     match &file.content {
         FileContent::Text(code) => sink(&file.name, code.as_bytes()),
         FileContent::Bytes(bytes) => sink(&file.name, bytes),
+        _ => Err(TranspileError::Internal(
+            "an output file of an unknown kind".into(),
+        )),
     }
 }
 
