@@ -245,6 +245,55 @@ mod shared_memory {
             assert_eq!(mem.atomic_load(0, 1), 1);
         }
 
+        // An address beyond the 32-bit space is out of bounds, never misreported as
+        // unaligned (on a 32-bit host it used to saturate to `usize::MAX`).
+        #[test]
+        fn atomic_address_beyond_u32_is_out_of_bounds_not_unaligned() {
+            let mem = SharedMemory::new(65536);
+            let msg = |f: &dyn Fn()| {
+                let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                    .expect_err("expected a trap");
+                err.downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            };
+            let far = u64::from(u32::MAX) + 1 + 4;
+            assert_eq!(
+                msg(&|| {
+                    mem.atomic_load(far, 4);
+                }),
+                "out of bounds atomic access"
+            );
+            assert_eq!(
+                msg(&|| mem.atomic_store(far, 4, 0)),
+                "out of bounds atomic access"
+            );
+            assert_eq!(
+                msg(&|| {
+                    mem.notify(far, 1);
+                }),
+                "out of bounds atomic access"
+            );
+            assert_eq!(
+                msg(&|| {
+                    mem.wait(far, 0, 4, 0);
+                }),
+                "out of bounds atomic access"
+            );
+            assert_eq!(
+                msg(&|| {
+                    mem.atomic_load(far + 1, 4);
+                }),
+                "unaligned atomic access"
+            );
+            assert_eq!(
+                msg(&|| {
+                    mem.atomic_load(65536, 4);
+                }),
+                "out of bounds atomic access"
+            );
+        }
+
         #[test]
         fn cmpxchg_stores_only_on_match() {
             let mem = SharedMemory::new(65536);
