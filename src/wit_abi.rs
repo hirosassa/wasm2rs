@@ -225,27 +225,49 @@ pub(crate) fn flatten(ty: &WitType, budget: &mut Budget) -> Result<Vec<Flat>, Tr
     Ok(out)
 }
 
+type Probe = fn(&WitType, &mut Budget) -> Result<bool, TranspileError>;
+
 /// Whether a value of `ty` is, or holds, a `string` or `list`: something the canonical ABI
 /// passes as a pointer into linear memory.
 pub(crate) fn needs_memory(ty: &WitType, budget: &mut Budget) -> Result<bool, TranspileError> {
     budget.spend()?;
     Ok(match ty {
         WitType::String | WitType::List(_) => true,
-        WitType::Tuple(ts) => any(ts.iter().map(AsRef::as_ref), budget)?,
-        WitType::Record(r) => any(r.fields.iter().map(|(_, t)| t.as_ref()), budget)?,
+        _ => any_part(ty, budget, needs_memory)?,
+    })
+}
+
+/// Whether a value of `ty` is, or holds, a `string`: the only type whose encoding
+/// (`string-encoding`) the canonical ABI options change.
+pub(crate) fn holds_string(ty: &WitType, budget: &mut Budget) -> Result<bool, TranspileError> {
+    budget.spend()?;
+    Ok(match ty {
+        WitType::String => true,
+        WitType::List(t) => holds_string(t, budget)?,
+        _ => any_part(ty, budget, holds_string)?,
+    })
+}
+
+/// Whether `probe` holds for a field, element or case payload of `ty`.
+fn any_part(ty: &WitType, budget: &mut Budget, probe: Probe) -> Result<bool, TranspileError> {
+    match ty {
+        WitType::Tuple(ts) => any(ts.iter().map(AsRef::as_ref), budget, probe),
+        WitType::Record(r) => any(r.fields.iter().map(|(_, t)| t.as_ref()), budget, probe),
         _ => any(
             cases_of(ty).unwrap_or_default().into_iter().flatten(),
             budget,
-        )?,
-    })
+            probe,
+        ),
+    }
 }
 
 fn any<'a>(
     types: impl Iterator<Item = &'a WitType>,
     budget: &mut Budget,
+    probe: Probe,
 ) -> Result<bool, TranspileError> {
     for t in types {
-        if needs_memory(t, budget)? {
+        if probe(t, budget)? {
             return Ok(true);
         }
     }

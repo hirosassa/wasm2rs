@@ -52,7 +52,7 @@ moves the examples, the CLI and the build-script story onto it.
    - components that link several core modules through a shim or adapter *and* export nothing, so
      the program cannot be told from the plumbing;
    - an export of a nested component (inherited from `wit_exports`);
-   - string encodings other than UTF-8 (inherited from `wit_exports`);
+   - `compact-utf16` strings, and an import lowered as UTF-16 with a string in its signature (exports with UTF-16 are supported);
    - input that is a core module rather than a component: the error says to use `transpile`;
    - a program module (the one that lifts the exports) that imports a memory, table or global from
      another core module, as the adapter of a preview1-adapter component does: the error says that

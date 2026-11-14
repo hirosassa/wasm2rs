@@ -26,7 +26,7 @@ pub use emit::{
     WitNaming, WitOptions, wit_host_glue, wit_host_glue_with_options, wit_host_trait,
     wit_host_trait_with_options,
 };
-pub use exports::{WitExport, wit_exports};
+pub use exports::{WitExport, WitStringEncoding, wit_exports};
 pub use read::wit_functions;
 
 pub(crate) use emit::{CoreImport, is_wit_function, wit_host_glue_for_module};

@@ -26,7 +26,7 @@ use std::fmt::Write as _;
 
 use super::emit::{Records, case_idents, doc_text, flags_int, typed_signature, unique_idents};
 use super::read::unsupported;
-use super::{WitExport, WitFunc, WitType};
+use super::{WitExport, WitFunc, WitStringEncoding, WitType};
 use crate::TranspileError;
 use crate::codegen::assign_export_names;
 use crate::wit_abi::{
@@ -148,6 +148,26 @@ mod glue_abi {
     pub fn string(m: &[u8], lb: &Budget, ptr: u32, len: u32) -> String {
         String::from_utf8(bytes(m, lb, ptr, len)).unwrap_or_else(|_| trap("invalid UTF-8 in a string"))
     }
+
+    /// A `string-encoding=utf16` string: `len` counts 16-bit code units, and an unpaired
+    /// surrogate is a trap, like invalid UTF-8.
+    pub fn string16(m: &[u8], lb: &Budget, ptr: u32, len: u32) -> String {
+        if ptr % 2 != 0 {
+            trap("unaligned pointer");
+        }
+        let bytes = u64::from(len) * 2;
+        lb.spend(bytes);
+        let units: Vec<u16> = slice(m, u64::from(ptr), bytes)
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16(&units).unwrap_or_else(|_| trap("invalid UTF-16 in a string"))
+    }
+
+    /// The little-endian bytes of `s` as UTF-16.
+    pub fn utf16_bytes(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
 }
 "#;
 
@@ -204,6 +224,21 @@ mod glue_alloc {
         let ptr = alloc(g, 1, data.len() as u64, 1);
         glue_mem::st(g, ptr, data);
         put_ptr_len(g, at, ptr, data.len() as u64);
+    }
+
+    /// Copies `s` as UTF-16 into a fresh guest allocation: its `(ptr, len)`, `len` in code units.
+    pub fn new_utf16<H: Host>(g: &mut Instance<Glue<H>>, s: &str) -> (u64, u64) {
+        let data = glue_abi::utf16_bytes(s);
+        let units = data.len() as u64 / 2;
+        let ptr = alloc(g, 2, units, 2);
+        glue_mem::st(g, ptr, &data);
+        (ptr, units)
+    }
+
+    /// Like [`put_bytes`] for a UTF-16 string: `len` counts code units.
+    pub fn put_utf16<H: Host>(g: &mut Instance<Glue<H>>, at: u64, s: &str) {
+        let (ptr, units) = new_utf16(g, s);
+        put_ptr_len(g, at, ptr, units);
     }
 
     /// Writes the `(ptr, len)` of a string or list at `at`.
@@ -334,6 +369,8 @@ struct Gen<'a> {
     allocates: bool,
     /// The module of allocation helpers the generated code calls (see [`ALLOC_MODULE`]).
     alloc: String,
+    /// Strings are UTF-16 (the lift being generated says `string-encoding=utf16`).
+    utf16: bool,
 }
 
 impl Gen<'_> {
@@ -473,7 +510,8 @@ impl Gen<'_> {
             }
             WitType::String => {
                 let (ptr, len) = Self::ptr_len(src);
-                format!("glue_abi::string(m, &lb, {ptr}, {len})")
+                let read = if self.utf16 { "string16" } else { "string" };
+                format!("glue_abi::{read}(m, &lb, {ptr}, {len})")
             }
             WitType::List(t) => {
                 let (ptr, len) = Self::ptr_len(src);
@@ -613,11 +651,18 @@ impl Gen<'_> {
                 self.writes_memory = true;
                 let next = base.saturating_add(1);
                 let al = self.alloc.clone();
-                format!(
-                    "{{ let v = {value}; let b = v.as_bytes(); \
-                     let p = {al}::alloc(g, 1, b.len() as u64, 1); glue_mem::st(g, p, b); \
-                     out[{base}] = p; out[{next}] = b.len() as u64; }}"
-                )
+                if self.utf16 {
+                    format!(
+                        "{{ let (p, units) = {al}::new_utf16(g, &({value})); \
+                         out[{base}] = p; out[{next}] = units; }}"
+                    )
+                } else {
+                    format!(
+                        "{{ let v = {value}; let b = v.as_bytes(); \
+                         let p = {al}::alloc(g, 1, b.len() as u64, 1); glue_mem::st(g, p, b); \
+                         out[{base}] = p; out[{next}] = b.len() as u64; }}"
+                    )
+                }
             }
             WitType::List(t) => {
                 self.allocates = true;
@@ -704,7 +749,11 @@ impl Gen<'_> {
             WitType::String => {
                 self.allocates = true;
                 let al = self.alloc.clone();
-                format!("{al}::put_bytes(g, {at}, ({value}).as_bytes());")
+                if self.utf16 {
+                    format!("{al}::put_utf16(g, {at}, &({value}));")
+                } else {
+                    format!("{al}::put_bytes(g, {at}, ({value}).as_bytes());")
+                }
             }
             WitType::List(t) => {
                 self.allocates = true;
@@ -799,6 +848,7 @@ pub(super) fn write(
         writes_memory: false,
         allocates: false,
         alloc: ALLOC_MODULE.to_string(),
+        utf16: false,
     };
     // The distinct import `realloc`s in first-use order, and whether an import allocates
     // through each (the last entry: through the lifts' `cabi_realloc`).
@@ -1015,6 +1065,7 @@ fn write_export(
     name: &str,
 ) -> Result<(), TranspileError> {
     let f = &e.func;
+    gen_.utf16 = e.encoding == WitStringEncoding::Utf16;
     let mut sig_budget = Budget::new();
     let sig = core_signature(f, &mut sig_budget)?;
     // Lifting differs from lowering for the result: it is the pointer the core function

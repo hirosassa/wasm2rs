@@ -59,7 +59,7 @@ pub struct WitExport {
     pub memory: Option<String>,
     pub realloc: Option<String>,
     pub post_return: Option<String>,
-    pub utf8: bool,             // other encodings: Unsupported
+    pub encoding: WitStringEncoding, // Utf8 | Utf16; compact-utf16: Unsupported
 }
 ```
 
