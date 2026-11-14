@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking (library): `WitExport::utf8: bool` is replaced by `WitExport::encoding: WitStringEncoding` (`Utf8` or `Utf16`).
 - An import lowered with `compact-utf16`, or with both `utf8` and `utf16`, whose signature holds a string is now an `Unsupported` error naming it; its strings used to be read as UTF-8 without any error. `compact-utf16` lifts stay unsupported, with a message naming the encoding.
 
+### Fixed
+- `memory.atomic.notify` now traps on a misaligned or out-of-bounds address (#406), as the threads proposal requires: on a shared memory (`SharedMemory::notify`) and on an unshared one (where it still returns 0 otherwise). On an unshared memory `memory.atomic.wait*` also checks alignment now. The `addr + offset` of `wait`/`notify` is summed in `u64` like the other atomics, so a sum past `u32` traps instead of panicking on overflow in debug and wrapping in release. Under `typed_traps` the alignment trap is `UnalignedAtomicAccess`. Output changes only around these instructions.
+
 ## [0.5.0] - 2026-11-14
 
 `wasm2rs` and `wasm2rs-macros` 0.5.0, `wasm2rs-wasi` 0.1.1 (a `Host` method with a default implementation was added; compatible with 0.1.0). `wasm2rs-macros` has no code change; its version follows `wasm2rs`.

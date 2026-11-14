@@ -644,3 +644,32 @@ fn memory_init_on_a_shared_memory_traps_typed_for_both_ranges() {
         ),
     );
 }
+
+#[test]
+fn notify_traps_are_typed_on_shared_and_unshared_memory() {
+    // `memory.atomic.notify` checks alignment and bounds on both kinds of memory;
+    // under `typed_traps` the alignment trap is `UnalignedAtomicAccess` either way.
+    let wat = |mem: &str| {
+        format!(
+            r#"(module (memory 1 1 {mem})
+                (func (export "notify") (param i32) (result i32)
+                  local.get 0 i32.const 1 memory.atomic.notify))"#
+        )
+    };
+    for (name, mem) in [
+        ("typed_notify_unshared", ""),
+        ("typed_notify_shared", "shared"),
+    ] {
+        compile_run_with(
+            name,
+            &wat(mem),
+            typed_named(),
+            &format!(
+                r#"{CATCH}
+                let mut inst = Instance::new();
+                assert_eq!(inst.notify(8), 0);
+                assert!(matches!(trap_of(|| inst.notify(2)), Wasm2RsTrap::UnalignedAtomicAccess));"#
+            ),
+        );
+    }
+}

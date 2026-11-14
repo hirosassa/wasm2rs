@@ -187,7 +187,8 @@ pub(crate) enum Rt {
     TrapMemoryOob,
     /// The out-of-line `out of bounds table access` trap (typed traps only).
     TrapTableOob,
-    /// The out-of-line `unaligned atomic access` trap (typed traps, shared memory only).
+    /// The out-of-line `unaligned atomic access` trap (typed traps only: shared-memory
+    /// atomics, and notify/wait on an unshared memory).
     TrapUnalignedAtomic,
     /// Explicit-check integer division/remainder (typed traps only): they replace
     /// Rust's `/` and `%`, whose built-in panics cannot carry a typed payload.
