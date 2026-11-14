@@ -89,6 +89,28 @@ Transpilation of a component (errors that say why):
 - The component bytes are parsed several times inside one transpilation (layout scan,
   `wit_exports`, the glue); this only costs time.
 
+## WASI 0.3 (p3): not supported
+
+WASI 0.3.0 (released 2026-06-11) replaces `wasi:io` with the component model's async features.
+wasm2rs targets 0.2 only: a component that uses any of the features below is refused with an
+`Unsupported` error that names the feature (the error says "WASI 0.3"). Nothing is silently
+mis-translated.
+
+| Feature | Where it is refused | Why it is not there |
+|---|---|---|
+| `async func` types | `src/wit/read.rs` (`P3_ASYNC_FUNC`) | needs the async canonical ABI and a single-threaded task scheduler |
+| `future<T>`, `stream<T>`, `error-context` | `src/wit/read.rs` (`P3_FUTURE`, `P3_STREAM`, `P3_ERROR_CONTEXT`) | values the scheduler owns; no `future.*`/`stream.*` built-ins |
+| `canon lift ... async` (stackful ABI) | `src/wit/exports.rs` | a guest that blocks inside the host's scheduler; needs suspension across `call_indirect`, which the `cont` backend does not support |
+| `canon lift ... async (callback ...)` (callback ABI) | `src/wit/exports.rs` | needs `task.return`, `subtask.*`, `waitable-set.*` and an event loop |
+| `core-type` / `gc` canonical options | `src/wit/exports.rs` | component-model GC, not modelled |
+
+The `canon` built-ins of the async ABI (`task.*`, `subtask.*`, `waitable-set.*`, `stream.*`,
+`future.*`) are not parsed into the function index space either. The `wasm2rs-wasi` host is
+built on `wasi:io` pollables and streams, so a 0.3 host would be a separate surface. The
+milestone plan (M0 this refusal, M0.5 a spike on what real async guests look like, then reading
+`async func` and generating glue, a callback-ABI scheduler, and a 0.3 host) is a proposal, not a
+commitment.
+
 ## Not done yet
 
 - Escape attempts through symlinks and junctions on Windows (everything else of #205 is done, see [windows.md](windows.md)).

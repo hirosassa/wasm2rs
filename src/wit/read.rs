@@ -129,7 +129,7 @@ pub(super) fn primitive(p: PrimitiveValType) -> Soft<WitType> {
         PrimitiveValType::F64 => WitType::F64,
         PrimitiveValType::Char => WitType::Char,
         PrimitiveValType::String => WitType::String,
-        PrimitiveValType::ErrorContext => return Err("error-context".into()),
+        PrimitiveValType::ErrorContext => return Err(P3_ERROR_CONTEXT.into()),
     })
 }
 
@@ -222,19 +222,27 @@ pub(super) fn defined(scope: &Scope, d: &ComponentDefinedType<'_>) -> Soft<WitTy
         }
         ComponentDefinedType::Own(i) => WitType::Own(resource_at(scope, *i)?),
         ComponentDefinedType::Borrow(i) => WitType::Borrow(resource_at(scope, *i)?),
-        ComponentDefinedType::Future(_) => return Err("future".into()),
-        ComponentDefinedType::Stream(_) => return Err("stream".into()),
+        ComponentDefinedType::Future(_) => return Err(P3_FUTURE.into()),
+        ComponentDefinedType::Stream(_) => return Err(P3_STREAM.into()),
         ComponentDefinedType::Map(..) => return Err("map".into()),
         ComponentDefinedType::FixedLengthList(..) => return Err("fixed-length list".into()),
     })
 }
+
+// WASI 0.3 (component-model async) features are named one by one: each needs the async
+// canonical ABI and a task scheduler, which this reader and the generated glue do not have.
+pub(super) const P3_ASYNC_FUNC: &str = "async function (WASI 0.3: needs the async canonical ABI and a task scheduler, which are not implemented)";
+pub(super) const P3_FUTURE: &str = "future type (WASI 0.3: asynchronous values need the async canonical ABI, which is not implemented)";
+pub(super) const P3_STREAM: &str = "stream type (WASI 0.3: asynchronous streams need the async canonical ABI, which is not implemented)";
+pub(super) const P3_ERROR_CONTEXT: &str =
+    "error-context type (WASI 0.3: part of the async canonical ABI, which is not implemented)";
 
 /// The most flags one `flags` type may have: one `u32` of the canonical ABI.
 pub(super) const MAX_FLAGS: usize = 32;
 
 pub(super) fn func_sig(scope: &Scope, f: &ComponentFuncType<'_>) -> Soft<Sig> {
     if f.async_ {
-        return Err("async function".into());
+        return Err(P3_ASYNC_FUNC.into());
     }
     // One level of sharing is copied; the types below stay shared.
     let params = fields(scope, &f.params)?

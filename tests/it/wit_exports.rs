@@ -452,3 +452,68 @@ fn a_type_aliased_out_of_a_nested_instance_type_keeps_its_shape() {
     assert_eq!(record.fields[0].0, "a");
     assert!(matches!(*record.fields[0].1, WitType::U32));
 }
+
+/// A component exporting `go` of type `ty`, lifted with `options` from a core function of
+/// signature `core_sig`.
+fn p3_export(ty: &str, options: &str, core_sig: &str) -> String {
+    format!(
+        r#"(component
+  (core module $b
+    (memory (export "mem") 1)
+    (func (export "f") {core_sig})
+    (func (export "cb") (param i32 i32 i32) (result i32) i32.const 0))
+  (core instance $ib (instantiate $b))
+  (alias core export $ib "mem" (core memory $m))
+  (alias core export $ib "f" (core func $f))
+  (alias core export $ib "cb" (core func $cb))
+  (type $t {ty})
+  (func $lf (type $t) (canon lift (core func $f) {options}))
+  (export "go" (func $lf)))"#
+    )
+}
+
+#[test]
+fn an_async_function_is_rejected_as_wasi_0_3() {
+    let err = rejection(&p3_export("(func async)", "async", ""));
+    assert!(
+        err.contains("`go`") && err.contains("async function") && err.contains("WASI 0.3"),
+        "{err}"
+    );
+}
+
+#[test]
+fn p3_value_types_are_rejected_by_name() {
+    for (ty, name) in [
+        ("(func (param \"p\" (future u32)))", "future"),
+        ("(func (param \"p\" (stream u8)))", "stream"),
+        ("(func (param \"p\" error-context))", "error-context"),
+    ] {
+        let err = rejection(&p3_export(ty, "(memory $m)", "(param i32)"));
+        assert!(
+            err.contains("`go`") && err.contains(name) && err.contains("WASI 0.3"),
+            "{name}: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_stackful_async_lift_is_rejected_as_the_stackful_abi() {
+    let err = rejection(&p3_export("(func async)", "async", ""));
+    assert!(
+        err.contains("`go`") && err.contains("stackful") && err.contains("WASI 0.3"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_callback_async_lift_is_rejected_as_the_callback_abi() {
+    let err = rejection(&p3_export(
+        "(func async)",
+        "async (callback $cb)",
+        "(result i32) i32.const 0",
+    ));
+    assert!(
+        err.contains("`go`") && err.contains("callback ABI") && err.contains("WASI 0.3"),
+        "{err}"
+    );
+}
