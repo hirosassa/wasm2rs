@@ -317,7 +317,7 @@ impl super::FuncGen<'_> {
         let init = self.pop()?;
         let slot = shape.wrap(&init.code)?;
         let code = format!(
-            "{{ let __n = ({}) as usize; \
+            "{{ let __n = ({}) as u32 as usize; \
              GcRef::Obj {{ ty: {type_index}u32, \
              slots: std::rc::Rc::new(std::cell::RefCell::new(vec![{slot}; __n])) }} }}",
             size.code
@@ -404,7 +404,7 @@ impl super::FuncGen<'_> {
         let default = self.array_element_shape(type_index)?.default_slot()?;
         let size = self.pop()?;
         let code = format!(
-            "{{ let __n = ({}) as usize; \
+            "{{ let __n = ({}) as u32 as usize; \
              GcRef::Obj {{ ty: {type_index}u32, \
              slots: std::rc::Rc::new(std::cell::RefCell::new(vec![{default}; __n])) }} }}",
             size.code

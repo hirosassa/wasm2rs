@@ -652,18 +652,18 @@ impl<'a> super::FuncGen<'a> {
 
     /// Emit an `i31.get_{s,u}`: read the `GcRef::I31` payload through
     /// `payload_expr` (in which `__v` is the raw i32 payload), trapping on a null
-    /// handle. Keeps the operand's stability (a pure read).
+    /// handle. The trap makes it non-droppable and unstable: it must still run
+    /// when the result is discarded, and not be reordered past a later side effect.
     fn i31_get(&mut self, payload_expr: &str) -> Result<(), TranspileError> {
         let r = self.pop()?;
         let fail = self.trap_or_panic(Rt::TrapNullReference, "i31.get on null");
-        self.push_combined(
+        self.push_trapping(
             format!(
                 "(match ({}) {{ GcRef::I31(__v) => {payload_expr}, \
                  _ => {fail} }})",
                 r.code
             ),
             ValType::I32,
-            &[&r],
         )
     }
 
