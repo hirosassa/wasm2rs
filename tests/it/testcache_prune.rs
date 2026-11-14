@@ -40,6 +40,7 @@ fn policy() -> Policy {
         max_age: 14 * DAY,
         max_bytes: u64::MAX,
         work_max_age: Duration::from_secs(6 * 60 * 60),
+        checkout_max_age: 14 * DAY,
     }
 }
 
@@ -107,12 +108,72 @@ fn files_that_are_not_cache_entries_are_left_alone() {
         now,
         100 * DAY,
     );
-    let target = dir.join("wasi-target-1");
-    fs::create_dir_all(&target).unwrap();
-    set_age(&target, now, 100 * DAY);
+    let stamp = entry(&dir, ".pruned", 0, now, 100 * DAY);
     prune(&dir, now, &policy());
     assert!(rlib.exists());
-    assert!(target.exists());
+    assert!(stamp.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Creates the per-checkout directory `name` holding a file of the given age, nested so that the
+/// directory's own mtime says nothing about the use of what is inside.
+fn checkout(dir: &Path, name: &str, now: SystemTime, inner_age: Duration) -> PathBuf {
+    let path = dir.join(name);
+    fs::create_dir_all(path.join("wasi-target/debug")).unwrap();
+    entry(
+        &path.join("wasi-target/debug"),
+        "libx.rlib",
+        10,
+        now,
+        inner_age,
+    );
+    // creating the file touched the directories above it
+    for sub in ["wasi-target/debug", "wasi-target", ""] {
+        set_age(&path.join(sub), now, 100 * DAY);
+    }
+    path
+}
+
+#[test]
+fn an_idle_checkout_dir_is_removed_and_a_used_one_is_kept() {
+    let dir = scratch("checkout");
+    let now = SystemTime::now();
+    let idle = checkout(&dir, "checkout-0000000000000001", now, 15 * DAY);
+    let used = checkout(&dir, "checkout-0000000000000002", now, DAY);
+    let report = prune(&dir, now, &policy());
+    assert!(!idle.exists());
+    assert!(used.exists());
+    assert_eq!(report.removed, 1);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn one_recent_file_deep_inside_keeps_the_whole_checkout_dir() {
+    let dir = scratch("checkout-newest");
+    let now = SystemTime::now();
+    let path = checkout(&dir, "checkout-0000000000000003", now, 30 * DAY);
+    entry(&path, ".used", 0, now, Duration::from_secs(60));
+    prune(&dir, now, &policy());
+    assert!(path.join("wasi-target/debug/libx.rlib").exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A cache restored from before the per-checkout layout still holds these at the top level.
+#[test]
+fn legacy_per_checkout_entries_are_aged_out_by_their_newest_inner_mtime() {
+    let dir = scratch("legacy");
+    let now = SystemTime::now();
+    let idle = checkout(&dir, "wasi-target-00000000000000aa", now, 20 * DAY);
+    let idle_example = checkout(&dir, "example-wasi-target-00000000000000aa", now, 20 * DAY);
+    let used = checkout(&dir, "wasi-target-00000000000000bb", now, DAY);
+    let idle_lock = entry(&dir, "wasi-target-00000000000000aa.lock", 0, now, 20 * DAY);
+    let used_lock = entry(&dir, "wasi-target-00000000000000bb.lock", 0, now, DAY);
+    prune(&dir, now, &policy());
+    assert!(!idle.exists());
+    assert!(!idle_example.exists());
+    assert!(!idle_lock.exists());
+    assert!(used.exists());
+    assert!(used_lock.exists());
     fs::remove_dir_all(&dir).ok();
 }
 
