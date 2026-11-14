@@ -80,6 +80,12 @@ jobs:
       # docs/wasi-threads-e2e.md). The wasi-sdk tests skip here; the
       # e2e-wasi-sdk job runs them. The full suite runs on stable only; beta and
       # nightly just have to compile it.
+      # Entries older than this were not used by the run below (a hit refreshes the mtime): the
+      # prune step before the save drops them.
+      - name: Record the start of the test run
+        if: matrix.rust == 'stable'
+        run: echo "WASM2RS_TESTCACHE_RUN_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Run cargo test
         if: matrix.rust == 'stable'
         run: cargo test --release --workspace
@@ -87,6 +93,14 @@ jobs:
           WASM2RS_REQUIRE_E2E: rust
           WASM2RS_TESTCACHE_DIR: ${{ runner.temp }}/wasm2rs-testcache
           WASM2RS_TESTCACHE_MAX_GIB: 2
+
+      # Only main saves (pull requests just restore), and it saves only what this run used, so the
+      # cache does not grow by one generation of compiled programs per generator change.
+      - name: Prune the generated-program cache of unused entries
+        if: matrix.rust == 'stable' && github.ref == 'refs/heads/main'
+        run: cargo test --release --test it -- --ignored prune_the_cache_of_what_this_run_did_not_use --nocapture
+        env:
+          WASM2RS_TESTCACHE_DIR: ${{ runner.temp }}/wasm2rs-testcache
 
       - name: Save the generated-program cache
         if: matrix.rust == 'stable' && github.ref == 'refs/heads/main'

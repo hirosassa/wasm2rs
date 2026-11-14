@@ -147,6 +147,47 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
     report
 }
 
+/// Prefix of the content-addressed copies of the `wasm2rs-wasi` rlib/rmeta that sit in the cache root.
+const WASI_LIB_PREFIX: &str = "libwasm2rs_wasi-";
+
+/// Removes what a run that began at `started` did not use, to shrink the cache before CI saves it:
+/// a hit refreshes an entry's mtime and a new compile is written during the run, so anything older
+/// than `started` is unused, and the next run would only restore it again. Checkout directories
+/// stay (a worktree's `wasm2rs-wasi` build is costly to redo and [`prune`] ages it out).
+pub fn prune_unused(dir: &Path, started: SystemTime) -> Report {
+    let mut report = Report::default();
+    let Ok(read) = fs::read_dir(dir) else {
+        return report;
+    };
+    for item in read.flatten() {
+        let name = item.file_name();
+        let name = name.to_string_lossy();
+        let Ok(meta) = item.metadata() else { continue };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        if modified >= started {
+            continue;
+        }
+        let removed = if name.starts_with(WORK_PREFIX) {
+            fs::remove_dir_all(item.path())
+        } else if meta.is_file()
+            && ENTRY_PREFIXES
+                .iter()
+                .chain([&WASI_LIB_PREFIX])
+                .any(|p| name.starts_with(p))
+        {
+            fs::remove_file(item.path())
+        } else {
+            continue;
+        };
+        if removed.is_ok() {
+            report.removed += 1;
+        }
+    }
+    report
+}
+
 /// A legacy `<target>.lock` goes with its target directory: the file's own mtime is its creation,
 /// which says nothing about whether the target is in use.
 fn remove_orphaned_locks(dir: &Path, report: &mut Report) {

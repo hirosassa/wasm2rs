@@ -7,7 +7,7 @@ use std::fs::{self, File, FileTimes};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::common::prune::{Policy, prune};
+use crate::common::prune::{Policy, prune, prune_unused};
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -177,4 +177,92 @@ fn pruning_a_missing_directory_is_a_no_op() {
     let dir = std::env::temp_dir().join("wasm2rs-prune-test-does-not-exist");
     fs::remove_dir_all(&dir).ok();
     assert_eq!(prune(&dir, SystemTime::now(), &policy()).removed, 0);
+}
+
+#[test]
+fn prune_unused_removes_what_this_run_did_not_touch_and_keeps_what_it_did() {
+    let dir = scratch("unused");
+    let now = SystemTime::now();
+    let started = now - Duration::from_secs(60);
+    // a hit refreshes the mtime and a new compile is written during the run: both are after `started`
+    let hit = entry(
+        &dir,
+        "gen-0000000000000001",
+        10,
+        now,
+        Duration::from_secs(30),
+    );
+    let fresh_example = entry(&dir, "ex-0000000000000002", 10, now, Duration::from_secs(5));
+    let stale = entry(&dir, "gen-0000000000000003", 10, now, 2 * DAY);
+    let stale_example = entry(&dir, "ex-0000000000000004", 10, now, 2 * DAY);
+    let stale_rlib = entry(
+        &dir,
+        "libwasm2rs_wasi-0000000000000005.rlib",
+        10,
+        now,
+        2 * DAY,
+    );
+    let used_rlib = entry(
+        &dir,
+        "libwasm2rs_wasi-0000000000000006.rlib",
+        10,
+        now,
+        Duration::from_secs(1),
+    );
+    let report = prune_unused(&dir, started);
+    assert_eq!(report.removed, 3);
+    for kept in [&hit, &fresh_example, &used_rlib] {
+        assert!(kept.exists(), "{kept:?}");
+    }
+    for gone in [&stale, &stale_example, &stale_rlib] {
+        assert!(!gone.exists(), "{gone:?}");
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn prune_unused_removes_idle_work_dirs_but_not_checkout_dirs_or_the_stamp() {
+    let dir = scratch("unused-dirs");
+    let now = SystemTime::now();
+    let started = now - Duration::from_secs(60);
+    let work = dir.join("work-label-1-0");
+    fs::create_dir_all(&work).unwrap();
+    set_age(&work, now, 2 * DAY);
+    // a checkout's build is the expensive part to redo: it stays however old its directory looks
+    let checkout = dir.join("checkout-0123456789abcdef");
+    fs::create_dir_all(&checkout).unwrap();
+    set_age(&checkout, now, 2 * DAY);
+    let stamp = entry(&dir, ".pruned", 0, now, 2 * DAY);
+    prune_unused(&dir, started);
+    assert!(!work.exists());
+    assert!(checkout.exists());
+    assert!(stamp.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn prune_unused_on_a_missing_directory_is_a_no_op() {
+    let dir = std::env::temp_dir().join("wasm2rs-prune-unused-does-not-exist");
+    fs::remove_dir_all(&dir).ok();
+    assert_eq!(prune_unused(&dir, SystemTime::now()).removed, 0);
+}
+
+/// Not a test: the CI step that runs before the cache is saved (`--ignored`), so that it reuses
+/// the pruning above and the binary `cargo test` already built. `$WASM2RS_TESTCACHE_RUN_START` is
+/// when the run began, in Unix seconds.
+#[test]
+#[ignore = "CI maintenance step: run explicitly before saving the generated-program cache"]
+fn prune_the_cache_of_what_this_run_did_not_use() {
+    let secs: u64 = std::env::var("WASM2RS_TESTCACHE_RUN_START")
+        .expect("WASM2RS_TESTCACHE_RUN_START (Unix seconds)")
+        .parse()
+        .expect("WASM2RS_TESTCACHE_RUN_START is not a number");
+    let dir =
+        crate::common::resolve_cache_dir(std::env::var_os("WASM2RS_TESTCACHE_DIR").as_deref());
+    let report = prune_unused(&dir, SystemTime::UNIX_EPOCH + Duration::from_secs(secs));
+    println!(
+        "pruned {} unused cache entries from {}",
+        report.removed,
+        dir.display()
+    );
 }
