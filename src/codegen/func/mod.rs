@@ -361,6 +361,15 @@ impl<'a> FuncGen<'a> {
         })
     }
 
+    /// The Rust expression raising `rt`: a call to its cold trap under
+    /// `typed_traps`, else a `panic!` with `message`.
+    pub(super) fn trap_or_panic(&mut self, rt: Rt, message: &str) -> String {
+        match self.typed_trap(rt) {
+            Some(trap) => format!("{trap}()"),
+            None => format!("panic!(\"{message}\")"),
+        }
+    }
+
     /// The runtime helpers used, plus the cold out-of-bounds traps the used
     /// instance-method memory/table helpers call (those are rendered separately,
     /// so they cannot register the trap themselves).

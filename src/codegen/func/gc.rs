@@ -846,10 +846,7 @@ impl super::FuncGen<'_> {
     ) -> Result<(), TranspileError> {
         let r = self.pop()?;
         let test = self.gc_heap_test("__r", hty, null_matches)?;
-        let fail = match self.typed_trap(Rt::TrapCastFailure) {
-            Some(trap) => format!("{trap}()"),
-            None => "panic!(\"ref.cast failed\")".to_string(),
-        };
+        let fail = self.trap_or_panic(Rt::TrapCastFailure, "ref.cast failed");
         let code = format!(
             "{{ let __r = ({}); if {test} {{ __r }} else {{ {fail} }} }}",
             r.code
@@ -984,22 +981,13 @@ impl super::FuncGen<'_> {
         let r = self.pop()?;
         let ty = r.ty;
         let (is_null, _) = self.null_test(ty, "__r")?;
-        let fail = self.null_panic("ref.as_non_null on null");
+        let fail = self.trap_or_panic(Rt::TrapNullReference, "ref.as_non_null on null");
         let code = format!(
             "{{ let __r = ({}); \
              if {is_null} {{ {fail} }} else {{ __r }} }}",
             r.code
         );
         self.materialize(code, ty)
-    }
-
-    /// The Rust expression raising a null-reference trap: the cold typed trap under
-    /// `typed_traps`, else a `panic!` with `message`.
-    pub(super) fn null_panic(&mut self, message: &str) -> String {
-        match self.typed_trap(Rt::TrapNullReference) {
-            Some(trap) => format!("{trap}()"),
-            None => format!("panic!(\"{message}\")"),
-        }
     }
 
     /// The Rust condition testing that the ref named `name` is null, plus the

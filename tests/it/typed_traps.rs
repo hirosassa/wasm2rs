@@ -574,12 +574,21 @@ fn shared_memory_traps_stay_rust_panics_when_off() {
 
 #[test]
 fn a_split_shared_module_defines_its_typed_traps_and_compiles() {
-    let wasm = wat::parse_str(
+    compile_run_split_typed(
+        "typed-traps-split-shared",
         r#"(module (memory 1 1 shared)
             (func (export "a") (param i32) (result i32) (i32.atomic.load (local.get 0)))
             (func (export "b") (param i32) (result i32) (i32.load (local.get 0))))"#,
-    )
-    .expect("valid wat");
+        "let mut inst = Instance::new();\n\
+         assert!(matches!(trap_of(|| inst.a(1)), Wasm2RsTrap::UnalignedAtomicAccess));\n\
+         assert!(matches!(trap_of(|| inst.b(65536)), Wasm2RsTrap::OutOfBoundsMemoryAccess));",
+    );
+}
+
+/// Transpile `wat` split one function per file with typed traps, append [`CATCH`]
+/// and a `main` running `main_body` to the crate root, then compile and run it.
+fn compile_run_split_typed(dir_name: &str, wat: &str, main_body: &str) {
+    let wasm = wat::parse_str(wat).expect("valid wat");
     let split = wasm2rs::SplitOptions {
         funcs_per_file: 1,
         max_bytes_per_file: 0,
@@ -591,15 +600,11 @@ fn a_split_shared_module_defines_its_typed_traps_and_compiles() {
     })
     .expect("transpile ok");
     assert!(files.len() > 1, "expected a split output");
-    let dir = common::scratch_dir("typed-traps-split-shared");
+    let dir = common::scratch_dir(dir_name);
     for f in &files {
         let mut code = f.code.clone();
         if f.name == "lib.rs" {
-            code.push_str(&format!(
-                "{CATCH}\nfn main() {{ let mut inst = Instance::new();\n\
-                 assert!(matches!(trap_of(|| inst.a(1)), Wasm2RsTrap::UnalignedAtomicAccess));\n\
-                 assert!(matches!(trap_of(|| inst.b(65536)), Wasm2RsTrap::OutOfBoundsMemoryAccess)); }}\n"
-            ));
+            code.push_str(&format!("{CATCH}\nfn main() {{\n{main_body} }}\n"));
         }
         std::fs::write(dir.join(&f.name), code).expect("write generated file");
     }
@@ -864,10 +869,6 @@ const GC_TRAPS: &str = r#"(module
       try (result i32) (i32.const 1) (call $nul) (drop) catch_all i32.const 0 end)
     (func $nul (result i32) (struct.get $s 0 (ref.null $s))))"#;
 
-fn gc_named() -> TranspileOptions {
-    typed_named()
-}
-
 #[test]
 fn gc_off_by_default_keeps_string_traps() {
     let plain = transpile_with(
@@ -891,7 +892,7 @@ fn gc_null_dereferences_are_typed() {
     compile_run_with(
         "typed_gc_null",
         GC_TRAPS,
-        gc_named(),
+        typed_named(),
         &format!(
             r#"{CATCH}
             let mut inst = Instance::new();
@@ -922,7 +923,7 @@ fn gc_cast_failure_and_array_bounds_are_typed() {
     compile_run_with(
         "typed_gc_cast_array",
         GC_TRAPS,
-        gc_named(),
+        typed_named(),
         &format!(
             r#"{CATCH}
             let mut inst = Instance::new();
@@ -965,7 +966,7 @@ fn gc_elem_segment_overrun_is_the_table_trap() {
               (array.new_elem $a $seg (local.get 0) (local.get 1)))
             (func (export "init_elem") (param (ref null $a) i32 i32 i32)
               (array.init_elem $a $seg (local.get 0) (local.get 1) (local.get 2) (local.get 3))))"#,
-        gc_named(),
+        typed_named(),
         &format!(
             r#"{CATCH}
             let mut inst = Instance::new();
@@ -1004,47 +1005,12 @@ fn a_typed_gc_trap_in_a_spawned_thread_reports_its_cause() {
 fn a_split_gc_module_defines_its_typed_traps_and_compiles() {
     // The managed value model is emitted at the crate root of a split output, so the
     // cold `trap_null_reference` it calls must be defined there too.
-    let wasm = wat::parse_str(
+    compile_run_split_typed(
+        "typed-traps-split-gc",
         r#"(module (type $s (struct (field i32)))
             (func (export "a") (param (ref null $s)) (result i32) (struct.get $s 0 (local.get 0)))
             (func (export "b") (param anyref) (result (ref $s)) (ref.cast (ref $s) (local.get 0))))"#,
-    )
-    .expect("valid wat");
-    let split = wasm2rs::SplitOptions {
-        funcs_per_file: 1,
-        max_bytes_per_file: 0,
-    };
-    let mut files = Vec::new();
-    wasm2rs::transpile_split_with_options(&wasm, &split, &typed_named(), |f| {
-        files.push(f);
-        Ok(())
-    })
-    .expect("transpile ok");
-    assert!(files.len() > 1, "expected a split output");
-    let dir = common::scratch_dir("typed-traps-split-gc");
-    for f in &files {
-        let mut code = f.code.clone();
-        if f.name == "lib.rs" {
-            code.push_str(&format!(
-                "{CATCH}\nfn main() {{\n\
-                 assert!(matches!(trap_of(|| a(GcRef::Null)), Wasm2RsTrap::NullReference));\n\
-                 assert!(matches!(trap_of(|| b(GcRef::Null)), Wasm2RsTrap::CastFailure)); }}\n"
-            ));
-        }
-        std::fs::write(dir.join(&f.name), code).expect("write generated file");
-    }
-    let bin = dir.join("gen");
-    let out = Command::new("rustc")
-        .current_dir(&dir)
-        .args(["lib.rs", "--edition", "2024", "-o"])
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+        "assert!(matches!(trap_of(|| a(GcRef::Null)), Wasm2RsTrap::NullReference));\n\
+         assert!(matches!(trap_of(|| b(GcRef::Null)), Wasm2RsTrap::CastFailure));",
     );
-    assert!(Command::new(&bin).status().expect("run").success());
-    std::fs::remove_dir_all(&dir).ok();
 }
