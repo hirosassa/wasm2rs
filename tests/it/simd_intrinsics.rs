@@ -6,16 +6,6 @@
 //! so a divergence on either architecture (saturation, signed/unsigned compare via
 //! bias, `avgr`) shows up.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    reason = "test code"
-)]
-
 use std::fmt::Write as _;
 use std::process::Command;
 

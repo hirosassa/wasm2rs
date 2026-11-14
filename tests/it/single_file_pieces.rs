@@ -1,8 +1,6 @@
 //! `transpile_pieces_with_options` must hand back the same bytes as
 //! `transpile_with_options`, however the module is shaped (stateful or not).
 
-#![allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
-
 use wasm2rs::{TranspileOptions, transpile_pieces_with_options, transpile_with_options};
 
 fn assert_pieces_match(wat: &str) {

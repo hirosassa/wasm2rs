@@ -3,15 +3,6 @@
 //! array element pays for the largest variant. These cover the boxed `v128`
 //! slot and the double-`Arc` exception handle that keep it at two words.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "test code"
-)]
-
 use crate::common;
 
 use common::compile_run;

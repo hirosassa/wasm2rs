@@ -1,13 +1,6 @@
 //! The continuation handle table must not grow without bound: a handle whose
 //! continuation has returned is recycled, while a stale reference to it still
 //! traps (it must never alias the continuation that reuses the slot).
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    reason = "test code"
-)]
 
 use crate::common::{compile_run, expect_trap_with};
 

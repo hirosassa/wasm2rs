@@ -3,15 +3,6 @@
 //! low memory on a 32-bit `usize` host. Out-of-range spans trap like any other
 //! out-of-bounds guest access.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "test code"
-)]
-
 use std::process::Command;
 
 use crate::common;

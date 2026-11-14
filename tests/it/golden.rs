@@ -1,20 +1,5 @@
 //! Golden tests: the generated Rust must match the expected text exactly.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::string_slice,
-    clippy::arithmetic_side_effects,
-    clippy::float_cmp,
-    clippy::lossy_float_literal,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::unwrap_in_result,
-    reason = "test code"
-)]
 use wasm2rs::transpile;
 
 fn wat_to_wasm(wat: &str) -> Vec<u8> {

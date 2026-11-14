@@ -2,14 +2,6 @@
 //! invalid wasm ("cannot cast to a continuation type"), so validation rejects them
 //! before code generation, which therefore has no lowering for them.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    reason = "test code"
-)]
-
 #[test]
 fn a_cast_to_a_continuation_type_is_rejected_by_validation() {
     for body in [

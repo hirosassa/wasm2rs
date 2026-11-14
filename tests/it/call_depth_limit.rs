@@ -6,16 +6,6 @@
 //! with `call stack exhausted` (a trap) instead. The option is off by default, so
 //! the plain output must not mention the counter at all.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::string_slice,
-    clippy::arithmetic_side_effects,
-    reason = "test code"
-)]
-
 use std::process::Command;
 use wasm2rs::TranspileOptions;
 

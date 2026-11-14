@@ -2,14 +2,6 @@
 //! chosen exports (plus the start function and the entry points the generated
 //! code itself calls) are emitted. Function names keep their wasm index.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    reason = "test code"
-)]
-
 use std::process::Command;
 
 use crate::common;

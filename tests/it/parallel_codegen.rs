@@ -2,15 +2,6 @@
 //! output: the pieces are joined in function-index order, so a parallel run is
 //! indistinguishable from a serial one — including which error surfaces first.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "test code"
-)]
-
 use wasm2rs::transpile_with_options;
 use wasm2rs::{SourceFile, SplitOptions, TranspileOptions, transpile_split_with_options};
 

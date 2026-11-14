@@ -4,15 +4,6 @@
 //! `_emscripten_tls_init`, the start routine from the table, then
 //! `_emscripten_thread_exit`.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "test code"
-)]
-
 use crate::common;
 
 use common::compile_run;

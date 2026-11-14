@@ -3,15 +3,6 @@
 //! table initialiser, or an export. A function of the same signature that is
 //! none of those is unreachable through the table, so it gets no `match` arm.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::string_slice,
-    reason = "test code"
-)]
-
 /// The `match` arms (`{idx}u32 =>`) of the generated `call_ref_t0` method.
 fn dispatch_arms(wat: &str) -> Vec<u32> {
     let wasm = wat::parse_str(wat).expect("valid wat");

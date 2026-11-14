@@ -2,16 +2,6 @@
 //! point (wasi-threads needs to find it by name); all other functions keep
 //! their `func{N}` names and no other export gains a wrapper.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::string_slice,
-    clippy::arithmetic_side_effects,
-    reason = "test code"
-)]
-
 use crate::common;
 
 use common::{compile_run, compile_run_split, transpile_files};

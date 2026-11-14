@@ -2,15 +2,6 @@
 //! instance over the same shared memory and calls its exported
 //! `wasi_thread_start(tid, start_arg)`.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "test code"
-)]
-
 use crate::common;
 
 use common::{compile_run, compile_run_raw, compile_run_split, expect_trap_with};
