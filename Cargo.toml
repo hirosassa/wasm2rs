@@ -45,6 +45,9 @@ workspace = true
 [dependencies]
 # `serde` is left out of wasmparser's defaults: the transpiler never (de)serializes parser types.
 wasmparser = { version = "0.263.0", default-features = false, features = ["std", "validate", "features", "component-model", "hash-collections", "simd"] }
+# Re-encodes the bodies of linked modules (`link.rs`); the version pairs with wasmparser and is
+# already in the lock through the dev-dependencies.
+wasm-encoder = { version = "0.263.0", default-features = false, features = ["std", "wasmparser"] }
 mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]

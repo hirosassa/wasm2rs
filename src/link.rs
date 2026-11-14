@@ -13,7 +13,9 @@
 
 use std::collections::HashMap;
 
-use wasmparser::{BinaryReader, BlockType, ConstExpr, FunctionBody, HeapType, Operator, ValType};
+use wasm_encoder::Encode;
+use wasm_encoder::reencode::{self, Reencode};
+use wasmparser::{BinaryReader, ConstExpr, FunctionBody, HeapType, Operator, ValType};
 
 use crate::parse::{ModuleIr, Signature, TypeEntry};
 use crate::{TranspileError, codegen};
@@ -474,87 +476,6 @@ fn allowed_proposal(proposal: &str) -> bool {
     )
 }
 
-/// The opcode of a load/store (a `memarg` operator of the MVP).
-fn memarg_opcode(op: &Operator<'_>) -> Option<(u8, wasmparser::MemArg)> {
-    use Operator::*;
-    Some(match op {
-        I32Load { memarg } => (0x28, *memarg),
-        I64Load { memarg } => (0x29, *memarg),
-        F32Load { memarg } => (0x2A, *memarg),
-        F64Load { memarg } => (0x2B, *memarg),
-        I32Load8S { memarg } => (0x2C, *memarg),
-        I32Load8U { memarg } => (0x2D, *memarg),
-        I32Load16S { memarg } => (0x2E, *memarg),
-        I32Load16U { memarg } => (0x2F, *memarg),
-        I64Load8S { memarg } => (0x30, *memarg),
-        I64Load8U { memarg } => (0x31, *memarg),
-        I64Load16S { memarg } => (0x32, *memarg),
-        I64Load16U { memarg } => (0x33, *memarg),
-        I64Load32S { memarg } => (0x34, *memarg),
-        I64Load32U { memarg } => (0x35, *memarg),
-        I32Store { memarg } => (0x36, *memarg),
-        I64Store { memarg } => (0x37, *memarg),
-        F32Store { memarg } => (0x38, *memarg),
-        F64Store { memarg } => (0x39, *memarg),
-        I32Store8 { memarg } => (0x3A, *memarg),
-        I32Store16 { memarg } => (0x3B, *memarg),
-        I64Store8 { memarg } => (0x3C, *memarg),
-        I64Store16 { memarg } => (0x3D, *memarg),
-        I64Store32 { memarg } => (0x3E, *memarg),
-        _ => return None,
-    })
-}
-
-// --- encoding ----------------------------------------------------------------------------
-
-/// An unsigned LEB128 (the same bytes for a `u32` and a `u64` of equal value).
-fn write_uleb(out: &mut Vec<u8>, mut v: u64) {
-    loop {
-        let byte = v.to_le_bytes()[0] & 0x7f;
-        v >>= 7;
-        if v == 0 {
-            out.push(byte);
-            return;
-        }
-        out.push(byte | 0x80);
-    }
-}
-
-fn write_u32(out: &mut Vec<u8>, v: u32) {
-    write_uleb(out, u64::from(v));
-}
-
-/// A non-negative value as a signed LEB128 (a block type's type index is an `s33`).
-fn write_s33(out: &mut Vec<u8>, index: u32) {
-    let mut v = i64::from(index);
-    loop {
-        let byte = v.to_le_bytes()[0] & 0x7f;
-        v >>= 7;
-        if v == 0 && byte & 0x40 == 0 {
-            out.push(byte);
-            return;
-        }
-        out.push(byte | 0x80);
-    }
-}
-
-/// A single-byte operator followed by its index immediates.
-fn encode(out: &mut Vec<u8>, opcode: u8, immediates: &[u32]) {
-    out.push(opcode);
-    for &i in immediates {
-        write_u32(out, i);
-    }
-}
-
-/// A `0xFC`-prefixed operator: the prefix, its sub-opcode, then the immediates.
-fn prefixed(out: &mut Vec<u8>, sub: u32, immediates: &[u32]) {
-    out.push(0xFC);
-    write_u32(out, sub);
-    for &i in immediates {
-        write_u32(out, i);
-    }
-}
-
 fn check_val_type(ty: ValType, what: &str) -> Result<(), TranspileError> {
     match ty {
         ValType::Ref(r) if matches!(r.heap_type(), HeapType::Concrete(_)) => Err(unsupported(
@@ -564,175 +485,90 @@ fn check_val_type(ty: ValType, what: &str) -> Result<(), TranspileError> {
     }
 }
 
-/// Re-encode a load/store of module `m` with the merged memory index.
-fn rewrite_memarg(
-    layout: &Layout,
-    m: usize,
-    opcode: u8,
-    memarg: wasmparser::MemArg,
-    out: &mut Vec<u8>,
-) -> Result<(), TranspileError> {
-    let source_memory = match memarg.target {
-        wasmparser::MemArgTarget::Memory(i) => i,
-        wasmparser::MemArgTarget::Array(_) => {
-            return Err(unsupported("GC array access in a linked module"));
-        }
-    };
-    let memory = layout.memory(m, source_memory)?;
-    out.push(opcode);
-    // Bit 6 of the alignment says an explicit memory index follows.
-    if memory == 0 {
-        write_u32(out, u32::from(memarg.align));
-    } else {
-        write_u32(out, u32::from(memarg.align) | 0x40);
-        write_u32(out, memory);
-    }
-    write_uleb(out, memarg.offset);
-    Ok(())
+// --- re-encoding -------------------------------------------------------------------------
+
+/// Re-encodes the operators of appended module `module` with the merged index spaces. Every
+/// index immediate goes through the [`Reencode`] hooks, so an operator naming an index
+/// needs no hand-written opcode here.
+struct Remap<'l> {
+    layout: &'l Layout,
+    module: usize,
 }
 
-/// Re-encode a `block`/`loop`/`if` of module `m`: only a type-index block type names an index.
-fn rewrite_block(
-    layout: &Layout,
-    m: usize,
-    opcode: u8,
-    blockty: BlockType,
-    raw: &[u8],
-    out: &mut Vec<u8>,
-) -> Result<(), TranspileError> {
-    match blockty {
-        BlockType::FuncType(t) => {
-            out.push(opcode);
-            write_s33(out, layout.type_(m, t)?);
-        }
-        BlockType::Type(ty) => {
-            check_val_type(ty, "a block type")?;
-            out.extend_from_slice(raw);
-        }
-        BlockType::Empty => out.extend_from_slice(raw),
-    }
-    Ok(())
+type ReencodeResult<T> = Result<T, reencode::Error<TranspileError>>;
+
+fn user_error<T>(e: TranspileError) -> ReencodeResult<T> {
+    Err(reencode::Error::UserError(e))
 }
 
-/// Re-encode one operator of module `m`, or copy its bytes when it names no index.
-fn rewrite_operator(
-    layout: &Layout,
-    m: usize,
-    op: &Operator<'_>,
-    raw: &[u8],
-    out: &mut Vec<u8>,
-) -> Result<(), TranspileError> {
-    use Operator::*;
-    if let Some((opcode, memarg)) = memarg_opcode(op) {
-        return rewrite_memarg(layout, m, opcode, memarg, out);
+/// A [`Reencode`] failure as the error the linker reports.
+fn from_reencode(e: reencode::Error<TranspileError>) -> TranspileError {
+    match e {
+        reencode::Error::UserError(e) => e,
+        reencode::Error::ParseError(e) => TranspileError::Parse(e),
+        other => TranspileError::Internal(format!("re-encoding a linked body: {other}")),
     }
-    match op {
-        Call { function_index } => encode(out, 0x10, &[layout.func(m, *function_index)?]),
-        CallIndirect {
-            type_index,
-            table_index,
-        } => encode(
-            out,
-            0x11,
-            &[
-                layout.type_(m, *type_index)?,
-                layout.table(m, *table_index)?,
-            ],
-        ),
-        RefFunc { function_index } => encode(out, 0xD2, &[layout.func(m, *function_index)?]),
-        GlobalGet { global_index } => encode(out, 0x23, &[layout.global(m, *global_index)?]),
-        GlobalSet { global_index } => encode(out, 0x24, &[layout.global(m, *global_index)?]),
-        TableGet { table } => encode(out, 0x25, &[layout.table(m, *table)?]),
-        TableSet { table } => encode(out, 0x26, &[layout.table(m, *table)?]),
-        Block { blockty } => rewrite_block(layout, m, 0x02, *blockty, raw, out)?,
-        Loop { blockty } => rewrite_block(layout, m, 0x03, *blockty, raw, out)?,
-        If { blockty } => rewrite_block(layout, m, 0x04, *blockty, raw, out)?,
-        MemorySize { mem } => encode(out, 0x3F, &[layout.memory(m, *mem)?]),
-        MemoryGrow { mem } => encode(out, 0x40, &[layout.memory(m, *mem)?]),
-        MemoryInit { data_index, mem } => prefixed(
-            out,
-            8,
-            &[layout.data(m, *data_index)?, layout.memory(m, *mem)?],
-        ),
-        DataDrop { data_index } => prefixed(out, 9, &[layout.data(m, *data_index)?]),
-        MemoryCopy { dst_mem, src_mem } => prefixed(
-            out,
-            10,
-            &[layout.memory(m, *dst_mem)?, layout.memory(m, *src_mem)?],
-        ),
-        MemoryFill { mem } => prefixed(out, 11, &[layout.memory(m, *mem)?]),
-        TableInit { elem_index, table } => prefixed(
-            out,
-            12,
-            &[layout.elem(m, *elem_index)?, layout.table(m, *table)?],
-        ),
-        ElemDrop { elem_index } => prefixed(out, 13, &[layout.elem(m, *elem_index)?]),
-        TableCopy {
-            dst_table,
-            src_table,
-        } => prefixed(
-            out,
-            14,
-            &[layout.table(m, *dst_table)?, layout.table(m, *src_table)?],
-        ),
-        TableGrow { table } => prefixed(out, 15, &[layout.table(m, *table)?]),
-        TableSize { table } => prefixed(out, 16, &[layout.table(m, *table)?]),
-        TableFill { table } => prefixed(out, 17, &[layout.table(m, *table)?]),
-        RefNull { hty } => {
-            if matches!(hty, HeapType::Concrete(_)) {
-                return Err(unsupported("typed reference in a linked module"));
-            }
-            out.extend_from_slice(raw);
-        }
-        TypedSelect { ty } => {
-            check_val_type(*ty, "a select")?;
-            out.extend_from_slice(raw);
-        }
-        _ => {
-            let (proposal, name) = operator_origin(op);
-            if !allowed_proposal(proposal) {
-                return Err(unsupported(format!(
-                    "operator `{name}` ({proposal}) in a linked module: only MVP, bulk-memory, sign-extension and reference-types operators can be linked"
-                )));
-            }
-            out.extend_from_slice(raw);
-        }
-    }
-    Ok(())
 }
 
-/// The operators of `bytes` (whose first byte is at `base` in the original input), each with
-/// the bytes it occupies.
-fn operator_spans<'o, 'b>(
-    bytes: &'b [u8],
-    base: u64,
-    ops: wasmparser::OperatorsIteratorWithOffsets<'o>,
-) -> Result<Vec<(Operator<'o>, &'b [u8])>, TranspileError> {
-    let ops: Vec<(Operator<'o>, u64)> = ops.collect::<Result<_, _>>()?;
-    let starts = ops
-        .iter()
-        .map(|(_, at)| {
-            at.checked_sub(base)
-                .and_then(|r| usize::try_from(r).ok())
-                .filter(|r| *r <= bytes.len())
-                .ok_or_else(|| TranspileError::Internal("operator outside its body".into()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    // Each operator ends where the next one starts; the last one at the end of the bytes.
-    let ends = starts
-        .iter()
-        .skip(1)
-        .copied()
-        .chain(std::iter::once(bytes.len()));
-    ops.into_iter()
-        .zip(starts.iter().copied().zip(ends))
-        .map(|((op, _), (start, end))| {
-            bytes
-                .get(start..end)
-                .map(|raw| (op, raw))
-                .ok_or_else(|| TranspileError::Internal("operator span out of range".into()))
-        })
-        .collect()
+impl Reencode for Remap<'_> {
+    type Error = TranspileError;
+
+    fn function_index(&mut self, i: u32) -> ReencodeResult<u32> {
+        self.layout.func(self.module, i).or_else(user_error)
+    }
+
+    fn global_index(&mut self, i: u32) -> ReencodeResult<u32> {
+        self.layout.global(self.module, i).or_else(user_error)
+    }
+
+    fn table_index(&mut self, i: u32) -> ReencodeResult<u32> {
+        self.layout.table(self.module, i).or_else(user_error)
+    }
+
+    fn memory_index(&mut self, i: u32) -> ReencodeResult<u32> {
+        self.layout.memory(self.module, i).or_else(user_error)
+    }
+
+    fn type_index(&mut self, i: u32) -> ReencodeResult<u32> {
+        self.layout.type_(self.module, i).or_else(user_error)
+    }
+
+    fn data_index(&mut self, i: u32) -> ReencodeResult<u32> {
+        self.layout.data(self.module, i).or_else(user_error)
+    }
+
+    fn element_index(&mut self, i: u32) -> ReencodeResult<u32> {
+        self.layout.elem(self.module, i).or_else(user_error)
+    }
+
+    // A concrete heap type would need a type index of the merged type space that the
+    // linker does not model for references.
+    fn heap_type(&mut self, ty: HeapType) -> ReencodeResult<wasm_encoder::HeapType> {
+        if matches!(ty, HeapType::Concrete(_)) {
+            return user_error(unsupported("typed reference in a linked module"));
+        }
+        reencode::utils::heap_type(self, ty)
+    }
+
+    fn mem_arg(&mut self, arg: wasmparser::MemArg) -> ReencodeResult<wasm_encoder::MemArg> {
+        if matches!(arg.target, wasmparser::MemArgTarget::Array(_)) {
+            return user_error(unsupported("GC array access in a linked module"));
+        }
+        reencode::utils::mem_arg(self, arg)
+    }
+
+    fn instruction<'a>(
+        &mut self,
+        op: Operator<'a>,
+    ) -> ReencodeResult<wasm_encoder::Instruction<'a>> {
+        let (proposal, name) = operator_origin(&op);
+        if !allowed_proposal(proposal) {
+            return user_error(unsupported(format!(
+                "operator `{name}` ({proposal}) in a linked module: only MVP, bulk-memory, sign-extension and reference-types operators can be linked"
+            )));
+        }
+        reencode::utils::instruction(self, op)
+    }
 }
 
 /// Rewrite one body of appended module `m`: the locals are copied, every operator is
@@ -742,27 +578,16 @@ fn rewrite_body(
     m: usize,
     body: &FunctionBody<'_>,
 ) -> Result<Vec<u8>, TranspileError> {
-    let base = body.range().start;
-    let bytes = body.as_bytes();
-    let mut locals = body.get_locals_reader()?.into_iter();
-    for local in &mut locals {
-        check_val_type(local?.1, "a local")?;
+    let mut remap = Remap { layout, module: m };
+    let mut func = remap
+        .new_function_with_parsed_locals(body)
+        .map_err(from_reencode)?;
+    let mut ops = body.get_operators_reader()?;
+    while !ops.eof() {
+        let op = remap.parse_instruction(&mut ops).map_err(from_reencode)?;
+        func.instruction(&op);
     }
-    let ops = locals.into_operators_reader();
-    let ops_start = usize::try_from(
-        ops.original_position()
-            .checked_sub(base)
-            .ok_or_else(|| TranspileError::Internal("body offset underflow".into()))?,
-    )
-    .map_err(|_| unsupported("module offset too large"))?;
-    let mut out = bytes
-        .get(..ops_start)
-        .ok_or_else(|| TranspileError::Internal("locals outside their body".into()))?
-        .to_vec();
-    for (op, raw) in operator_spans(bytes, base, ops.into_iter_with_offsets())? {
-        rewrite_operator(layout, m, &op, raw, &mut out)?;
-    }
-    Ok(out)
+    Ok(func.into_raw_body())
 }
 
 /// Re-encode the initializer of a defined global of module `m`. Only the constant forms a
@@ -772,24 +597,14 @@ fn rewrite_const(
     m: usize,
     expr: &ConstExpr<'_>,
 ) -> Result<Vec<u8>, TranspileError> {
-    let mut reader = expr.get_binary_reader();
-    let base = reader.original_position();
-    let len = reader.bytes_remaining();
-    let bytes = reader.read_bytes(len)?;
-    let mut out = Vec::with_capacity(len);
-    for (op, raw) in operator_spans(
-        bytes,
-        base,
-        expr.get_operators_reader().into_iter_with_offsets(),
-    )? {
+    let mut remap = Remap { layout, module: m };
+    let mut out = Vec::new();
+    for op in expr.get_operators_reader() {
+        let op = op?;
         match op {
-            Operator::GlobalGet { global_index } => {
-                encode(&mut out, 0x23, &[layout.global(m, global_index)?]);
-            }
-            Operator::RefFunc { function_index } => {
-                encode(&mut out, 0xD2, &[layout.func(m, function_index)?]);
-            }
-            Operator::RefNull {
+            Operator::GlobalGet { .. }
+            | Operator::RefFunc { .. }
+            | Operator::RefNull {
                 hty: HeapType::Abstract { .. },
             }
             | Operator::I32Const { .. }
@@ -802,7 +617,10 @@ fn rewrite_const(
             | Operator::I64Add
             | Operator::I64Sub
             | Operator::I64Mul
-            | Operator::End => out.extend_from_slice(raw),
+            | Operator::End => remap
+                .instruction(op)
+                .map_err(from_reencode)?
+                .encode(&mut out),
             other => {
                 let (_, name) = operator_origin(&other);
                 return Err(unsupported(format!(
@@ -816,13 +634,12 @@ fn rewrite_const(
 
 /// The body of a function that calls each of `targets` in order.
 fn start_body(targets: &[u32]) -> Vec<u8> {
-    // No locals, then the calls, then `end`.
-    let mut body = vec![0x00];
+    let mut func = wasm_encoder::Function::new([]);
     for &t in targets {
-        encode(&mut body, 0x10, &[t]);
+        func.instruction(&wasm_encoder::Instruction::Call(t));
     }
-    body.push(0x0B);
-    body
+    func.instruction(&wasm_encoder::Instruction::End);
+    func.into_raw_body()
 }
 
 /// Rewrite the bodies of every appended module (and build the synthesized start function when
