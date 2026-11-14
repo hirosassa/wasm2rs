@@ -139,6 +139,89 @@ mod float_quiet {
     }
 }
 
+mod i8x16_swizzle {
+    include!("i8x16_swizzle.rs");
+
+    #[cfg(test)]
+    mod tests {
+        use super::i8x16_swizzle;
+
+        #[test]
+        fn indexes_by_byte_and_zeroes_out_of_range() {
+            let a = u128::from_le_bytes(core::array::from_fn(|i| 10 + i as u8));
+            let b = u128::from_le_bytes([0, 15, 16, 255, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]);
+            let r = i8x16_swizzle(a, b).to_le_bytes();
+            assert_eq!(&r[..5], &[10, 25, 0, 0, 13]);
+        }
+    }
+}
+
+mod i8x16_shuffle {
+    include!("i8x16_shuffle.rs");
+
+    #[cfg(test)]
+    mod tests {
+        use super::i8x16_shuffle;
+
+        #[test]
+        fn picks_from_the_concatenation_and_zeroes_indices_past_32() {
+            let a = u128::from_le_bytes([1; 16]);
+            let b = u128::from_le_bytes([2; 16]);
+            let mut idx = [0u8; 16];
+            idx[..5].copy_from_slice(&[0, 15, 16, 31, 32]);
+            let r = i8x16_shuffle(a, b, u128::from_le_bytes(idx)).to_le_bytes();
+            assert_eq!(&r[..5], &[1, 1, 2, 2, 0]);
+        }
+    }
+}
+
+mod i16x8_relaxed_dot {
+    include!("i16x8_relaxed_dot.rs");
+
+    #[cfg(test)]
+    mod tests {
+        use super::i16x8_relaxed_dot_i8x16_i7x16_s;
+
+        #[test]
+        fn sums_adjacent_products_and_saturates_into_i16() {
+            let mut a = [0u8; 16];
+            let mut b = [0u8; 16];
+            a[..4].copy_from_slice(&[3, 4, 127, 127]);
+            b[..4].copy_from_slice(&[5, 6, 127, 127]);
+            let r = i16x8_relaxed_dot_i8x16_i7x16_s(u128::from_le_bytes(a), u128::from_le_bytes(b))
+                .to_le_bytes();
+            assert_eq!(i16::from_le_bytes([r[0], r[1]]), 39);
+            assert_eq!(i16::from_le_bytes([r[2], r[3]]), 32258);
+        }
+    }
+}
+
+mod i32x4_relaxed_dot_add {
+    include!("i32x4_relaxed_dot_add.rs");
+
+    #[cfg(test)]
+    mod tests {
+        use super::i32x4_relaxed_dot_i8x16_i7x16_add_s;
+
+        #[test]
+        fn adds_the_accumulator_to_two_saturated_pair_sums_and_wraps() {
+            let a = u128::from_le_bytes([0x80; 16]);
+            let b = u128::from_le_bytes([0x80; 16]);
+            let c = u128::from_le_bytes(
+                [i32::MAX.to_le_bytes(), [1, 0, 0, 0], [0; 4], [0; 4]]
+                    .concat()
+                    .try_into()
+                    .unwrap(),
+            );
+            let r = i32x4_relaxed_dot_i8x16_i7x16_add_s(a, b, c).to_le_bytes();
+            let lane = |i: usize| i32::from_le_bytes(r[i * 4..i * 4 + 4].try_into().unwrap());
+            // Each lane adds two sums saturated to 32767.
+            assert_eq!(lane(0), i32::MAX.wrapping_add(65534));
+            assert_eq!(lane(1), 65535);
+        }
+    }
+}
+
 mod shared_memory {
     include!("shared_memory.rs");
 
@@ -230,7 +313,7 @@ mod shared_memory {
 
 /// Files that are emitted as they are and not yet rustfmt-clean: formatting
 /// them would change the generated output, so that is done on its own.
-const NOT_FORMATTED: [&str; 1] = ["shared_memory.rs"];
+const NOT_FORMATTED: [&str; 2] = ["shared_memory.rs", "i32x4_relaxed_dot_add.rs"];
 
 #[test]
 fn files_are_rustfmt_clean() {

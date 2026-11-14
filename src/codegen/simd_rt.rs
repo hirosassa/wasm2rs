@@ -419,11 +419,26 @@ pub(super) fn render_simd_helpers(used: &HashSet<&'static str>, intrinsics: bool
     }
     // Byte-permute helpers don't fit the tables above (they permute bytes rather
     // than apply a per-lane op), so each is a fixed self-contained function.
+    // `i8x16.swizzle`: index the first vector by each byte of the second, yielding
+    // 0 where the (unsigned) index is 16 or more. A byte permute, so unlike the
+    // lane helpers it selects whole bytes rather than applying a per-lane op.
     if used.contains("i8x16_swizzle") {
-        blocks.push(swizzle_lines().join("\n"));
+        blocks.push(
+            include_str!("rt_src/i8x16_swizzle.rs")
+                .trim_end()
+                .to_string(),
+        );
     }
+    // `i8x16.shuffle`: pick each output byte from the 32-byte `a ++ b` window by the
+    // constant index vector `idx` (baked in by the caller). A valid module only uses
+    // indices `0..32`; any larger index yields 0, keeping the helper panic-free (the
+    // transpiler does not pre-validate modules) like the other generated helpers.
     if used.contains("i8x16_shuffle") {
-        blocks.push(shuffle_lines().join("\n"));
+        blocks.push(
+            include_str!("rt_src/i8x16_shuffle.rs")
+                .trim_end()
+                .to_string(),
+        );
     }
     // Relaxed fused-multiply-add and dot-product helpers. These are ternary or
     // have differing lane widths with a per-lane clamp, so they fit neither the
@@ -438,11 +453,26 @@ pub(super) fn render_simd_helpers(used: &HashSet<&'static str>, intrinsics: bool
             blocks.push(madd_lines(name, elem, bytes, neg).join("\n"));
         }
     }
+    // `i16x8.relaxed_dot_i8x16_i7x16_s`: for each i16 lane, sum the two adjacent
+    // signed-`i8` products, saturating the sum into `i16`. The second operand is
+    // nominally `i7` (its top bit is where the relaxation applies); reading it as a
+    // full signed `i8` is one permitted deterministic choice.
     if used.contains("i16x8_relaxed_dot_i8x16_i7x16_s") {
-        blocks.push(relaxed_dot_lines().join("\n"));
+        blocks.push(
+            include_str!("rt_src/i16x8_relaxed_dot.rs")
+                .trim_end()
+                .to_string(),
+        );
     }
+    // `i32x4.relaxed_dot_i8x16_i7x16_add_s`: each i32 lane sums the four adjacent
+    // signed-`i8` products (two saturated `i16` dot results, then widened and added)
+    // plus the corresponding `i32` accumulator lane, wrapping like `i32x4.add`.
     if used.contains("i32x4_relaxed_dot_i8x16_i7x16_add_s") {
-        blocks.push(relaxed_dot_add_lines().join("\n"));
+        blocks.push(
+            include_str!("rt_src/i32x4_relaxed_dot_add.rs")
+                .trim_end()
+                .to_string(),
+        );
     }
     let mut out = blocks.join("\n\n");
     if !out.is_empty() {
@@ -960,56 +990,6 @@ fn reduce_lines(r: &Reduce) -> Vec<String> {
     }
 }
 
-/// `i8x16.swizzle`: index the first vector by each byte of the second, yielding
-/// 0 where the (unsigned) index is 16 or more. A byte permute, so unlike the
-/// lane helpers it selects whole bytes rather than applying a per-lane op.
-fn swizzle_lines() -> Vec<String> {
-    vec![
-        "fn i8x16_swizzle(a: u128, b: u128) -> u128 {".to_string(),
-        "    let a = a.to_le_bytes();".to_string(),
-        "    let b = b.to_le_bytes();".to_string(),
-        "    let mut r = [0u8; 16];".to_string(),
-        "    let mut i = 0;".to_string(),
-        "    while i < 16 {".to_string(),
-        "        let j = b[i] as usize;".to_string(),
-        "        if j < 16 {".to_string(),
-        "            r[i] = a[j];".to_string(),
-        "        }".to_string(),
-        "        i += 1;".to_string(),
-        "    }".to_string(),
-        "    u128::from_le_bytes(r)".to_string(),
-        "}".to_string(),
-    ]
-}
-
-/// `i8x16.shuffle`: pick each output byte from the 32-byte `a ++ b` window by the
-/// constant index vector `idx` (baked in by the caller). A valid module only uses
-/// indices `0..32`; any larger index yields 0, keeping the helper panic-free (the
-/// transpiler does not pre-validate modules) like the other generated helpers.
-fn shuffle_lines() -> Vec<String> {
-    vec![
-        "fn i8x16_shuffle(a: u128, b: u128, idx: u128) -> u128 {".to_string(),
-        "    let a = a.to_le_bytes();".to_string(),
-        "    let b = b.to_le_bytes();".to_string(),
-        "    let idx = idx.to_le_bytes();".to_string(),
-        "    let mut r = [0u8; 16];".to_string(),
-        "    let mut i = 0;".to_string(),
-        "    while i < 16 {".to_string(),
-        "        let j = idx[i] as usize;".to_string(),
-        "        r[i] = if j < 16 {".to_string(),
-        "            a[j]".to_string(),
-        "        } else if j < 32 {".to_string(),
-        "            b[j - 16]".to_string(),
-        "        } else {".to_string(),
-        "            0".to_string(),
-        "        };".to_string(),
-        "        i += 1;".to_string(),
-        "    }".to_string(),
-        "    u128::from_le_bytes(r)".to_string(),
-        "}".to_string(),
-    ]
-}
-
 /// `f32x4`/`f64x2` `relaxed_madd`/`relaxed_nmadd`: a ternary per-lane op computing
 /// `a*b + c` (`madd`) or `-(a*b) + c` (`nmadd`). Relaxed SIMD leaves fusion
 /// (whether an intermediate rounding occurs) up to the implementation; this picks
@@ -1029,61 +1009,6 @@ fn madd_lines(name: &str, elem: &str, bytes: usize, neg: bool) -> Vec<String> {
         format!("        let z = {elem}::from_le_bytes(c[i..i + {bytes}].try_into().unwrap());"),
         format!("        r[i..i + {bytes}].copy_from_slice(&({prod} + z).to_le_bytes());"),
         format!("        i += {bytes};"),
-        "    }".to_string(),
-        "    u128::from_le_bytes(r)".to_string(),
-        "}".to_string(),
-    ]
-}
-
-/// `i16x8.relaxed_dot_i8x16_i7x16_s`: for each i16 lane, sum the two adjacent
-/// signed-`i8` products, saturating the sum into `i16`. The second operand is
-/// nominally `i7` (its top bit is where the relaxation applies); reading it as a
-/// full signed `i8` is one permitted deterministic choice.
-fn relaxed_dot_lines() -> Vec<String> {
-    vec![
-        "fn i16x8_relaxed_dot_i8x16_i7x16_s(a: u128, b: u128) -> u128 {".to_string(),
-        "    let a = a.to_le_bytes();".to_string(),
-        "    let b = b.to_le_bytes();".to_string(),
-        "    let mut r = [0u8; 16];".to_string(),
-        "    let mut o = 0;".to_string(),
-        "    let mut s = 0;".to_string(),
-        "    while o < 16 {".to_string(),
-        "        let p0 = (a[s] as i8 as i32) * (b[s] as i8 as i32);".to_string(),
-        "        let p1 = (a[s + 1] as i8 as i32) * (b[s + 1] as i8 as i32);".to_string(),
-        "        let v = (p0 + p1).clamp(-32768, 32767) as i16;".to_string(),
-        "        r[o..o + 2].copy_from_slice(&v.to_le_bytes());".to_string(),
-        "        o += 2;".to_string(),
-        "        s += 2;".to_string(),
-        "    }".to_string(),
-        "    u128::from_le_bytes(r)".to_string(),
-        "}".to_string(),
-    ]
-}
-
-/// `i32x4.relaxed_dot_i8x16_i7x16_add_s`: each i32 lane sums the four adjacent
-/// signed-`i8` products (two saturated `i16` dot results, then widened and added)
-/// plus the corresponding `i32` accumulator lane, wrapping like `i32x4.add`.
-fn relaxed_dot_add_lines() -> Vec<String> {
-    vec![
-        "fn i32x4_relaxed_dot_i8x16_i7x16_add_s(a: u128, b: u128, c: u128) -> u128 {".to_string(),
-        "    let a = a.to_le_bytes();".to_string(),
-        "    let b = b.to_le_bytes();".to_string(),
-        "    let c = c.to_le_bytes();".to_string(),
-        "    let mut r = [0u8; 16];".to_string(),
-        "    let mut o = 0;".to_string(),
-        "    let mut s = 0;".to_string(),
-        "    while o < 16 {".to_string(),
-        "        let d0 = ((a[s] as i8 as i32) * (b[s] as i8 as i32)".to_string(),
-        "            + (a[s + 1] as i8 as i32) * (b[s + 1] as i8 as i32)).clamp(-32768, 32767);"
-            .to_string(),
-        "        let d1 = ((a[s + 2] as i8 as i32) * (b[s + 2] as i8 as i32)".to_string(),
-        "            + (a[s + 3] as i8 as i32) * (b[s + 3] as i8 as i32)).clamp(-32768, 32767);"
-            .to_string(),
-        "        let acc = i32::from_le_bytes(c[o..o + 4].try_into().unwrap());".to_string(),
-        "        let v = acc.wrapping_add(d0).wrapping_add(d1);".to_string(),
-        "        r[o..o + 4].copy_from_slice(&v.to_le_bytes());".to_string(),
-        "        o += 4;".to_string(),
-        "        s += 4;".to_string(),
         "    }".to_string(),
         "    u128::from_le_bytes(r)".to_string(),
         "}".to_string(),
