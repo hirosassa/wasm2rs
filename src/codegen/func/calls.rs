@@ -385,7 +385,9 @@ impl<'a> super::FuncGen<'a> {
         args.reverse();
         let use_tc =
             tail && self.tc_enabled && (self.ctx.has_tc_dispatch(type_index) || self.in_try_body());
-        let arg_list = if use_tc {
+        // The null check below runs before the dispatch call, so arguments that may
+        // trap are bound first to keep wasm's order (arguments, then the funcref).
+        let arg_list = if use_tc || tail {
             self.bind_args(args)?
         } else {
             self.join_call_args(args)?

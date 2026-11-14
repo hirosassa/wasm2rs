@@ -745,19 +745,18 @@ fn unshared_atomics(memory64: bool) -> (String, Vec<(String, u32)>) {
     (format!("(module {mem}\n{funcs})"), names)
 }
 
-fn unshared_atomic_main(names: &[(String, u32)], typed: bool) -> String {
-    // `CATCH` names `Wasm2RsTrap`, which only a typed build defines.
-    let mut body = String::from(if typed {
-        CATCH
-    } else {
-        r#"
+/// A `msg_of` helper for untyped builds: the string payload of a trap's panic.
+const MSG_OF: &str = r#"
 fn msg_of<R>(f: impl FnOnce() -> R) -> String {
     let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).err().expect("a trap");
     p.downcast_ref::<&str>().map(|s| s.to_string())
         .or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default()
 }
-"#
-    });
+"#;
+
+fn unshared_atomic_main(names: &[(String, u32)], typed: bool) -> String {
+    // `CATCH` names `Wasm2RsTrap`, which only a typed build defines.
+    let mut body = String::from(if typed { CATCH } else { MSG_OF });
     body.push_str("let mut inst = Instance::new();\n");
     for (name, bytes) in names {
         // An aligned access is unaffected; a byte access can never be misaligned.
@@ -1274,37 +1273,54 @@ fn call_ref_null_and_bad_externref_are_string_panics_when_untyped() {
         "untyped_call_ref_null",
         NULL_FUNCREF_AND_EXTERN,
         TranspileOptions::default().with_named_exports(true),
-        r#"
-            fn msg<R>(f: impl FnOnce() -> R) -> String {
-                let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
-                    .err()
-                    .expect("a trap");
-                match p.downcast::<String>() {
-                    Ok(s) => *s,
-                    Err(p) => p.downcast::<&str>().expect("a string payload").to_string(),
-                }
-            }
+        &format!(
+            r#"{MSG_OF}
             let mut inst = Instance::new();
             assert_eq!(inst.call_ok(), 7);
-            assert_eq!(msg(|| inst.call_null()), "null function reference");
-            assert_eq!(msg(|| inst.call_param(u32::MAX)), "null function reference");
-            assert_eq!(msg(|| inst.tail_null()), "null function reference");
+            assert_eq!(msg_of(|| inst.call_null()), "null function reference");
+            assert_eq!(msg_of(|| inst.call_param(u32::MAX)), "null function reference");
+            assert_eq!(msg_of(|| inst.tail_null()), "null function reference");
             assert_eq!(inst.conv(u32::MAX), 1);
-            assert_eq!(msg(|| inst.conv(5)), "invalid externref");
-            assert_eq!(msg(|| inst.c_conv(5)), "invalid externref");"#,
+            assert_eq!(msg_of(|| inst.conv(5)), "invalid externref");
+            assert_eq!(msg_of(|| inst.c_conv(5)), "invalid externref");"#
+        ),
     );
 }
 
 #[test]
-fn call_ref_emits_an_explicit_null_check_only_when_typed() {
-    // A module with a `call_ref` but no null funcref in sight still compiles to the
-    // same dispatch; the explicit check is the only added code, in both modes.
+fn call_ref_null_check_uses_the_typed_trap_only_when_typed() {
+    // Every `call_ref` gets the null check, even with no null funcref in sight; only
+    // a typed build routes it to `Wasm2RsTrap`.
     let wat = r#"(module (type $ft (func))
         (func $f) (elem declare func $f)
         (func (export "go") (call_ref $ft (ref.func $f))))"#;
     let untyped = transpile_typed(wat, false);
     let typed = transpile_typed(wat, true);
+    assert!(untyped.contains("null function reference"), "{untyped}");
     assert!(!untyped.contains("Wasm2RsTrap"), "{untyped}");
     assert!(typed.contains("trap_null_reference"), "{typed}");
     assert!(!typed.contains("InvalidExternRef"), "{typed}");
+}
+
+#[test]
+fn a_trapping_argument_of_a_null_return_call_ref_traps_first() {
+    // The arguments are evaluated before `return_call_ref` looks at the funcref, so
+    // an out-of-bounds load among them wins over the null funcref.
+    compile_run_with(
+        "typed_return_call_ref_arg_first",
+        r#"(module
+            (type $ft (func (param i32) (result i32)))
+            (memory 1)
+            (func $f (param i32) (result i32) local.get 0)
+            (elem declare func $f)
+            (func (export "tail_oob") (param i32 i32) (result i32)
+              (return_call_ref $ft (i32.load (local.get 1)) (ref.null $ft))))"#,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            assert!(matches!(trap_of(|| inst.tail_oob(0, 1_000_000)), Wasm2RsTrap::OutOfBoundsMemoryAccess));
+            assert!(matches!(trap_of(|| inst.tail_oob(0, 0)), Wasm2RsTrap::NullReference));"#
+        ),
+    );
 }
