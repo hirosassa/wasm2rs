@@ -475,6 +475,9 @@ impl Gen<'_> {
             WitType::Own(_) | WitType::Borrow(_) => {
                 format!("{}({s} as u32)", self.records.rust(ty)?)
             }
+            WitType::Future(_) | WitType::Stream(_) => {
+                format!("<{}>::new({s} as u32)", self.records.rust(ty)?)
+            }
             WitType::Flags(f) => {
                 let name = self.records.rust(ty)?;
                 let count = f.flags.len();
@@ -614,7 +617,7 @@ impl Gen<'_> {
             WitType::F64 => format!("out[{base}] = ({value}).to_bits();"),
             WitType::Bool => format!("out[{base}] = u64::from({value});"),
             WitType::Char => format!("out[{base}] = u64::from(u32::from({value}));"),
-            WitType::Own(_) | WitType::Borrow(_) => {
+            WitType::Own(_) | WitType::Borrow(_) | WitType::Future(_) | WitType::Stream(_) => {
                 format!("out[{base}] = u64::from(({value}).0);")
             }
             WitType::Flags(f) => {
@@ -728,7 +731,9 @@ impl Gen<'_> {
             | WitType::F32
             | WitType::F64 => put(format!("({value}).to_le_bytes()")),
             WitType::Char => put(format!("u32::from({value}).to_le_bytes()")),
-            WitType::Own(_) | WitType::Borrow(_) => put(format!("({value}).0.to_le_bytes()")),
+            WitType::Own(_) | WitType::Borrow(_) | WitType::Future(_) | WitType::Stream(_) => {
+                put(format!("({value}).0.to_le_bytes()"))
+            }
             WitType::Flags(f) => {
                 if f.flags.is_empty() {
                     String::new()
@@ -875,6 +880,12 @@ pub(super) fn write(
     } in methods
     {
         gen_.utf16 = utf16;
+        if f.is_async {
+            return Err(unsupported(format!(
+                "async import `{}` of `{}` (WASI 0.3: its glue is not generated yet)",
+                f.name, f.interface
+            )));
+        }
         let slot = realloc.map(|r| match reallocs.iter().position(|(n, _)| *n == r) {
             Some(at) => at,
             None => {

@@ -82,6 +82,8 @@ pub(super) struct Records {
     list: Vec<(Decl, Placed)>,
     /// Type nodes visited so far, against [`NODE_BUDGET`].
     visited: Cell<usize>,
+    /// Some type is a `future<T>` or `stream<T>`: the output declares their handle types.
+    uses_async_handles: bool,
 }
 
 /// `kebab-case` as a `CamelCase` Rust type name that is not one of the std names the
@@ -103,8 +105,11 @@ pub(super) fn type_name(name: &str) -> String {
     }
     // The std names the generated code uses, and the prelude items a `struct Some(..)` or
     // `trait Default` would shadow in a module that also holds the user's `impl Host`.
-    const RESERVED: [&str; 28] = [
+    const RESERVED: [&str; 30] = [
         "Host",
+        // The handle types of `future<T>` and `stream<T>`.
+        "WitFuture",
+        "WitStream",
         // Top-level names of the transpiled code and the glue it is placed beside.
         "Glue",
         "Instance",
@@ -325,6 +330,16 @@ impl Records {
                 self.add_resource(r);
                 Ok(())
             }
+            WitType::Future(t) | WitType::Stream(t) => {
+                if !self.prefix.is_empty() {
+                    return Err(unsupported(
+                        "future and stream types with external types (the library declares no \
+                         handle types for them)",
+                    ));
+                }
+                self.uses_async_handles = true;
+                t.as_deref().map_or(Ok(()), |t| self.add_in(t))
+            }
             _ => Ok(()),
         }
     }
@@ -354,6 +369,11 @@ impl Records {
     /// The type as the trait and the glue spell it.
     pub(super) fn rust(&self, ty: &WitType) -> Result<String, TranspileError> {
         self.rust_in(ty, "")
+    }
+
+    /// How a top-level item is reached from `prefix`: only qualified output has modules.
+    fn top_prefix<'a>(&self, prefix: &'a str) -> &'a str {
+        if self.qualified { prefix } else { "" }
     }
 
     /// The type as spelled from inside a type's own module (`super::` reaches the others).
@@ -402,6 +422,9 @@ impl Records {
                 Some(placed) => self.path(placed, prefix),
                 None => type_name(&r.name),
             },
+            // The handle types are top-level: a module reaches them through `super::`.
+            WitType::Future(t) => format!("{}WitFuture<{}>", self.top_prefix(prefix), inner(t)?),
+            WitType::Stream(t) => format!("{}WitStream<{}>", self.top_prefix(prefix), inner(t)?),
         })
     }
 }
@@ -660,6 +683,9 @@ pub(super) fn write_declarations(
     out.push_str("\npub trait Host {\n");
     for (f, name) in funcs.iter().zip(names) {
         let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
+        if f.is_async {
+            out.push_str("    ///\n    /// An `async func` (WASI 0.3): the host completes it before returning.\n");
+        }
         let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
         let sig = typed_signature(records, name, f, &idents)?;
         if default_trap {
@@ -710,6 +736,9 @@ pub(super) fn doc_text(interface: &str, name: &str) -> String {
 /// The type declarations: top-level, or (qualified) one `pub mod` per defining interface,
 /// ordered by module and name so that the text does not depend on the order of the functions.
 pub(super) fn write_types(out: &mut String, records: &Records) -> Result<(), TranspileError> {
+    if records.uses_async_handles {
+        write_async_handles(out);
+    }
     if !records.qualified {
         for placed in &records.resources {
             write_resource(out, &placed.name);
@@ -750,6 +779,49 @@ pub(super) fn write_types(out: &mut String, records: &Records) -> Result<(), Tra
         out.push_str("}\n");
     }
     Ok(())
+}
+
+/// The typed ends of `future<T>` and `stream<T>` (WASI 0.3): the handle in the component's
+/// table. Reading or writing through them needs the async runtime, which is not generated yet.
+/// The impls are written out so that they do not require `T: Clone`.
+fn write_async_handles(out: &mut String) {
+    for (name, what) in [("WitFuture", "future"), ("WitStream", "stream")] {
+        let _ = write!(
+            out,
+            r#"
+/// The readable end of a `{what}<T>`.
+pub struct {name}<T>(pub u32, pub std::marker::PhantomData<fn() -> T>);
+
+impl<T> {name}<T> {{
+    pub fn new(handle: u32) -> Self {{
+        {name}(handle, std::marker::PhantomData)
+    }}
+}}
+
+impl<T> Clone for {name}<T> {{
+    fn clone(&self) -> Self {{
+        *self
+    }}
+}}
+
+impl<T> Copy for {name}<T> {{}}
+
+impl<T> std::fmt::Debug for {name}<T> {{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{
+        write!(f, "{name}({{}})", self.0)
+    }}
+}}
+
+impl<T> PartialEq for {name}<T> {{
+    fn eq(&self, other: &Self) -> bool {{
+        self.0 == other.0
+    }}
+}}
+
+impl<T> Eq for {name}<T> {{}}
+"#
+        );
+    }
 }
 
 pub(super) fn write_resource(out: &mut String, name: &str) {

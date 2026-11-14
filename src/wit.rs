@@ -8,9 +8,11 @@
 //! the core import that lowers it (module = the interface, field = the function name).
 //!
 //! Supported types: integers, floats, `bool`, `char`, `string`, `list`, `option`,
-//! `result`, `tuple`, `record`, `variant`, `enum`, `flags` (at most 32) and resource handles
-//! (`own`/`borrow`). A function that uses anything else (`future`, `stream`,
-//! `error-context`, more than 32 flags, ...) is an [`Unsupported`](crate::TranspileError::Unsupported) error naming
+//! `result`, `tuple`, `record`, `variant`, `enum`, `flags` (at most 32), resource handles
+//! (`own`/`borrow`) and, for WASI 0.3, `future<T>` / `stream<T>` (typed handles; reading or
+//! writing through them needs the async runtime, which is not generated yet) and `async func`
+//! (a method the host completes before returning). A function that uses anything else
+//! (`error-context`, more than 32 flags, ...) is an [`Unsupported`](crate::TranspileError::Unsupported) error naming
 //! the type, never silently dropped. A type that no function uses is not checked.
 
 use std::sync::Arc;
@@ -68,6 +70,10 @@ pub enum WitType {
     Own(Arc<WitResource>),
     /// `borrow<R>`: a handle lent for the call.
     Borrow(Arc<WitResource>),
+    /// `future<T>` (WASI 0.3): the readable end of a one-shot value; `None` is `future`.
+    Future(Option<Arc<WitType>>),
+    /// `stream<T>` (WASI 0.3): the readable end of a stream; `None` is `stream`.
+    Stream(Option<Arc<WitType>>),
 }
 
 /// A WIT resource type. Two handles are of the same resource when their `id`s are equal,
@@ -145,4 +151,6 @@ pub struct WitFunc {
     pub params: Vec<(String, WitType)>,
     /// The result type, if the function returns a value.
     pub result: Option<WitType>,
+    /// Whether the function is `async` (WASI 0.3).
+    pub is_async: bool,
 }

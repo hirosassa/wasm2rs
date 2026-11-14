@@ -86,7 +86,7 @@ pub(crate) fn size_align(ty: &WitType, budget: &mut Budget) -> Result<(u64, u64)
         WitType::U32 | WitType::S32 | WitType::F32 | WitType::Char => (4, 4),
         WitType::U64 | WitType::S64 | WitType::F64 => (8, 8),
         WitType::String | WitType::List(_) => (8, 4),
-        WitType::Own(_) | WitType::Borrow(_) => (4, 4),
+        WitType::Own(_) | WitType::Borrow(_) | WitType::Future(_) | WitType::Stream(_) => (4, 4),
         WitType::Tuple(ts) => {
             let mut fields = Vec::new();
             for t in ts {
@@ -190,7 +190,9 @@ pub(crate) fn flatten(ty: &WitType, budget: &mut Budget) -> Result<Vec<Flat>, Tr
         | WitType::S32
         | WitType::Char
         | WitType::Own(_)
-        | WitType::Borrow(_) => out.push(Flat::I32),
+        | WitType::Borrow(_)
+        | WitType::Future(_)
+        | WitType::Stream(_) => out.push(Flat::I32),
         WitType::U64 | WitType::S64 => out.push(Flat::I64),
         WitType::F32 => out.push(Flat::F32),
         WitType::F64 => out.push(Flat::F64),
@@ -447,6 +449,7 @@ mod tests {
                 .map(|(i, t)| (format!("p{i}"), t))
                 .collect(),
             result,
+            is_async: false,
         }
     }
 

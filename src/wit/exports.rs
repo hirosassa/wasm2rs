@@ -716,11 +716,17 @@ impl Reader {
                  canonical ABI and its task scheduler are not implemented)"
             )));
         }
-        let (params, result) = lift
+        let (params, result, is_async) = lift
             .sig
             .clone()
             .map_err(|what| unsupported(format!("{what} in function `{name}` of `{interface}`")))?;
 
+        if is_async {
+            return Err(unsupported(format!(
+                "export `{label}` is an async function lifted without the `async` option \
+                 (WASI 0.3: the async canonical ABI is not implemented)"
+            )));
+        }
         let ((module, instance), core_export) =
             self.core_export(&label, lift.core_func, "function")?;
         let core_module = self.top_module(&label, module)?.ordinal;
@@ -730,6 +736,7 @@ impl Reader {
                 name: name.to_string(),
                 params,
                 result,
+                is_async: false,
             },
             core_module,
             core_export,
