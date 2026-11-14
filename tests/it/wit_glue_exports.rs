@@ -616,18 +616,19 @@ fn the_async_entry_and_callback_are_typed_trait_methods() {
 }
 
 #[test]
-fn an_async_export_with_a_result_is_rejected_until_task_return_is_routed() {
+fn an_async_export_with_a_result_returns_it_but_is_unimplemented_until_task_return_is_routed() {
     let component = encoded(
         "package a:b; world w { export slow: async func(n: u32) -> u32; }",
         ASYNC_CORE,
     );
-    let err = wit_host_glue_with_options(&component, &exports_on())
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("`slow`") && err.contains("task.return"),
-        "{err}"
-    );
+    let glue = wit_host_glue_with_options(&component, &exports_on()).unwrap();
+    for needle in [
+        "fn slow(&mut self, n: u32, events: &mut dyn FnMut(CallbackCode) -> Option<[u32; 3]>) -> u32;",
+        "CallbackCode::Exit => unimplemented!(",
+        "task.return",
+    ] {
+        assert!(glue.contains(needle), "{needle}\n{glue}");
+    }
 }
 
 #[test]

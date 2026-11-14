@@ -630,19 +630,17 @@ fn an_import_lowered_as_utf16_without_a_string_is_still_served() {
 }
 
 #[test]
-fn an_import_lowered_with_the_async_option_is_rejected_by_the_glue() {
-    // The core import would be `(param, result pointer) -> status`, not the sync signature.
-    // The core import returns the subtask status (the parameter list closes early to say so).
-    let err = glue_error(&lowering_of(
+fn an_import_lowered_with_the_async_option_returns_the_returned_status() {
+    // The core import is `(param) -> status` (the parameter list closes early to say so).
+    let glue = wasm2rs::wit_host_glue(&lowering_of(
         "func async",
         "u32",
         "i32) (result i32",
         "async",
-    ));
-    assert!(
-        err.contains("`a:b/i#f`") && err.contains("lowered with the `async` option"),
-        "{err}"
-    );
+    ))
+    .unwrap();
+    assert!(glue.contains("p0: i32) -> i32 {"), "{glue}");
+    assert!(glue.contains("self.0.a_b_i_f(a0);\n        2\n"), "{glue}");
 }
 
 #[test]

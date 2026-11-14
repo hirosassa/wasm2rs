@@ -22,6 +22,8 @@ pub(crate) enum Flat {
 pub(crate) const MAX_FLAT_PARAMS: usize = 16;
 /// `MAX_FLAT_RESULTS`: more flat results than this are returned through memory.
 pub(crate) const MAX_FLAT_RESULTS: usize = 1;
+/// `MAX_FLAT_ASYNC_PARAMS`: an `async` lift or lower takes at most this many flat parameters.
+pub(crate) const MAX_FLAT_ASYNC_PARAMS: usize = 4;
 
 /// How many type nodes a walk may still visit.
 pub(crate) struct Budget(usize);
@@ -290,15 +292,24 @@ pub(crate) struct CoreSignature {
     pub result_in_memory: bool,
 }
 
+/// The core signature of `f`. With `async_lower` (a `canon lower` with the `async` option,
+/// WASI 0.3) at most 4 values are passed flat, a result is always written through a trailing
+/// pointer, and the function returns an `i32` status.
 pub(crate) fn core_signature(
     f: &WitFunc,
     budget: &mut Budget,
+    async_lower: bool,
 ) -> Result<CoreSignature, TranspileError> {
     let mut params = Vec::new();
     for (_, t) in &f.params {
         params.extend(flatten(t, budget)?);
     }
-    let params_in_memory = params.len() > MAX_FLAT_PARAMS;
+    let max_params = if async_lower {
+        MAX_FLAT_ASYNC_PARAMS
+    } else {
+        MAX_FLAT_PARAMS
+    };
+    let params_in_memory = params.len() > max_params;
     if params_in_memory {
         params = vec![Flat::I32];
     }
@@ -306,10 +317,17 @@ pub(crate) fn core_signature(
         Some(t) => flatten(t, budget)?,
         None => Vec::new(),
     };
-    let result_in_memory = results.len() > MAX_FLAT_RESULTS;
+    let result_in_memory = if async_lower {
+        f.result.is_some()
+    } else {
+        results.len() > MAX_FLAT_RESULTS
+    };
     if result_in_memory {
         results.clear();
         params.push(Flat::I32);
+    }
+    if async_lower {
+        results = vec![Flat::I32];
     }
     Ok(CoreSignature {
         params,
@@ -455,7 +473,7 @@ mod tests {
 
     #[test]
     fn the_core_signature_spills_to_memory_past_the_flat_limits() {
-        let sig = |f: &WitFunc| core_signature(f, &mut Budget::new()).unwrap();
+        let sig = |f: &WitFunc| core_signature(f, &mut Budget::new(), false).unwrap();
         let ok = sig(&func(vec![WitType::U32; 16], Some(WitType::U64)));
         assert_eq!(ok.params.len(), 16);
         assert_eq!(ok.results, vec![Flat::I64]);
@@ -468,6 +486,21 @@ mod tests {
         let retptr = sig(&func(vec![WitType::U8], Some(WitType::String)));
         assert_eq!(retptr.params, vec![Flat::I32, Flat::I32]);
         assert!(retptr.results.is_empty() && retptr.result_in_memory);
+    }
+
+    #[test]
+    fn an_async_lower_passes_four_flat_params_and_always_returns_through_a_pointer() {
+        let sig = |f: &WitFunc| core_signature(f, &mut Budget::new(), true).unwrap();
+        let flat = sig(&func(vec![WitType::U32; 4], Some(WitType::U32)));
+        // Four parameters, the result pointer, and the status.
+        assert_eq!(flat.params, vec![Flat::I32; 5]);
+        assert_eq!(flat.results, vec![Flat::I32]);
+        assert!(!flat.params_in_memory && flat.result_in_memory);
+
+        let spilled = sig(&func(vec![WitType::U32; 5], None));
+        assert_eq!(spilled.params, vec![Flat::I32]);
+        assert_eq!(spilled.results, vec![Flat::I32]);
+        assert!(spilled.params_in_memory && !spilled.result_in_memory);
     }
 
     #[test]
