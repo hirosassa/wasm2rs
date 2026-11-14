@@ -57,7 +57,10 @@ impl SharedBytes {
         if start > end {
             panic!("slice index starts at {start} but ends at {end}");
         }
-        panic!("range end index {end} out of range for slice of length {}", self.len);
+        panic!(
+            "range end index {end} out of range for slice of length {}",
+            self.len
+        );
     }
 
     #[inline(always)]
@@ -70,7 +73,10 @@ impl SharedBytes {
     #[inline(always)]
     fn check_index(&self, i: usize) {
         if i >= self.len {
-            panic!("index out of bounds: the len is {} but the index is {i}", self.len);
+            panic!(
+                "index out of bounds: the len is {} but the index is {i}",
+                self.len
+            );
         }
     }
 }
@@ -138,7 +144,11 @@ fn shared_layout(cap: usize) -> std::alloc::Layout {
 }
 
 fn shared_width_mask(width: usize) -> u64 {
-    if width >= 8 { u64::MAX } else { (1u64 << (width * 8)) - 1 }
+    if width >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (width * 8)) - 1
+    }
 }
 
 // RMW op codes: 0=add 1=sub 2=and 3=or 4=xor 5=xchg
@@ -201,7 +211,10 @@ impl SharedMemory {
     // page itself gives no such edge. Relaxed avoids a load-acquire per access.
     fn bytes(&self) -> SharedBytes {
         let len = self.0.len.load(std::sync::atomic::Ordering::Relaxed);
-        SharedBytes { base: self.0.base, len }
+        SharedBytes {
+            base: self.0.base,
+            len,
+        }
     }
 
     // Raises the length by `delta` pages; returns the old page count, or -1 if
@@ -209,7 +222,10 @@ impl SharedMemory {
     fn grow(&self, delta: u32) -> i32 {
         let mut cur = self.0.len.load(std::sync::atomic::Ordering::Relaxed);
         loop {
-            let new = match (delta as usize).checked_mul(65536).and_then(|d| cur.checked_add(d)) {
+            let new = match (delta as usize)
+                .checked_mul(65536)
+                .and_then(|d| cur.checked_add(d))
+            {
                 Some(n) if n <= self.0.cap => n,
                 _ => return -1,
             };
@@ -241,7 +257,7 @@ impl SharedMemory {
 
     // Sequentially consistent atomic load of `width` bytes, zero-extended.
     fn atomic_load(&self, addr: usize, width: usize) -> u64 {
-        use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::SeqCst};
+        use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::SeqCst};
         let p = self.atomic_cell(addr, width);
         // SAFETY: `p` is in bounds and aligned for `width` (checked above).
         unsafe {
@@ -256,7 +272,7 @@ impl SharedMemory {
 
     // Sequentially consistent atomic store of the low `width` bytes of `val`.
     fn atomic_store(&self, addr: usize, width: usize, val: u64) {
-        use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::SeqCst};
+        use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::SeqCst};
         let p = self.atomic_cell(addr, width);
         // SAFETY: `p` is in bounds and aligned for `width` (checked above).
         unsafe {
@@ -272,7 +288,7 @@ impl SharedMemory {
     // Atomic read-modify-write (a compare-exchange loop, so one routine serves
     // every width and op). Returns the (zero-extended) old value.
     fn atomic_rmw(&self, addr: usize, width: usize, op: u8, val: u64) -> u64 {
-        use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::SeqCst};
+        use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::SeqCst};
         let p = self.atomic_cell(addr, width);
         let val = val & shared_width_mask(width);
         macro_rules! rmw {
@@ -300,7 +316,7 @@ impl SharedMemory {
     // Stores `replacement` only if the (masked) current value equals `expected`.
     // Returns the (zero-extended) old value either way.
     fn atomic_cmpxchg(&self, addr: usize, width: usize, expected: u64, replacement: u64) -> u64 {
-        use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::SeqCst};
+        use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::SeqCst};
         let p = self.atomic_cell(addr, width);
         let expected = expected & shared_width_mask(width);
         let replacement = replacement & shared_width_mask(width);
