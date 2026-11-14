@@ -377,6 +377,20 @@ fn receive_waiting(inst: &mut Instance<Glue<WasiHost>>, d_in: i32, max: i64) -> 
     inst.drop_pollable(p);
     inst.receive(d_in, max)
 }
+/// Receives until `total` datagrams came in, at most `max` per call; returns the size of each batch.
+/// A pollable is ready as soon as the first of several queued datagrams lands, so one call
+/// cannot be assumed to see all that were sent.
+#[allow(dead_code)]
+fn receive_batches(inst: &mut Instance<Glue<WasiHost>>, d_in: i32, max: i64, total: i32) -> Vec<i32> {
+    let mut batches = Vec::new();
+    while batches.iter().sum::<i32>() < total {
+        let n = receive_waiting(inst, d_in, max);
+        // after the pollable is ready a receive takes at least one; a negative is an error code
+        assert!(n >= 1, "receive after ready: {n} (batches so far {batches:?})");
+        batches.push(n);
+    }
+    batches
+}
 "#;
 
 #[test]
@@ -460,11 +474,10 @@ fn two_sockets_exchange_datagrams_both_ways_with_the_source_address() {
          assert_eq!(inst.rsrc(0), lb);
          // several datagrams at once, taken at most `max` at a time (max 0 takes none)
          assert_eq!(inst.send(a_out, 3, 1, port(lb), 127, 0, 0, 1, 420, 2), 3);
-         let p = inst.sub_in(b_in);
-         inst.block(p);
          assert_eq!(inst.receive(b_in, 0), 0);
-         assert_eq!(inst.receive(b_in, 2), 2);
-         assert_eq!(inst.receive(b_in, 10), 1);
+         let batches = receive_batches(&mut inst, b_in, 2, 3);
+         assert!(batches.iter().all(|&n| n <= 2), \"{batches:?}\");
+         assert_eq!(batches.iter().sum::<i32>(), 3, \"{batches:?}\");
          assert_eq!(inst.receive(b_in, 10), 0);",
     ));
 }
