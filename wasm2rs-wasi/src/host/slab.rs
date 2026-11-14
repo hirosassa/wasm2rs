@@ -1,5 +1,48 @@
 //! The slab that hands out and recycles the guest-visible handles.
 
+/// Traps the guest. The generated `Host` methods have no error channel for a bad handle or an
+/// exhausted host resource, so a trap is a panic that names the cause (the contract in the
+/// crate docs).
+#[cold]
+#[expect(
+    clippy::panic,
+    reason = "the one place a trap is raised: `Host` signatures leave no other channel"
+)]
+pub(super) fn trap(msg: impl std::fmt::Display) -> ! {
+    panic!("{msg}")
+}
+
+/// Locks the stdin buffer; one poisoned by a panicking thread traps like any broken invariant.
+pub(super) fn lock_stdin<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| stdin_poisoned(e))
+}
+
+pub(super) fn stdin_poisoned<E>(_: E) -> ! {
+    trap("wasi:cli: the stdin buffer is poisoned")
+}
+
+/// The slab index a handle names. One too large for `usize` is as unknown as any other
+/// handle that is not in the table, so it saturates to a slot that never exists.
+pub(super) fn idx(handle: u32) -> usize {
+    usize::try_from(handle).unwrap_or(usize::MAX)
+}
+
+/// A length as the `u64` that WASI counts in (`usize` is never wider than 64 bits here).
+pub(super) fn to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+/// A WASI length as a `usize`; one beyond the address space saturates, which the callers'
+/// own limits (already applied) and the allocator reject.
+pub(super) fn to_usize(len: u64) -> usize {
+    usize::try_from(len).unwrap_or(usize::MAX)
+}
+
+/// The handle for a slab slot; a table with over `u32::MAX` slots traps.
+pub(super) fn to_handle(slot: usize) -> u32 {
+    u32::try_from(slot).unwrap_or_else(|_| trap("handle table exhausted"))
+}
+
 /// A table of live handles: a handle is a slot's index, and the slot of a dropped handle
 /// is reused by the next `insert`. A guest must not use a handle after dropping it; the
 /// host does not detect that, and the stale handle may then name a newer resource.
@@ -30,7 +73,11 @@ impl<T> Slab<T> {
     pub(super) fn insert(&mut self, value: T) -> usize {
         match self.free.pop() {
             Some(slot) => {
-                self.slots[slot] = Some(value);
+                // every freed slot index came from `slots`
+                *self
+                    .slots
+                    .get_mut(slot)
+                    .unwrap_or_else(|| trap("handle table: a freed slot is missing")) = Some(value);
                 // a new occupant: a ref made while the slot was free must not match it
                 if let Some(epoch) = self.epochs.get_mut(slot) {
                     *epoch = epoch.wrapping_add(1);
@@ -38,9 +85,10 @@ impl<T> Slab<T> {
                 slot
             }
             None => {
+                let slot = self.slots.len();
                 self.slots.push(Some(value));
                 self.epochs.push(1);
-                self.slots.len() - 1
+                slot
             }
         }
     }

@@ -58,8 +58,8 @@ wasm2rs-wasi = { path = "wasm2rs-wasi" }
 # Hardening gates (rust-hardening skill), inherited by every member via
 # `[lints] workspace = true`. Only lints with zero findings in every member's
 # production code belong here; `clippy::panic`, `unwrap_in_result` and
-# `cast_possible_truncation` are denied per-crate in src/lib.rs and src/main.rs
-# until wasm2rs-wasi is clean. The root crate is a code generator, so several
+# `cast_possible_truncation` are denied per-crate in src/lib.rs, src/main.rs and
+# wasm2rs-wasi/src/lib.rs (workspace-wide they would reach the tests). The root crate is a code generator, so several
 # restriction lints fire on intentional index/offset arithmetic and casts; those
 # are enabled incrementally (see "Deferred" below). Test code relaxes the
 # panic-prone subset with a scoped `#[allow(..., reason = "test code")]`.

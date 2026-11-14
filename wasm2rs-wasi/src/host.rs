@@ -224,30 +224,30 @@ impl Drop for WasiHost {
 /// The slot of a `wasi:http` resource handle that the guest must still own: using a dropped
 /// one traps, like any other bad handle.
 fn http_missing(kind: &str) -> ! {
-    panic!("wasi:http: unknown {kind} handle")
+    trap(format_args!("wasi:http: unknown {kind} handle"))
 }
 
 impl WasiHost {
     fn http_fields(&self, h: Fields) -> &http::HttpFields {
         self.http_fields
-            .get(h.0 as usize)
+            .get(idx(h.0))
             .unwrap_or_else(|| http_missing("fields"))
     }
 
     fn http_fields_mut(&mut self, h: Fields) -> &mut http::HttpFields {
         self.http_fields
-            .get_mut(h.0 as usize)
+            .get_mut(idx(h.0))
             .unwrap_or_else(|| http_missing("fields"))
     }
 
     fn http_new_fields(&mut self, fields: http::HttpFields) -> Fields {
-        Fields(self.http_fields.insert(fields) as u32)
+        Fields(to_handle(self.http_fields.insert(fields)))
     }
 
     /// Takes over the `fields` handle's contents, for a constructor the guest gave it to.
     fn http_take_fields(&mut self, h: Fields) -> http::HttpFields {
         self.http_fields
-            .take(h.0 as usize)
+            .take(idx(h.0))
             .unwrap_or_else(|| http_missing("fields"))
     }
 
@@ -260,78 +260,78 @@ impl WasiHost {
         let body = http::HttpOutgoingBody::new(self.http_max_body, too_large);
         let handle = body.handle();
         let slot = self.http_out_bodies.insert(body);
-        (handle, OutgoingBody(slot as u32))
+        (handle, OutgoingBody(to_handle(slot)))
     }
 
     fn http_option(&self, h: RequestOptions) -> &http::HttpOptions {
         self.http_options
-            .get(h.0 as usize)
+            .get(idx(h.0))
             .unwrap_or_else(|| http_missing("request-options"))
     }
 
     fn http_option_mut(&mut self, h: RequestOptions) -> &mut http::HttpOptions {
         self.http_options
-            .get_mut(h.0 as usize)
+            .get_mut(idx(h.0))
             .unwrap_or_else(|| http_missing("request-options"))
     }
 
     fn http_request(&self, h: OutgoingRequest) -> &http::HttpOutgoingRequest {
         self.http_requests
-            .get(h.0 as usize)
+            .get(idx(h.0))
             .unwrap_or_else(|| http_missing("outgoing-request"))
     }
 
     fn http_request_mut(&mut self, h: OutgoingRequest) -> &mut http::HttpOutgoingRequest {
         self.http_requests
-            .get_mut(h.0 as usize)
+            .get_mut(idx(h.0))
             .unwrap_or_else(|| http_missing("outgoing-request"))
     }
 
     fn http_future_mut(&mut self, h: FutureIncomingResponse) -> &mut http::HttpFuture {
         self.http_futures
-            .get_mut(h.0 as usize)
+            .get_mut(idx(h.0))
             .unwrap_or_else(|| http_missing("future-incoming-response"))
     }
 
     fn http_in_request(&self, h: IncomingRequest) -> &http::HttpIncomingRequest {
         self.http_in_requests
-            .get(h.0 as usize)
+            .get(idx(h.0))
             .unwrap_or_else(|| http_missing("incoming-request"))
     }
 
     fn http_out_response(&self, h: OutgoingResponse) -> &http::HttpOutgoingResponse {
         self.http_out_responses
-            .get(h.0 as usize)
+            .get(idx(h.0))
             .unwrap_or_else(|| http_missing("outgoing-response"))
     }
 
     fn http_out_response_mut(&mut self, h: OutgoingResponse) -> &mut http::HttpOutgoingResponse {
         self.http_out_responses
-            .get_mut(h.0 as usize)
+            .get_mut(idx(h.0))
             .unwrap_or_else(|| http_missing("outgoing-response"))
     }
 
     fn http_response(&self, h: IncomingResponse) -> &http::HttpIncomingResponse {
         self.http_responses
-            .get(h.0 as usize)
+            .get(idx(h.0))
             .unwrap_or_else(|| http_missing("incoming-response"))
     }
 
     fn http_response_mut(&mut self, h: IncomingResponse) -> &mut http::HttpIncomingResponse {
         self.http_responses
-            .get_mut(h.0 as usize)
+            .get_mut(idx(h.0))
             .unwrap_or_else(|| http_missing("incoming-response"))
     }
 
     fn http_out_body_mut(&mut self, h: OutgoingBody) -> &mut http::HttpOutgoingBody {
         self.http_out_bodies
-            .get_mut(h.0 as usize)
+            .get_mut(idx(h.0))
             .unwrap_or_else(|| http_missing("outgoing-body"))
     }
 
     fn http_body_mut(&mut self, h: IncomingBody) -> &mut http::HttpIncomingBody {
         self.http_bodies
-            .get_mut(h.0 as usize)
+            .get_mut(idx(h.0))
             .unwrap_or_else(|| http_missing("incoming-body"))
     }
 
@@ -360,11 +360,11 @@ impl WasiHost {
     ) -> Result<FutureIncomingResponse, HttpErrorCode> {
         let mut request = self
             .http_requests
-            .take(handle.0 as usize)
+            .take(idx(handle.0))
             .unwrap_or_else(|| http_missing("outgoing-request"));
         let options = options.map(|o| {
             self.http_options
-                .take(o.0 as usize)
+                .take(idx(o.0))
                 .unwrap_or_else(|| http_missing("request-options"))
         });
         let authority = request
@@ -399,19 +399,19 @@ impl WasiHost {
             between_bytes_timeout: options.between_bytes,
         };
         let future = http::HttpFuture::spawn(client, request, body);
-        Ok(FutureIncomingResponse(
-            self.http_futures.insert(future) as u32
-        ))
+        Ok(FutureIncomingResponse(to_handle(
+            self.http_futures.insert(future),
+        )))
     }
 
     /// Mints the `incoming-request` for a call of `incoming-handler#handle` (see the `Exports`
     /// trait of the generated glue). The guest owns the handle from then on; one that is not
     /// consumed or dropped stays in the table.
     pub fn new_incoming_request(&mut self, parts: IncomingRequestParts) -> IncomingRequest {
-        IncomingRequest(
+        IncomingRequest(to_handle(
             self.http_in_requests
-                .insert(http::HttpIncomingRequest::new(parts)) as u32,
-        )
+                .insert(http::HttpIncomingRequest::new(parts)),
+        ))
     }
 
     /// Mints the `response-outparam` for a call of `incoming-handler#handle`; pass the same
@@ -511,8 +511,8 @@ impl WasiHost {
     fn legacy_preopen(mut self, root: PathBuf, access: Access) -> Self {
         match self.add_preopen("/".to_string(), root, access) {
             Ok(()) => self,
-            Err(ConfigError::Preopen { .. }) => panic!("preopen: directory does not exist"),
-            Err(e) => panic!("preopen: {e}"),
+            Err(ConfigError::Preopen { .. }) => trap("preopen: directory does not exist"),
+            Err(e) => trap(format_args!("preopen: {e}")),
         }
     }
 
@@ -546,7 +546,7 @@ impl WasiHost {
     /// at its end): the handle.
     fn open_output_stream(&mut self, descriptor: u32, pos: u64, append: bool) -> Result<u32, Fs> {
         let stream = FileStream::over(self.writable_descriptor_file(descriptor)?, pos, append)?;
-        Ok(FIRST_FILE_STREAM + self.outputs.insert(stream) as u32)
+        Ok(file_stream_handle(self.outputs.insert(stream)))
     }
 
     /// Runs `op` on the open file behind a descriptor, or on the directory's own open handle.
@@ -598,7 +598,7 @@ impl WasiHost {
     /// The descriptor behind a handle, or `bad-descriptor`.
     fn open_descriptor(&self, descriptor: u32) -> Result<&OpenDescriptor, Fs> {
         self.descriptors
-            .get(descriptor as usize)
+            .get(idx(descriptor))
             .ok_or(Fs::BadDescriptor)
     }
 
@@ -678,14 +678,14 @@ impl WasiHost {
     fn random_source(&mut self) -> &mut dyn RandomSource {
         match self.random.as_deref_mut() {
             Some(random) => random,
-            None => panic!("wasi:random: no random source (enable `os-random` or use the builder)"),
+            None => trap("wasi:random: no random source (enable `os-random` or use the builder)"),
         }
     }
 
     /// Fills `buf` with secure random bytes; a source that fails traps.
     fn fill_secure(&mut self, buf: &mut [u8]) {
         if let Err(e) = self.random_source().fill_random(buf) {
-            panic!("wasi:random: the random source failed: {e}");
+            trap(format_args!("wasi:random: the random source failed: {e}"));
         }
     }
 
@@ -693,7 +693,7 @@ impl WasiHost {
     /// a guest cannot make the host allocate without bound; so does a source that fails.
     fn secure_bytes(&mut self, len: u64) -> Vec<u8> {
         assert!(len <= 64 << 20, "random bytes: length over 64 MiB");
-        let mut bytes = vec![0; len as usize];
+        let mut bytes = vec![0; to_usize(len)];
         self.fill_secure(&mut bytes);
         bytes
     }
@@ -704,7 +704,7 @@ impl WasiHost {
         let source = self.random_source();
         std::iter::repeat_with(|| source.insecure_u64().to_le_bytes())
             .flatten()
-            .take(len as usize)
+            .take(to_usize(len))
             .collect()
     }
 
@@ -734,9 +734,9 @@ impl WasiHost {
                     return;
                 };
                 let (buf, changed) = &*shared;
-                let mut buf = buf.lock().unwrap();
+                let mut buf = lock_stdin(buf);
                 buf.error = error;
-                buf.bytes.extend(&chunk[..n]);
+                buf.bytes.extend(chunk.iter().take(n));
                 buf.eof = n == 0;
                 changed.notify_all();
                 if n == 0 {
@@ -751,13 +751,13 @@ impl WasiHost {
     }
 
     fn subscribe_wait(&mut self, wait: Wait) -> Pollable {
-        Pollable(self.pollables.insert(wait) as u32)
+        Pollable(to_handle(self.pollables.insert(wait)))
     }
 
     /// What a pollable waits for; an unknown one is ready.
     fn wait_of(&self, pollable: Pollable) -> Wait {
         self.pollables
-            .get(pollable.0 as usize)
+            .get(idx(pollable.0))
             .copied()
             .unwrap_or(Wait::Ready)
     }
@@ -773,28 +773,35 @@ impl WasiHost {
     /// `wait_ready` for the conditions themselves (a blocking call has no pollable).
     fn wait_any(&self, waits: &[Wait]) -> Vec<u32> {
         let (buf, changed) = &*self.stdin;
-        let mut buf = buf.lock().unwrap();
+        let mut buf = lock_stdin(buf);
         loop {
             let now = Instant::now();
-            let ready: Vec<u32> = (0..waits.len() as u32)
-                .filter(|&i| waits[i as usize].is_ready(now, &buf, self))
+            let ready: Vec<u32> = waits
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| w.is_ready(now, &buf, self))
+                .map(|(i, _)| to_handle(i))
                 .collect();
             if !ready.is_empty() {
                 return ready;
             }
             let mut earliest = waits.iter().filter_map(|w| w.deadline()).min();
-            if waits.iter().any(|w| w.polls_socket()) {
-                let soon = now + Duration::from_millis(1);
+            let soon = waits
+                .iter()
+                .any(|w| w.polls_socket())
+                .then(|| now.checked_add(Duration::from_millis(1)))
+                .flatten();
+            if let Some(soon) = soon {
                 earliest = Some(earliest.map_or(soon, |d| d.min(soon)));
             }
             buf = match earliest {
                 Some(d) => {
                     changed
                         .wait_timeout(buf, d.saturating_duration_since(now))
-                        .unwrap()
+                        .unwrap_or_else(|e| stdin_poisoned(e))
                         .0
                 }
-                None => changed.wait(buf).unwrap(),
+                None => changed.wait(buf).unwrap_or_else(|e| stdin_poisoned(e)),
             };
         }
     }
@@ -815,6 +822,15 @@ const DEFAULT_MAX_REQUEST_BODY: usize = 1 << 20;
 mod impl_host;
 
 #[cfg(test)]
+#[allow(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::arithmetic_side_effects,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "test code"
+)]
 mod tests {
     use super::*;
     use std::io::{Error, ErrorKind};

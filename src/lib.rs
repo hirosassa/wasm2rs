@@ -9,7 +9,8 @@
 //! [`transpile_split`] and [`transpile_split_with_options`]; a component goes in through
 //! [`transpile_component`].
 
-// Kept in source rather than in `[workspace.lints]`: wasm2rs-wasi still violates these.
+// Kept in source rather than in `[workspace.lints]`: the lints also reach the tests, which
+// panic by design. wasm2rs-wasi denies the same set (and more) in its own `lib.rs`.
 #![deny(
     clippy::panic,
     clippy::unwrap_in_result,

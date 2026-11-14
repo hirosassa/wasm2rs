@@ -88,19 +88,19 @@ pub(super) const HTTP_OUT_STREAM: usize = HTTP_STREAM + (1 << 28);
 
 /// The slot in `http_bodies` of a stream handle, `None` for any other stream.
 pub(super) fn http_slot(stream: u32) -> Option<usize> {
-    let slot = (stream as usize).checked_sub(HTTP_STREAM)?;
+    let slot = idx(stream).checked_sub(HTTP_STREAM)?;
     (slot < HTTP_OUT_STREAM - HTTP_STREAM).then_some(slot)
 }
 
 /// The slot in `http_out_bodies` of a stream handle, `None` for any other stream.
 pub(super) fn http_out_slot(stream: u32) -> Option<usize> {
-    let slot = (stream as usize).checked_sub(HTTP_OUT_STREAM)?;
+    let slot = idx(stream).checked_sub(HTTP_OUT_STREAM)?;
     (slot < TCP_STREAM - HTTP_OUT_STREAM).then_some(slot)
 }
 
 /// The slot in `tcp_in` or `tcp_out` of a stream handle, `None` for any other stream.
 pub(super) fn tcp_slot(stream: u32) -> Option<usize> {
-    (stream as usize).checked_sub(TCP_STREAM)
+    idx(stream).checked_sub(TCP_STREAM)
 }
 
 impl WasiHost {
@@ -123,7 +123,7 @@ impl WasiHost {
             fs,
             http,
         };
-        StreamError::LastOperationFailed(Error(self.errors.insert(entry) as u32))
+        StreamError::LastOperationFailed(Error(to_handle(self.errors.insert(entry))))
     }
 
     /// `last_operation_failed` for an I/O failure of `stream`: only a file stream's carries a
@@ -171,11 +171,11 @@ impl WasiHost {
     /// Reads at most 4096 bytes of a stream without waiting: the one read path of `read`,
     /// `blocking-read`, `skip`, `blocking-skip`, `splice` and `blocking-splice`.
     pub(super) fn read_stream(&mut self, stream: u32, len: u64) -> Result<Vec<u8>, StreamError> {
-        let mut buf = vec![0u8; len.min(4096) as usize];
+        let mut buf = vec![0u8; to_usize(len.min(4096))];
         if stream == 0 {
             self.start_stdin();
             let stdin = Arc::clone(&self.stdin);
-            let mut shared = stdin.0.lock().unwrap();
+            let mut shared = lock_stdin(&stdin.0);
             // a zero length consumes nothing: ok while the input is open, like a read with data left
             let n = std::io::Read::read(&mut shared.bytes, &mut buf).unwrap_or(0); // a `VecDeque` never fails
             if n == 0 && shared.bytes.is_empty() && shared.eof {
@@ -197,7 +197,7 @@ impl WasiHost {
             let body = self
                 .http_bodies
                 .get(slot)
-                .expect("read from an unknown or dropped stream")
+                .unwrap_or_else(|| trap("read from an unknown or dropped stream"))
                 .shared();
             return match body.read(buf.len()) {
                 http::BodyRead::Data(data) => Ok(data),
@@ -214,7 +214,7 @@ impl WasiHost {
             let conn = self
                 .tcp_in
                 .get_mut(slot)
-                .expect("read from an unknown or dropped stream");
+                .unwrap_or_else(|| trap("read from an unknown or dropped stream"));
             if buf.is_empty() {
                 // a zero length succeeds only while the connection is open: peek, consume nothing
                 return match conn.peek(&mut [0u8; 1]) {
@@ -240,7 +240,7 @@ impl WasiHost {
         let file = self
             .files
             .get_mut(index)
-            .expect("read from an unknown or dropped stream");
+            .unwrap_or_else(|| trap("read from an unknown or dropped stream"));
         if buf.is_empty() {
             // a zero length succeeds only before the end of the file: look, consume nothing
             let at_end = file

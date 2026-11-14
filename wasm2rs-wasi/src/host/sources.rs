@@ -1,5 +1,6 @@
 //! The injectable time and randomness sources of a [`WasiHost`](super::WasiHost).
 
+use super::slab::trap;
 use crate::wasi_clocks_wall_clock::Datetime;
 use std::fmt;
 use std::time::Instant;
@@ -59,7 +60,11 @@ impl Clock for SystemClock {
     fn wall_now(&self) -> Datetime {
         let since = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("the system clock is before the Unix epoch");
+            .unwrap_or_else(|e| {
+                trap(format_args!(
+                    "the system clock is before the Unix epoch: {e}"
+                ))
+            });
         Datetime {
             seconds: since.as_secs(),
             nanoseconds: since.subsec_nanos(),
