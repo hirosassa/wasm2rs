@@ -1142,7 +1142,9 @@ pub(crate) fn contract_pc_edges(arms: &mut Vec<(usize, Vec<ArmLine>)>, start: us
     // for a forwarding cycle (a side-effect-free infinite loop) — an entry of the
     // cycle, kept alive so the loop is preserved. Memoised with path compression.
     let mut resolved: HashMap<usize, usize> = HashMap::new();
-    for &s0 in fwd.keys() {
+    // Walk starts in arm order, not `fwd` hash order: where a cycle is entered
+    // depends on the start state, and the output must be deterministic.
+    for &(s0, _) in arms.iter().filter(|(state, _)| fwd.contains_key(state)) {
         if resolved.contains_key(&s0) {
             continue;
         }
@@ -1598,5 +1600,39 @@ mod tests {
         assert_eq!(start, 1);
         assert_eq!(arms.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [1]);
         assert_eq!(arms[0].1[0].1.as_goto(), Some(1));
+    }
+
+    #[test]
+    fn contract_cycle_entry_follows_arm_order() {
+        // The surviving entry of the 1<->2 cycle is where the first arm's walk
+        // closes it: 1, unless that walk starts inside the cycle at 2. It must
+        // depend only on arm order, never on hash iteration order.
+        let base = [
+            (0, "pc = 3;"),
+            (1, "pc = 2;"),
+            (2, "pc = 1;"),
+            (3, "pc = 1;"),
+        ];
+        // (arm order, expected entry)
+        let cases: [([usize; 4], usize); 4] = [
+            ([0, 1, 2, 3], 1),
+            ([3, 0, 1, 2], 1),
+            ([2, 1, 0, 3], 2),
+            ([1, 2, 3, 0], 1),
+        ];
+        for (order, want) in cases {
+            // Every HashMap gets a fresh random seed, so repetition exposes any
+            // leftover dependence on hash iteration order.
+            for _ in 0..200 {
+                let mut arms: Vec<_> = order
+                    .iter()
+                    .map(|&i| (base[i].0, vec![line(base[i].1)]))
+                    .collect();
+                let start = contract_pc_edges(&mut arms, order[0]);
+                assert_eq!(start, want, "order {order:?}");
+                assert_eq!(arms.len(), 1, "order {order:?}");
+                assert_eq!(arms[0].0, want, "order {order:?}");
+            }
+        }
     }
 }
