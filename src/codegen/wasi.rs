@@ -1,6 +1,6 @@
 use wasmparser::ValType;
 
-use super::runtime::source_lines;
+use super::runtime::{source_lines, tpl_section};
 
 /// A recognised WASI (`wasi_snapshot_preview1`) function that is generated as a
 /// native inherent `Instance` method rather than dispatched through the host
@@ -77,6 +77,16 @@ pub(crate) enum WasiFn {
     /// `memory.grow` hook. A shared memory cannot move, so natively it always
     /// reports failure (0) and the allocator falls back to its own error path.
     EmscriptenResizeHeap,
+}
+
+/// The static template of `w` (see `wasi_fns.tpl`): the section `<Variant> files`
+/// when the module has a file table and one exists, else `<Variant>`.
+fn wasi_fn_template(w: WasiFn, files: bool) -> Option<&'static str> {
+    let src = include_str!("rt_src/wasi_fns.tpl");
+    if files && let Some(body) = tpl_section(src, &format!("//# {w:?} files\n")) {
+        return Some(body);
+    }
+    tpl_section(src, &format!("//# {w:?}\n"))
 }
 
 impl WasiFn {
@@ -1043,7 +1053,30 @@ impl WasiFn {
                 body.extend(owned(&["}"]));
                 body
             }
-            _ => unreachable!("{self:?} has no static template in wasi_fns.tpl"),
+            // Rendered from wasi_fns.tpl by `wasi_fn_template` before this match.
+            WasiFn::ProcExit
+            | WasiFn::FdClose
+            | WasiFn::FdSeek
+            | WasiFn::FdFdstatGet
+            | WasiFn::ClockTimeGet
+            | WasiFn::RandomGet
+            | WasiFn::FdPrestatGet
+            | WasiFn::FdPrestatDirName
+            | WasiFn::FdFilestatGet
+            | WasiFn::FdTell
+            | WasiFn::FdRenumber
+            | WasiFn::ProcRaise
+            | WasiFn::EmscriptenInitMainThread
+            | WasiFn::EmscriptenGetNow
+            | WasiFn::EmscriptenNoop0
+            | WasiFn::EmscriptenNoop1
+            | WasiFn::SchedYield
+            | WasiFn::ClockResGet
+            | WasiFn::FdPread
+            | WasiFn::FdPwrite
+            | WasiFn::FdReaddir => {
+                unreachable!("{self:?} is rendered from wasi_fns.tpl")
+            }
         }
     }
 }
@@ -1344,20 +1377,6 @@ pub(super) struct WasiAccess {
     pub(super) locked_fds: bool,
 }
 
-/// The static template of `w` (see `wasi_fns.tpl`): the section `<Variant> files`
-/// when the module has a file table and one exists, else `<Variant>`.
-fn wasi_fn_template(w: WasiFn, files: bool) -> Option<&'static str> {
-    let src = include_str!("rt_src/wasi_fns.tpl");
-    let section = |header: String| {
-        let (_, rest) = src.split_once(&header)?;
-        Some(rest.split_once("\n\n").map_or(rest, |(body, _)| body))
-    };
-    if files && let Some(body) = section(format!("//# {w:?} files\n")) {
-        return Some(body);
-    }
-    section(format!("//# {w:?}\n"))
-}
-
 impl WasiAccess {
     fn fill(self, line: &str) -> String {
         let (mem, mem_mut) = if self.shared_memory {
@@ -1411,10 +1430,12 @@ mod tests {
         assert!(headers.len() > 20);
         for header in headers {
             let name = header.strip_suffix(" files").unwrap_or(header);
-            let body = src
-                .split_once(&format!("//# {header}\n"))
-                .map(|(_, rest)| rest.split_once("\n\n").map_or(rest, |(b, _)| b))
-                .unwrap();
+            assert_eq!(
+                src.matches(&format!("//# {header}\n")).count(),
+                1,
+                "{header} must appear exactly once"
+            );
+            let body = tpl_section(src, &format!("//# {header}\n")).unwrap();
             assert!(body.starts_with("fn "), "{header}");
             assert!(body.trim_end().ends_with('}'), "{header}");
             // The renderer resolves the same section for the right form.
