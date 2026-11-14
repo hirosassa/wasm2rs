@@ -8,7 +8,12 @@
 //! tests next to them must reach; rustfmt does not follow `include!`, so
 //! `files_are_rustfmt_clean` checks them instead.
 //!
-//! Conventions for a file:
+//! The exception is `mem_helpers.tpl`: a placeholder template (`@NAME`, `@R`, ...)
+//! that `helpers::mem_helper_template` slices into per-method sections. It is not
+//! valid Rust, so rustc and rustfmt never see it; the helpers tests check its
+//! structure and the e2e tests compile what it renders.
+//!
+//! Conventions for a `.rs` file:
 //! - It is a compiled *instance*, never a text template with holes. A helper
 //!   that exists for several types is written for `f32`; the renderer derives the
 //!   others by replacing the token `f32` (see `widen` in `runtime.rs`).

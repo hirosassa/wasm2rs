@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-use std::sync::OnceLock;
-
+use super::runtime::source_lines;
 use super::{Helper, WASM_MAX_PAGES, WASM_PAGE_SIZE};
 
 /// The accessor pair `(mem(), mem_mut())` naming linear memory `mem`: memory 0
@@ -475,33 +473,20 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "    old_pages as i32".to_string(),
             "}".to_string(),
         ],
-        _ => mem_helper_template(helper_name(helper))
-            .expect("every memory helper but `Grow` has a section in mem_helpers.tpl")
-            .iter()
-            .map(|line| (*line).to_string())
-            .collect(),
+        _ => source_lines(
+            mem_helper_template(helper_name(helper))
+                .expect("every memory helper but `Grow` has a section in mem_helpers.tpl"),
+        ),
     }
 }
 
-/// The template lines of the memory helper method `name` (see `mem_helpers.tpl`).
-fn mem_helper_template(name: &str) -> Option<&'static Vec<&'static str>> {
-    static SECTIONS: OnceLock<HashMap<&'static str, Vec<&'static str>>> = OnceLock::new();
-    SECTIONS
-        .get_or_init(|| {
-            let mut sections: HashMap<&str, Vec<&str>> = HashMap::new();
-            let mut current: Option<&mut Vec<&str>> = None;
-            for line in include_str!("rt_src/mem_helpers.tpl").lines() {
-                if let Some(name) = line.strip_prefix("//# ") {
-                    current = Some(sections.entry(name).or_default());
-                } else if line.is_empty() || line.starts_with("//") {
-                    current = None;
-                } else if let Some(section) = current.as_mut() {
-                    section.push(line);
-                }
-            }
-            sections
-        })
-        .get(name)
+/// The template of the memory helper method `name`: the section that starts at
+/// its `//# name` line and runs to the next blank line (see `mem_helpers.tpl`).
+fn mem_helper_template(name: &str) -> Option<&'static str> {
+    let src = include_str!("rt_src/mem_helpers.tpl");
+    // The trailing newline keeps `r8u` from matching the header of `r8u64`.
+    let (_, section) = src.split_once(&format!("//# {name}\n"))?;
+    Some(section.split_once("\n\n").map_or(section, |(body, _)| body))
 }
 
 #[cfg(test)]
