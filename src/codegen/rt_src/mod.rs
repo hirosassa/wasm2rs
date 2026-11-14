@@ -123,8 +123,12 @@ mod float_quiet {
 
         #[test]
         fn sets_the_quiet_bit_only_on_nan() {
+            // The payload is host-dependent (a folded add may canonicalise it), so
+            // only the quiet bit is part of the contract.
             let signaling = f32::from_bits(0x7fa0_0000);
-            assert_eq!(quiet_f32(signaling).to_bits(), 0x7fe0_0000);
+            let quieted = quiet_f32(signaling);
+            assert!(quieted.is_nan());
+            assert_ne!(quieted.to_bits() & 0x0040_0000, 0);
             assert_eq!(quiet_f32(1.5), 1.5);
         }
     }
