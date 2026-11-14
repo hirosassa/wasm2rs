@@ -319,3 +319,56 @@ fn shared_memory_is_accepted() {
         "let mut inst = Instance::new(); assert_eq!(inst.func0(42), 42);",
     );
 }
+
+pub const NOTIFY_TRAPS_MAIN: &str = r#"fn main() {
+    let mut inst = Instance::new();
+    // Panic message of a call that must trap.
+    fn trap_msg(f: impl FnOnce()) -> String {
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+            .expect_err("expected a trap");
+        err.downcast_ref::<String>().cloned()
+            .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+    // Aligned and in bounds: wakes nobody.
+    assert_eq!(inst.func0(0), 0);
+    assert_eq!(inst.func0(65532), 0);
+    // Misaligned: traps, even when it is also out of bounds.
+    assert_eq!(trap_msg(|| { inst.func0(2); }), "unaligned atomic access");
+    assert_eq!(trap_msg(|| { inst.func0(65535); }), "unaligned atomic access");
+    // Out of bounds, including addr + offset beyond u32 (the message is the slice
+    // panic when the memory is not shared).
+    assert!(trap_msg(|| { inst.func0(65536); }).contains("out of"));
+    assert!(trap_msg(|| { inst.func0(-4); }).contains("out of"));
+    assert!(trap_msg(|| { inst.func1(-4); }).contains("out of"));
+    // The static offset takes part in the alignment check.
+    assert_eq!(trap_msg(|| { inst.func2(0); }), "unaligned atomic access");
+    assert_eq!(inst.func1(0), 0);
+    // `wait` checks alignment and bounds too (an address + offset beyond u32).
+    assert_eq!(trap_msg(|| { inst.func3(2); }), "unaligned atomic access");
+    assert!(trap_msg(|| { inst.func4(-4); }).contains("out of"));
+}"#;
+
+#[test]
+fn notify_on_unshared_memory_traps_when_misaligned_or_out_of_bounds() {
+    // The threads proposal makes `memory.atomic.notify` trap on a misaligned or
+    // out-of-bounds address even when the memory is not shared (it then returns 0
+    // otherwise). The effective address is addr + offset in unbounded arithmetic,
+    // so a u32 sum that would wrap must still trap, in debug and release alike.
+    common::compile_run_raw(
+        "atomic_notify_traps_unshared",
+        r#"(module
+            (memory 1)
+            (func (export "notify") (param i32) (result i32)
+              local.get 0 i32.const 1 memory.atomic.notify)
+            (func (export "notify_off") (param i32) (result i32)
+              local.get 0 i32.const 1 memory.atomic.notify offset=8)
+            (func (export "notify_off3") (param i32) (result i32)
+              local.get 0 i32.const 1 memory.atomic.notify offset=3)
+            (func (export "wait") (param i32) (result i32)
+              local.get 0 i32.const 5 i64.const 0 memory.atomic.wait32)
+            (func (export "wait_off") (param i32) (result i32)
+              local.get 0 i32.const 5 i64.const 0 memory.atomic.wait32 offset=8))"#,
+        NOTIFY_TRAPS_MAIN,
+    );
+}

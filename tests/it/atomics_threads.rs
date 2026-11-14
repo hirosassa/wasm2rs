@@ -547,3 +547,26 @@ fn shared_grow_by_one_thread_is_usable_by_another_after_handshake() {
         }"#,
     );
 }
+
+#[test]
+fn notify_and_wait_trap_when_misaligned_or_out_of_bounds_on_shared_memory() {
+    // `notify` used to skip the alignment/bounds trap that every other atomic
+    // access has, and the u32 `addr + offset` of `wait`/`notify` could overflow
+    // (a debug panic, a silent wrap in release). Both now trap like `atomic.load`.
+    compile_run_raw(
+        "atomics_threads_notify_wait_traps",
+        r#"(module
+            (memory 1 1 shared)
+            (func (export "notify") (param i32) (result i32)
+              local.get 0 i32.const 1 memory.atomic.notify)
+            (func (export "notify_off") (param i32) (result i32)
+              local.get 0 i32.const 1 memory.atomic.notify offset=8)
+            (func (export "notify_off3") (param i32) (result i32)
+              local.get 0 i32.const 1 memory.atomic.notify offset=3)
+            (func (export "wait") (param i32) (result i32)
+              local.get 0 i32.const 5 i64.const 0 memory.atomic.wait32)
+            (func (export "wait_off") (param i32) (result i32)
+              local.get 0 i32.const 5 i64.const 0 memory.atomic.wait32 offset=8))"#,
+        crate::atomics::NOTIFY_TRAPS_MAIN,
+    );
+}

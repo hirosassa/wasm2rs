@@ -124,7 +124,7 @@ impl std::ops::IndexMut<std::ops::Range<usize>> for SharedBytes {
 #[derive(Default)]
 struct SharedPark {
     // addr -> FIFO of tickets of the waiters still parked there
-    queues: std::collections::HashMap<u32, std::collections::VecDeque<u64>>,
+    queues: std::collections::HashMap<usize, std::collections::VecDeque<u64>>,
     // tickets a `notify` has chosen to wake but whose waiter has not yet resumed
     woken: std::collections::HashSet<u64>,
     next_ticket: u64,
@@ -338,7 +338,10 @@ impl SharedMemory {
     }
 
     // Wakes the `count` longest-parked waiters on `addr` (at most), by ticket.
-    fn notify(&self, addr: u32, count: u32) -> u32 {
+    // Like a wait, it traps on a misaligned or out-of-bounds address, before taking
+    // the lock.
+    fn notify(&self, addr: usize, count: u32) -> u32 {
+        self.atomic_cell(addr, 4);
         let mut park = self.0.park.lock().unwrap();
         let mut n = 0;
         while n < count {
@@ -358,15 +361,15 @@ impl SharedMemory {
 
     // Returns 0 (woken), 1 (value mismatch - did not block), or 2 (timed out).
     // `timeout_ns < 0` means wait forever. `width` is 4 (wait32) or 8 (wait64).
-    fn wait(&self, addr: u32, expected: u64, width: usize, timeout_ns: i64) -> i32 {
+    fn wait(&self, addr: usize, expected: u64, width: usize, timeout_ns: i64) -> i32 {
         // The bounds/alignment trap comes first, outside the lock, so a trapping
         // wait cannot poison it for the other threads.
-        self.atomic_cell(addr as usize, width);
+        self.atomic_cell(addr, width);
         // Hold `park` across the value check so a concurrent `notify` (which also
         // takes `park`) cannot slip between the check and our registration -
         // closing the lost-wakeup window.
         let mut park = self.0.park.lock().unwrap();
-        if self.atomic_load(addr as usize, width) != (expected & shared_width_mask(width)) {
+        if self.atomic_load(addr, width) != (expected & shared_width_mask(width)) {
             return 1;
         }
         let ticket = park.next_ticket;
