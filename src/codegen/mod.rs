@@ -382,6 +382,9 @@ fn byte_string_literal(out: &mut String, bytes: &[u8]) {
         let plain = b.is_ascii_graphic() && b != b'"' && b != b'\\';
         if plain || (b == b' ' && !line_start) {
             out.push(char::from(b));
+        } else if b == 0 {
+            // `\0` is a complete escape, so a following digit stays a separate byte.
+            out.push_str("\\0");
         } else {
             out.push_str("\\x");
             out.push(char::from(HEX[usize::from(b >> 4)]));
