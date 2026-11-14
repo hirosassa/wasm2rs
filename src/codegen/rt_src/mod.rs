@@ -311,10 +311,6 @@ mod shared_memory {
     }
 }
 
-/// Files that are emitted as they are and not yet rustfmt-clean: formatting
-/// them would change the generated output, so that is done on its own.
-const NOT_FORMATTED: [&str; 2] = ["shared_memory.rs", "i32x4_relaxed_dot_add.rs"];
-
 #[test]
 fn files_are_rustfmt_clean() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/codegen/rt_src");
@@ -323,9 +319,6 @@ fn files_are_rustfmt_clean() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_str().unwrap().to_string();
         if name == "mod.rs" || path.extension().is_none_or(|e| e != "rs") {
-            continue;
-        }
-        if NOT_FORMATTED.contains(&name.as_str()) {
             continue;
         }
         let status = std::process::Command::new("rustfmt")
