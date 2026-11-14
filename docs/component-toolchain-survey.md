@@ -23,9 +23,9 @@ directory; the commands are below so the survey can be repeated.
 | J | wasi-sdk 34 `clang --target=wasm32-wasip2`, C `puts` | 227 KB, one core module, `wasi:cli/run@0.2.12` | **works** (2026-11-14): prints `hello from wasi-sdk C`, exit 0; 5.3 s end to end with a warm `wasm2rs-wasi` build (290 MB peak RSS). `#[ignore]` test: `WASM2RS_WASISDK_C_HELLO_COMPONENT` |
 | K | wasi-sdk 34 `clang++ --target=wasm32-wasip2 -fno-exceptions`, `std::cout` | 3.2 MB | **works** (2026-11-14, after #339): prints `hello from wasi-sdk C++`, exit 0; 10 s end to end with a warm `wasm2rs-wasi` build. The program imports `wasi:cli/exit@0.2.12`'s `exit-with-code`; before the overlay added it to the 0.2.0 `Host` trait, `rustc` failed with E0599 (`no method named wasi_cli_exit_exit_with_code`). `#[ignore]` test: `WASM2RS_WASISDK_CPP_HELLO_COMPONENT`. Without `-fno-exceptions` the link fails in `wasm-ld` (`__cxa_throw`; wasi-sdk has no C++ exceptions), not a wasm2rs matter. See F6 (#339) |
 | L | `cargo component build` 0.21.1, custom world (`export ops` with a record, a string and integers; no `wasi:cli/run`) | 72 KB, `wasm32-wasip1` + adapter (main + adapter module, as B) | **works** (2026-11-14): `wasip2_run` does not apply (no `run`), so a small program calls the typed `Exports` (`test_calc_ops_add(40, 2)` = 42, `greet`, `shift` on a record); 3 s for the test with a warm library build (430 MB peak RSS). `#[ignore]` test: `WASM2RS_CARGO_COMPONENT_CALC` |
-| M | MoonBit `moon 0.1.20261104` (`--target wasm`) + `wit-bindgen moonbit` 0.63.0 + `wasm-tools component embed`/`new`, the `calc` world as L | 4.2 KB (3.6 KB without `greet`), one core module, no WASI imports | **works without strings; fails with a string export** (2026-11-14, #344): with `add` and `shift` only, it transpiles, builds and `Exports` returns `42` and `11 2` (the same values as L); the program has no imports, so the glue has no `Glue` and `Instance::new()` takes no host. With `greet` the transpile stops with `Unsupported("export ... uses a string encoding other than utf8")`: MoonBit's `String` is UTF-16, so its components lift strings as `utf16`. A missing feature with a clear error, not a miscompile. `wasmtime run --invoke` does not support components, so the expected values come from the sources |
+| M | MoonBit `moon 0.1.20261104` (`--target wasm`) + `wit-bindgen moonbit` 0.63.0 + `wasm-tools component embed`/`new`, the `calc` world as L | 4.2 KB (3.6 KB without `greet`), one core module, no WASI imports | **works without strings; fails with a string export** (2026-11-14, #344): with `add` and `shift` only, it transpiles, builds and `Exports` returns `42` and `11 2` (the same values as L); With `greet` the transpile stops with `Unsupported("export ... uses a string encoding other than utf8")`, a clear error, not a miscompile (see F7). `wasmtime run --invoke` does not support components, so the expected values come from the sources |
 | N | Zig 0.15.2 (`mise`), `wasm32-wasi` + the command adapter (hello); `wasm32-freestanding` `export fn add` + `component embed` | 36 KB (hello, main + adapter module); 313 bytes (`add`) | **works** (2026-11-14): `wasip2_run` prints `hello from zig` as `wasmtime run` does, exit 0, 6.2 s end to end with a warm `wasm2rs-wasi` build (290 MB peak RSS). The `add` component has a root-level function export (no interface); `Exports::add(40, 2)` = 42. Zig 0.15 has no `wasm32-wasip2` target, so every WASI component goes through the adapter, as B |
-| O | AssemblyScript 0.28.20 (`npm`) + `@assemblyscript/wasi-shim`, `--runtime stub`, + the command adapter (hello); `export function add` + `component embed` | 24 KB (hello, main + adapter module); 318 bytes (`add`) | **works** (2026-11-14): `wasip2_run` prints `hello from assemblyscript` as `wasmtime run` does, exit 0, 5.9 s end to end (290 MB peak RSS); `Exports::add(40, 2)` = 42. Also preview1-only, so through the adapter |
+| O | AssemblyScript 0.28.20 (`npm`) + `@assemblyscript/wasi-shim`, `--runtime stub`, + the command adapter (hello); `export function add` + `component embed` | 24 KB (hello, main + adapter module); 318 bytes (`add`) | **works** (2026-11-14): `wasip2_run` prints `hello from assemblyscript` as `wasmtime run` does, exit 0, 5.9 s end to end with a warm `wasm2rs-wasi` build (290 MB peak RSS); `Exports::add(40, 2)` = 42. Also preview1-only, so through the adapter |
 
 ## Findings
 
@@ -135,8 +135,7 @@ other UTF-16 guest. Fix: transcode at the boundary in the generated glue (`compa
   implementing package must be a virtual package, which needs a `pkg.mbti` and abstract types), so
   the functions were written into the generated package. A toolchain quirk, not a wasm2rs matter.
 - Zig and AssemblyScript emit `wasm32-wasi` core modules only, so a WASI program is B's shape (main
-  module + command adapter); no new wasm2rs path was involved. Not tried: Kotlin/Wasm (WasmGC output, no component
-  tooling) and SwiftWasm.
+  module + command adapter); no new wasm2rs path was involved.
 
 ## Suggested order
 
@@ -147,7 +146,7 @@ other UTF-16 guest. Fix: transcode at the boundary in the generated glue (`compa
 4. F4 measurement after F3.
 5. F2 only after F1 step 2: done as an investigation; F4 first for the end-to-end goal, see the F2 design.
 
-Not covered yet: `wasi:http` guests built with TinyGo, wasi-sdk or `cargo-component`. Add a row to the
+Not covered yet: `wasi:http` guests built with TinyGo, wasi-sdk or `cargo-component`; Kotlin/Wasm (WasmGC output, no component tooling) and SwiftWasm. Add a row to the
 table when one is tried.
 
 ## Reproduction
@@ -181,7 +180,7 @@ wit-bindgen moonbit wit --out-dir mb --derive-show   # world calc as L; implemen
 (cd mb && moon build --target wasm --release)
 wasm-tools component embed wit mb/_build/wasm/release/build/gen/gen.wasm --world calc --encoding utf16 -o emb.wasm
 wasm-tools component new emb.wasm -o mb-calc.wasm   # drop greet from the WIT to get a component that transpiles
-# N (mise use zig@0.15.2)
+# N (mise use zig@0.15.2; add.wit: package test:addonly; world w { export add: func(a: s32, b: s32) -> s32; })
 zig build-exe hello.zig -target wasm32-wasi -O ReleaseSmall -femit-bin=zig.core.wasm
 wasm-tools component new zig.core.wasm --adapt wasi_snapshot_preview1=adapter.wasm -o zig-hello.wasm
 zig build-exe add.zig -target wasm32-freestanding -O ReleaseSmall -rdynamic -fno-entry -femit-bin=add.core.wasm
@@ -190,8 +189,7 @@ wasm-tools component embed add.wit add.core.wasm --world w -o add.emb.wasm && wa
 npx asc assembly/hello.ts --config asconfig.json -o as.core.wasm -O3 --runtime stub
 wasm-tools component new as.core.wasm --adapt wasi_snapshot_preview1=adapter.wasm -o as-hello.wasm
 npx asc assembly/add.ts -o add.core.wasm -O3 --runtime stub   # then embed/new as for Zig's add
-# add.wit: package test:addonly; world w { export add: func(a: s32, b: s32) -> s32; }
-# a component without imports has no `Glue`: `Instance::new()` takes no host, then `Exports::add(&mut inst, 40, 2)`
+# M, N, O `add`: a component without imports has no `Glue`: `Instance::new()` takes no host, then `Exports::add(&mut inst, 40, 2)`
 # run
 cargo run --release --example wasip2_run -- <component>.wasm
 
