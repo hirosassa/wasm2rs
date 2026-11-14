@@ -2,6 +2,9 @@
 name = "wasm2rs"
 version = "0.5.0"
 edition = "2024"
+# Measured: wasmparser 0.263 needs 1.88 for the libraries and the CLI, but the
+# examples and tests use `File::lock` (stable in 1.89), so every target needs 1.89.
+rust-version = "1.89"
 description = "Transpile WebAssembly binaries into standalone native Rust source code."
 license = "MIT"
 repository = "https://github.com/hirosassa/wasm2rs"
@@ -33,8 +36,12 @@ cli = ["dep:mimalloc"]
 [workspace]
 members = ["wasm2rs-macros", "wasm2rs-wasi"]
 
+[lints]
+workspace = true
+
 [dependencies]
-wasmparser = "0.263.0"
+# `serde` is left out of wasmparser's defaults: the transpiler never (de)serializes parser types.
+wasmparser = { version = "0.263.0", default-features = false, features = ["std", "validate", "features", "component-model", "hash-collections", "simd"] }
 mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
@@ -45,27 +52,28 @@ wit-parser = "0.263"
 # The typed WASI host that the tests and `examples/wasip2_run.rs` link into generated programs.
 wasm2rs-wasi = { path = "wasm2rs-wasi" }
 
-# Hardening gates (rust-hardening skill). This crate is a code generator, so a
+# Hardening gates (rust-hardening skill), shared by every workspace member through
+# `[lints] workspace = true`. Only lints that no member violates belong here;
+# `clippy::panic`, `unwrap_in_result` and `cast_possible_truncation` still fire in
+# wasm2rs-wasi (see #[deny] at the top of `src/lib.rs`/`src/main.rs` for the root
+# crate, which stays clean). This crate is a code generator, so a
 # chunk of the restriction lints below fire on *intentional* index/offset
 # arithmetic and casts in the lowering; those are enabled incrementally. The
 # lints denied here have zero findings in production (`src/`) today, so they are
 # real gates now; `#[cfg(test)]`/`tests/` code relaxes the panic-prone subset
 # with a scoped `#[allow(..., reason = "test code")]`, the sanctioned exception.
-[lints.rust]
+[workspace.lints.rust]
 warnings = "deny"
 unsafe_code = "deny"          # no `unsafe` in src today; keep it an opt-in exception
 unsafe_op_in_unsafe_fn = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 # Panic-prone constructs with zero production findings — denied outright.
-panic = "deny"
 todo = "deny"
 unimplemented = "deny"
-unwrap_in_result = "deny"
 # Float and lossy-cast foot-guns, none present in production.
 float_cmp = "deny"
 lossy_float_literal = "deny"
-cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"
 cast_sign_loss = "deny"
 # Suppression hygiene: every `#[allow]`/`#[expect]` must carry a `reason`.
@@ -74,11 +82,11 @@ allow_attributes_without_reason = "deny"
 # Deferred — these still fire in production `src/` (the code generator's
 # intentional lowering); left at clippy's default so the build stays green while
 # a follow-up hardens them per item (checked_*/.get()/TryFrom/#[expect]). Counts
-# at adoption time (worklist for that review):
-#   arithmetic_side_effects 85, indexing_slicing 30, as_conversions 21,
-#   string_slice 9, cast_lossless 2, unwrap_used 2, expect_used 1,
-#   unreachable 1 (a proven-defensive Try arm in the flattener),
-#   let_underscore_must_use 1 (`let _ = write!(String, …)`, infallible).
+# (worklist for that review):
+#   arithmetic_side_effects 146, let_underscore_must_use 89 (`let _ = write!(String, …)`,
+#   infallible), as_conversions 78, indexing_slicing 60, string_slice 25, unreachable 7,
+#   cast_lossless 2, unwrap_used 2, expect_used 1. Measured for the root crate's
+#   lib and bin targets (clippy 1.99, 2026-11-14).
 
 # Keep file:line info for panics/test failures but drop full variable/type
 # debug info. Shrinks the test binary and cuts link time on macOS.
