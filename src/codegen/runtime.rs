@@ -242,58 +242,10 @@ fn rt_lines(rt: Rt, typed: bool, variants: &[TrapVariant]) -> Vec<String> {
         Rt::TrapIntegerOverflow => {
             trap_fn_lines("trap_integer_overflow", TrapVariant::IntegerOverflow, typed)
         }
-        Rt::DelegateExc => vec![
-            "#[allow(dead_code)]".to_string(),
-            "struct Wasm2RsDelegate {".to_string(),
-            "    skip: u32,".to_string(),
-            "    payload: Box<dyn ::std::any::Any + Send>,".to_string(),
-            "}".to_string(),
-        ],
-        Rt::Tc => vec![
-            "#[allow(dead_code)]".to_string(),
-            "pub struct Tc<S, R>(Option<Box<dyn FnOnce(&mut S, &mut Tc<S, R>) -> R>>);".to_string(),
-            "#[allow(dead_code)]".to_string(),
-            "impl<S, R> Tc<S, R> {".to_string(),
-            "    fn new() -> Self {".to_string(),
-            "        Tc(None)".to_string(),
-            "    }".to_string(),
-            "    fn set(&mut self, f: impl FnOnce(&mut S, &mut Tc<S, R>) -> R + 'static) {"
-                .to_string(),
-            "        self.0 = Some(Box::new(f));".to_string(),
-            "    }".to_string(),
-            "    fn run(&mut self, s: &mut S, mut r: R) -> R {".to_string(),
-            "        while let Some(f) = self.0.take() {".to_string(),
-            "            r = f(s, self);".to_string(),
-            "        }".to_string(),
-            "        r".to_string(),
-            "    }".to_string(),
-            "}".to_string(),
-        ],
-        Rt::CallDepth => vec![
-            // `CALL_DEPTH` is upper-case, which a sanitized export name never is.
-            "thread_local! {".to_string(),
-            "    static CALL_DEPTH: ::std::cell::Cell<u32> = const { ::std::cell::Cell::new(0) };"
-                .to_string(),
-            "}".to_string(),
-            "struct CallDepth;".to_string(),
-            "impl CallDepth {".to_string(),
-            "    #[inline]".to_string(),
-            "    fn enter(limit: u32) -> CallDepth {".to_string(),
-            "        let depth = CALL_DEPTH.get();".to_string(),
-            "        if depth >= limit {".to_string(),
-            "            trap_call_stack_exhausted();".to_string(),
-            "        }".to_string(),
-            "        CALL_DEPTH.set(depth + 1);".to_string(),
-            "        CallDepth".to_string(),
-            "    }".to_string(),
-            "}".to_string(),
-            "impl Drop for CallDepth {".to_string(),
-            "    #[inline]".to_string(),
-            "    fn drop(&mut self) {".to_string(),
-            "        CALL_DEPTH.set(CALL_DEPTH.get() - 1);".to_string(),
-            "    }".to_string(),
-            "}".to_string(),
-        ],
+        Rt::DelegateExc => source_lines(include_str!("rt_src/delegate.rs")),
+        Rt::Tc => source_lines(include_str!("rt_src/tc.rs")),
+        // `CALL_DEPTH` is upper-case, which a sanitized export name never is.
+        Rt::CallDepth => source_lines(include_str!("rt_src/call_depth.rs")),
         Rt::TrapCallStackExhausted => trap_fn_lines(
             "trap_call_stack_exhausted",
             TrapVariant::CallStackExhausted,
@@ -305,9 +257,12 @@ fn rt_lines(rt: Rt, typed: bool, variants: &[TrapVariant]) -> Vec<String> {
             TrapVariant::IndirectCallTypeMismatch,
             typed,
         ),
-        Rt::F32Min | Rt::F32Max | Rt::F64Min | Rt::F64Max => rt_minmax_lines(rt),
-        Rt::QuietF32 => rt_quiet_lines("f32"),
-        Rt::QuietF64 => rt_quiet_lines("f64"),
+        Rt::F32Min => source_lines(include_str!("rt_src/float_min.rs")),
+        Rt::F32Max => source_lines(include_str!("rt_src/float_max.rs")),
+        Rt::F64Min => widen(include_str!("rt_src/float_min.rs")),
+        Rt::F64Max => widen(include_str!("rt_src/float_max.rs")),
+        Rt::QuietF32 => source_lines(include_str!("rt_src/float_quiet.rs")),
+        Rt::QuietF64 => widen(include_str!("rt_src/float_quiet.rs")),
         Rt::I32TruncF32S => trunc_lines(
             typed,
             "i32_trunc_f32_s",
@@ -447,49 +402,38 @@ fn trunc_lines(
     ]
 }
 
-/// A NaN result of `floor`/`ceil`/`trunc`/`nearest` (and of `demote`/`promote`,
-/// which LLVM can fold to the identity) must be quiet, but a host
-/// without hardware rounding instructions (baseline x86_64) returns a signaling
-/// NaN input unchanged. `r + r` quiets a NaN (keeping sign and payload) and only
-/// runs for NaN, so ordinary results are untouched.
-fn rt_quiet_lines(ty: &str) -> Vec<String> {
-    vec![
-        format!("fn quiet_{ty}(r: {ty}) -> {ty} {{"),
-        "    if r.is_nan() { r + r } else { r }".to_string(),
-        "}".to_string(),
-    ]
+/// The lines of a verbatim `rt_src` file.
+fn source_lines(src: &str) -> Vec<String> {
+    src.lines().map(str::to_string).collect()
 }
 
-/// wasm `min`/`max` return NaN if either operand is NaN, and when the operands
-/// are equal (notably ±0) `min` yields the negatively-signed and `max` the
-/// positively-signed value — differing from Rust's `f32::min`/`max`.
-fn rt_minmax_lines(rt: Rt) -> Vec<String> {
-    let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
-    let name = rt_name(rt);
-    let ty = if matches!(rt, Rt::F32Min | Rt::F32Max) {
-        "f32"
-    } else {
-        "f64"
-    };
-    // For equal operands, `min` keeps the negative one and `max` the positive
-    // one; the `<`/`>` picks the smaller/larger otherwise.
-    let (equal_pick, order_op) = if matches!(rt, Rt::F32Min | Rt::F64Min) {
-        ("if a.is_sign_negative() { a } else { b }", "<")
-    } else {
-        ("if a.is_sign_negative() { b } else { a }", ">")
-    };
-    owned(&[
-        &format!("fn {name}(a: {ty}, b: {ty}) -> {ty} {{"),
-        "    if a.is_nan() || b.is_nan() {",
-        &format!("        return {ty}::NAN;"),
-        "    }",
-        "    if a == b {",
-        &format!("        {equal_pick}"),
-        &format!("    }} else if a {order_op} b {{"),
-        "        a",
-        "    } else {",
-        "        b",
-        "    }",
-        "}",
-    ])
+/// The `f64` instance of an `rt_src` helper written for `f32`.
+fn widen(src: &str) -> Vec<String> {
+    source_lines(&src.replace("f32", "f64"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render(rt: Rt) -> String {
+        render_rt_helpers(&HashSet::from([rt]), false)
+    }
+
+    #[test]
+    fn verbatim_files_are_emitted_as_they_are() {
+        assert_eq!(
+            render(Rt::DelegateExc),
+            include_str!("rt_src/delegate.rs").to_string()
+        );
+        assert_eq!(render(Rt::Tc), include_str!("rt_src/tc.rs").to_string());
+    }
+
+    #[test]
+    fn f64_helpers_are_the_f32_instance_widened() {
+        let min = render(Rt::F64Min);
+        assert!(min.starts_with("fn f64_min(a: f64, b: f64) -> f64 {"));
+        assert!(min.contains("return f64::NAN;") && !min.contains("f32"));
+        assert!(render(Rt::QuietF64).starts_with("fn quiet_f64(r: f64) -> f64 {"));
+    }
 }

@@ -35,6 +35,8 @@ mod parallel;
 mod parens;
 mod render;
 mod render_cont;
+#[cfg(test)]
+mod rt_src;
 mod runtime;
 mod simd_rt;
 mod wasi;
