@@ -56,6 +56,8 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) tail_imports: &'a [ImportInfo],
     /// Per defined function (parallel to `funcs`): the locals it writes.
     pub(crate) mutated_locals: Vec<LocalFlags>,
+    /// Per defined function, the locals its body names (see `BodyScan::referenced`).
+    pub(crate) referenced_locals: Vec<LocalFlags>,
     /// Per defined function: whether its body is wrapped in a synthetic block
     /// frame (it branches to its own label, or — as a continuation step — returns).
     /// Precomputed by [`scan_bodies`] so no function re-parses its body.
@@ -554,6 +556,7 @@ pub(crate) fn build_ctx<'a>(
         funcs,
         tail_imports,
         mutated_locals: scan.mutated,
+        referenced_locals: scan.referenced,
         branches_to_function_label: scan.branches_to_function_label,
         has_return: scan.has_return,
         has_tail_call: scan.has_tail_call,
@@ -968,16 +971,19 @@ fn render_function_into(
 ) -> Result<GenMeta, TranspileError> {
     let no_scanned_body =
         || TranspileError::Internal(format!("function {index} has no scanned body"));
-    let mutated = index
+    let defined = index
         .checked_sub(ctx.imports.len())
-        .and_then(|defined| ctx.mutated_locals.get(defined))
+        .ok_or_else(no_scanned_body)?;
+    let mutated = ctx
+        .mutated_locals
+        .get(defined)
+        .ok_or_else(no_scanned_body)?;
+    let referenced = ctx
+        .referenced_locals
+        .get(defined)
         .ok_or_else(no_scanned_body)?;
     let flag = |flags: &[bool]| -> Result<bool, TranspileError> {
-        index
-            .checked_sub(ctx.imports.len())
-            .and_then(|defined| flags.get(defined))
-            .copied()
-            .ok_or_else(no_scanned_body)
+        flags.get(defined).copied().ok_or_else(no_scanned_body)
     };
     let branches_to_label = flag(&ctx.branches_to_function_label)?;
     // A function that tail-calls itself loops instead of trampolining: its
@@ -995,12 +1001,20 @@ fn render_function_into(
     } else {
         mutated
     };
-    let mut func = FuncGen::new(input.params, input.results, input.body, ctx, loop_mutated)?;
+    let mut func = FuncGen::new(
+        input.params,
+        input.results,
+        input.body,
+        ctx,
+        loop_mutated,
+        referenced,
+    )?;
     func.self_loop = self_loop;
     // A step function (a continuation body, or a function reached from one
     // through a suspend-crossing call) is emitted as a resumable
     // `cont_step_func{N}` state machine instead of an ordinary `func{N}`.
     if ctx.cont.step_set.binary_search(&index_u32(index)?).is_ok() {
+        func.cont_step = true;
         let wrap = branches_to_label || flag(&ctx.has_return)? || flag(&ctx.has_tail_call)?;
         return func.emit_cont_step(index, input.params, input.body, wrap, line_prefix, out);
     }
@@ -1010,7 +1024,14 @@ fn render_function_into(
     // functions) that cannot reach the `__tc` slot, so such a function regenerates
     // with plain tail calls and only gets a forwarder `_tc` entry.
     if func.tc_enabled && func.would_flatten() {
-        func = FuncGen::new(input.params, input.results, input.body, ctx, mutated)?;
+        func = FuncGen::new(
+            input.params,
+            input.results,
+            input.body,
+            ctx,
+            mutated,
+            referenced,
+        )?;
         func.run(input.body, branches_to_label)?;
     }
     func.finish(index, input.params, input.results, line_prefix, out)

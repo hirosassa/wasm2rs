@@ -202,6 +202,10 @@ pub(super) struct FuncGen<'a> {
     /// body is wrapped in a synthetic `loop` frame and a self tail call reassigns
     /// the parameters and branches back to it, with no trampoline.
     pub(super) self_loop: Option<u32>,
+    /// The function is emitted as a resumable step function. Its `suspend`/
+    /// `switch` handling does not honour dead code, so it may still read a
+    /// region's result variable even when no path leaves that region.
+    pub(super) cont_step: bool,
 }
 
 impl<'a> FuncGen<'a> {
@@ -211,6 +215,7 @@ impl<'a> FuncGen<'a> {
         body: &FunctionBody<'_>,
         ctx: &'a ModuleCtx<'a>,
         mutable_locals: &'a LocalFlags,
+        referenced: &LocalFlags,
     ) -> Result<Self, TranspileError> {
         let mut local_types = params.to_vec();
         for local in body.get_locals_reader()? {
@@ -227,16 +232,22 @@ impl<'a> FuncGen<'a> {
         // many locals emits a handful of lines rather than one per local; a
         // single local of a type stays a plain scalar binding. `mut` is applied
         // per-local, only to the ones actually mutated.
-        let mut i = params.len();
-        while i < local_types.len() {
-            let ty = local_types[i];
-            let mut run_end = i + 1;
-            while run_end < local_types.len() && local_types[run_end] == ty {
-                run_end += 1;
+        // A local no operator names is never read or written, so its binding
+        // would be dead; skipping it cannot change behaviour. Step functions
+        // reload every local from the frame separately and never use these.
+        let mut declared: Vec<(usize, ValType)> = Vec::new();
+        for (i, &ty) in local_types.iter().enumerate().skip(params.len()) {
+            if referenced.contains(index_u32(i)?) {
+                declared.push((i, ty));
             }
+        }
+        for run in declared.chunk_by(|a, b| a.1 == b.1) {
+            let Some(&(i, ty)) = run.first() else {
+                continue;
+            };
             let rty = rust_type(ty, ctx.type_kinds)?;
             let default = default_value(ty, ctx.type_kinds);
-            if run_end - i == 1 {
+            if run.len() == 1 {
                 let keyword = if mutable_locals.contains(index_u32(i)?) {
                     "let mut"
                 } else {
@@ -244,8 +255,8 @@ impl<'a> FuncGen<'a> {
                 };
                 cur.push(Node::Line(format!("{keyword} l{i}: {rty} = {default};")));
             } else {
-                let mut names = Vec::with_capacity(run_end - i);
-                for j in i..run_end {
+                let mut names = Vec::with_capacity(run.len());
+                for &(j, _) in run {
                     let mutp = if mutable_locals.contains(index_u32(j)?) {
                         "mut "
                     } else {
@@ -253,7 +264,7 @@ impl<'a> FuncGen<'a> {
                     };
                     names.push(format!("{mutp}l{j}"));
                 }
-                let count = run_end - i;
+                let count = run.len();
                 let tys = vec![rty; count].join(", ");
                 let defaults = vec![default; count].join(", ");
                 cur.push(Node::Line(format!(
@@ -261,7 +272,6 @@ impl<'a> FuncGen<'a> {
                     names.join(", ")
                 )));
             }
-            i = run_end;
         }
 
         let local_names = (0..local_types.len()).map(|i| format!("l{i}")).collect();
@@ -290,6 +300,7 @@ impl<'a> FuncGen<'a> {
             uses_ret_escape: false,
             tc_enabled: false,
             self_loop: None,
+            cont_step: false,
         })
     }
 
