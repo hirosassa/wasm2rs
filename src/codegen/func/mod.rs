@@ -333,6 +333,51 @@ impl<'a> FuncGen<'a> {
         Ok(())
     }
 
+    /// The cold trap function a linear-memory access raises, when `typed_traps` is
+    /// on and the access is checked (`None` otherwise: the untyped code keeps Rust's
+    /// slice panic, and `unsafe_memory` / a shared memory do no per-access check).
+    pub(super) fn typed_memory_trap(&mut self) -> Option<&'static str> {
+        let on = self.ctx.typed_traps && !self.ctx.unsafe_memory && !self.ctx.memory_shared;
+        on.then(|| {
+            self.used_rt.insert(Rt::TrapMemoryOob);
+            "trap_memory_oob"
+        })
+    }
+
+    /// The cold trap function a table access raises under `typed_traps`.
+    pub(super) fn typed_table_trap(&mut self) -> Option<&'static str> {
+        self.ctx.typed_traps.then(|| {
+            self.used_rt.insert(Rt::TrapTableOob);
+            "trap_table_oob"
+        })
+    }
+
+    /// The runtime helpers used, plus the cold out-of-bounds traps the used
+    /// instance-method memory/table helpers call (those are rendered separately,
+    /// so they cannot register the trap themselves).
+    fn rt_with_oob_traps(
+        ctx: &ModuleCtx<'_>,
+        used_rt: &HashSet<Rt>,
+        used_helpers: &HashSet<(Helper, u32)>,
+    ) -> HashSet<Rt> {
+        let mut rt = used_rt.clone();
+        if ctx.typed_traps {
+            for (helper, _) in used_helpers {
+                match helper {
+                    Helper::Grow => {}
+                    Helper::TableCopy | Helper::TableFill => {
+                        rt.insert(Rt::TrapTableOob);
+                    }
+                    _ if ctx.unsafe_memory || ctx.memory_shared => {}
+                    _ => {
+                        rt.insert(Rt::TrapMemoryOob);
+                    }
+                }
+            }
+        }
+        rt
+    }
+
     fn emit_op(&mut self, op: Operator<'_>) -> Result<(), TranspileError> {
         if !self.reachable {
             return self.skip_dead(&op);

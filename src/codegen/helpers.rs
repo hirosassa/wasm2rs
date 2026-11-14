@@ -158,6 +158,9 @@ struct AccessCtx {
     read: String,
     write: String,
     unchecked: bool,
+    /// `typed_traps`: an out-of-range access calls `trap_memory_oob` (a typed
+    /// payload) instead of panicking on the slice index. Ignored when `unchecked`.
+    typed: bool,
     memory64: bool,
 }
 
@@ -191,8 +194,11 @@ impl AccessCtx {
             .replace("@OFF", off)
             .replace("@EA", ea);
         let line = if self.unchecked {
-            let line = rewrite_index_unchecked(&line, "@W", &self.write, "get_unchecked_mut");
-            rewrite_index_unchecked(&line, "@R", &self.read, "get_unchecked")
+            let line = rewrite_index(&line, "@W", &self.write, "get_unchecked_mut", true);
+            rewrite_index(&line, "@R", &self.read, "get_unchecked", true)
+        } else if self.typed {
+            let line = rewrite_index(&line, "@W", &self.write, "get_mut", false);
+            rewrite_index(&line, "@R", &self.read, "get", false)
         } else {
             line
         };
@@ -219,6 +225,7 @@ pub(super) fn helper_lines(
     mem: u32,
     max_pages: Option<u64>,
     unsafe_memory: bool,
+    typed_traps: bool,
     memory64: bool,
 ) -> Vec<String> {
     let base = base_helper_lines(helper, max_pages);
@@ -230,8 +237,13 @@ pub(super) fn helper_lines(
     } else {
         base
     };
-    let base = if unsafe_memory {
+    // `unsafe_memory` never covers table storage, so a table helper is still
+    // checked (and typed) under it.
+    let table_helper = matches!(helper, Helper::TableCopy | Helper::TableFill);
+    let base = if unsafe_memory && !table_helper {
         unchecked_helper_lines(helper, base, memory64)
+    } else if typed_traps {
+        typed_helper_lines(helper, base)
     } else {
         base
     };
@@ -241,6 +253,7 @@ pub(super) fn helper_lines(
         read: format!("self.{get}()"),
         write: format!("self.{get_mut}()"),
         unchecked: unsafe_memory,
+        typed: typed_traps,
         memory64,
     }
     .render_all(base)
@@ -295,6 +308,33 @@ fn unchecked_helper_lines(helper: Helper, base: Vec<String>, memory64: bool) -> 
             out.extend(base);
             out
         }
+    }
+}
+
+/// Adapt a helper template for `typed_traps`: the slice accesses become checked
+/// `get`s (see [`AccessCtx::render`]), and the helpers that bypass `@R[..]`/`@W[..]`
+/// get an explicit range check. `memory.grow` touches no slice and is unchanged.
+fn typed_helper_lines(helper: Helper, base: Vec<String>) -> Vec<String> {
+    match helper {
+        Helper::MemoryCopy => typed_copy_within(base, "trap_memory_oob"),
+        Helper::TableCopy => typed_copy_within(base, "trap_table_oob"),
+        Helper::TableFill => base
+            .into_iter()
+            .map(|line| match line.strip_prefix("    self.table_mut()[") {
+                Some(rest) => {
+                    let (range, tail) = rest.split_once(']').expect("an index closes on its line");
+                    format!(
+                        "    {}{tail}",
+                        checked_place(
+                            &format!("self.table_mut().get_mut({range})"),
+                            "trap_table_oob"
+                        )
+                    )
+                }
+                None => line,
+            })
+            .collect(),
+        _ => base,
     }
 }
 
@@ -369,10 +409,18 @@ fn widen_helper_lines(helper: Helper, max_pages: Option<u64>, base: Vec<String>)
     }
 }
 
-/// Replace each `{placeholder}[EXPR]` in `line` with
-/// `(*unsafe { ACCESSOR.METHOD(EXPR) })`. A helper-template index never
+/// Replace each `{placeholder}[EXPR]` in `line` with a parenthesised place
+/// expression over `ACCESSOR.METHOD(EXPR)`: `(*unsafe { .. })` when `unchecked`,
+/// else `(*.. .unwrap_or_else(|| trap_memory_oob()))` (the `typed_traps` form,
+/// whose `get`/`get_mut` returns an `Option`). A helper-template index never
 /// contains `[`/`]`, so the matching `]` is simply the next one.
-fn rewrite_index_unchecked(line: &str, placeholder: &str, accessor: &str, method: &str) -> String {
+fn rewrite_index(
+    line: &str,
+    placeholder: &str,
+    accessor: &str,
+    method: &str,
+    unchecked: bool,
+) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     let open = format!("{placeholder}[");
@@ -383,10 +431,47 @@ fn rewrite_index_unchecked(line: &str, placeholder: &str, accessor: &str, method
             .find(']')
             .expect("a memory-helper index is always closed on the same line");
         let expr = &after[..close];
-        out.push_str(&format!("(*unsafe {{ {accessor}.{method}({expr}) }})"));
+        out.push_str(&if unchecked {
+            format!("(*unsafe {{ {accessor}.{method}({expr}) }})")
+        } else {
+            checked_place(&format!("{accessor}.{method}({expr})"), "trap_memory_oob")
+        });
         rest = &after[close + 1..];
     }
     out.push_str(rest);
+    out
+}
+
+/// The place expression of an `Option`-returning `get`/`get_mut` call that raises
+/// the typed trap `trap_fn` when out of range (`typed_traps`).
+pub(super) fn checked_place(call: &str, trap_fn: &str) -> String {
+    format!("(*{call}.unwrap_or_else(|| {trap_fn}()))")
+}
+
+/// Under `typed_traps`, make a `copy_within` in a bulk helper template an explicit
+/// range check calling `trap_fn` first (the slice method's own panic carries no
+/// typed payload); other lines pass through. Handles both operand shapes the
+/// templates use (`s..s + len as usize` and `s..s + n`).
+fn typed_copy_within(lines: Vec<String>, trap_fn: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(lines.len() + 3);
+    for line in lines {
+        let parsed = line.trim().strip_suffix(");").and_then(|l| {
+            let (acc, args) = l.split_once(".copy_within(")?;
+            let (range, dest) = args.rsplit_once(", ")?;
+            Some((acc.to_string(), range.to_string(), dest.to_string()))
+        });
+        let Some((acc, range, dest)) = parsed else {
+            out.push(line);
+            continue;
+        };
+        out.push(format!("    let r = {range};"));
+        out.push(format!(
+            "    if r.end > {acc}.len() || {dest}.checked_add(r.end - r.start).map_or(true, |e| e > {acc}.len()) {{"
+        ));
+        out.push(format!("        {trap_fn}();"));
+        out.push("    }".to_string());
+        out.push(format!("    {acc}.copy_within(r, {dest});"));
+    }
     out
 }
 
@@ -408,6 +493,7 @@ pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
         read: "__m".to_string(),
         write: "__m".to_string(),
         unchecked: false,
+        typed: false,
         memory64: false,
     };
     if matches!(helper, Helper::TableCopy | Helper::TableFill) {
@@ -525,6 +611,7 @@ mod tests {
                             mem,
                             Some(5),
                             unsafe_memory,
+                            false,
                             memory64,
                         ));
                     }
@@ -558,8 +645,8 @@ mod tests {
     fn memory64_widens_every_address_operand() {
         let widened = ["Grow", "MemoryFill", "MemoryCopy", "TableCopy", "TableFill"];
         for helper in HELPER_ORDER {
-            let narrow = helper_lines(helper, 0, None, false, false).join("\n");
-            let wide = helper_lines(helper, 0, None, false, true).join("\n");
+            let narrow = helper_lines(helper, 0, None, false, false, false).join("\n");
+            let wide = helper_lines(helper, 0, None, false, false, true).join("\n");
             if narrow.contains("addr: i32") {
                 assert!(
                     wide.contains("addr: i64, offset: u64"),

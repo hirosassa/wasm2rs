@@ -34,6 +34,17 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::TrapType => "Wasm2RsTrap",
         Rt::TrapInvalidConversion => "trap_invalid_conversion",
         Rt::TrapIntegerOverflow => "trap_integer_overflow",
+        Rt::TrapDivideByZero => "trap_integer_divide_by_zero",
+        Rt::TrapMemoryOob => "trap_memory_oob",
+        Rt::TrapTableOob => "trap_table_oob",
+        Rt::I32DivS => "i32_div_s",
+        Rt::I32DivU => "i32_div_u",
+        Rt::I32RemS => "i32_rem_s",
+        Rt::I32RemU => "i32_rem_u",
+        Rt::I64DivS => "i64_div_s",
+        Rt::I64DivU => "i64_div_u",
+        Rt::I64RemS => "i64_rem_s",
+        Rt::I64RemU => "i64_rem_u",
     }
 }
 
@@ -44,7 +55,7 @@ pub(super) fn is_rt_name(name: &str) -> bool {
 
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
-const RT_ORDER: [Rt; 29] = [
+const RT_ORDER: [Rt; 40] = [
     Rt::TrapType,
     Rt::DelegateExc,
     Rt::CallDepth,
@@ -54,6 +65,17 @@ const RT_ORDER: [Rt; 29] = [
     Rt::TrapIndirectTypeMismatch,
     Rt::TrapInvalidConversion,
     Rt::TrapIntegerOverflow,
+    Rt::TrapDivideByZero,
+    Rt::TrapMemoryOob,
+    Rt::TrapTableOob,
+    Rt::I32DivS,
+    Rt::I32DivU,
+    Rt::I32RemS,
+    Rt::I32RemU,
+    Rt::I64DivS,
+    Rt::I64DivU,
+    Rt::I64RemS,
+    Rt::I64RemU,
     Rt::F32Min,
     Rt::F32Max,
     Rt::F64Min,
@@ -85,13 +107,8 @@ pub(super) fn render_rt_helpers(used: &HashSet<Rt>, typed: bool) -> String {
     let mut used = Cow::Borrowed(used);
     let variants = typed_trap_variants(&used, typed);
     if !variants.is_empty() {
-        let uses_trunc = uses_trunc(&used);
-        let owned = used.to_mut();
-        owned.insert(Rt::TrapType);
-        if uses_trunc {
-            owned.insert(Rt::TrapInvalidConversion);
-            owned.insert(Rt::TrapIntegerOverflow);
-        }
+        used = Cow::Owned(with_trap_deps(&used));
+        used.to_mut().insert(Rt::TrapType);
     }
     let mut blocks: Vec<String> = Vec::new();
     for rt in RT_ORDER {
@@ -112,8 +129,22 @@ pub(super) fn defines_trap_type(used: &HashSet<Rt>, typed: bool) -> bool {
     !typed_trap_variants(used, typed).is_empty()
 }
 
-fn uses_trunc(used: &HashSet<Rt>) -> bool {
-    used.iter().any(|rt| TRUNC_RTS.contains(rt))
+/// `used` plus the cold trap functions the used helpers call (typed traps only),
+/// so a helper only has to name itself.
+fn with_trap_deps(used: &HashSet<Rt>) -> HashSet<Rt> {
+    let mut all = used.clone();
+    for rt in used {
+        if TRUNC_RTS.contains(rt) {
+            all.extend([Rt::TrapInvalidConversion, Rt::TrapIntegerOverflow]);
+        }
+        if DIV_REM_RTS.contains(rt) {
+            all.insert(Rt::TrapDivideByZero);
+        }
+        if matches!(rt, Rt::I32DivS | Rt::I64DivS) {
+            all.insert(Rt::TrapIntegerOverflow);
+        }
+    }
+    all
 }
 
 /// The `Wasm2RsTrap` variants the used helpers raise; empty when untyped.
@@ -121,24 +152,27 @@ fn typed_trap_variants(used: &HashSet<Rt>, typed: bool) -> Vec<TrapVariant> {
     if !typed {
         return Vec::new();
     }
-    let mut variants = Vec::new();
-    for (rt, variant) in [
+    let used = with_trap_deps(used);
+    [
         (Rt::TrapUnreachable, TrapVariant::Unreachable),
         (
             Rt::TrapIndirectTypeMismatch,
             TrapVariant::IndirectCallTypeMismatch,
         ),
         (Rt::TrapCallStackExhausted, TrapVariant::CallStackExhausted),
-    ] {
-        if used.contains(&rt) {
-            variants.push(variant);
-        }
-    }
-    if uses_trunc(used) {
-        variants.push(TrapVariant::InvalidConversionToInteger);
-        variants.push(TrapVariant::IntegerOverflow);
-    }
-    variants
+        (
+            Rt::TrapInvalidConversion,
+            TrapVariant::InvalidConversionToInteger,
+        ),
+        (Rt::TrapIntegerOverflow, TrapVariant::IntegerOverflow),
+        (Rt::TrapDivideByZero, TrapVariant::IntegerDivideByZero),
+        (Rt::TrapMemoryOob, TrapVariant::OutOfBoundsMemoryAccess),
+        (Rt::TrapTableOob, TrapVariant::OutOfBoundsTableAccess),
+    ]
+    .into_iter()
+    .filter(|(rt, _)| used.contains(rt))
+    .map(|(_, variant)| variant)
+    .collect()
 }
 
 /// The trapping float->int truncation helpers.
@@ -153,6 +187,18 @@ const TRUNC_RTS: [Rt; 8] = [
     Rt::I64TruncF64U,
 ];
 
+/// The explicit-check integer division/remainder helpers (typed traps only).
+const DIV_REM_RTS: [Rt; 8] = [
+    Rt::I32DivS,
+    Rt::I32DivU,
+    Rt::I32RemS,
+    Rt::I32RemU,
+    Rt::I64DivS,
+    Rt::I64DivU,
+    Rt::I64RemS,
+    Rt::I64RemU,
+];
+
 /// A variant of the typed trap payload `Wasm2RsTrap`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TrapVariant {
@@ -161,6 +207,9 @@ enum TrapVariant {
     CallStackExhausted,
     InvalidConversionToInteger,
     IntegerOverflow,
+    IntegerDivideByZero,
+    OutOfBoundsMemoryAccess,
+    OutOfBoundsTableAccess,
 }
 
 impl TrapVariant {
@@ -171,6 +220,9 @@ impl TrapVariant {
             TrapVariant::CallStackExhausted => "CallStackExhausted",
             TrapVariant::InvalidConversionToInteger => "InvalidConversionToInteger",
             TrapVariant::IntegerOverflow => "IntegerOverflow",
+            TrapVariant::IntegerDivideByZero => "IntegerDivideByZero",
+            TrapVariant::OutOfBoundsMemoryAccess => "OutOfBoundsMemoryAccess",
+            TrapVariant::OutOfBoundsTableAccess => "OutOfBoundsTableAccess",
         }
     }
 
@@ -182,6 +234,9 @@ impl TrapVariant {
             TrapVariant::CallStackExhausted => "call stack exhausted",
             TrapVariant::InvalidConversionToInteger => "invalid conversion to integer",
             TrapVariant::IntegerOverflow => "integer overflow",
+            TrapVariant::IntegerDivideByZero => "integer divide by zero",
+            TrapVariant::OutOfBoundsMemoryAccess => "out of bounds memory access",
+            TrapVariant::OutOfBoundsTableAccess => "out of bounds table access",
         }
     }
 }
@@ -259,6 +314,27 @@ fn rt_lines(rt: Rt, typed: bool, variants: &[TrapVariant]) -> Vec<String> {
         Rt::TrapIntegerOverflow => {
             trap_fn_lines("trap_integer_overflow", TrapVariant::IntegerOverflow, typed)
         }
+        Rt::TrapDivideByZero => trap_fn_lines(
+            "trap_integer_divide_by_zero",
+            TrapVariant::IntegerDivideByZero,
+            typed,
+        ),
+        Rt::TrapMemoryOob => trap_fn_lines(
+            "trap_memory_oob",
+            TrapVariant::OutOfBoundsMemoryAccess,
+            typed,
+        ),
+        Rt::TrapTableOob => {
+            trap_fn_lines("trap_table_oob", TrapVariant::OutOfBoundsTableAccess, typed)
+        }
+        Rt::I32DivS => div_rem_lines("i32_div_s", "i32", DivRem::DivS),
+        Rt::I32DivU => div_rem_lines("i32_div_u", "i32", DivRem::DivU),
+        Rt::I32RemS => div_rem_lines("i32_rem_s", "i32", DivRem::RemS),
+        Rt::I32RemU => div_rem_lines("i32_rem_u", "i32", DivRem::RemU),
+        Rt::I64DivS => div_rem_lines("i64_div_s", "i64", DivRem::DivS),
+        Rt::I64DivU => div_rem_lines("i64_div_u", "i64", DivRem::DivU),
+        Rt::I64RemS => div_rem_lines("i64_rem_s", "i64", DivRem::RemS),
+        Rt::I64RemU => div_rem_lines("i64_rem_u", "i64", DivRem::RemU),
         Rt::DelegateExc => source_lines(include_str!("rt_src/delegate.rs")),
         Rt::Tc => source_lines(include_str!("rt_src/tc.rs")),
         // `CALL_DEPTH` is upper-case, which a sanitized export name never is.
@@ -359,6 +435,53 @@ fn rt_lines(rt: Rt, typed: bool, variants: &[TrapVariant]) -> Vec<String> {
         Rt::SplatF32x4 => splat_lines("f32x4_splat", "f32", "x.to_bits() as u128", 32),
         Rt::SplatF64x2 => splat_lines("f64x2_splat", "f64", "x.to_bits() as u128", 64),
     }
+}
+
+#[derive(Clone, Copy)]
+enum DivRem {
+    DivS,
+    DivU,
+    RemS,
+    RemU,
+}
+
+/// An integer division/remainder helper with explicit trap checks, so no Rust
+/// built-in panic (which cannot carry a typed payload) remains. The operation after
+/// the checks is `wrapping_*`, which never panics: the zero divisor and, for
+/// `div_s`, `MIN / -1` are already handled, and `MIN % -1` is `0` as in wasm.
+fn div_rem_lines(name: &str, ty: &str, op: DivRem) -> Vec<String> {
+    let unsigned = matches!(op, DivRem::DivU | DivRem::RemU);
+    let uty = format!("u{}", &ty[1..]);
+    let (a, b) = if unsigned {
+        (format!("a as {uty}"), format!("b as {uty}"))
+    } else {
+        ("a".to_string(), "b".to_string())
+    };
+    let method = match op {
+        DivRem::DivS | DivRem::DivU => "wrapping_div",
+        DivRem::RemS | DivRem::RemU => "wrapping_rem",
+    };
+    let mut lines = vec![
+        "#[inline(always)]".to_string(),
+        format!("fn {name}(a: {ty}, b: {ty}) -> {ty} {{"),
+        "    if b == 0 {".to_string(),
+        "        trap_integer_divide_by_zero();".to_string(),
+        "    }".to_string(),
+    ];
+    if matches!(op, DivRem::DivS) {
+        lines.extend([
+            format!("    if a == {ty}::MIN && b == -1 {{"),
+            "        trap_integer_overflow();".to_string(),
+            "    }".to_string(),
+        ]);
+    }
+    if unsigned {
+        lines.push(format!("    (({a}).{method}({b})) as {ty}"));
+    } else {
+        lines.push(format!("    a.{method}(b)"));
+    }
+    lines.push("}".to_string());
+    lines
 }
 
 /// A lane-splat helper: place the scalar in the lowest `lane_bits`-wide lane,

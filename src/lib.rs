@@ -264,21 +264,31 @@ pub struct TranspileOptions {
     /// `Some(0)` traps on the first call. `None` (the default) emits no counter, so existing output is unchanged.
     pub call_depth_limit: Option<u32>,
 
-    /// Raise the five runtime-helper traps (`unreachable`, an indirect-call type
-    /// mismatch, `call stack exhausted`, and the two float-to-integer conversion
-    /// traps) as a typed payload instead of a message string, so a host can classify
-    /// a trap by type. The generated source then defines `Wasm2RsTrap` (only the
-    /// variants it uses), a `Send + 'static` enum implementing `Display` (with the
-    /// message the string panic carried) and `std::error::Error`, and each of these
-    /// traps is a `resume_unwind(Box::new(Wasm2RsTrap::..))` — the mechanism a thrown
-    /// wasm exception already uses. Downcast the `catch_unwind` payload to
-    /// `Wasm2RsTrap` to recognise one; `try`/`catch_all` do not catch it.
+    /// Raise the traps of the runtime helpers as a typed payload instead of a message
+    /// string, so a host can classify a trap by type: `unreachable`, an indirect-call
+    /// type mismatch, `call stack exhausted`, the two float-to-integer conversion
+    /// traps, integer division/remainder (divide by zero; `MIN / -1` is the
+    /// `IntegerOverflow` of `div_s`), and linear-memory and table out-of-bounds
+    /// accesses. The generated source then defines `Wasm2RsTrap` (only the variants it
+    /// uses), a `Send + 'static` enum implementing `Display` (with the message the
+    /// string panic carried) and `std::error::Error`, and each of these traps is a
+    /// `resume_unwind(Box::new(Wasm2RsTrap::..))` — the mechanism a thrown wasm
+    /// exception already uses. Downcast the `catch_unwind` payload to `Wasm2RsTrap`
+    /// to recognise one; `try`/`catch_all` do not catch it.
+    ///
+    /// Division and the memory/table accesses become explicit checks in place of
+    /// Rust's `/` and slice indexing (whose panics carry no typed payload); see
+    /// `docs/bounds-check-bench.md` for what that costs. Under [`unsafe_memory`]
+    /// the linear-memory accesses stay unchecked (undefined behaviour, as without
+    /// this option) while division and table accesses are still typed. A shared
+    /// memory's accesses are not typed yet.
     ///
     /// `resume_unwind` does not run the panic hook, so these traps print nothing to
-    /// stderr; report them from the payload instead. Every other trap (integer
-    /// division, out-of-range memory or table access, GC, continuations, atomics,
-    /// `exnref`, glue) is still a string panic. Off by default, which leaves the
-    /// generated code unchanged.
+    /// stderr; report them from the payload instead. Every other trap (GC,
+    /// continuations, atomics, `exnref`, glue) is still a string panic. Off by default,
+    /// which leaves the generated code unchanged.
+    ///
+    /// [`unsafe_memory`]: TranspileOptions::unsafe_memory
     pub typed_traps: bool,
 
     /// Split a flattened `loop { match pc { … } }` dispatch whose surviving arm

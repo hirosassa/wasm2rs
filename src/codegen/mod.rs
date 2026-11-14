@@ -181,6 +181,22 @@ pub(crate) enum Rt {
     /// The out-of-line `integer overflow` trap of the trapping float->int
     /// truncations (typed traps only).
     TrapIntegerOverflow,
+    /// The out-of-line `integer divide by zero` trap (typed traps only).
+    TrapDivideByZero,
+    /// The out-of-line `out of bounds memory access` trap (typed traps only).
+    TrapMemoryOob,
+    /// The out-of-line `out of bounds table access` trap (typed traps only).
+    TrapTableOob,
+    /// Explicit-check integer division/remainder (typed traps only): they replace
+    /// Rust's `/` and `%`, whose built-in panics cannot carry a typed payload.
+    I32DivS,
+    I32DivU,
+    I32RemS,
+    I32RemU,
+    I64DivS,
+    I64DivU,
+    I64RemS,
+    I64RemU,
     /// The wrapper a `delegate` raises when it must bypass enclosing `try`
     /// bodies: the exception plus how many more bodies to skip.
     DelegateExc,

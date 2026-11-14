@@ -1,6 +1,6 @@
 use wasmparser::ValType;
 
-use super::super::helpers::table_accessor;
+use super::super::helpers::{checked_place, table_accessor};
 use super::super::{
     ALLOW, FLATTEN_DEPTH_THRESHOLD, GenMeta, ModuleCtx, Node, Rt, SplitPlan, Val, can_flatten,
     default_value, estimate_body_len, flatten_body, index_u32, push_body_line, render_body_into,
@@ -318,10 +318,12 @@ impl<'a> super::FuncGen<'a> {
         // self` method call. Copying out the `u32` releases it. An out-of-bounds
         // index panics on this slice access (a trap).
         let entry = self.fresh_temp();
-        self.line(format!(
-            "let {entry} = self.{table_get}()[{}];",
-            self.table_index_expr(table_index, &index.code)
-        ));
+        let index_expr = self.table_index_expr(table_index, &index.code);
+        let read = match self.typed_table_trap() {
+            Some(trap) => checked_place(&format!("self.{table_get}().get({index_expr})"), trap),
+            None => format!("self.{table_get}()[{index_expr}]"),
+        };
+        self.line(format!("let {entry} = {read};"));
         self.dispatch_sigs.insert(type_index);
         if use_tc {
             return self.park_dispatch(type_index, &entry, &arg_list);
@@ -770,8 +772,8 @@ impl<'a> super::FuncGen<'a> {
             out.push('\n');
         }
         Ok(GenMeta {
+            rt: Self::rt_with_oob_traps(self.ctx, &self.used_rt, &self.used_helpers),
             helpers: self.used_helpers,
-            rt: self.used_rt,
             simd: self.used_simd,
             dispatch_sigs: self.dispatch_sigs,
             uses_eh: self.uses_eh,

@@ -1,11 +1,21 @@
 use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, ValType};
 
-use super::super::helpers::{mem_accessor, table_accessor};
+use super::super::helpers::{checked_place, mem_accessor, table_accessor};
 use super::super::{
     CompositeKind, Helper, Val, is_bottom_u32_heap, is_cont_heap, is_gc_table_element,
     table_elem_rust,
 };
 use crate::TranspileError;
+
+/// How a bulk `*.init` bounds-checks its ranges: Rust's slice panic, no check
+/// (`unsafe_memory`, memory.init only), or a typed trap (`typed_traps`) named by
+/// its cold function.
+#[derive(Clone, Copy)]
+pub(super) enum BulkCheck {
+    Panic,
+    Unchecked,
+    Typed(&'static str),
+}
 
 impl<'a> super::FuncGen<'a> {
     pub(super) fn is_table64(&self, table: u32) -> bool {
@@ -97,14 +107,34 @@ impl<'a> super::FuncGen<'a> {
         let src_expr = self.table_index_expr(src_table, &src.code);
         let dest_expr = self.table_index_expr(dst_table, &dest.code);
         let elem = table_elem_rust(self.table_element(dst_table));
+        let trap = self.typed_table_trap();
         let body = if dst_table == src_table && !gc {
-            format!("self.{dst_mut}().copy_within(s..s + n, d);")
+            match trap {
+                // `copy_within` panics on its own, so check the two ranges first.
+                Some(trap) => format!(
+                    "let len = self.{dst_mut}().len(); \
+                     if s.checked_add(n).is_none_or(|e| e > len) \
+                     || d.checked_add(n).is_none_or(|e| e > len) {{ {trap}(); }} \
+                     self.{dst_mut}().copy_within(s..s + n, d);"
+                ),
+                None => format!("self.{dst_mut}().copy_within(s..s + n, d);"),
+            }
         } else {
             // A managed entry is not `Copy`, so it is cloned through the temporary
             // (which also covers overlapping ranges within one table).
+            let (src_range, dst_range) = match trap {
+                Some(trap) => (
+                    checked_place(&format!("self.{src_get}().get(s..s + n)"), trap),
+                    checked_place(&format!("self.{dst_mut}().get_mut(d..d + n)"), trap),
+                ),
+                None => (
+                    format!("self.{src_get}()[s..s + n]"),
+                    format!("self.{dst_mut}()[d..d + n]"),
+                ),
+            };
             format!(
-                "let tmp: Vec<{elem}> = self.{src_get}()[s..s + n].to_vec(); \
-                 self.{dst_mut}()[d..d + n].clone_from_slice(&tmp);"
+                "let tmp: Vec<{elem}> = {src_range}.to_vec(); \
+                 {dst_range}.clone_from_slice(&tmp);"
             )
         };
         self.line(format!(
@@ -126,13 +156,12 @@ impl<'a> super::FuncGen<'a> {
         } else {
             ""
         };
-        self.push_trapping(
-            format!(
-                "self.{get}()[{}]{clone}",
-                self.table_index_expr(table, &index.code)
-            ),
-            element,
-        )
+        let index_expr = self.table_index_expr(table, &index.code);
+        let read = match self.typed_table_trap() {
+            Some(trap) => checked_place(&format!("self.{get}().get({index_expr})"), trap),
+            None => format!("self.{get}()[{index_expr}]"),
+        };
+        self.push_trapping(format!("{read}{clone}"), element)
     }
 
     /// `table.set`: write a funcref at the given index. Out-of-bounds panics (a
@@ -144,10 +173,12 @@ impl<'a> super::FuncGen<'a> {
         let index = self.pop()?;
         let (_, get_mut) = table_accessor(table);
         let stored = self.table_entry_expr(table, &value)?;
-        self.line(format!(
-            "self.{get_mut}()[{}] = {stored};",
-            self.table_index_expr(table, &index.code),
-        ));
+        let index_expr = self.table_index_expr(table, &index.code);
+        let slot = match self.typed_table_trap() {
+            Some(trap) => checked_place(&format!("self.{get_mut}().get_mut({index_expr})"), trap),
+            None => format!("self.{get_mut}()[{index_expr}]"),
+        };
+        self.line(format!("{slot} = {stored};"));
         Ok(())
     }
 
@@ -232,8 +263,12 @@ impl<'a> super::FuncGen<'a> {
         }
         let (_, get_mut) = table_accessor(table);
         let value = self.table_entry_expr(table, &val)?;
+        let range = match self.typed_table_trap() {
+            Some(trap) => checked_place(&format!("self.{get_mut}().get_mut(d..d + n)"), trap),
+            None => format!("self.{get_mut}()[d..d + n]"),
+        };
         self.line(format!(
-            "{{ let d = {}; let v = {value}; let n = {}; self.{get_mut}()[d..d + n].fill(v); }}",
+            "{{ let d = {}; let v = {value}; let n = {}; {range}.fill(v); }}",
             self.table_index_expr(table, &dest.code),
             self.table_index_expr(table, &len.code)
         ));
@@ -282,16 +317,22 @@ impl<'a> super::FuncGen<'a> {
         dest: &Val,
         src: &Val,
         len: &Val,
-        unchecked: bool,
+        check: BulkCheck,
     ) {
         // `unchecked` (opt-in `unsafe_memory`, memory.init only) drops the slice
         // bounds check on both the destination memory and the segment source,
         // turning an out-of-range copy into undefined behaviour rather than a
         // trap.
-        let (dst_slice, seg_slice) = if unchecked {
+        let (dst_slice, seg_slice) = if let BulkCheck::Unchecked = check {
             (
                 format!("(*unsafe {{ {dst}.get_unchecked_mut(d..d + n) }})"),
                 "unsafe { seg.get_unchecked(s..s + n) }".to_string(),
+            )
+        } else if let BulkCheck::Typed(trap) = check {
+            // `typed_traps`: the destination is checked first, then the segment.
+            (
+                checked_place(&format!("{dst}.get_mut(d..d + n)"), trap),
+                format!("&{}", checked_place("seg.get(s..s + n)", trap)),
             )
         } else {
             (format!("{dst}[d..d + n]"), "&seg[s..s + n]".to_string())
@@ -325,7 +366,13 @@ impl<'a> super::FuncGen<'a> {
         } else {
             "{ let empty: &[u8] = &[]; empty }".to_string()
         };
-        self.emit_bulk_init(&dst, &seg, &dest, &src, &len, unchecked);
+        let check = if unchecked {
+            BulkCheck::Unchecked
+        } else {
+            self.typed_memory_trap()
+                .map_or(BulkCheck::Panic, BulkCheck::Typed)
+        };
+        self.emit_bulk_init(&dst, &seg, &dest, &src, &len, check);
         Ok(())
     }
 
@@ -351,23 +398,29 @@ impl<'a> super::FuncGen<'a> {
         if self.is_gc_table(table) {
             // A managed table's segment holds only `ref.null` items, so initialising
             // it writes nulls; the range is still checked against the segment.
+            let (seg_range, dst_range) = match self.typed_table_trap() {
+                Some(trap) => (
+                    checked_place("seg.get(s..s + n)", trap),
+                    checked_place(&format!("self.{get_mut}().get_mut(d..d + n)"), trap),
+                ),
+                None => (
+                    "seg[s..s + n]".to_string(),
+                    format!("self.{get_mut}()[d..d + n]"),
+                ),
+            };
             self.line(format!(
                 "{{ let seg = {seg}; let n = ({}) as usize; let s = ({}) as usize; \
-                 let d = ({}) as usize; let _ = &seg[s..s + n]; \
-                 self.{get_mut}()[d..d + n].fill(GcRef::Null); }}",
+                 let d = ({}) as usize; let _ = &{seg_range}; \
+                 {dst_range}.fill(GcRef::Null); }}",
                 len.code, src.code, dest.code
             ));
             return Ok(());
         }
-        self.emit_bulk_init(
-            &format!("self.{get_mut}()"),
-            &seg,
-            &dest,
-            &src,
-            &len,
-            // Table storage is out of scope for unchecked memory access.
-            false,
-        );
+        // Table storage is out of scope for unchecked memory access.
+        let check = self
+            .typed_table_trap()
+            .map_or(BulkCheck::Panic, BulkCheck::Typed);
+        self.emit_bulk_init(&format!("self.{get_mut}()"), &seg, &dest, &src, &len, check);
         Ok(())
     }
 
