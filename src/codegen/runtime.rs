@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use super::Rt;
@@ -81,37 +82,32 @@ const RT_ORDER: [Rt; 29] = [
 /// With `typed` the helper traps raise a `Wasm2RsTrap` payload, so the type (and
 /// the cold trap functions the truncations call) join the helpers that need them.
 pub(super) fn render_rt_helpers(used: &HashSet<Rt>, typed: bool) -> String {
-    let mut used = std::borrow::Cow::Borrowed(used);
+    let mut used = Cow::Borrowed(used);
     let mut variants: Vec<TrapVariant> = Vec::new();
     if typed {
-        let is_trunc = |rt: &Rt| TRUNC_RTS.contains(rt);
-        let has = |rt: Rt| used.contains(&rt);
-        for (variant, needed) in [
-            (TrapVariant::Unreachable, has(Rt::TrapUnreachable)),
+        for (rt, variant) in [
+            (Rt::TrapUnreachable, TrapVariant::Unreachable),
             (
+                Rt::TrapIndirectTypeMismatch,
                 TrapVariant::IndirectCallTypeMismatch,
-                has(Rt::TrapIndirectTypeMismatch),
             ),
-            (
-                TrapVariant::CallStackExhausted,
-                has(Rt::TrapCallStackExhausted),
-            ),
-            (
-                TrapVariant::InvalidConversionToInteger,
-                used.iter().any(is_trunc),
-            ),
-            (TrapVariant::IntegerOverflow, used.iter().any(is_trunc)),
+            (Rt::TrapCallStackExhausted, TrapVariant::CallStackExhausted),
         ] {
-            if needed {
+            if used.contains(&rt) {
                 variants.push(variant);
             }
         }
+        let uses_trunc = used.iter().any(|rt| TRUNC_RTS.contains(rt));
+        if uses_trunc {
+            variants.push(TrapVariant::InvalidConversionToInteger);
+            variants.push(TrapVariant::IntegerOverflow);
+        }
         if !variants.is_empty() {
-            let extra = used.to_mut();
-            extra.insert(Rt::TrapType);
-            if variants.contains(&TrapVariant::InvalidConversionToInteger) {
-                extra.insert(Rt::TrapInvalidConversion);
-                extra.insert(Rt::TrapIntegerOverflow);
+            let owned = used.to_mut();
+            owned.insert(Rt::TrapType);
+            if uses_trunc {
+                owned.insert(Rt::TrapInvalidConversion);
+                owned.insert(Rt::TrapIntegerOverflow);
             }
         }
     }
@@ -185,12 +181,15 @@ fn trap_type_lines(variants: &[TrapVariant]) -> Vec<String> {
         "pub enum Wasm2RsTrap {".to_string(),
     ];
     lines.extend(variants.iter().map(|v| format!("    {},", v.name())));
-    lines.push("}".to_string());
-    lines.push("impl ::std::fmt::Display for Wasm2RsTrap {".to_string());
-    lines.push(
-        "    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {".to_string(),
+    lines.extend(
+        [
+            "}",
+            "impl ::std::fmt::Display for Wasm2RsTrap {",
+            "    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {",
+            "        f.write_str(match self {",
+        ]
+        .map(String::from),
     );
-    lines.push("        f.write_str(match self {".to_string());
     lines.extend(variants.iter().map(|v| {
         format!(
             "            Wasm2RsTrap::{} => \"{}\",",
@@ -198,10 +197,15 @@ fn trap_type_lines(variants: &[TrapVariant]) -> Vec<String> {
             v.message()
         )
     }));
-    lines.push("        })".to_string());
-    lines.push("    }".to_string());
-    lines.push("}".to_string());
-    lines.push("impl ::std::error::Error for Wasm2RsTrap {}".to_string());
+    lines.extend(
+        [
+            "        })",
+            "    }",
+            "}",
+            "impl ::std::error::Error for Wasm2RsTrap {}",
+        ]
+        .map(String::from),
+    );
     lines
 }
 

@@ -1313,15 +1313,21 @@ fn assert_known_gap(file: &str, report: &Report, reason: &str) {
     );
 }
 
+/// Replay the vendored `tests/spec/<file>.wast` as the generated crate `name`,
+/// requiring at least one executed assertion.
+fn replay_vendored(name: &str, file: &str) {
+    let path = format!("{}/tests/spec/{file}.wast", env!("CARGO_MANIFEST_DIR"));
+    let src = std::fs::read_to_string(path).expect("read vendored .wast");
+    let report = run_wast(name, &src);
+    assert!(report.executed > 0, "{file}: nothing was executed");
+}
+
 /// Replay a vendored `tests/spec/<file>.wast`.
 macro_rules! spec_test {
     ($($name:ident => $file:literal),+ $(,)?) => {$(
         #[test]
         fn $name() {
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/spec/", $file, ".wast");
-            let src = std::fs::read_to_string(path).expect("read vendored .wast");
-            let report = run_wast(concat!("spec_", $file), &src);
-            assert!(report.executed > 0, "{}: nothing was executed", $file);
+            replay_vendored(concat!("spec_", $file), $file);
         }
     )+};
 }
@@ -1335,10 +1341,7 @@ macro_rules! typed_spec_test {
         #[test]
         fn $name() {
             TYPED_TRAPS.set(true);
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/spec/", $file, ".wast");
-            let src = std::fs::read_to_string(path).expect("read vendored .wast");
-            let report = run_wast(concat!("spec_typed_", $file), &src);
-            assert!(report.executed > 0, "{}: nothing was executed", $file);
+            replay_vendored(concat!("spec_typed_", $file), $file);
         }
     )+};
 }
