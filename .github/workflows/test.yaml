@@ -76,16 +76,16 @@ jobs:
           key: testcache-${{ runner.os }}-${{ github.run_id }}
           restore-keys: testcache-${{ runner.os }}-
 
-      # The Rust wasi-threads E2E test must run here, not skip (see
-      # docs/wasi-threads-e2e.md). The wasi-sdk tests skip here; the
-      # e2e-wasi-sdk job runs them. The full suite runs on stable only; beta and
-      # nightly just have to compile it.
       # Entries older than this were not used by the run below (a hit refreshes the mtime): the
       # prune step before the save drops them.
       - name: Record the start of the test run
         if: matrix.rust == 'stable'
         run: echo "WASM2RS_TESTCACHE_RUN_START=$(date +%s)" >> "$GITHUB_ENV"
 
+      # The Rust wasi-threads E2E test must run here, not skip (see
+      # docs/wasi-threads-e2e.md). The wasi-sdk tests skip here; the
+      # e2e-wasi-sdk job runs them. The full suite runs on stable only; beta and
+      # nightly just have to compile it.
       - name: Run cargo test
         if: matrix.rust == 'stable'
         run: cargo test --release --workspace

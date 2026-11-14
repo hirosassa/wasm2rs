@@ -263,7 +263,10 @@ fn wasi_lib() -> &'static WasiLib {
         let digest = h.finish();
         let publish = |ext: &str, bytes: &[u8]| {
             let path = cache_dir.join(format!("libwasm2rs_wasi-{digest:016x}.{ext}"));
-            if !path.exists() {
+            if path.exists() {
+                // a reused copy counts as used, or `prune_unused` would drop it before CI saves
+                prune::touch(&path);
+            } else {
                 let staged = cache_dir.join(format!(
                     "libwasm2rs_wasi-{digest:016x}-{}.{ext}.tmp",
                     std::process::id()
