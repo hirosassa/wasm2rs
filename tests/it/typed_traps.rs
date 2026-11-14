@@ -816,3 +816,22 @@ fn unshared_atomic_alignment_includes_the_static_offset() {
         ),
     );
 }
+
+#[test]
+fn unshared_atomic_store_evaluates_its_value_before_the_alignment_trap() {
+    // The stored value traps (out of bounds) while the store address is also
+    // misaligned: the operand runs first, so its trap wins.
+    compile_run_with(
+        "unshared_atomic_align_order",
+        r#"(module (memory 1 1)
+            (func (export "st") (param i32)
+              (i32.atomic.store (i32.const 2) (i32.load (local.get 0)))))"#,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            assert!(matches!(trap_of(|| inst.st(65536)), Wasm2RsTrap::OutOfBoundsMemoryAccess));
+            assert!(matches!(trap_of(|| inst.st(0)), Wasm2RsTrap::UnalignedAtomicAccess));"#
+        ),
+    );
+}

@@ -251,10 +251,10 @@ impl SharedMemory {
         if addr % width as u64 != 0 {
             panic!("unaligned atomic access");
         }
-        let in_bounds = usize::try_from(addr)
+        let Some(start) = usize::try_from(addr)
             .ok()
-            .filter(|start| start.checked_add(width).is_some_and(|end| end <= len));
-        let Some(start) = in_bounds else {
+            .filter(|start| start.checked_add(width).is_some_and(|end| end <= len))
+        else {
             panic!("out of bounds atomic access");
         };
         // SAFETY: `start + width <= len <= cap`.

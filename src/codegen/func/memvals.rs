@@ -335,8 +335,9 @@ impl<'a> super::FuncGen<'a> {
         // The trap is a statement of its own: keep it after any earlier pending
         // operand that may trap, and freeze the operands so they run before it.
         self.spill_nonstable()?;
-        let top = self.stack.len();
-        let idx = top
+        let idx = self
+            .stack
+            .len()
             .checked_sub(above + 1)
             .ok_or(TranspileError::StackUnderflow)?;
         let addr_code = self
