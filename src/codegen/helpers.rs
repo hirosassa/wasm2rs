@@ -1,3 +1,4 @@
+use super::runtime::source_lines;
 use super::{Helper, WASM_MAX_PAGES, WASM_PAGE_SIZE};
 
 /// The accessor pair `(mem(), mem_mut())` naming linear memory `mem`: memory 0
@@ -443,379 +444,7 @@ pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
 /// method name, `@R` / `@W` the read / write accessors of the memory bytes, and
 /// `@ADDR` / `@OFF` / `@EA` the address operand types and effective address.
 fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
-    let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     match helper {
-        Helper::LoadI32 => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i32 {",
-            "    let a = @EA;",
-            "    i32::from_le_bytes(@R[a..a + 4].try_into().unwrap())",
-            "}",
-        ]),
-        Helper::Load8U => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i32 {",
-            "    let a = @EA;",
-            "    @R[a] as i32",
-            "}",
-        ]),
-        Helper::Load8S => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i32 {",
-            "    let a = @EA;",
-            "    @R[a] as i8 as i32",
-            "}",
-        ]),
-        Helper::Load16U => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i32 {",
-            "    let a = @EA;",
-            "    u16::from_le_bytes(@R[a..a + 2].try_into().unwrap()) as i32",
-            "}",
-        ]),
-        Helper::Load16S => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i32 {",
-            "    let a = @EA;",
-            "    i16::from_le_bytes(@R[a..a + 2].try_into().unwrap()) as i32",
-            "}",
-        ]),
-        Helper::StoreI32 => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i32) {",
-            "    let a = @EA;",
-            "    @W[a..a + 4].copy_from_slice(&value.to_le_bytes());",
-            "}",
-        ]),
-        Helper::Store8 => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i32) {",
-            "    let a = @EA;",
-            "    @W[a] = value as u8;",
-            "}",
-        ]),
-        Helper::Store16 => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i32) {",
-            "    let a = @EA;",
-            "    @W[a..a + 2].copy_from_slice(&(value as u16).to_le_bytes());",
-            "}",
-        ]),
-        Helper::LoadI64 => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
-            "    let a = @EA;",
-            "    i64::from_le_bytes(@R[a..a + 8].try_into().unwrap())",
-            "}",
-        ]),
-        Helper::LoadF32 => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> f32 {",
-            "    let a = @EA;",
-            "    f32::from_le_bytes(@R[a..a + 4].try_into().unwrap())",
-            "}",
-        ]),
-        Helper::LoadF64 => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> f64 {",
-            "    let a = @EA;",
-            "    f64::from_le_bytes(@R[a..a + 8].try_into().unwrap())",
-            "}",
-        ]),
-        Helper::Load8UI64 => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
-            "    let a = @EA;",
-            "    @R[a] as i64",
-            "}",
-        ]),
-        Helper::Load8SI64 => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
-            "    let a = @EA;",
-            "    @R[a] as i8 as i64",
-            "}",
-        ]),
-        Helper::Load16UI64 => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
-            "    let a = @EA;",
-            "    u16::from_le_bytes(@R[a..a + 2].try_into().unwrap()) as i64",
-            "}",
-        ]),
-        Helper::Load16SI64 => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
-            "    let a = @EA;",
-            "    i16::from_le_bytes(@R[a..a + 2].try_into().unwrap()) as i64",
-            "}",
-        ]),
-        Helper::Load32UI64 => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
-            "    let a = @EA;",
-            "    u32::from_le_bytes(@R[a..a + 4].try_into().unwrap()) as i64",
-            "}",
-        ]),
-        Helper::Load32SI64 => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> i64 {",
-            "    let a = @EA;",
-            "    i32::from_le_bytes(@R[a..a + 4].try_into().unwrap()) as i64",
-            "}",
-        ]),
-        Helper::StoreI64 => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i64) {",
-            "    let a = @EA;",
-            "    @W[a..a + 8].copy_from_slice(&value.to_le_bytes());",
-            "}",
-        ]),
-        Helper::StoreF32 => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: f32) {",
-            "    let a = @EA;",
-            "    @W[a..a + 4].copy_from_slice(&value.to_le_bytes());",
-            "}",
-        ]),
-        Helper::StoreF64 => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: f64) {",
-            "    let a = @EA;",
-            "    @W[a..a + 8].copy_from_slice(&value.to_le_bytes());",
-            "}",
-        ]),
-        Helper::Store8I64 => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i64) {",
-            "    let a = @EA;",
-            "    @W[a] = value as u8;",
-            "}",
-        ]),
-        Helper::Store16I64 => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i64) {",
-            "    let a = @EA;",
-            "    @W[a..a + 2].copy_from_slice(&(value as u16).to_le_bytes());",
-            "}",
-        ]),
-        Helper::Store32I64 => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: i64) {",
-            "    let a = @EA;",
-            "    @W[a..a + 4].copy_from_slice(&(value as u32).to_le_bytes());",
-            "}",
-        ]),
-        // A v128 load/store moves 16 bytes to/from memory as a little-endian
-        // `u128`; the slice access is bounds-checked, so an out-of-range access
-        // panics (a wasm trap).
-        Helper::LoadV128 => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    let mut b = [0u8; 16];",
-            "    b.copy_from_slice(&@R[a..a + 16]);",
-            "    u128::from_le_bytes(b)",
-            "}",
-        ]),
-        Helper::StoreV128 => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: u128) {",
-            "    let a = @EA;",
-            "    @W[a..a + 16].copy_from_slice(&value.to_le_bytes());",
-            "}",
-        ]),
-        // `load*_splat` reads one element and broadcasts it to every lane;
-        // `load*_zero` reads one into the low lane and zeroes the rest. Each
-        // access is bounds-checked, so an out-of-range read traps.
-        Helper::Load8Splat => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    u128::from_le_bytes([@R[a]; 16])",
-            "}",
-        ]),
-        Helper::Load16Splat => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    let mut lane = [0u8; 2];",
-            "    lane.copy_from_slice(&@R[a..a + 2]);",
-            "    let mut b = [0u8; 16];",
-            "    let mut i = 0;",
-            "    while i < 16 {",
-            "        b[i..i + 2].copy_from_slice(&lane);",
-            "        i += 2;",
-            "    }",
-            "    u128::from_le_bytes(b)",
-            "}",
-        ]),
-        Helper::Load32Splat => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    let mut lane = [0u8; 4];",
-            "    lane.copy_from_slice(&@R[a..a + 4]);",
-            "    let mut b = [0u8; 16];",
-            "    let mut i = 0;",
-            "    while i < 16 {",
-            "        b[i..i + 4].copy_from_slice(&lane);",
-            "        i += 4;",
-            "    }",
-            "    u128::from_le_bytes(b)",
-            "}",
-        ]),
-        Helper::Load64Splat => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    let mut b = [0u8; 16];",
-            "    b[0..8].copy_from_slice(&@R[a..a + 8]);",
-            "    b.copy_within(0..8, 8);",
-            "    u128::from_le_bytes(b)",
-            "}",
-        ]),
-        Helper::Load32Zero => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    let mut b = [0u8; 16];",
-            "    b[0..4].copy_from_slice(&@R[a..a + 4]);",
-            "    u128::from_le_bytes(b)",
-            "}",
-        ]),
-        Helper::Load64Zero => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    let mut b = [0u8; 16];",
-            "    b[0..8].copy_from_slice(&@R[a..a + 8]);",
-            "    u128::from_le_bytes(b)",
-            "}",
-        ]),
-        // `load{8x8,16x4,32x2}_{s,u}` read eight bytes and widen each source lane
-        // to a double-width lane: `_s` sign-extends, `_u` zero-extends. The eight
-        // bytes are bounds-checked, so an out-of-range read traps.
-        Helper::Load8x8S => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    let mut r = [0u8; 16];",
-            "    let mut i = 0;",
-            "    while i < 8 {",
-            "        let x = @R[a + i] as i8 as i16;",
-            "        r[i * 2..i * 2 + 2].copy_from_slice(&x.to_le_bytes());",
-            "        i += 1;",
-            "    }",
-            "    u128::from_le_bytes(r)",
-            "}",
-        ]),
-        Helper::Load8x8U => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    let mut r = [0u8; 16];",
-            "    let mut i = 0;",
-            "    while i < 8 {",
-            "        let x = @R[a + i] as u16;",
-            "        r[i * 2..i * 2 + 2].copy_from_slice(&x.to_le_bytes());",
-            "        i += 1;",
-            "    }",
-            "    u128::from_le_bytes(r)",
-            "}",
-        ]),
-        Helper::Load16x4S => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    let mut r = [0u8; 16];",
-            "    let mut i = 0;",
-            "    while i < 4 {",
-            "        let s = a + i * 2;",
-            "        let x = i16::from_le_bytes([@R[s], @R[s + 1]]) as i32;",
-            "        r[i * 4..i * 4 + 4].copy_from_slice(&x.to_le_bytes());",
-            "        i += 1;",
-            "    }",
-            "    u128::from_le_bytes(r)",
-            "}",
-        ]),
-        Helper::Load16x4U => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    let mut src = [0u8; 8];",
-            "    src.copy_from_slice(&@R[a..a + 8]);",
-            "    let mut r = [0u8; 16];",
-            "    let mut i = 0;",
-            "    while i < 4 {",
-            "        let s = i * 2;",
-            "        let x = u16::from_le_bytes([src[s], src[s + 1]]) as u32;",
-            "        r[i * 4..i * 4 + 4].copy_from_slice(&x.to_le_bytes());",
-            "        i += 1;",
-            "    }",
-            "    u128::from_le_bytes(r)",
-            "}",
-        ]),
-        Helper::Load32x2S => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    let mut r = [0u8; 16];",
-            "    let mut i = 0;",
-            "    while i < 2 {",
-            "        let s = a + i * 4;",
-            "        let x = i32::from_le_bytes([@R[s], @R[s + 1], @R[s + 2], @R[s + 3]]) as i64;",
-            "        r[i * 8..i * 8 + 8].copy_from_slice(&x.to_le_bytes());",
-            "        i += 1;",
-            "    }",
-            "    u128::from_le_bytes(r)",
-            "}",
-        ]),
-        Helper::Load32x2U => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {",
-            "    let a = @EA;",
-            "    let mut src = [0u8; 8];",
-            "    src.copy_from_slice(&@R[a..a + 8]);",
-            "    let mut r = [0u8; 16];",
-            "    let mut i = 0;",
-            "    while i < 2 {",
-            "        let s = i * 4;",
-            "        let x = u32::from_le_bytes([src[s], src[s + 1], src[s + 2], src[s + 3]]) as u64;",
-            "        r[i * 8..i * 8 + 8].copy_from_slice(&x.to_le_bytes());",
-            "        i += 1;",
-            "    }",
-            "    u128::from_le_bytes(r)",
-            "}",
-        ]),
-        // `load*_lane` replaces one lane of `value` with an element read from
-        // memory; `store*_lane` writes one lane of `value` back to memory. `lane`
-        // is a validated lane index, so the byte range is always in bounds.
-        Helper::Load8Lane => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) -> u128 {",
-            "    let a = @EA;",
-            "    let mut b = value.to_le_bytes();",
-            "    b[lane] = @R[a];",
-            "    u128::from_le_bytes(b)",
-            "}",
-        ]),
-        Helper::Load16Lane => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) -> u128 {",
-            "    let a = @EA;",
-            "    let o = lane * 2;",
-            "    let mut b = value.to_le_bytes();",
-            "    b[o..o + 2].copy_from_slice(&@R[a..a + 2]);",
-            "    u128::from_le_bytes(b)",
-            "}",
-        ]),
-        Helper::Load32Lane => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) -> u128 {",
-            "    let a = @EA;",
-            "    let o = lane * 4;",
-            "    let mut b = value.to_le_bytes();",
-            "    b[o..o + 4].copy_from_slice(&@R[a..a + 4]);",
-            "    u128::from_le_bytes(b)",
-            "}",
-        ]),
-        Helper::Load64Lane => owned(&[
-            "fn @NAME(&self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) -> u128 {",
-            "    let a = @EA;",
-            "    let o = lane * 8;",
-            "    let mut b = value.to_le_bytes();",
-            "    b[o..o + 8].copy_from_slice(&@R[a..a + 8]);",
-            "    u128::from_le_bytes(b)",
-            "}",
-        ]),
-        Helper::Store8Lane => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) {",
-            "    let a = @EA;",
-            "    @W[a] = value.to_le_bytes()[lane];",
-            "}",
-        ]),
-        Helper::Store16Lane => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) {",
-            "    let a = @EA;",
-            "    let o = lane * 2;",
-            "    @W[a..a + 2].copy_from_slice(&value.to_le_bytes()[o..o + 2]);",
-            "}",
-        ]),
-        Helper::Store32Lane => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) {",
-            "    let a = @EA;",
-            "    let o = lane * 4;",
-            "    @W[a..a + 4].copy_from_slice(&value.to_le_bytes()[o..o + 4]);",
-            "}",
-        ]),
-        Helper::Store64Lane => owned(&[
-            "fn @NAME(&mut self, addr: @ADDR, offset: @OFF, value: u128, lane: usize) {",
-            "    let a = @EA;",
-            "    let o = lane * 8;",
-            "    @W[a..a + 8].copy_from_slice(&value.to_le_bytes()[o..o + 8]);",
-            "}",
-        ]),
         // `delta` is an unsigned page count. Growth past the memory's own bound,
         // `min(declared maximum, wasm32 limit of 65536 pages = 4 GiB)`, fails
         // before anything is resized, returning -1 as the wasm spec requires.
@@ -844,41 +473,45 @@ fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
             "    old_pages as i32".to_string(),
             "}".to_string(),
         ],
-        // Bulk operations. An out-of-bounds range panics on the slice access or
-        // `copy_within` (a wasm trap); `copy_within` is memmove, so overlapping
-        // source and destination copy correctly.
-        Helper::MemoryFill => owned(&[
-            "fn @NAME(&mut self, dest: u32, val: i32, len: u32) {",
-            "    let d = dest as usize;",
-            "    @W[d..d + len as usize].fill(val as u8);",
-            "}",
-        ]),
-        Helper::MemoryCopy => owned(&[
-            "fn @NAME(&mut self, dest: u32, src: u32, len: u32) {",
-            "    let s = src as usize;",
-            "    let d = dest as usize;",
-            "    @W.copy_within(s..s + len as usize, d);",
-            "}",
-        ]),
-        Helper::TableCopy => owned(&[
-            "fn @NAME(&mut self, dest: u32, src: u32, len: u32) {",
-            "    let s = src as usize;",
-            "    let d = dest as usize;",
-            "    self.table_mut().copy_within(s..s + len as usize, d);",
-            "}",
-        ]),
-        Helper::TableFill => owned(&[
-            "fn @NAME(&mut self, dest: u32, val: u32, len: u32) {",
-            "    let d = dest as usize;",
-            "    self.table_mut()[d..d + len as usize].fill(val);",
-            "}",
-        ]),
+        _ => source_lines(
+            mem_helper_template(helper_name(helper))
+                .expect("every memory helper but `Grow` has a section in mem_helpers.tpl"),
+        ),
     }
+}
+
+/// The template of the memory helper method `name`: the section that starts at
+/// its `//# name` line and runs to the next blank line (see `mem_helpers.tpl`).
+fn mem_helper_template(name: &str) -> Option<&'static str> {
+    let src = include_str!("rt_src/mem_helpers.tpl");
+    // The trailing newline keeps `r8u` from matching the header of `r8u64`.
+    let (_, section) = src.split_once(&format!("//# {name}\n"))?;
+    Some(section.split_once("\n\n").map_or(section, |(body, _)| body))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_helper_but_grow_has_exactly_one_template_section() {
+        let sections = include_str!("rt_src/mem_helpers.tpl")
+            .lines()
+            .filter(|l| l.starts_with("//# "))
+            .count();
+        assert_eq!(sections, HELPER_ORDER.len() - 1);
+        for helper in HELPER_ORDER.into_iter().filter(|h| *h != Helper::Grow) {
+            let lines = base_helper_lines(helper, None);
+            assert!(
+                lines
+                    .first()
+                    .is_some_and(|l| l.starts_with("fn @NAME(") && l.ends_with('{')),
+                "{}",
+                helper_name(helper)
+            );
+            assert_eq!(lines.last().map(String::as_str), Some("}"));
+        }
+    }
 
     #[test]
     fn rendered_helpers_never_leak_a_placeholder() {
