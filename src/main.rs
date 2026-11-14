@@ -25,7 +25,8 @@
 //! bounding peak memory (`max_bytes_per_file` caps chunk size, so a few huge
 //! functions cannot balloon one file).
 
-// Kept in source rather than in `[workspace.lints]`: wasm2rs-wasi still violates these.
+// Kept in source rather than in `[workspace.lints]`: the lints also reach the tests, which
+// panic by design. wasm2rs-wasi denies the same set (and more) in its own `lib.rs`.
 #![deny(
     clippy::panic,
     clippy::unwrap_in_result,

@@ -195,7 +195,7 @@ impl TcpOut {
             return Some(0);
         }
         let room = SEND_QUEUE_CAPACITY.saturating_sub(self.queue.borrow().len());
-        Some(room.min(4096) as u64)
+        Some(to_u64(room.min(4096)))
     }
 
     /// Appends `bytes` behind the ones queued, then drains. Never waits.
@@ -283,9 +283,9 @@ impl WasiHost {
     /// Best effort, at exit and when the host is dropped: sends what the connections' send
     /// queues still hold, waiting for the peers to read for up to 5 seconds in all.
     pub(super) fn flush_all_connections(&self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now().checked_add(Duration::from_secs(5));
         for conn in self.tcp_out.slots.iter().flatten() {
-            conn.flush_until(Some(deadline));
+            conn.flush_until(deadline);
         }
     }
 
@@ -297,8 +297,8 @@ impl WasiHost {
     /// The socket behind a handle.
     pub(super) fn socket(&mut self, handle: u32) -> &mut NetSocket {
         self.sockets
-            .get_mut(handle as usize)
-            .expect("unknown or dropped tcp-socket")
+            .get_mut(idx(handle))
+            .unwrap_or_else(|| trap("unknown or dropped tcp-socket"))
     }
 
     /// `check_address` for the address of a peer to connect or send to: also not port 0 nor an
@@ -341,17 +341,17 @@ impl WasiHost {
         let dup = |s: &TcpStream| s.try_clone().map_err(|e| net_error(&e));
         let (input, output) = (dup(&stream)?, dup(&stream)?);
         let id = self.next_tcp_out_id;
-        self.next_tcp_out_id += 1;
+        self.next_tcp_out_id = id.checked_add(1).ok_or(Net::Unknown)?;
         let out = self.tcp_out.insert(TcpOut::new(id, output));
         let state = NetState::Connected {
             stream,
             out: (out, id),
         };
-        Ok((
-            TCP_STREAM + self.tcp_in.insert(input),
-            TCP_STREAM + out,
-            state,
-        ))
+        let in_stream = TCP_STREAM
+            .checked_add(self.tcp_in.insert(input))
+            .ok_or(Net::Unknown)?;
+        let out_stream = TCP_STREAM.checked_add(out).ok_or(Net::Unknown)?;
+        Ok((in_stream, out_stream, state))
     }
 
     pub(super) fn tcp_start_bind(&mut self, handle: u32, addr: SocketAddr) -> Result<(), Net> {
@@ -588,8 +588,8 @@ impl WasiHost {
     /// The UDP socket behind a handle.
     pub(super) fn udp_socket(&mut self, handle: u32) -> &mut UdpSock {
         self.udp_sockets
-            .get_mut(handle as usize)
-            .expect("unknown or dropped udp-socket")
+            .get_mut(idx(handle))
+            .unwrap_or_else(|| trap("unknown or dropped udp-socket"))
     }
 
     pub(super) fn udp_start_bind(&mut self, handle: u32, addr: SocketAddr) -> Result<(), Net> {
@@ -659,7 +659,8 @@ impl WasiHost {
         let socket = Arc::clone(socket);
         // the streams of earlier calls are stale from now on
         let current = Arc::clone(&sock.generation);
-        let generation = current.fetch_add(1, Ordering::SeqCst) + 1;
+        // generations wrap like the counter itself: only inequality with an older one matters
+        let generation = current.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
         let end = || UdpEnd {
             ipv6,
             socket: Arc::clone(&socket),
@@ -686,8 +687,11 @@ impl WasiHost {
             match end.socket.peek_from(&mut byte) {
                 Ok((_, from)) if from_peer(end.remote, from) => return true,
                 Ok(_) => {
-                    // not for this stream: take it off the queue
-                    let _ = end.socket.recv_from(&mut byte);
+                    // not for this stream: take it off the queue; a failure is what the next
+                    // peek reports too
+                    if let Err(e) = end.socket.recv_from(&mut byte) {
+                        return e.kind() != std::io::ErrorKind::WouldBlock;
+                    }
                 }
                 Err(e) => return e.kind() != std::io::ErrorKind::WouldBlock,
             }
@@ -703,14 +707,19 @@ impl WasiHost {
     ) -> Result<Vec<(Vec<u8>, SocketAddr)>, Net> {
         let end = self
             .udp_in
-            .get(slot as usize)
-            .expect("unknown or dropped incoming-datagram-stream");
+            .get(idx(slot))
+            .unwrap_or_else(|| trap("unknown or dropped incoming-datagram-stream"));
         end.require_current();
         let mut got = Vec::new();
         let mut buf = vec![0u8; 65536];
-        while (got.len() as u64) < max {
+        while to_u64(got.len()) < max {
             match end.socket.recv_from(&mut buf) {
-                Ok((n, from)) if from_peer(end.remote, from) => got.push((buf[..n].to_vec(), from)),
+                Ok((n, from)) if from_peer(end.remote, from) => {
+                    let data = buf
+                        .get(..n)
+                        .unwrap_or_else(|| trap("recv_from read past its buffer"));
+                    got.push((data.to_vec(), from));
+                }
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) if got.is_empty() => return Err(net_error(&e)),
@@ -724,8 +733,8 @@ impl WasiHost {
     pub(super) fn udp_check_send(&self, slot: u32) {
         let end = self
             .udp_out
-            .get(slot as usize)
-            .expect("unknown or dropped outgoing-datagram-stream");
+            .get(idx(slot))
+            .unwrap_or_else(|| trap("unknown or dropped outgoing-datagram-stream"));
         end.require_current();
     }
 
@@ -739,13 +748,13 @@ impl WasiHost {
         datagrams: Vec<(Vec<u8>, Option<SocketAddr>)>,
     ) -> Result<u64, Net> {
         assert!(
-            datagrams.len() as u64 <= UDP_SEND_BATCH,
+            to_u64(datagrams.len()) <= UDP_SEND_BATCH,
             "send: more datagrams than check-send permits"
         );
         let end = self
             .udp_out
-            .get(slot as usize)
-            .expect("unknown or dropped outgoing-datagram-stream");
+            .get(idx(slot))
+            .unwrap_or_else(|| trap("unknown or dropped outgoing-datagram-stream"));
         end.require_current();
         let max = if end.ipv6 {
             UDP_MAX_PAYLOAD_V6
@@ -774,7 +783,8 @@ impl WasiHost {
                 Err(e) => return Err(e),
             };
             match end.socket.send_to(&data, to) {
-                Ok(_) => sent += 1,
+                // at most the batch size, which `check-send` bounds
+                Ok(_) => sent = sent.saturating_add(1),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) if sent == 0 => return Err(net_error(&e)),
                 Err(_) => break,

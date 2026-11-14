@@ -3,6 +3,7 @@
 //! `future-incoming-response` and `incoming-body`, and the buffer behind `outgoing-body`.
 
 use super::NetworkPolicy;
+use super::slab::to_u64;
 use super::sources::{HttpClient, HttpClientError, HttpRequest, HttpResponse, ResponseTrailers};
 use crate::wasi_http_types::{ErrorCode, HeaderError, Method, Scheme};
 use std::collections::VecDeque;
@@ -605,11 +606,11 @@ impl OutBodyHandle {
         // A full body still permits a write: 0 would make a guest that waits on the stream
         // and asks again spin for ever, while the write that passes the limit fails with
         // `HTTP-request-body-size`.
-        Ok(if room == 0 {
+        Ok(to_u64(if room == 0 {
             WRITE_PERMIT
         } else {
             room.min(WRITE_PERMIT)
-        } as u64)
+        }))
     }
 
     /// Appends `contents`; a body that would pass the limit fails for good instead.
@@ -618,7 +619,7 @@ impl OutBodyHandle {
         state.check_not_failed()?;
         let size = state.bytes.len().saturating_add(contents.len());
         if size > self.0.limit {
-            let code = (self.0.too_large)(Some(size as u64));
+            let code = (self.0.too_large)(Some(to_u64(size)));
             self.settle(state, OutPhase::Failed(code.clone()));
             return Err(code);
         }
@@ -690,7 +691,8 @@ impl OutBodyHandle {
         if buf.is_empty() {
             return Ok(0);
         }
-        let deadline = idle.map(|d| Instant::now() + d);
+        // an idle timeout too large for an `Instant` never elapses
+        let deadline = idle.and_then(|d| Instant::now().checked_add(d));
         let mut state = lock(&self.0.state);
         loop {
             if !state.bytes.is_empty() {

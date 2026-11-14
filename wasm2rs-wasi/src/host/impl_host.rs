@@ -55,7 +55,7 @@ impl Host for WasiHost {
     /// The message of the failure behind an `error` handle (an unknown one is empty).
     fn wasi_io_error_method_error_to_debug_string(&mut self, self_: Error) -> String {
         self.errors
-            .get(self_.0 as usize)
+            .get(idx(self_.0))
             .map(|e| e.message.clone())
             .unwrap_or_default()
     }
@@ -63,11 +63,11 @@ impl Host for WasiHost {
     /// The filesystem `error-code` behind an `error` handle: only a failure of a file stream
     /// has one (`None` for a connection's or stdout's, and for a handle the host does not hold).
     fn wasi_filesystem_types_filesystem_error_code(&mut self, err: Error) -> Option<FsErrorCode> {
-        self.errors.get(err.0 as usize)?.fs.map(FsErrorCode::from)
+        self.errors.get(idx(err.0))?.fs.map(FsErrorCode::from)
     }
 
     fn wasi_io_error_resource_drop_error(&mut self, handle: Error) {
-        self.errors.remove(handle.0 as usize);
+        self.errors.remove(idx(handle.0));
     }
 
     fn wasi_http_types_constructor_fields(&mut self) -> Fields {
@@ -129,7 +129,9 @@ impl Host for WasiHost {
     /// Takes over the `headers` handle's contents: the guest gave the resource away.
     fn wasi_http_types_constructor_outgoing_request(&mut self, headers: Fields) -> OutgoingRequest {
         let fields = self.http_take_fields(headers);
-        OutgoingRequest(self.http_requests.insert(HttpOutgoingRequest::new(fields)) as u32)
+        OutgoingRequest(to_handle(
+            self.http_requests.insert(HttpOutgoingRequest::new(fields)),
+        ))
     }
 
     /// The request's body, buffered until the guest finishes it; it can be asked for once.
@@ -153,7 +155,10 @@ impl Host for WasiHost {
         if !self.http_out_body_mut(self_).take_stream() {
             return Err(());
         }
-        let handle = u32::try_from(HTTP_OUT_STREAM + self_.0 as usize).map_err(|_| ())?;
+        let handle = HTTP_OUT_STREAM
+            .checked_add(idx(self_.0))
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or(())?;
         Ok(OutputStream(handle))
     }
 
@@ -167,11 +172,11 @@ impl Host for WasiHost {
     ) -> Result<(), HttpErrorCode> {
         let body = self
             .http_out_bodies
-            .take(this.0 as usize)
+            .take(idx(this.0))
             .unwrap_or_else(|| http_missing("outgoing-body"));
         let trailers = trailers.map(|handle| {
             self.http_fields
-                .take(handle.0 as usize)
+                .take(idx(handle.0))
                 .unwrap_or_else(|| http_missing("fields"))
         });
         let entries = trailers.map(|t| t.entries());
@@ -226,14 +231,14 @@ impl Host for WasiHost {
     ) -> Result<IncomingBody, ()> {
         let request = self
             .http_in_requests
-            .get_mut(self_.0 as usize)
+            .get_mut(idx(self_.0))
             .unwrap_or_else(|| http_missing("incoming-request"));
         let body = request.body.take().ok_or(())?;
         let trailers = request.trailers.take();
         let reader = Box::new(std::io::Cursor::new(body));
         let mut body = HttpIncomingBody::spawn(reader, None);
         body.trailers = trailers;
-        Ok(IncomingBody(self.http_bodies.insert(body) as u32))
+        Ok(IncomingBody(to_handle(self.http_bodies.insert(body))))
     }
 
     /// Takes over the `headers` handle's contents: the guest gave the resource away.
@@ -242,10 +247,10 @@ impl Host for WasiHost {
         headers: Fields,
     ) -> OutgoingResponse {
         let fields = self.http_take_fields(headers);
-        OutgoingResponse(
+        OutgoingResponse(to_handle(
             self.http_out_responses
-                .insert(HttpOutgoingResponse::new(fields)) as u32,
-        )
+                .insert(HttpOutgoingResponse::new(fields)),
+        ))
     }
 
     fn wasi_http_types_method_outgoing_response_status_code(
@@ -298,7 +303,7 @@ impl Host for WasiHost {
     ) {
         let answer = response.map(|handle| {
             self.http_out_responses
-                .take(handle.0 as usize)
+                .take(idx(handle.0))
                 .unwrap_or_else(|| http_missing("outgoing-response"))
         });
         *self
@@ -308,11 +313,11 @@ impl Host for WasiHost {
     }
 
     fn wasi_http_types_resource_drop_incoming_request(&mut self, handle: IncomingRequest) {
-        self.http_in_requests.remove(handle.0 as usize);
+        self.http_in_requests.remove(idx(handle.0));
     }
 
     fn wasi_http_types_resource_drop_outgoing_response(&mut self, handle: OutgoingResponse) {
-        self.http_out_responses.remove(handle.0 as usize);
+        self.http_out_responses.remove(idx(handle.0));
     }
 
     /// The slot is the embedder's: `take_response` frees it, so a guest that drops the
@@ -408,7 +413,7 @@ impl Host for WasiHost {
     }
 
     fn wasi_http_types_constructor_request_options(&mut self) -> RequestOptions {
-        RequestOptions(self.http_options.insert(HttpOptions::default()) as u32)
+        RequestOptions(to_handle(self.http_options.insert(HttpOptions::default())))
     }
 
     fn wasi_http_types_method_request_options_connect_timeout(
@@ -460,15 +465,15 @@ impl Host for WasiHost {
     }
 
     fn wasi_http_types_resource_drop_fields(&mut self, handle: Fields) {
-        self.http_fields.remove(handle.0 as usize);
+        self.http_fields.remove(idx(handle.0));
     }
 
     fn wasi_http_types_resource_drop_request_options(&mut self, handle: RequestOptions) {
-        self.http_options.remove(handle.0 as usize);
+        self.http_options.remove(idx(handle.0));
     }
 
     fn wasi_http_types_resource_drop_outgoing_request(&mut self, handle: OutgoingRequest) {
-        self.http_requests.remove(handle.0 as usize);
+        self.http_requests.remove(idx(handle.0));
     }
 
     fn wasi_http_outgoing_handler_handle(
@@ -483,9 +488,7 @@ impl Host for WasiHost {
         &mut self,
         self_: FutureIncomingResponse,
     ) -> Pollable {
-        self.subscribe_wait(Wait::HttpResponse(
-            self.http_futures.slot_ref(self_.0 as usize),
-        ))
+        self.subscribe_wait(Wait::HttpResponse(self.http_futures.slot_ref(idx(self_.0))))
     }
 
     /// `None` while the request runs; then the result once (`Some(Err(()))` afterwards). A
@@ -500,7 +503,7 @@ impl Host for WasiHost {
                 let slot = self
                     .http_responses
                     .insert(HttpIncomingResponse::new(response));
-                Ok(IncomingResponse(slot as u32))
+                Ok(IncomingResponse(to_handle(slot)))
             }
             Err(code) => Err(code),
         }))
@@ -524,10 +527,10 @@ impl Host for WasiHost {
         self_: IncomingResponse,
     ) -> Result<IncomingBody, ()> {
         let (reader, trailers) = self.http_response_mut(self_).take_body().ok_or(())?;
-        Ok(IncomingBody(
+        Ok(IncomingBody(to_handle(
             self.http_bodies
-                .insert(HttpIncomingBody::spawn(reader, trailers)) as u32,
-        ))
+                .insert(HttpIncomingBody::spawn(reader, trailers)),
+        )))
     }
 
     /// The body's input stream (`HTTP_STREAM + slot`); it can be taken once.
@@ -538,7 +541,10 @@ impl Host for WasiHost {
         if !self.http_body_mut(self_).take_stream() {
             return Err(());
         }
-        let handle = u32::try_from(HTTP_STREAM + self_.0 as usize).map_err(|_| ())?;
+        let handle = HTTP_STREAM
+            .checked_add(idx(self_.0))
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or(())?;
         Ok(InputStream(handle))
     }
 
@@ -549,37 +555,37 @@ impl Host for WasiHost {
     ) -> FutureTrailers {
         let mut body = self
             .http_bodies
-            .take(this.0 as usize)
+            .take(idx(this.0))
             .unwrap_or_else(|| http_missing("incoming-body"));
         let trailers = body
             .trailers
             .take()
             .or_else(|| body.take_received_trailers());
-        FutureTrailers(self.http_trailers.insert(Some(trailers)) as u32)
+        FutureTrailers(to_handle(self.http_trailers.insert(Some(trailers))))
     }
 
     /// Only failures of a response body have an `error-code` (`None` for any other `error`).
     fn wasi_http_types_http_error_code(&mut self, err: Error) -> Option<HttpErrorCode> {
-        self.errors.get(err.0 as usize)?.http.clone()
+        self.errors.get(idx(err.0))?.http.clone()
     }
 
     fn wasi_http_types_resource_drop_future_incoming_response(
         &mut self,
         handle: FutureIncomingResponse,
     ) {
-        self.http_futures.take(handle.0 as usize);
+        self.http_futures.take(idx(handle.0));
     }
 
     fn wasi_http_types_resource_drop_incoming_response(&mut self, handle: IncomingResponse) {
-        self.http_responses.remove(handle.0 as usize);
+        self.http_responses.remove(idx(handle.0));
     }
 
     fn wasi_http_types_resource_drop_incoming_body(&mut self, handle: IncomingBody) {
-        self.http_bodies.take(handle.0 as usize);
+        self.http_bodies.take(idx(handle.0));
     }
 
     fn wasi_http_types_resource_drop_outgoing_body(&mut self, handle: OutgoingBody) {
-        self.http_out_bodies.take(handle.0 as usize);
+        self.http_out_bodies.take(idx(handle.0));
     }
 
     fn wasi_http_types_method_future_trailers_subscribe(
@@ -587,7 +593,7 @@ impl Host for WasiHost {
         self_: FutureTrailers,
     ) -> Pollable {
         self.http_trailers
-            .get(self_.0 as usize)
+            .get(idx(self_.0))
             .unwrap_or_else(|| http_missing("future-trailers"));
         self.subscribe(None)
     }
@@ -599,7 +605,7 @@ impl Host for WasiHost {
     ) -> Option<Result<Result<Option<Fields>, HttpErrorCode>, ()>> {
         let slot = self
             .http_trailers
-            .get_mut(self_.0 as usize)
+            .get_mut(idx(self_.0))
             .unwrap_or_else(|| http_missing("future-trailers"));
         let Some(trailers) = slot.take() else {
             return Some(Err(()));
@@ -610,11 +616,11 @@ impl Host for WasiHost {
     }
 
     fn wasi_http_types_resource_drop_future_trailers(&mut self, handle: FutureTrailers) {
-        self.http_trailers.remove(handle.0 as usize);
+        self.http_trailers.remove(idx(handle.0));
     }
 
     fn wasi_io_poll_resource_drop_pollable(&mut self, handle: Pollable) {
-        self.pollables.remove(handle.0 as usize);
+        self.pollables.remove(idx(handle.0));
     }
 
     fn wasi_io_streams_resource_drop_input_stream(&mut self, handle: InputStream) {
@@ -705,7 +711,7 @@ impl Host for WasiHost {
     /// Whether the pollable is ready now, without waiting.
     fn wasi_io_poll_method_pollable_ready(&mut self, self_: Pollable) -> bool {
         let (buf, _) = &*self.stdin;
-        let buf = buf.lock().unwrap();
+        let buf = lock_stdin(buf);
         self.wait_of(self_).is_ready(Instant::now(), &buf, self)
     }
 
@@ -740,7 +746,7 @@ impl Host for WasiHost {
             contents.len() <= 4096,
             "write: more than check-write allows"
         );
-        self.assert_within_permit(self_.0, contents.len() as u64, "write")?;
+        self.assert_within_permit(self_.0, to_u64(contents.len()), "write")?;
         self.write_stream(self_.0, &contents, false)
     }
 
@@ -785,7 +791,7 @@ impl Host for WasiHost {
     ) -> Result<(), StreamError> {
         assert!(len <= 4096, "write-zeroes: more than check-write allows");
         self.assert_within_permit(self_.0, len, "write-zeroes")?;
-        self.write_stream(self_.0, &vec![0u8; len as usize], false)
+        self.write_stream(self_.0, &vec![0u8; to_usize(len)], false)
     }
 
     /// `write-zeroes` then flush; a `len` over 4096 traps. Waits on a connection like
@@ -799,7 +805,7 @@ impl Host for WasiHost {
             len <= 4096,
             "blocking-write-zeroes-and-flush: more than check-write allows"
         );
-        self.write_stream(self_.0, &vec![0u8; len as usize], true)?;
+        self.write_stream(self_.0, &vec![0u8; to_usize(len)], true)?;
         self.flush_stream(self_.0, true)
     }
 
@@ -828,7 +834,7 @@ impl Host for WasiHost {
         if !data.is_empty() {
             self.write_stream(self_.0, &data, false)?;
         }
-        Ok(data.len() as u64)
+        Ok(to_u64(data.len()))
     }
 
     /// Like `splice`, but waits while an open `src` (stdin or a connection) has nothing yet,
@@ -848,7 +854,7 @@ impl Host for WasiHost {
         if !data.is_empty() {
             self.write_stream(self_.0, &data, false)?;
         }
-        Ok(data.len() as u64)
+        Ok(to_u64(data.len()))
     }
 
     /// Ready at once, except for a connection: it is ready while its send queue has room.
@@ -882,9 +888,9 @@ impl Host for WasiHost {
     }
 
     fn wasi_filesystem_types_resource_drop_descriptor(&mut self, handle: Descriptor) {
-        if handle.0 as usize >= self.preopens.len() {
+        if idx(handle.0) >= self.preopens.len() {
             // the preopens (the first slots) are never freed
-            self.descriptors.remove(handle.0 as usize);
+            self.descriptors.remove(idx(handle.0));
         }
     }
 
@@ -892,7 +898,7 @@ impl Host for WasiHost {
         &mut self,
         handle: DirectoryEntryStream,
     ) {
-        self.listings.remove(handle.0 as usize);
+        self.listings.remove(idx(handle.0));
     }
 
     /// The preopens with their guest names, in descriptor order.
@@ -1013,7 +1019,7 @@ impl Host for WasiHost {
             file,
             dir: opened_dir,
         });
-        Ok(Descriptor(slot as u32))
+        Ok(Descriptor(to_handle(slot)))
     }
 
     /// A new stream over the file, starting at `offset`: `is-directory` for a directory,
@@ -1025,7 +1031,7 @@ impl Host for WasiHost {
     ) -> Result<InputStream, FsErrorCode> {
         let stream = FileStream::over(self.readable_descriptor_file(self_.0)?, offset, false)?;
         let slot = self.files.insert(stream);
-        Ok(InputStream(FIRST_FILE_STREAM + slot as u32))
+        Ok(InputStream(file_stream_handle(slot)))
     }
 
     /// A new stream writing into the file from `offset`: `read-only` unless the preopen is
@@ -1308,14 +1314,15 @@ impl Host for WasiHost {
     ) -> Result<(Vec<u8>, bool), FsErrorCode> {
         const LIMIT: u64 = 1 << 20;
         let mut stream = FileStream::over(self.readable_descriptor_file(self_.0)?, offset, false)?;
-        let wanted = length.min(LIMIT) as usize;
+        let wanted = to_usize(length.min(LIMIT));
         let mut data = Vec::new();
         let mut chunk = [0u8; 8192];
         while data.len() < wanted {
-            let room = (wanted - data.len()).min(chunk.len());
-            match stream.read(&mut chunk[..room]).map_err(io_error_code)? {
+            let room = wanted.saturating_sub(data.len()).min(chunk.len());
+            let window = chunk.get_mut(..room).ok_or(FsErrorCode::Io)?;
+            match stream.read(window).map_err(io_error_code)? {
                 0 => return Ok((data, true)),
-                n => data.extend_from_slice(&chunk[..n]),
+                n => data.extend_from_slice(chunk.get(..n).ok_or(FsErrorCode::Io)?),
             }
         }
         Ok((data, false))
@@ -1334,7 +1341,7 @@ impl Host for WasiHost {
         FileStream::over(file, offset, false)?
             .write_all(&buffer)
             .map_err(io_error_code)?;
-        Ok(buffer.len() as u64)
+        Ok(to_u64(buffer.len()))
     }
 
     /// Only a hint, so nothing is done with it (the range and the advice are not checked);
@@ -1378,9 +1385,9 @@ impl Host for WasiHost {
         self_: Descriptor,
     ) -> Result<DirectoryEntryStream, FsErrorCode> {
         let entries = self.list_directory(self_.0)?;
-        Ok(DirectoryEntryStream(
-            self.listings.insert(entries.into_iter()) as u32,
-        ))
+        Ok(DirectoryEntryStream(to_handle(
+            self.listings.insert(entries.into_iter()),
+        )))
     }
 
     fn wasi_filesystem_types_method_descriptor_stat(
@@ -1433,7 +1440,7 @@ impl Host for WasiHost {
     ) -> Result<Option<DirectoryEntry>, FsErrorCode> {
         let listing = self
             .listings
-            .get_mut(self_.0 as usize)
+            .get_mut(idx(self_.0))
             .ok_or(Fs::BadDescriptor)?;
         Ok(listing
             .next()
@@ -1468,7 +1475,7 @@ impl Host for WasiHost {
         self_: InputStream,
         len: u64,
     ) -> Result<u64, StreamError> {
-        Ok(self.read_stream(self_.0, len)?.len() as u64)
+        Ok(to_u64(self.read_stream(self_.0, len)?.len()))
     }
 
     /// Like `skip`, but waits while stdin or a connection has nothing yet.
@@ -1477,7 +1484,7 @@ impl Host for WasiHost {
         self_: InputStream,
         len: u64,
     ) -> Result<u64, StreamError> {
-        Ok(self.read_stream_waiting(self_.0, len)?.len() as u64)
+        Ok(to_u64(self.read_stream_waiting(self_.0, len)?.len()))
     }
 
     fn wasi_sockets_network_resource_drop_network(&mut self, _handle: Network) {}
@@ -1497,11 +1504,11 @@ impl Host for WasiHost {
             state: NetState::Unbound,
             options: TcpOptions::default(),
         });
-        Ok(TcpSocket(slot as u32))
+        Ok(TcpSocket(to_handle(slot)))
     }
 
     fn wasi_sockets_tcp_resource_drop_tcp_socket(&mut self, handle: TcpSocket) {
-        self.sockets.remove(handle.0 as usize);
+        self.sockets.remove(idx(handle.0));
     }
 
     /// `access-denied` outside loopback unless `with_external_network` was called.
@@ -1557,7 +1564,10 @@ impl Host for WasiHost {
         self_: TcpSocket,
     ) -> Result<(InputStream, OutputStream), NetErrorCode> {
         let (input, output) = self.tcp_finish_connect(self_.0)?;
-        Ok((InputStream(input as u32), OutputStream(output as u32)))
+        Ok((
+            InputStream(to_handle(input)),
+            OutputStream(to_handle(output)),
+        ))
     }
 
     /// `would-block` if no connection is waiting.
@@ -1567,9 +1577,9 @@ impl Host for WasiHost {
     ) -> Result<(TcpSocket, InputStream, OutputStream), NetErrorCode> {
         let (socket, input, output) = self.tcp_accept(self_.0)?;
         Ok((
-            TcpSocket(socket as u32),
-            InputStream(input as u32),
-            OutputStream(output as u32),
+            TcpSocket(to_handle(socket)),
+            InputStream(to_handle(input)),
+            OutputStream(to_handle(output)),
         ))
     }
 
@@ -1582,7 +1592,7 @@ impl Host for WasiHost {
 
     /// Ready when `accept` would not block (a socket that is not listening is always ready).
     fn wasi_sockets_tcp_method_tcp_socket_subscribe(&mut self, self_: TcpSocket) -> Pollable {
-        self.subscribe_wait(Wait::TcpAccept(self.sockets.slot_ref(self_.0 as usize)))
+        self.subscribe_wait(Wait::TcpAccept(self.sockets.slot_ref(idx(self_.0))))
     }
 
     /// Ready when stdin has data or is at its end, or a connection's stream has data or is
@@ -1787,25 +1797,25 @@ impl Host for WasiHost {
             state: UdpState::Unbound,
             generation: Arc::new(AtomicU64::new(0)),
         });
-        Ok(UdpSocket(slot as u32))
+        Ok(UdpSocket(to_handle(slot)))
     }
 
     fn wasi_sockets_udp_resource_drop_udp_socket(&mut self, handle: UdpSocket) {
-        self.udp_sockets.remove(handle.0 as usize);
+        self.udp_sockets.remove(idx(handle.0));
     }
 
     fn wasi_sockets_udp_resource_drop_incoming_datagram_stream(
         &mut self,
         handle: IncomingDatagramStream,
     ) {
-        self.udp_in.remove(handle.0 as usize);
+        self.udp_in.remove(idx(handle.0));
     }
 
     fn wasi_sockets_udp_resource_drop_outgoing_datagram_stream(
         &mut self,
         handle: OutgoingDatagramStream,
     ) {
-        self.udp_out.remove(handle.0 as usize);
+        self.udp_out.remove(idx(handle.0));
     }
 
     /// `access-denied` outside loopback unless `with_external_network` was called.
@@ -1833,8 +1843,8 @@ impl Host for WasiHost {
     ) -> Result<(IncomingDatagramStream, OutgoingDatagramStream), NetErrorCode> {
         let (input, output) = self.udp_stream(self_.0, remote_address.map(socket_addr))?;
         Ok((
-            IncomingDatagramStream(input as u32),
-            OutgoingDatagramStream(output as u32),
+            IncomingDatagramStream(to_handle(input)),
+            OutgoingDatagramStream(to_handle(output)),
         ))
     }
 
@@ -1935,7 +1945,7 @@ impl Host for WasiHost {
         &mut self,
         self_: IncomingDatagramStream,
     ) -> Pollable {
-        self.subscribe_wait(Wait::UdpReadable(self.udp_in.slot_ref(self_.0 as usize)))
+        self.subscribe_wait(Wait::UdpReadable(self.udp_in.slot_ref(idx(self_.0))))
     }
 
     fn wasi_sockets_udp_method_outgoing_datagram_stream_check_send(
@@ -1974,7 +1984,9 @@ impl Host for WasiHost {
         name: String,
     ) -> Result<ResolveAddressStream, NetErrorCode> {
         let found = self.resolve_name(&name)?;
-        Ok(ResolveAddressStream(self.resolutions.insert(found) as u32))
+        Ok(ResolveAddressStream(to_handle(
+            self.resolutions.insert(found),
+        )))
     }
 
     /// The next address, `None` once they are all read; never `would-block`.
@@ -1984,8 +1996,8 @@ impl Host for WasiHost {
     ) -> Result<Option<IpAddress>, NetErrorCode> {
         let stream = self
             .resolutions
-            .get_mut(self_.0 as usize)
-            .expect("unknown or dropped resolve-address-stream");
+            .get_mut(idx(self_.0))
+            .unwrap_or_else(|| trap("unknown or dropped resolve-address-stream"));
         Ok(stream.pop_front().map(ip_address))
     }
 
@@ -2001,6 +2013,6 @@ impl Host for WasiHost {
         &mut self,
         handle: ResolveAddressStream,
     ) {
-        self.resolutions.remove(handle.0 as usize);
+        self.resolutions.remove(idx(handle.0));
     }
 }

@@ -51,7 +51,7 @@ impl FileStream {
         use std::io::{Read, Seek, SeekFrom};
         self.file.seek(SeekFrom::Start(self.pos))?;
         let n = self.file.read(buf)?;
-        self.pos += n as u64;
+        self.pos = self.pos.saturating_add(to_u64(n));
         Ok(n)
     }
 
@@ -64,7 +64,7 @@ impl FileStream {
         };
         self.pos = self.file.seek(at)?;
         self.file.write_all(bytes)?;
-        self.pos += bytes.len() as u64;
+        self.pos = self.pos.saturating_add(to_u64(bytes.len()));
         Ok(())
     }
 }
@@ -75,7 +75,7 @@ pub(super) const FIRST_FILE_STREAM: u32 = 3;
 /// The slot in `files` (input streams) or `outputs` (output streams) of a stream handle
 /// (`None` for stdin, stdout, stderr).
 pub(super) fn file_index(stream: u32) -> Option<usize> {
-    stream.checked_sub(FIRST_FILE_STREAM).map(|i| i as usize)
+    stream.checked_sub(FIRST_FILE_STREAM).map(idx)
 }
 
 /// The filesystem `error-code`s this host returns; `From<Fs> for FsErrorCode` below.
