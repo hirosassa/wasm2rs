@@ -225,14 +225,14 @@ fn a_typed_trap_in_a_spawned_thread_reports_its_cause() {
 
 #[test]
 fn a_string_panic_in_a_typed_spawned_thread_still_reaches_the_hook() {
-    // Division is a stage-2 string panic, and no helper defines `Wasm2RsTrap`
-    // in this module, so the wrapper must compile without the type.
+    // A misaligned atomic is a stage-3 string panic, and no helper defines
+    // `Wasm2RsTrap` in this module, so the wrapper must compile without the type.
     let stderr = run_trapping_child(
         "typed_trap_thread_string",
-        "(drop (i32.div_s (i32.const 1) (i32.const 0)))",
+        "(drop (i32.atomic.load (i32.const 1)))",
     );
     assert!(stderr.contains("thread 1 trapped"), "{stderr}");
-    assert!(stderr.contains("divide by zero"), "{stderr}");
+    assert!(stderr.contains("unaligned atomic access"), "{stderr}");
 }
 
 /// Typed traps with named exports, so the stage-2 modules are driven by export name.
