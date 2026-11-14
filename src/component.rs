@@ -93,13 +93,15 @@ pub fn transpile_component_with_exports(
 ) -> Result<(String, Vec<WitExport>), TranspileError> {
     let layout = scan(component)?;
     let exports = wit_exports(component)?;
-    // Whatever `options.exports` is: an async lift's entry is called through a callback loop
-    // that is not generated yet, and its built-ins would come out as plain imports.
-    if let Some(e) = exports.iter().find(|e| e.async_abi.is_some()) {
-        return Err(TranspileError::Unsupported(format!(
-            "async export `{}` (WASI 0.3: the async canonical ABI is not generated yet)",
-            e.func.name
-        )));
+    // Without `exports` nothing generates the callback loop that drives an async lift, and its
+    // built-ins would come out as plain imports.
+    let has_async = exports.iter().any(|e| e.async_abi.is_some());
+    if !options.exports && has_async {
+        return Err(TranspileError::Unsupported(
+            "an async export (WASI 0.3) needs `exports` (the callback entry is only generated \
+             with the exports glue)"
+                .into(),
+        ));
     }
     let transpile = TranspileOptions {
         named_imports: true,
@@ -115,6 +117,14 @@ pub fn transpile_component_with_exports(
     let module = match select_program(component, &layout, &exports)? {
         Program::Module(module) => module,
         Program::Linked => {
+            // The linker renames the core exports the glue calls, not the callback's.
+            if has_async {
+                return Err(TranspileError::Unsupported(
+                    "an async export (WASI 0.3) of a component with several core modules \
+                     (the callback export is not traced through linking)"
+                        .into(),
+                ));
+            }
             let code = link::transpile_linked(component, &layout, &exports, &transpile, &wit)?;
             return Ok((code, exports));
         }

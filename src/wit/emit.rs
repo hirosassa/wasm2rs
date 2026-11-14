@@ -1015,6 +1015,43 @@ fn glue_text(
             )));
         }
     }
+    // A callback export is named after its WIT function, like a sync export is after its core
+    // one (`interface#name`): its core export is `[async-lift]name`. The core method is reached
+    // through the forwarders either way.
+    let export_names: Vec<String> = exports
+        .iter()
+        .zip(export_names)
+        .map(|(e, name)| {
+            if e.async_abi.is_none() {
+                return name;
+            }
+            let wit_name = if e.func.interface.is_empty() {
+                e.func.name.clone()
+            } else {
+                format!("{}#{}", e.func.interface, e.func.name)
+            };
+            assign_export_names([(wit_name.as_str(), 0)])
+                .into_iter()
+                .next()
+                .unwrap_or(name)
+        })
+        .collect();
+    // An async export also has `{name}_start` and `{name}_callback`.
+    let mut taken = std::collections::HashSet::new();
+    for (e, name) in exports.iter().zip(&export_names) {
+        let mut methods = vec![name.clone()];
+        if e.async_abi.is_some() {
+            methods.extend([format!("{name}_start"), format!("{name}_callback")]);
+        }
+        for method in methods {
+            if !taken.insert(method.clone()) {
+                return Err(unsupported(format!(
+                    "export `{}`: its method name `{method}` clashes with another export's",
+                    e.core_export
+                )));
+            }
+        }
+    }
     let exported = options
         .exports
         .then_some((exports.as_slice(), export_names.as_slice()));
