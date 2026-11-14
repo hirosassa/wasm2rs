@@ -9,8 +9,7 @@ fn compile(test: &str, wat: &str, main_body: &str) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
 
-    let dir = std::env::temp_dir().join(format!("wasm2rs_intarith_{test}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = crate::common::scratch_dir(&format!("wasm2rs_intarith_{test}"));
     let src = dir.join("gen.rs");
     let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
 

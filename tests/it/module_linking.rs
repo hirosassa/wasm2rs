@@ -25,8 +25,7 @@ fn compile(test: &str, modules: &[(&str, &str)], extra: &str) -> std::path::Path
     program.push_str(extra);
     program.push('\n');
 
-    let dir = std::env::temp_dir().join(format!("wasm2rs_linking_{test}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = crate::common::scratch_dir(&format!("wasm2rs_linking_{test}"));
     let src = dir.join("gen.rs");
     let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
     std::fs::write(&src, &program).expect("write generated source");

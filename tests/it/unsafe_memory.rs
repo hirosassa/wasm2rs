@@ -24,8 +24,7 @@ fn transpile_unsafe(wat: &str) -> String {
 /// warnings`, run it, and assert both the build and the run succeed. `test` names
 /// a per-invocation temp directory so parallel `rustc`s do not collide.
 fn compile_and_run(test: &str, generated: &str, main_body: &str) {
-    let dir = std::env::temp_dir().join(format!("wasm2rs_unsafe_mem_{test}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = crate::common::scratch_dir(&format!("wasm2rs_unsafe_mem_{test}"));
     let src = dir.join("gen.rs");
     let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
 

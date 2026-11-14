@@ -21,8 +21,7 @@ fn generated_add_compiles_and_produces_correct_result() {
 
     let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
 
-    let dir = std::env::temp_dir().join("wasm2rs_it_add");
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = crate::common::scratch_dir("wasm2rs_it_add");
     let src = dir.join("gen.rs");
     let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
 
