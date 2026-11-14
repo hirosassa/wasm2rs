@@ -14,8 +14,8 @@
 //!   others by replacing the token `f32` (see `widen` in `runtime.rs`).
 //! - Anything that depends on the module or the options (a trap that is typed or
 //!   a string, a count, a name) stays in the renderer and is not moved here.
-//! - It may call helpers the renderer emits next to it; the stubs below stand in
-//!   for those so the file still compiles.
+//! - It may call helpers the renderer emits next to it; a stub next to it stands
+//!   in for those so the file still compiles.
 #![allow(
     dead_code,
     unsafe_code,
@@ -24,11 +24,6 @@
     clippy::restriction,
     reason = "emitted verbatim; helpers unused by some modules"
 )]
-
-/// Stands in for the cold trap helper the renderer emits beside `CallDepth`.
-fn trap_call_stack_exhausted() -> ! {
-    panic!("call stack exhausted")
-}
 
 mod delegate {
     include!("delegate.rs");
@@ -58,7 +53,10 @@ mod tc {
 }
 
 mod call_depth {
-    use super::trap_call_stack_exhausted;
+    /// Stands in for the cold trap helper the renderer emits beside `CallDepth`.
+    fn trap_call_stack_exhausted() -> ! {
+        panic!("call stack exhausted")
+    }
 
     include!("call_depth.rs");
 

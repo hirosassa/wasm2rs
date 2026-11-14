@@ -257,10 +257,18 @@ fn rt_lines(rt: Rt, typed: bool, variants: &[TrapVariant]) -> Vec<String> {
             TrapVariant::IndirectCallTypeMismatch,
             typed,
         ),
+        // wasm `min`/`max` return NaN if either operand is NaN, and when the operands
+        // are equal (notably ±0) `min` yields the negatively-signed and `max` the
+        // positively-signed value, differing from Rust's `f32::min`/`max`.
         Rt::F32Min => source_lines(include_str!("rt_src/float_min.rs")),
         Rt::F32Max => source_lines(include_str!("rt_src/float_max.rs")),
         Rt::F64Min => widen(include_str!("rt_src/float_min.rs")),
         Rt::F64Max => widen(include_str!("rt_src/float_max.rs")),
+        // A NaN result of `floor`/`ceil`/`trunc`/`nearest` (and of `demote`/`promote`,
+        // which LLVM can fold to the identity) must be quiet, but a host without
+        // hardware rounding instructions (baseline x86_64) returns a signaling NaN
+        // input unchanged. `r + r` quiets a NaN (keeping sign and payload) and only
+        // runs for NaN, so ordinary results are untouched.
         Rt::QuietF32 => source_lines(include_str!("rt_src/float_quiet.rs")),
         Rt::QuietF64 => widen(include_str!("rt_src/float_quiet.rs")),
         Rt::I32TruncF32S => trunc_lines(
@@ -403,7 +411,7 @@ fn trunc_lines(
 }
 
 /// The lines of a verbatim `rt_src` file.
-fn source_lines(src: &str) -> Vec<String> {
+pub(super) fn source_lines(src: &str) -> Vec<String> {
     src.lines().map(str::to_string).collect()
 }
 
@@ -422,18 +430,25 @@ mod tests {
 
     #[test]
     fn verbatim_files_are_emitted_as_they_are() {
-        assert_eq!(
-            render(Rt::DelegateExc),
-            include_str!("rt_src/delegate.rs").to_string()
-        );
-        assert_eq!(render(Rt::Tc), include_str!("rt_src/tc.rs").to_string());
+        assert_eq!(render(Rt::DelegateExc), include_str!("rt_src/delegate.rs"));
+        assert_eq!(render(Rt::Tc), include_str!("rt_src/tc.rs"));
     }
 
     #[test]
-    fn f64_helpers_are_the_f32_instance_widened() {
-        let min = render(Rt::F64Min);
-        assert!(min.starts_with("fn f64_min(a: f64, b: f64) -> f64 {"));
-        assert!(min.contains("return f64::NAN;") && !min.contains("f32"));
-        assert!(render(Rt::QuietF64).starts_with("fn quiet_f64(r: f64) -> f64 {"));
+    fn float_helpers_are_named_by_rt_name_and_f64_is_the_widened_f32_instance() {
+        for rt in [
+            Rt::F32Min,
+            Rt::F32Max,
+            Rt::F64Min,
+            Rt::F64Max,
+            Rt::QuietF32,
+            Rt::QuietF64,
+        ] {
+            let out = render(rt);
+            assert!(out.starts_with(&format!("fn {}(", rt_name(rt))), "{out}");
+            if matches!(rt, Rt::F64Min | Rt::F64Max | Rt::QuietF64) {
+                assert!(!out.contains("f32"), "{out}");
+            }
+        }
     }
 }

@@ -1836,10 +1836,7 @@ fn dispatch_method_block(
 /// Rust formally calls a data race. Atomic operations are real atomic
 /// instructions (sequentially consistent) and trap on a misaligned address.
 fn shared_memory_runtime_lines() -> Vec<String> {
-    include_str!("rt_src/shared_memory.rs")
-        .lines()
-        .map(|l| l.to_string())
-        .collect()
+    super::runtime::source_lines(include_str!("rt_src/shared_memory.rs"))
 }
 
 /// Whether the module needs the injected `Imports` host trait — i.e. it has a
