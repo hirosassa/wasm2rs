@@ -393,9 +393,9 @@ impl super::FuncGen<'_> {
     /// Whether `op` sits in unreachable code the cont step loops must hand to the
     /// ordinary lowering, which skips it (see `skip_dead`). Otherwise a dead
     /// `suspend`/`switch`/checkpoint would pop a polymorphic stack and emit
-    /// statements after a diverging one. The function's own outermost `end` (and a
-    /// live frame's `end`, which the loops close themselves) is the exception; an
-    /// `end` of a dead nested region is not.
+    /// statements after a diverging one. True for every dead op except an `end`
+    /// that closes a live frame (`dead_nesting == 0`): the loops' own `End` arms
+    /// handle that one, including the function's outermost `end`.
     fn skips_dead_in_cont(&self, op: &Operator<'_>) -> bool {
         !self.reachable && (!matches!(op, Operator::End) || self.dead_nesting > 0)
     }

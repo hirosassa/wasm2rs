@@ -139,3 +139,14 @@ fn dead_cross_call_checkpoint_after_infinite_loop() {
         "let mut inst = Instance::new(); assert_eq!(inst.func2(), 7);",
     );
 }
+
+#[test]
+fn dead_empty_block_before_top_level_suspend() {
+    // The dead block's `end` must not be taken for the function's: the suspend
+    // stays at depth 0 (arm-splitting path), so only the `end` bookkeeping is
+    // exercised.
+    check(
+        "cont_dead_empty_block",
+        "(loop (result i32) (br 0)) (block (nop)) suspend $yield i32.const 2",
+    );
+}
