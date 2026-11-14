@@ -79,6 +79,10 @@ pub(crate) struct BodyScan {
     /// `local.tee`. A written local is unstable (a read of it cannot be reordered
     /// past a write) and needs a `mut` binding.
     pub(crate) mutated: Vec<LocalFlags>,
+    /// Per defined function (0-based): the locals named by any `local.get`/
+    /// `local.set`/`local.tee`. A declared local outside this set is never
+    /// mentioned by the lowered body, so its zero-initialised binding is dead.
+    pub(crate) referenced: Vec<LocalFlags>,
     /// Continuation bodies: the target of a `ref.func` immediately followed by
     /// `cont.new` (the phase-4 pattern), sorted and deduplicated.
     pub(crate) cont_bodies: Vec<u32>,
@@ -219,6 +223,7 @@ impl FunctionLabelBranch {
 #[derive(Default)]
 struct FuncScan {
     mutated: LocalFlags,
+    referenced: LocalFlags,
     cont_bodies: Vec<u32>,
     suspends: bool,
     branches_to_function_label: bool,
@@ -243,6 +248,7 @@ fn scan_function(input: &FuncInput<'_>) -> Result<FuncScan, TranspileError> {
         n_locals = n_locals.saturating_add(count as usize);
     }
     scan.mutated = LocalFlags::with_len(n_locals);
+    scan.referenced = LocalFlags::with_len(n_locals);
     // `ref.func` immediately followed by `cont.new` names a continuation
     // body; any other operator breaks the adjacency, so every non-matching
     // arm clears `last_ref_func`.
@@ -274,7 +280,9 @@ fn scan_function(input: &FuncInput<'_>) -> Result<FuncScan, TranspileError> {
             }
             Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
                 scan.mutated.insert(local_index);
+                scan.referenced.insert(local_index);
             }
+            Operator::LocalGet { local_index } => scan.referenced.insert(local_index),
             Operator::Suspend { .. } | Operator::Switch { .. } => scan.suspends = true,
             Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
                 scan.calls.push(function_index);
@@ -347,6 +355,7 @@ pub(crate) fn scan_bodies(
     };
     let mut scan = BodyScan {
         mutated: Vec::with_capacity(funcs.len()),
+        referenced: Vec::with_capacity(funcs.len()),
         cont_bodies: Vec::new(),
         suspends: Vec::with_capacity(funcs.len()),
         branches_to_function_label: Vec::with_capacity(funcs.len()),
@@ -361,6 +370,7 @@ pub(crate) fn scan_bodies(
     };
     for f in per_func {
         scan.mutated.push(f.mutated);
+        scan.referenced.push(f.referenced);
         scan.cont_bodies.extend(f.cont_bodies);
         scan.suspends.push(f.suspends);
         scan.branches_to_function_label

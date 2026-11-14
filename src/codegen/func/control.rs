@@ -307,6 +307,12 @@ impl<'a> super::FuncGen<'a> {
         };
 
         self.cur = parent_buffer;
+        if !next_reachable && kind != FrameKind::If && !self.cont_step {
+            // No path leaves the region (it is not branch-targeted and does not
+            // fall through), so its result variables are never assigned and the
+            // code after it is dead: their declarations are unused.
+            Self::drop_result_decls(&mut self.cur, &results);
+        }
         self.cur.push(Node::Region(region));
 
         self.stack.truncate(parent_height);
@@ -324,6 +330,24 @@ impl<'a> super::FuncGen<'a> {
             self.dead_nesting = 0;
         }
         Ok(())
+    }
+
+    /// Remove the `let mut {name}: …` lines [`alloc_results`](Self::alloc_results)
+    /// pushed for `results`, which are the last nodes of `buffer`. Leaves the
+    /// buffer untouched unless every one is found where expected.
+    fn drop_result_decls(buffer: &mut Vec<Node>, results: &[(String, ValType)]) {
+        let Some(start) = buffer.len().checked_sub(results.len()) else {
+            return;
+        };
+        let Some(tail) = buffer.get(start..) else {
+            return;
+        };
+        let all_decls = tail.iter().zip(results).all(|(node, (name, _))| {
+            matches!(node, Node::Line(l) if l.starts_with(&format!("let mut {name}: ")))
+        });
+        if all_decls {
+            buffer.truncate(start);
+        }
     }
 
     pub(super) fn branch(&mut self, depth: u32, cond: Option<Val>) -> Result<(), TranspileError> {

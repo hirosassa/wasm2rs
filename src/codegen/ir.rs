@@ -429,6 +429,19 @@ pub(crate) fn render_region_into(
         els,
     } = region;
 
+    // A `block` that is empty, or only branches to itself, does nothing: the
+    // jump lands right where falling through would. (`if` is excluded: its
+    // condition is still evaluated.)
+    if kind == FrameKind::Block
+        && match body.as_slice() {
+            [] => true,
+            [Node::Br { label: l, is_loop }] => *l == label && !*is_loop,
+            _ => false,
+        }
+    {
+        return;
+    }
+
     // The inner content (block/loop body, or the `if { … } else { … }`),
     // rendered at `inner_depth`; a targeted region wraps it in a labelled loop.
     let inner_depth = if targeted { depth + 1 } else { depth };
