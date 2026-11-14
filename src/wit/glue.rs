@@ -880,12 +880,6 @@ pub(super) fn write(
     } in methods
     {
         gen_.utf16 = utf16;
-        if f.is_async {
-            return Err(unsupported(format!(
-                "async import `{}` of `{}` (WASI 0.3: its glue is not generated yet)",
-                f.name, f.interface
-            )));
-        }
         let slot = realloc.map(|r| match reallocs.iter().position(|(n, _)| *n == r) {
             Some(at) => at,
             None => {
@@ -1016,6 +1010,15 @@ pub(super) fn write(
     Ok(())
 }
 
+/// `go` or `interface#go`: how an export is named in errors.
+fn display_name(f: &WitFunc) -> String {
+    if f.interface.is_empty() {
+        format!("`{}`", f.name)
+    } else {
+        format!("`{}#{}`", f.interface, f.name)
+    }
+}
+
 /// The core module's `realloc` export the glue's allocation helper calls.
 const REALLOC: &str = "cabi_realloc";
 
@@ -1040,6 +1043,12 @@ fn write_exports(
     exports: &[WitExport],
     export_names: &[String],
 ) -> Result<(), TranspileError> {
+    if let Some(e) = exports.iter().find(|e| e.async_abi.is_some()) {
+        return Err(unsupported(format!(
+            "async export {} (WASI 0.3: its glue is not generated yet)",
+            display_name(&e.func)
+        )));
+    }
     out.push_str(
         "\n/// Typed calls of the functions the component exports: the host lowers the arguments\n\
          /// and lifts the result (canonical ABI). A guest trap is a panic.\n\

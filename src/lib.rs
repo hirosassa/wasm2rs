@@ -23,9 +23,9 @@ pub use component::{ComponentOptions, transpile_component, transpile_component_w
 pub use dump::{ModuleSummary, dump};
 pub use extract::extract_core_modules;
 pub use wit::{
-    WitExport, WitFunc, WitNaming, WitOptions, WitRecord, WitResource, WitStringEncoding, WitType,
-    wit_exports, wit_functions, wit_host_glue, wit_host_glue_with_options, wit_host_trait,
-    wit_host_trait_with_options,
+    WitAsyncAbi, WitExport, WitFunc, WitNaming, WitOptions, WitRecord, WitResource,
+    WitStringEncoding, WitType, wit_exports, wit_functions, wit_host_glue,
+    wit_host_glue_with_options, wit_host_trait, wit_host_trait_with_options,
 };
 
 /// An error that can occur while transpiling a wasm module.

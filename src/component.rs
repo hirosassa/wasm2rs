@@ -93,6 +93,14 @@ pub fn transpile_component_with_exports(
 ) -> Result<(String, Vec<WitExport>), TranspileError> {
     let layout = scan(component)?;
     let exports = wit_exports(component)?;
+    // Whatever `options.exports` is: an async lift's entry is called through a callback loop
+    // that is not generated yet, and its built-ins would come out as plain imports.
+    if let Some(e) = exports.iter().find(|e| e.async_abi.is_some()) {
+        return Err(TranspileError::Unsupported(format!(
+            "async export `{}` (WASI 0.3: the async canonical ABI is not generated yet)",
+            e.func.name
+        )));
+    }
     let transpile = TranspileOptions {
         named_imports: true,
         named_exports: true,

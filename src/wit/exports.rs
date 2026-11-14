@@ -36,6 +36,22 @@ pub struct WitExport {
     pub post_return: Option<String>,
     /// The encoding of the lift's strings (`compact-utf16` is rejected).
     pub encoding: WitStringEncoding,
+    /// How an `async` lift is called (WASI 0.3); `None` for a synchronous lift. Exactly the
+    /// exports whose [`WitFunc::is_async`] is set have one.
+    pub async_abi: Option<WitAsyncAbi>,
+}
+
+/// The ABI of a `canon lift ... async`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WitAsyncAbi {
+    /// `async (callback ...)`: the core export starts the task and returns the first callback
+    /// code; every event is then delivered to the `callback` core export.
+    Callback {
+        /// The name under which the module exports the callback function.
+        callback: String,
+    },
+    /// `async` without `callback`: the core export runs on its own stack and may suspend.
+    Stackful,
 }
 
 /// The canonical ABI string encoding of a `canon lift`. A string crosses the glue as a Rust
@@ -62,9 +78,19 @@ pub fn wit_exports(component: &[u8]) -> Result<Vec<WitExport>, TranspileError> {
     reader.resolve()
 }
 
-/// Every `canon lower` of an imported function in `component`, with the name of its string
-/// encoding (`utf8`, `utf16` or `compact-utf16`).
-pub(crate) fn lowers(component: &[u8]) -> Result<Vec<(HostFunc, &'static str)>, TranspileError> {
+/// What the glue cannot serve in the `canon lower`s of the imported functions of a component.
+#[derive(Default)]
+pub(crate) struct Lowers {
+    /// Every lowering of an imported function, with the name of its string encoding (`utf8`,
+    /// `utf16` or `compact-utf16`).
+    pub encodings: Vec<(HostFunc, &'static str)>,
+    /// The functions lowered with the `async` option (WASI 0.3): the core import then takes a
+    /// result pointer and returns a status, not the synchronous signature.
+    pub async_: Vec<HostFunc>,
+}
+
+/// The [`Lowers`] of `component`.
+pub(crate) fn lowers(component: &[u8]) -> Result<Lowers, TranspileError> {
     let mut reader = Reader::default();
     read_component(component, Some(&mut reader))?;
     Ok(reader.lowers)
@@ -225,8 +251,8 @@ pub(super) struct Reader {
     components: Vec<Shim>,
     exported: Vec<Exported>,
     inner: Option<Inner>,
-    /// The lowerings of imported functions, with the name of their string encoding.
-    lowers: Vec<(HostFunc, &'static str)>,
+    /// The lowerings of imported functions.
+    lowers: Lowers,
 }
 
 fn index(i: u32) -> Option<usize> {
@@ -458,7 +484,10 @@ impl Reader {
                 if let Some(Func::Imported(host)) =
                     index(func_index).and_then(|i| self.funcs.get(i))
                 {
-                    self.lowers.push((host.clone(), encoding));
+                    self.lowers.encodings.push((host.clone(), encoding));
+                    if options.iter().any(|o| matches!(o, CanonicalOption::Async)) {
+                        self.lowers.async_.push(host.clone());
+                    }
                 }
                 self.core_funcs.push(CoreFunc::Lowered {
                     func: func_index,
@@ -708,23 +737,23 @@ impl Reader {
             }
             None => return Err(unsupported(format!("export `{label}` has no function"))),
         };
-        // Name the async ABI before the signature: an async lift always has an async type,
-        // whose own error would hide which ABI the guest was built for.
-        if let Some(abi) = async_abi(&lift.options) {
-            return Err(unsupported(format!(
-                "export `{label}` is an async function lifted with {abi} (WASI 0.3: the async \
-                 canonical ABI and its task scheduler are not implemented)"
-            )));
-        }
         let (params, result, is_async) = lift
             .sig
             .clone()
             .map_err(|what| unsupported(format!("{what} in function `{name}` of `{interface}`")))?;
 
-        if is_async {
+        let lifted_async = lift
+            .options
+            .iter()
+            .any(|o| matches!(o, CanonicalOption::Async | CanonicalOption::Callback(_)));
+        if is_async != lifted_async {
+            let (what, how) = if is_async {
+                ("an async function", "without")
+            } else {
+                ("not an async function", "with")
+            };
             return Err(unsupported(format!(
-                "export `{label}` is an async function lifted without the `async` option \
-                 (WASI 0.3: the async canonical ABI is not implemented)"
+                "export `{label}` is {what} but lifted {how} the `async` option"
             )));
         }
         let ((module, instance), core_export) =
@@ -736,7 +765,7 @@ impl Reader {
                 name: name.to_string(),
                 params,
                 result,
-                is_async: false,
+                is_async,
             },
             core_module,
             core_export,
@@ -744,6 +773,7 @@ impl Reader {
             realloc: None,
             post_return: None,
             encoding: WitStringEncoding::Utf8,
+            async_abi: None,
         };
         for option in &lift.options {
             match option {
@@ -782,9 +812,13 @@ impl Reader {
                     export.post_return =
                         Some(self.option_export(&label, *i, "post-return", instance)?);
                 }
-                // `async_abi` returned early for these, before the signature.
-                CanonicalOption::Async | CanonicalOption::Callback(_) => {
-                    return Err(TranspileError::Internal("an async lift option".into()));
+                CanonicalOption::Async => {
+                    export.async_abi.get_or_insert(WitAsyncAbi::Stackful);
+                }
+                CanonicalOption::Callback(i) => {
+                    export.async_abi = Some(WitAsyncAbi::Callback {
+                        callback: self.option_export(&label, *i, "callback", instance)?,
+                    });
                 }
                 CanonicalOption::CoreType(_) | CanonicalOption::Gc => {
                     return Err(unsupported(format!(
@@ -906,21 +940,6 @@ impl Reader {
                 "export `{label}`: core module {module} has no {kind:?} export `{name}`"
             )))
         }
-    }
-}
-
-/// The async ABI a lift selects. `callback` is checked first: a callback lift also carries
-/// `async`.
-fn async_abi(options: &[CanonicalOption]) -> Option<&'static str> {
-    if options
-        .iter()
-        .any(|o| matches!(o, CanonicalOption::Callback(_)))
-    {
-        Some("the callback ABI")
-    } else if options.iter().any(|o| matches!(o, CanonicalOption::Async)) {
-        Some("the stackful ABI")
-    } else {
-        None
     }
 }
 
