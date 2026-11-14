@@ -258,9 +258,9 @@ impl WasiHost {
         too_large: fn(Option<u64>) -> HttpErrorCode,
     ) -> (http::OutBodyHandle, OutgoingBody) {
         let body = http::HttpOutgoingBody::new(self.http_max_body, too_large);
-        let out = body.handle();
+        let handle = body.handle();
         let slot = self.http_out_bodies.insert(body);
-        (out, OutgoingBody(to_handle(slot)))
+        (handle, OutgoingBody(to_handle(slot)))
     }
 
     fn http_option(&self, h: RequestOptions) -> &http::HttpOptions {
@@ -798,12 +798,10 @@ impl WasiHost {
                 Some(d) => {
                     changed
                         .wait_timeout(buf, d.saturating_duration_since(now))
-                        .unwrap_or_else(|_| trap("wasi:cli: the stdin buffer is poisoned"))
+                        .unwrap_or_else(|e| stdin_poisoned(e))
                         .0
                 }
-                None => changed
-                    .wait(buf)
-                    .unwrap_or_else(|_| trap("wasi:cli: the stdin buffer is poisoned")),
+                None => changed.wait(buf).unwrap_or_else(|e| stdin_poisoned(e)),
             };
         }
     }

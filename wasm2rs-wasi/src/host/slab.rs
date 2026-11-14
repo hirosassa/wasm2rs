@@ -1,7 +1,5 @@
 //! The slab that hands out and recycles the guest-visible handles.
 
-use super::fs::FIRST_FILE_STREAM;
-
 /// Traps the guest. The generated `Host` methods have no error channel for a bad handle or an
 /// exhausted host resource, so a trap is a panic that names the cause (the contract in the
 /// crate docs).
@@ -16,8 +14,11 @@ pub(super) fn trap(msg: impl std::fmt::Display) -> ! {
 
 /// Locks the stdin buffer; one poisoned by a panicking thread traps like any broken invariant.
 pub(super) fn lock_stdin<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock()
-        .unwrap_or_else(|_| trap("wasi:cli: the stdin buffer is poisoned"))
+    m.lock().unwrap_or_else(|e| stdin_poisoned(e))
+}
+
+pub(super) fn stdin_poisoned<E>(_: E) -> ! {
+    trap("wasi:cli: the stdin buffer is poisoned")
 }
 
 /// The slab index a handle names. One too large for `usize` is as unknown as any other
@@ -73,10 +74,10 @@ impl<T> Slab<T> {
         match self.free.pop() {
             Some(slot) => {
                 // every freed slot index came from `slots`
-                match self.slots.get_mut(slot) {
-                    Some(entry) => *entry = Some(value),
-                    None => trap("handle table: a freed slot is missing"),
-                }
+                *self
+                    .slots
+                    .get_mut(slot)
+                    .unwrap_or_else(|| trap("handle table: a freed slot is missing")) = Some(value);
                 // a new occupant: a ref made while the slot was free must not match it
                 if let Some(epoch) = self.epochs.get_mut(slot) {
                     *epoch = epoch.wrapping_add(1);
@@ -131,11 +132,4 @@ impl<T> Slab<T> {
     pub(super) fn remove(&mut self, slot: usize) {
         drop(self.take(slot));
     }
-}
-
-/// The stream handle of a file stream's slot: file streams count up from `FIRST_FILE_STREAM`.
-pub(super) fn file_stream_handle(slot: usize) -> u32 {
-    FIRST_FILE_STREAM
-        .checked_add(to_handle(slot))
-        .unwrap_or_else(|| trap("stream handle table exhausted"))
 }

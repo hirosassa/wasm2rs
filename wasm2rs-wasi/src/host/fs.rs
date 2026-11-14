@@ -451,3 +451,10 @@ pub(super) fn file_times(
     }
     Ok(times)
 }
+
+/// The stream handle of a file stream's slot: file streams count up from `FIRST_FILE_STREAM`.
+pub(super) fn file_stream_handle(slot: usize) -> u32 {
+    FIRST_FILE_STREAM
+        .checked_add(to_handle(slot))
+        .unwrap_or_else(|| trap("stream handle table exhausted"))
+}

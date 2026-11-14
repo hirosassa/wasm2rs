@@ -88,19 +88,19 @@ pub(super) const HTTP_OUT_STREAM: usize = HTTP_STREAM + (1 << 28);
 
 /// The slot in `http_bodies` of a stream handle, `None` for any other stream.
 pub(super) fn http_slot(stream: u32) -> Option<usize> {
-    let slot = (idx(stream)).checked_sub(HTTP_STREAM)?;
+    let slot = idx(stream).checked_sub(HTTP_STREAM)?;
     (slot < HTTP_OUT_STREAM - HTTP_STREAM).then_some(slot)
 }
 
 /// The slot in `http_out_bodies` of a stream handle, `None` for any other stream.
 pub(super) fn http_out_slot(stream: u32) -> Option<usize> {
-    let slot = (idx(stream)).checked_sub(HTTP_OUT_STREAM)?;
+    let slot = idx(stream).checked_sub(HTTP_OUT_STREAM)?;
     (slot < TCP_STREAM - HTTP_OUT_STREAM).then_some(slot)
 }
 
 /// The slot in `tcp_in` or `tcp_out` of a stream handle, `None` for any other stream.
 pub(super) fn tcp_slot(stream: u32) -> Option<usize> {
-    (idx(stream)).checked_sub(TCP_STREAM)
+    idx(stream).checked_sub(TCP_STREAM)
 }
 
 impl WasiHost {
