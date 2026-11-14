@@ -40,11 +40,12 @@ const FIXED: &[&str] = &[
 ];
 
 /// `name` as a snake_case Rust identifier: camelCase words are split, anything
-/// that is not alphanumeric becomes `_`, a leading digit gets a `_` prefix and an
+/// that is not alphanumeric becomes `_` (a run of separators other than `_` one `_`), a leading digit gets a `_` prefix and an
 /// empty or all-underscore result becomes `export`.
 pub(super) fn sanitize(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut prev_lower_or_digit = false;
+    let mut after_separator = false;
     for c in name.chars() {
         if c.is_ascii_alphanumeric() {
             if c.is_ascii_uppercase() && prev_lower_or_digit {
@@ -52,8 +53,13 @@ pub(super) fn sanitize(name: &str) -> String {
             }
             out.push(c.to_ascii_lowercase());
             prev_lower_or_digit = c.is_ascii_lowercase() || c.is_ascii_digit();
+            after_separator = false;
         } else {
-            out.push('_');
+            // A literal `_` is kept; any other run of separators (`][`) is one `_`.
+            if c == '_' || !after_separator {
+                out.push('_');
+            }
+            after_separator = c != '_';
             prev_lower_or_digit = false;
         }
     }
@@ -250,6 +256,18 @@ mod tests {
         assert_eq!(sanitize(""), "export");
         assert_eq!(sanitize("--"), "export");
         assert_eq!(sanitize("a.b"), "a_b");
+    }
+
+    #[test]
+    fn sanitize_collapses_a_run_of_separators() {
+        // The core exports of an async lift: `[callback][async-lift]name`.
+        assert_eq!(
+            sanitize("[callback][async-lift]slow"),
+            "_callback_async_lift_slow"
+        );
+        // A literal `_` is not a separator run: C names keep their underscores.
+        assert_eq!(sanitize("__wasm_call_ctors"), "__wasm_call_ctors");
+        assert_eq!(sanitize("__heap_base"), "__heap_base");
     }
 
     #[test]

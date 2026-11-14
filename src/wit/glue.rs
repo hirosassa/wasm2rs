@@ -26,7 +26,7 @@ use std::fmt::Write as _;
 
 use super::emit::{Records, case_idents, doc_text, flags_int, typed_signature, unique_idents};
 use super::read::unsupported;
-use super::{WitExport, WitFunc, WitStringEncoding, WitType};
+use super::{WitAsyncAbi, WitExport, WitFunc, WitStringEncoding, WitType};
 use crate::TranspileError;
 use crate::codegen::assign_export_names;
 use crate::wit_abi::{
@@ -1043,11 +1043,8 @@ fn write_exports(
     exports: &[WitExport],
     export_names: &[String],
 ) -> Result<(), TranspileError> {
-    if let Some(e) = exports.iter().find(|e| e.async_abi.is_some()) {
-        return Err(unsupported(format!(
-            "async export {} (WASI 0.3: its glue is not generated yet)",
-            display_name(&e.func)
-        )));
+    if exports.iter().any(|e| e.async_abi.is_some()) {
+        out.push_str(CALLBACK_CODE);
     }
     out.push_str(
         "\n/// Typed calls of the functions the component exports: the host lowers the arguments\n\
@@ -1058,6 +1055,20 @@ fn write_exports(
         let f = &e.func;
         let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
         let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
+        if e.async_abi.is_some() {
+            if f.result.is_some() {
+                return Err(unsupported(format!(
+                    "async export {} has a result (WASI 0.3: it is delivered through `task.return`, \
+             which is not routed yet)",
+                    display_name(f)
+                )));
+            }
+            let heads = async_heads(gen_.records, name, f, &idents)?;
+            for head in [heads.start, heads.callback, heads.run] {
+                let _ = writeln!(out, "{head};");
+            }
+            continue;
+        }
         let sig = typed_signature(gen_.records, name, f, &idents)?;
         let _ = writeln!(out, "{sig};");
     }
@@ -1077,6 +1088,70 @@ fn write_exports(
         "\nmod glue_core {{\n    use super::{{Glue, Host, Instance}};\n{forwarders}}}\n"
     );
     Ok(())
+}
+
+/// The most core parameters an `async` lift takes before they spill to memory.
+const MAX_FLAT_ASYNC_PARAMS: usize = 4;
+
+/// What an async task asks for next, as `Exports` of an async function reports it: the callback
+/// ABI's code (`EXIT`, `YIELD` or `WAIT` with a waitable set in the upper bits).
+const CALLBACK_CODE: &str = r#"
+/// What an async task asks for next (the callback ABI of WASI 0.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallbackCode {
+    /// The task is done.
+    Exit,
+    /// The task yields and wants to be called again.
+    Yield,
+    /// The task waits for an event of the waitable set with this handle.
+    Wait(u32),
+    /// A code this glue does not know.
+    Unknown(u32),
+}
+
+impl CallbackCode {
+    pub fn from_raw(code: u32) -> Self {
+        match (code & 0xf, code >> 4) {
+            (0, 0) => CallbackCode::Exit,
+            (1, 0) => CallbackCode::Yield,
+            (2, set) => CallbackCode::Wait(set),
+            _ => CallbackCode::Unknown(code),
+        }
+    }
+}
+"#;
+
+/// The three typed methods of an async export (without the `;` or body): `start` calls the core
+/// entry and returns the first callback code, `callback` delivers one event, and `run` is the
+/// driver: start, then callback with each event `events` provides until the task exits.
+struct AsyncHeads {
+    start: String,
+    callback: String,
+    run: String,
+}
+
+fn async_heads(
+    records: &Records,
+    name: &str,
+    f: &WitFunc,
+    idents: &[String],
+) -> Result<AsyncHeads, TranspileError> {
+    // An async export with a result is rejected, so there is none to drop here.
+    let no_result = WitFunc {
+        result: None,
+        ..f.clone()
+    };
+    let start = typed_signature(records, &format!("{name}_start"), &no_result, idents)?;
+    let mut run = typed_signature(records, name, &no_result, idents)?;
+    run.pop();
+    run.push_str(", events: &mut dyn FnMut(CallbackCode) -> Option<[u32; 3]>)");
+    Ok(AsyncHeads {
+        start: format!("{start} -> CallbackCode"),
+        callback: format!(
+            "    fn {name}_callback(&mut self, event: u32, p1: u32, p2: u32) -> CallbackCode"
+        ),
+        run,
+    })
 }
 
 /// One method of the `Exports` impl, and its forwarder to the core export of the same name
@@ -1104,7 +1179,35 @@ fn write_export(
     let tys: Vec<&WitType> = f.params.iter().map(|(_, t)| t).collect();
     let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
 
-    let head = typed_signature(gen_.records, name, f, &idents)?;
+    let callback = match &e.async_abi {
+        None => None,
+        Some(WitAsyncAbi::Callback { callback }) => Some(callback.as_str()),
+        Some(WitAsyncAbi::Stackful) => {
+            return Err(unsupported(format!(
+                "async export {} uses the stackful ABI (WASI 0.3: only the callback ABI is \
+                 supported)",
+                display_name(f)
+            )));
+        }
+    };
+    if callback.is_some() && (sig.params_in_memory || core_params.len() > MAX_FLAT_ASYNC_PARAMS) {
+        return Err(unsupported(format!(
+            "async export {} takes more than {MAX_FLAT_ASYNC_PARAMS} core parameters (WASI 0.3: \
+             an async lift passes them through memory, which is not supported yet)",
+            display_name(f)
+        )));
+    }
+    let heads = async_heads(gen_.records, name, f, &idents)?;
+    let head = if callback.is_some() {
+        heads.start.clone()
+    } else {
+        typed_signature(gen_.records, name, f, &idents)?
+    };
+    let result_flat = if callback.is_some() {
+        Some(Flat::I32)
+    } else {
+        result_flat
+    };
     let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
     let _ = writeln!(out, "{head} {{");
     let _ = writeln!(out, "        let g = self;");
@@ -1161,7 +1264,10 @@ fn write_export(
     }
 
     let post = e.post_return.as_deref().and_then(export_method);
-    let mut forwarder = format!("    pub fn {name}<H: Host>(g: &mut Instance<Glue<H>>");
+    // The core method of the entry (a callback export's `name` is the typed one).
+    let core_name = export_method(&e.core_export)
+        .ok_or_else(|| unsupported(format!("export `{}` has no method name", e.core_export)))?;
+    let mut forwarder = format!("    pub fn {core_name}<H: Host>(g: &mut Instance<Glue<H>>");
     let mut forwarded = Vec::new();
     for (i, flat) in core_params.iter().enumerate() {
         let _ = write!(forwarder, ", p{i}: {}", core_rust(*flat));
@@ -1171,14 +1277,66 @@ fn write_export(
     if let Some(flat) = result_flat {
         let _ = write!(forwarder, " -> {}", core_rust(flat));
     }
-    let _ = writeln!(forwarder, " {{ g.{name}({}) }}", forwarded.join(", "));
+    let _ = writeln!(forwarder, " {{ g.{core_name}({}) }}", forwarded.join(", "));
     forwarders.push_str(&forwarder);
-    let call = format!("glue_core::{name}(g, {})", args.join(", "));
+    let call = format!("glue_core::{core_name}(g, {})", args.join(", "));
     let post_call = |arg: &str| {
         post.as_ref()
             .map(|p| format!("        g.{p}({arg});\n"))
             .unwrap_or_default()
     };
+    if let Some(callback) = callback {
+        let cb = export_method(callback).ok_or_else(|| {
+            unsupported(format!("callback export `{callback}` has no method name"))
+        })?;
+        let cb_forwarder = format!(
+            "    pub fn {cb}<H: Host>(g: &mut Instance<Glue<H>>, p0: i32, p1: i32, p2: i32) -> i32 {{ g.{cb}(p0, p1, p2) }}\n"
+        );
+        // Several exports may share one callback core function.
+        if !forwarders.contains(&cb_forwarder) {
+            forwarders.push_str(&cb_forwarder);
+        }
+        let _ = writeln!(out, "        CallbackCode::from_raw({call} as u32)");
+        out.push_str("    }\n");
+        let _ = writeln!(out, "{} {{", heads.callback);
+        let _ = writeln!(out, "        let g = self;");
+        let _ = writeln!(
+            out,
+            "        CallbackCode::from_raw(glue_core::{cb}(g, event as i32, p1 as i32, p2 as i32) as u32)"
+        );
+        out.push_str("    }\n");
+        let _ = writeln!(out, "{} {{", heads.run);
+        let args = idents.join(", ");
+        let _ = writeln!(
+            out,
+            "        let mut code = Exports::{name}_start(self, {args});"
+        );
+        out.push_str(
+            "        loop {\n\
+             \x20           match code {\n\
+             \x20               CallbackCode::Exit => return,\n\
+             \x20               CallbackCode::Yield | CallbackCode::Wait(_) => {\n\
+             \x20                   // The scheduler (tasks, subtasks, waitable sets, streams and futures) is\n\
+             \x20                   // not part of the glue yet: the caller supplies the events.\n\
+             \x20                   let Some([event, p1, p2]) = events(code) else {\n\
+             \x20                       panic!(\"wasm2rs wit glue: async runtime not implemented (WASI 0.3): no event for {code:?}\");\n\
+             \x20                   };\n",
+        );
+        let _ = writeln!(
+            out,
+            "                    code = Exports::{name}_callback(self, event, p1, p2);"
+        );
+        out.push_str(
+            "                }\n\
+             \x20               CallbackCode::Unknown(raw) => {\n\
+             \x20                   panic!(\"wasm2rs wit glue: unknown callback code {raw:#x}\")\n\
+             \x20               }\n\
+             \x20           }\n\
+             \x20       }\n",
+        );
+        out.push_str("    }\n");
+        return Ok(());
+    }
     match (&f.result, result_flat) {
         (None, _) => {
             let _ = writeln!(out, "        {call};");

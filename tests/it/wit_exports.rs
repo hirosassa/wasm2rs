@@ -652,13 +652,8 @@ fn an_async_function_lowered_without_the_async_option_gets_the_sync_glue() {
 }
 
 #[test]
-fn an_async_export_is_rejected_by_the_glue_until_its_entry_is_generated() {
-    let wasm = wat::parse_str(p3_export(
-        "(func async)",
-        "async (callback $cb)",
-        "(result i32) i32.const 0",
-    ))
-    .unwrap();
+fn a_stackful_async_export_is_rejected_by_the_glue() {
+    let wasm = wat::parse_str(p3_export("(func async)", "async", "")).unwrap();
     let err = wasm2rs::wit_host_glue_with_options(
         &wasm,
         &wasm2rs::WitOptions {
@@ -668,22 +663,28 @@ fn an_async_export_is_rejected_by_the_glue_until_its_entry_is_generated() {
     )
     .unwrap_err()
     .to_string();
-    assert!(
-        err.contains("`go`") && err.contains("async export"),
-        "{err}"
-    );
+    assert!(err.contains("`go`") && err.contains("stackful"), "{err}");
 }
 
 #[test]
-fn an_async_export_is_rejected_by_transpile_component_whatever_the_options() {
+fn an_async_export_needs_the_exports_glue_in_transpile_component() {
     let wasm = wat::parse_str(p3_export(
         "(func async)",
         "async (callback $cb)",
         "(result i32) i32.const 0",
     ))
     .unwrap();
-    let err = wasm2rs::transpile_component(&wasm, &wasm2rs::ComponentOptions::default())
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("async export `go`"), "{err}");
+    let err = wasm2rs::transpile_component(
+        &wasm,
+        &wasm2rs::ComponentOptions {
+            exports: false,
+            ..wasm2rs::ComponentOptions::default()
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("async export") && err.contains("needs `exports`"),
+        "{err}"
+    );
 }

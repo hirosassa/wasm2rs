@@ -557,3 +557,92 @@ fn utf16_strings_inside_a_list_are_stored_through_memory() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A core module whose async export `slow` waits on waitable set 5 for its first event, then
+/// exits; the callback records the event it is given in the global `last`.
+const ASYNC_CORE: &str = r#"(module
+  (global $last (mut i32) (i32.const 0))
+  (func (export "[async-lift]slow") (param i32) (result i32)
+    (i32.or (i32.const 2) (i32.shl (i32.const 5) (i32.const 4))))
+  (func (export "[callback][async-lift]slow") (param i32 i32 i32) (result i32)
+    (global.set $last (i32.add (i32.add (local.get 0) (local.get 1)) (local.get 2)))
+    (i32.const 0))
+  (func (export "last") (result i32) (global.get $last)))"#;
+
+const ASYNC_WIT: &str = "package a:b; world w { export slow: async func(n: u32); }";
+
+#[test]
+fn an_async_callback_export_is_driven_from_start_to_exit() {
+    run(
+        "async_callback",
+        ASYNC_WIT,
+        ASYNC_CORE,
+        r#"let mut codes = Vec::new();
+           Exports::slow(&mut inst, 3, &mut |code| {
+               codes.push(code);
+               Some([1, 10, 100])
+           });
+           assert_eq!(codes, [CallbackCode::Wait(5)]);
+           // The callback saw the event and both payload words.
+           assert_eq!(inst.last(), 111);"#,
+    );
+}
+
+#[test]
+fn an_async_export_without_an_event_source_says_the_runtime_is_missing() {
+    let out = build_and_run(
+        "async_no_events",
+        ASYNC_WIT,
+        ASYNC_CORE,
+        "Exports::slow(&mut inst, 3, &mut |_| None);",
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("async runtime not implemented"), "{stderr}");
+}
+
+#[test]
+fn the_async_entry_and_callback_are_typed_trait_methods() {
+    let component = encoded(ASYNC_WIT, ASYNC_CORE);
+    let glue = wit_host_glue_with_options(&component, &exports_on()).unwrap();
+    for needle in [
+        "pub enum CallbackCode",
+        "fn slow_start(&mut self, n: u32) -> CallbackCode;",
+        "fn slow_callback(&mut self, event: u32, p1: u32, p2: u32) -> CallbackCode;",
+        "fn slow(&mut self, n: u32, events: &mut dyn FnMut(CallbackCode) -> Option<[u32; 3]>);",
+    ] {
+        assert!(glue.contains(needle), "{needle}\n{glue}");
+    }
+}
+
+#[test]
+fn an_async_export_with_a_result_is_rejected_until_task_return_is_routed() {
+    let component = encoded(
+        "package a:b; world w { export slow: async func(n: u32) -> u32; }",
+        ASYNC_CORE,
+    );
+    let err = wit_host_glue_with_options(&component, &exports_on())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("`slow`") && err.contains("task.return"),
+        "{err}"
+    );
+}
+
+#[test]
+fn async_exports_of_two_interfaces_get_distinct_method_names() {
+    let wit = "package a:b;
+        interface x { go: async func(); }
+        interface y { go: async func(); }
+        world w { export x; export y; }";
+    let core = r#"(module
+      (func (export "[async-lift]a:b/x#go") (result i32) (i32.const 0))
+      (func (export "[callback][async-lift]a:b/x#go") (param i32 i32 i32) (result i32) (i32.const 0))
+      (func (export "[async-lift]a:b/y#go") (result i32) (i32.const 0))
+      (func (export "[callback][async-lift]a:b/y#go") (param i32 i32 i32) (result i32) (i32.const 0)))"#;
+    let component = encoded(wit, core);
+    let glue = wit_host_glue_with_options(&component, &exports_on()).unwrap();
+    assert!(glue.contains("fn a_b_x_go_start("), "{glue}");
+    assert!(glue.contains("fn a_b_y_go_start("), "{glue}");
+}
