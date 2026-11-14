@@ -171,3 +171,54 @@ fn traps_outside_stage_one_keep_their_string_payload() {
         ),
     );
 }
+
+/// A wasi-threads child that runs `child_body` while the parent is parked for up
+/// to 5s; returns the generated program's stderr after asserting it failed.
+fn run_trapping_child(name: &str, child_body: &str) -> String {
+    let wat = format!(
+        r#"(module
+          (import "env" "memory" (memory 1 1 shared))
+          (import "wasi" "thread-spawn" (func $spawn (param i32) (result i32)))
+          (func (export "wasi_thread_start") (param i32 i32) {child_body})
+          (func (export "run") (result i32)
+            i32.const 0
+            call $spawn
+            drop
+            i32.const 0
+            i32.const 0
+            i64.const 5000000000
+            memory.atomic.wait32))"#
+    );
+    let program = format!(
+        "{}\nfn main() {{ let mut inst = Instance::new(SharedMemory::new(65536)); inst.func2(); }}\n",
+        transpile_typed(&wat, true)
+    );
+    let bin = common::build(name, &program);
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        !run.status.success(),
+        "expected the child trap to end the process"
+    );
+    String::from_utf8_lossy(&run.stderr).into_owned()
+}
+
+#[test]
+fn a_typed_trap_in_a_spawned_thread_reports_its_cause() {
+    // `resume_unwind` skips the panic hook, so the spawn wrapper is the only
+    // place that can print the typed payload.
+    let stderr = run_trapping_child("typed_trap_thread_cause", "unreachable");
+    assert!(stderr.contains("thread 1 trapped"), "{stderr}");
+    assert!(stderr.contains("unreachable"), "{stderr}");
+}
+
+#[test]
+fn a_string_panic_in_a_typed_spawned_thread_still_reaches_the_hook() {
+    // Division is a stage-2 string panic, and no helper defines `Wasm2RsTrap`
+    // in this module, so the wrapper must compile without the type.
+    let stderr = run_trapping_child(
+        "typed_trap_thread_string",
+        "(drop (i32.div_s (i32.const 1) (i32.const 0)))",
+    );
+    assert!(stderr.contains("thread 1 trapped"), "{stderr}");
+    assert!(stderr.contains("divide by zero"), "{stderr}");
+}
