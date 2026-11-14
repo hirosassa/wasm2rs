@@ -880,6 +880,12 @@ pub(super) fn write(
     } in methods
     {
         gen_.utf16 = utf16;
+        if f.is_async {
+            return Err(unsupported(format!(
+                "async import `{}` of `{}` (WASI 0.3: its glue is not generated yet)",
+                f.name, f.interface
+            )));
+        }
         let slot = realloc.map(|r| match reallocs.iter().position(|(n, _)| *n == r) {
             Some(at) => at,
             None => {
@@ -888,12 +894,6 @@ pub(super) fn write(
             }
         });
         gen_.alloc = slot.map_or_else(|| ALLOC_MODULE.to_string(), import_alloc_module);
-        if f.is_async {
-            return Err(unsupported(format!(
-                "async import `{}` of `{}` (WASI 0.3: its glue is not generated yet)",
-                f.name, f.interface
-            )));
-        }
         let sig = core_signature(f, &mut sig_budget)?;
         let _ = writeln!(out, "    /// {:?} {:?}", f.interface, f.name);
         let mut head = format!("    fn {name}(&mut self, g: &mut Instance<Self>");

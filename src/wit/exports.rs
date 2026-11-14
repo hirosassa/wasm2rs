@@ -736,7 +736,7 @@ impl Reader {
                 name: name.to_string(),
                 params,
                 result,
-                is_async,
+                is_async: false,
             },
             core_module,
             core_export,

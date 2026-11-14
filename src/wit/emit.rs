@@ -105,8 +105,11 @@ pub(super) fn type_name(name: &str) -> String {
     }
     // The std names the generated code uses, and the prelude items a `struct Some(..)` or
     // `trait Default` would shadow in a module that also holds the user's `impl Host`.
-    const RESERVED: [&str; 28] = [
+    const RESERVED: [&str; 30] = [
         "Host",
+        // The handle types of `future<T>` and `stream<T>`.
+        "WitFuture",
+        "WitStream",
         // Top-level names of the transpiled code and the glue it is placed beside.
         "Glue",
         "Instance",
@@ -368,6 +371,11 @@ impl Records {
         self.rust_in(ty, "")
     }
 
+    /// How a top-level item is reached from `prefix`: only qualified output has modules.
+    fn top_prefix<'a>(&self, prefix: &'a str) -> &'a str {
+        if self.qualified { prefix } else { "" }
+    }
+
     /// The type as spelled from inside a type's own module (`super::` reaches the others).
     pub(super) fn rust_in_module(&self, ty: &WitType) -> Result<String, TranspileError> {
         self.rust_in(ty, "super::")
@@ -414,16 +422,9 @@ impl Records {
                 Some(placed) => self.path(placed, prefix),
                 None => type_name(&r.name),
             },
-            WitType::Future(t) | WitType::Stream(t) => {
-                // The handle types are top-level: a module reaches them through `super::`.
-                let at = if self.qualified { prefix } else { "" };
-                let kind = if matches!(ty, WitType::Future(_)) {
-                    "WitFuture"
-                } else {
-                    "WitStream"
-                };
-                format!("{at}{kind}<{}>", inner(t)?)
-            }
+            // The handle types are top-level: a module reaches them through `super::`.
+            WitType::Future(t) => format!("{}WitFuture<{}>", self.top_prefix(prefix), inner(t)?),
+            WitType::Stream(t) => format!("{}WitStream<{}>", self.top_prefix(prefix), inner(t)?),
         })
     }
 }
@@ -736,7 +737,7 @@ pub(super) fn doc_text(interface: &str, name: &str) -> String {
 /// ordered by module and name so that the text does not depend on the order of the functions.
 pub(super) fn write_types(out: &mut String, records: &Records) -> Result<(), TranspileError> {
     if records.uses_async_handles {
-        out.push_str(ASYNC_HANDLES);
+        write_async_handles(out);
     }
     if !records.qualified {
         for placed in &records.resources {
@@ -782,41 +783,46 @@ pub(super) fn write_types(out: &mut String, records: &Records) -> Result<(), Tra
 
 /// The typed ends of `future<T>` and `stream<T>` (WASI 0.3): the handle in the component's
 /// table. Reading or writing through them needs the async runtime, which is not generated yet.
-const ASYNC_HANDLES: &str = r#"
-/// The readable end of a `future<T>`.
-pub struct WitFuture<T>(pub u32, pub std::marker::PhantomData<fn() -> T>);
+/// The impls are written out so that they do not require `T: Clone`.
+fn write_async_handles(out: &mut String) {
+    for (name, what) in [("WitFuture", "future"), ("WitStream", "stream")] {
+        let _ = write!(
+            out,
+            r#"
+/// The readable end of a `{what}<T>`.
+pub struct {name}<T>(pub u32, pub std::marker::PhantomData<fn() -> T>);
 
-/// The readable end of a `stream<T>`.
-pub struct WitStream<T>(pub u32, pub std::marker::PhantomData<fn() -> T>);
+impl<T> {name}<T> {{
+    pub fn new(handle: u32) -> Self {{
+        {name}(handle, std::marker::PhantomData)
+    }}
+}}
 
-macro_rules! wit_handle_impls {
-    ($($name:ident),*) => {$(
-        impl<T> $name<T> {
-            pub fn new(handle: u32) -> Self {
-                $name(handle, std::marker::PhantomData)
-            }
-        }
-        impl<T> Clone for $name<T> {
-            fn clone(&self) -> Self {
-                *self
-            }
-        }
-        impl<T> Copy for $name<T> {}
-        impl<T> std::fmt::Debug for $name<T> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}({})", stringify!($name), self.0)
-            }
-        }
-        impl<T> PartialEq for $name<T> {
-            fn eq(&self, other: &Self) -> bool {
-                self.0 == other.0
-            }
-        }
-        impl<T> Eq for $name<T> {}
-    )*};
+impl<T> Clone for {name}<T> {{
+    fn clone(&self) -> Self {{
+        *self
+    }}
+}}
+
+impl<T> Copy for {name}<T> {{}}
+
+impl<T> std::fmt::Debug for {name}<T> {{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{
+        write!(f, "{name}({{}})", self.0)
+    }}
+}}
+
+impl<T> PartialEq for {name}<T> {{
+    fn eq(&self, other: &Self) -> bool {{
+        self.0 == other.0
+    }}
+}}
+
+impl<T> Eq for {name}<T> {{}}
+"#
+        );
+    }
 }
-wit_handle_impls!(WitFuture, WitStream);
-"#;
 
 pub(super) fn write_resource(out: &mut String, name: &str) {
     let _ = writeln!(

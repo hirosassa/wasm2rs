@@ -1096,16 +1096,19 @@ fn main() {{
 /// A component around the core module `core` (wrapped by `wit-component`, which lowers
 /// exactly the functions the core imports) importing `a:b/res`, which defines the resource `r`.
 fn component_around(core: &str) -> Vec<u8> {
+    component_with_wit(
+        "package a:b;
+         interface res { resource r { poke: func(); } }
+         world w { import res; }",
+        core,
+    )
+}
+
+/// A component around `core` importing the interfaces of the WIT text `wit`, world `w`.
+fn component_with_wit(wit: &str, core: &str) -> Vec<u8> {
     use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
     let mut resolve = wit_parser::Resolve::default();
-    let package = resolve
-        .push_str(
-            "test.wit",
-            "package a:b;
-             interface res { resource r { poke: func(); } }
-             world w { import res; }",
-        )
-        .unwrap();
+    let package = resolve.push_str("test.wit", wit).unwrap();
     let world = resolve.select_world(&[package], Some("w")).unwrap();
     let mut module = wat::parse_str(core).unwrap();
     embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
@@ -1153,7 +1156,8 @@ fn glue_of_builds_with(component: &[u8], core: &str, host_impl: &str) {
     let glue = wasm2rs::wit_host_glue(component).unwrap();
     let opts = TranspileOptions::default()
         .with_named_imports(true)
-        .with_reentrant_imports(true);
+        .with_reentrant_imports(true)
+        .with_named_exports(true);
     let generated = transpile_with_options(&wat::parse_str(core).unwrap(), &opts).unwrap();
     let program = format!(
         "{generated}\n{glue}\n{host_impl}\nfn main() {{ let _inst = Instance::new(Glue(H)); }}\n"
@@ -1567,32 +1571,13 @@ fn handle_types_are_declared_only_when_used() {
     assert!(!host(&wasm).contains("WitFuture"));
 }
 
-/// A component around `core` (wrapped by `wit-component`) importing `a:b/i`, whose WIT is
-/// `body`.
-fn p3_component_around(body: &str, core: &str) -> Vec<u8> {
-    use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve
-        .push_str(
-            "test.wit",
-            &format!("package a:b; interface i {{ {body} }} world w {{ import i; }}"),
-        )
-        .unwrap();
-    let world = resolve.select_world(&[package], Some("w")).unwrap();
-    let mut module = wat::parse_str(core).unwrap();
-    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
-    ComponentEncoder::default()
-        .module(&module)
-        .unwrap()
-        .validate(true)
-        .encode()
-        .unwrap()
-}
-
 #[test]
 fn the_glue_passes_future_and_stream_handles_as_i32() {
     let core = r#"(module (import "a:b/i" "pump" (func (param i32) (result i32))))"#;
-    let component = p3_component_around("pump: func(s: stream<u8>) -> future<u32>;", core);
+    let component = component_with_wit(
+        "package a:b; interface i { pump: func(s: stream<u8>) -> future<u32>; } world w { import i; }",
+        core,
+    );
     let glue = wasm2rs::wit_host_glue(&component).unwrap();
     assert!(glue.contains("<WitStream<u8>>::new("), "{glue}");
     assert!(glue.contains("self.0.a_b_i_pump(a0)"), "{glue}");
@@ -1600,5 +1585,37 @@ fn the_glue_passes_future_and_stream_handles_as_i32() {
         &component,
         core,
         "struct H;\nimpl Host for H {\n    fn a_b_i_pump(&mut self, s: WitStream<u8>) -> WitFuture<u32> {\n        WitFuture::new(s.0)\n    }\n}",
+    );
+}
+
+#[test]
+fn a_type_named_like_a_handle_type_does_not_collide_with_it() {
+    let wasm = component(
+        "",
+        "a:b/c",
+        r#"(type $r (record (field "x" u8)))
+           (export "wit-future" (type $t (eq $r)))
+           (export "f" (func (param "a" (future u8)) (param "b" $t)))"#,
+    );
+    let rust = host(&wasm);
+    assert_eq!(rust.matches("pub struct WitFuture<T>").count(), 1, "{rust}");
+}
+
+#[test]
+fn a_handle_inside_a_list_or_option_result_is_written_through_memory() {
+    let core = r#"(module
+        (import "a:b/i" "all" (func (param i32)))
+        (memory (export "memory") 1)
+        (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) i32.const 0))"#;
+    let component = component_with_wit(
+        "package a:b; interface i { all: func() -> list<option<stream<u8>>>; } world w { import i; }",
+        core,
+    );
+    let glue = wasm2rs::wit_host_glue(&component).unwrap();
+    assert!(glue.contains("self.0.a_b_i_all()"), "{glue}");
+    glue_of_builds_with(
+        &component,
+        core,
+        "struct H;\nimpl Host for H {\n    fn a_b_i_all(&mut self) -> Vec<Option<WitStream<u8>>> {\n        vec![Some(WitStream::new(1)), None]\n    }\n}",
     );
 }
