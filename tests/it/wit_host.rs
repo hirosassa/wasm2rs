@@ -1235,7 +1235,7 @@ fn a_component_without_a_core_module_keeps_every_resource_drop() {
         .map(|f| f.name)
         .collect();
     assert!(
-        names.contains(&"[resource-drop]pollable".to_string()),
+        names.iter().any(|n| n == "[resource-drop]pollable"),
         "{names:?}"
     );
 }
