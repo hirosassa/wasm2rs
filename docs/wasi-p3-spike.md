@@ -11,12 +11,12 @@ not rest on guesses. Nothing here is implemented; the current state is in
   built with `cargo build --release --target wasm32-wasip2` (rustc 1.99.1). The component comes
   straight out of the build; `wasm-tools validate --features all` accepts it. A `wasm32-wasip1`
   build needs a preview1 adapter to be componentized, so the `wasip2` target was used.
-- WIT: one imported interface (`async func slow`, `func numbers() -> stream<u32>`,
+- WIT: one imported interface of its own (`async func slow`, `func numbers() -> stream<u32>`,
   `func one() -> future<u32>`) and four exports: `async func double-slow(n: u32) -> u32` (awaits
   an async import twice), `async func sum-stream(s: stream<u32>) -> u32`,
   `async func await-future(f: future<u32>) -> u32`, and a synchronous `sync-add`.
 - Observation: `wasm-tools print`, then reading the canonical section and the main core module
-  (324 functions, 90 `call_indirect`, a 108-slot funcref table).
+  (324 defined functions, 90 `call_indirect`, a 108-slot funcref table).
 - Not done: running the component (no Wasmtime on this machine) and a guest built for
   `wasm32-wasip3` (see "Tooling facts"). The host side of the imports was not provided; only the
   guest's shape was examined.
@@ -44,9 +44,7 @@ Every async export is lifted as `canon lift ... async (callback ...)`:
   `wit-bindgen` option selects it was not checked, so it is only known that Rust guests built
   with the defaults use the callback ABI.
 - Between events the guest returns to the host. The suspended state (the Rust `Future`) lives
-  in linear memory, not on the wasm stack. **Nothing in the callback ABI needs stack switching.**
-- The return-code encoding (EXIT, YIELD, WAIT with a waitable-set index) is from the
-  specification and was not decoded in this spike.
+  in linear memory, not on the wasm stack. **As long as imports are lowered `async` (true of every async import here), nothing in the callback ABI needs stack switching.**
 
 ### Canonical built-ins that appear
 
@@ -63,19 +61,25 @@ Every async export is lifted as `canon lift ... async (callback ...)`:
 | `waitable-set.wait`, `thread.yield`, `backpressure.set`, `thread.*` | no | |
 
 `stream.*` and `future.*` are instantiated per type index (`stream.new 25` for `stream<u32>`);
-the guest imports them under names like `[stream-read-0]numbers` and
+the guest imports them under names like `[stream-new-0]numbers` and
 `[async-lower][stream-read-0]numbers`.
+
+### The guest is mixed p2 and p3
+
+Built for `wasm32-wasip2`, std still imports WASI 0.2.0 (`wasi:io`, `wasi:cli`, `wasi:clocks`),
+including the blocking `pollable.block` and `poll`. The other 8 shim slots are these p2 lowers.
+A scheduler must therefore also cope with a blocking p2 call made inside a callback-ABI task.
 
 ### Wiring is the same shape as for p2
 
 The async built-ins that need the memory (`waitable-set.poll`, `canon lower async`, `stream.read`,
 `future.read`, ...) are reached through `wit-component`'s shim module and its table
-(`$imports`, 14 slots here) filled by a fixup module. This is the indirection wasm2rs already
+(`$imports`, 14 slots here, 6 of them async built-ins) filled by a fixup module. This is the indirection wasm2rs already
 links for preview1 adapters and lowered host functions, so the wiring needs no new mechanism.
 What is new is that the canonical section carries many more built-ins and that `canon lower`
 and `canon lift` carry the `async`/`callback` options.
 
-### `call_indirect` is inside the async runtime
+### `call_indirect` also occurs inside the async runtime
 
 `async_support::callback`, `CabiTask::new`, and the waitable operations each contain a
 `call_indirect` (the executor stores futures as trait objects). So a design that suspends
@@ -84,7 +88,6 @@ callback ABI never suspends there.
 
 ### Core-wasm facts relevant to wasm2rs
 
-- Size: the printed guest is about 29.6k lines for a few lines of Rust.
 - `context.get 0/set 0` is the wit-bindgen executor's task-local pointer. The `wasm32-wasip3`
   target will also keep the shadow stack pointer in a context slot instead of a `global`
   (rustc platform-support page), so a scheduler needs one context slot set per task and
@@ -98,12 +101,13 @@ callback ABI never suspends there.
 | `wasm-tools` | CLI 1.255.0 validates and prints these components (`--features all`); the 1.263.0 crates wasm2rs uses parse the types (M0 tests build them) |
 | `wasip3` crate | 0.10.0+wasi-0.3.2 on crates.io |
 | `wasm32-wasip3` | Tier 2, first on stable in Rust 1.100.0 (not installable on 1.99.1) |
-| Wasmtime | 46.0.0 and later releases exist (v46, v47, v48 to v51 rc series); its default support for the final 0.3.0 was not run here |
+| Wasmtime | 46.0.0 and later exist (v51 is in rc); its 0.3.0 support was not tested here |
 
 ## Recommendations
 
 1. **Target the callback ABI first (M2); drop "cont-based stackful async" from the critical
-   path.** The guests of the main Rust toolchain use it, it needs no suspension inside core wasm,
+   path.** Rust guests built with `wit-bindgen`'s defaults use it, it needs no suspension inside core wasm
+   as long as imports are lowered `async`,
    and so the `cont` limit on `call_indirect` and recursion does not apply. Stackful would be a
    later, separate decision.
 2. **M1 is small and independent of the scheduler.** Read `async` function types and the
@@ -119,7 +123,7 @@ callback ABI never suspends there.
    must be driven by the same scheduler.
 5. **Test with Rust guests built by `wit-bindgen`**, with Wasmtime as the oracle (differential
    testing, as for p2). Guests from other toolchains were not examined and are reported to be
-   less mature.
+   less mature (see [component-toolchain-survey.md](component-toolchain-survey.md)).
 
 ## Open questions
 
