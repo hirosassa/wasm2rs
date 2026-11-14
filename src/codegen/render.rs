@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use super::helpers::{HELPER_ORDER, helper_lines, shared_helper_lines, table_accessor};
 use super::render_cont::{continuation_method_lines, continuation_runtime_lines};
-use super::runtime::render_rt_helpers;
+use super::runtime::{defines_trap_type, render_rt_helpers};
 use super::wasi::{WasiAccess, confine_lines, guest_range_lines};
 use super::{
     ALLOW, DATA_FILE_MIN_BYTES, DataFiles, DataSegment, ElemSegment, ExportInfo, GlobalExportInfo,
@@ -99,6 +99,10 @@ impl Layout {
 /// `impl`'s inherent methods (constructors, memory/table accessors, WASI/helper/
 /// dispatch/continuation methods), and finally each function's own source
 /// streamed in.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "forwards render_module_head's inputs plus the function sources"
+)]
 fn render_module(
     out: &mut String,
     parts: &ModuleParts<'_>,
@@ -106,9 +110,10 @@ fn render_module(
     sources: &[&str],
     used: &HashSet<(Helper, u32)>,
     dispatch_sigs: &HashSet<u32>,
+    typed_trap_type: bool,
     side: Option<&mut DataFiles>,
 ) -> Result<(), TranspileError> {
-    render_module_head(out, parts, ctx, used, dispatch_sigs, side)?;
+    render_module_head(out, parts, ctx, used, dispatch_sigs, typed_trap_type, side)?;
     // Stream each function's source straight into `out`, indenting as it is
     // written: no per-line `String`, no intermediate line vector and no final
     // `join` copy of the whole module.
@@ -127,6 +132,7 @@ pub(super) fn render_module_head(
     ctx: &ModuleCtx<'_>,
     used: &HashSet<(Helper, u32)>,
     dispatch_sigs: &HashSet<u32>,
+    typed_trap_type: bool,
     side: Option<&mut DataFiles>,
 ) -> Result<(), TranspileError> {
     let layout = Layout::of(parts);
@@ -201,7 +207,12 @@ pub(super) fn render_module_head(
     }
     inner.extend(memory_accessor_lines(parts, ctx));
     inner.extend(table_accessor_lines(parts)?);
-    inner.extend(wasi_method_lines(parts.imports, &layout, ctx.memory_shared));
+    inner.extend(wasi_method_lines(
+        parts.imports,
+        &layout,
+        ctx.memory_shared,
+        typed_trap_type,
+    ));
     inner.extend(helper_method_lines(
         used,
         parts.memories,
@@ -1274,7 +1285,12 @@ fn table_accessor_lines(parts: &ModuleParts<'_>) -> Result<Vec<String>, Transpil
 
 /// The native WASI functions as inherent methods backed by `self.mem()`, each
 /// recognised kind emitted once in first-import order.
-fn wasi_method_lines(imports: &[ImportInfo], layout: &Layout, shared: bool) -> Vec<String> {
+fn wasi_method_lines(
+    imports: &[ImportInfo],
+    layout: &Layout,
+    shared: bool,
+    typed_trap_type: bool,
+) -> Vec<String> {
     let wasi_files = layout.wasi_files;
     let mut inner: Vec<String> = Vec::new();
     let mut wasi_emitted: Vec<WasiFn> = Vec::new();
@@ -1295,9 +1311,9 @@ fn wasi_method_lines(imports: &[ImportInfo], layout: &Layout, shared: bool) -> V
             inner.push(String::new());
             // `thread_spawn_lines` clones the `Arc` itself rather than locking it.
             let body = if w == WasiFn::ThreadSpawn {
-                thread_spawn_lines(layout)
+                thread_spawn_lines(layout, typed_trap_type)
             } else if w == WasiFn::PthreadCreateJs {
-                pthread_create_js_lines(layout)
+                pthread_create_js_lines(layout, typed_trap_type)
             } else {
                 w.lines(
                     wasi_files,
@@ -1319,9 +1335,10 @@ fn wasi_method_lines(imports: &[ImportInfo], layout: &Layout, shared: bool) -> V
 /// `wasi_thread_start(tid, start_arg)`. The child is detached. A trap in it ends
 /// the whole process with a nonzero status, as the proposal requires. The
 /// descriptor table is shared: a child sees the descriptors its siblings opened.
-fn thread_spawn_lines(layout: &Layout) -> Vec<String> {
+fn thread_spawn_lines(layout: &Layout, typed_trap_type: bool) -> Vec<String> {
     spawn_thread_lines(
         layout,
+        typed_trap_type,
         "fn wasi_thread_spawn(&mut self, a0: i32) -> i32 {",
         &[
             "let tid = self.wasi_tid.fetch_add(1, std::sync::atomic::Ordering::SeqCst).wrapping_add(1);",
@@ -1340,9 +1357,10 @@ fn thread_spawn_lines(layout: &Layout) -> Vec<String> {
 /// with `arg`, then exit the thread with the result. The child is detached; a
 /// trap in it ends the whole process. Returns 0, or EAGAIN (6) if no thread could
 /// be started.
-fn pthread_create_js_lines(layout: &Layout) -> Vec<String> {
+fn pthread_create_js_lines(layout: &Layout, typed_trap_type: bool) -> Vec<String> {
     spawn_thread_lines(
         layout,
+        typed_trap_type,
         "fn emscripten_pthread_create_js(&mut self, a0: i32, a1: i32, a2: i32, a3: i32) -> i32 {",
         &[],
         &[
@@ -1360,9 +1378,12 @@ fn pthread_create_js_lines(layout: &Layout) -> Vec<String> {
 /// parent, then a detached thread builds a sibling instance (`Self::with_memory`
 /// over the shared memory, sharing the tid counter, descriptor table and
 /// preopen), runs `run` and, if it unwinds, prints `trap_msg` and exits 134.
-/// `ok_err` is the (success, failure) value the import returns.
+/// `ok_err` is the (success, failure) value the import returns. With
+/// `typed_trap_type` (the output defines `Wasm2RsTrap`) a typed payload, which
+/// bypasses the panic hook, has its `Display` printed ahead of `trap_msg`.
 fn spawn_thread_lines(
     layout: &Layout,
+    typed_trap_type: bool,
     header: &str,
     prelude: &[&str],
     run: &[&str],
@@ -1402,13 +1423,20 @@ fn spawn_thread_lines(
     }
     lines.push("        let run = std::panic::AssertUnwindSafe(|| {".to_string());
     lines.extend(run.iter().map(|l| format!("            {l}")));
-    lines.extend(
-        [
-            "        });",
-            "        if std::panic::catch_unwind(run).is_err() {",
-        ]
-        .map(str::to_string),
-    );
+    lines.push("        });".to_string());
+    if typed_trap_type {
+        lines.extend(
+            [
+                "        if let Err(payload) = std::panic::catch_unwind(run) {",
+                "            if let Some(trap) = payload.downcast_ref::<Wasm2RsTrap>() {",
+                "                eprintln!(\"{trap}\");",
+                "            }",
+            ]
+            .map(str::to_string),
+        );
+    } else {
+        lines.push("        if std::panic::catch_unwind(run).is_err() {".to_string());
+    }
     lines.push(format!("            eprintln!({trap_msg});"));
     lines.extend(
         [
@@ -1947,6 +1975,7 @@ pub(super) fn render_lib_root(
             &[],
             deps.helpers,
             deps.dispatch_sigs,
+            defines_trap_type(deps.rt, ctx.typed_traps),
             side,
         )?;
         out.push('\n');

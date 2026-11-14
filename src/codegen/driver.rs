@@ -764,6 +764,7 @@ fn generate_module_pieces_with(
             &ctx,
             &deps.helpers,
             &deps.dispatch_sigs,
+            super::runtime::defines_trap_type(&deps.rt, ctx.typed_traps),
             side,
         )?;
         let mut tail = String::new();

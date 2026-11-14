@@ -83,32 +83,14 @@ const RT_ORDER: [Rt; 29] = [
 /// the cold trap functions the truncations call) join the helpers that need them.
 pub(super) fn render_rt_helpers(used: &HashSet<Rt>, typed: bool) -> String {
     let mut used = Cow::Borrowed(used);
-    let mut variants: Vec<TrapVariant> = Vec::new();
-    if typed {
-        for (rt, variant) in [
-            (Rt::TrapUnreachable, TrapVariant::Unreachable),
-            (
-                Rt::TrapIndirectTypeMismatch,
-                TrapVariant::IndirectCallTypeMismatch,
-            ),
-            (Rt::TrapCallStackExhausted, TrapVariant::CallStackExhausted),
-        ] {
-            if used.contains(&rt) {
-                variants.push(variant);
-            }
-        }
-        let uses_trunc = used.iter().any(|rt| TRUNC_RTS.contains(rt));
+    let variants = typed_trap_variants(&used, typed);
+    if !variants.is_empty() {
+        let uses_trunc = uses_trunc(&used);
+        let owned = used.to_mut();
+        owned.insert(Rt::TrapType);
         if uses_trunc {
-            variants.push(TrapVariant::InvalidConversionToInteger);
-            variants.push(TrapVariant::IntegerOverflow);
-        }
-        if !variants.is_empty() {
-            let owned = used.to_mut();
-            owned.insert(Rt::TrapType);
-            if uses_trunc {
-                owned.insert(Rt::TrapInvalidConversion);
-                owned.insert(Rt::TrapIntegerOverflow);
-            }
+            owned.insert(Rt::TrapInvalidConversion);
+            owned.insert(Rt::TrapIntegerOverflow);
         }
     }
     let mut blocks: Vec<String> = Vec::new();
@@ -122,6 +104,41 @@ pub(super) fn render_rt_helpers(used: &HashSet<Rt>, typed: bool) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Whether the typed output defines `Wasm2RsTrap` for these helpers, i.e. whether
+/// generated code outside the helpers may name the type.
+pub(super) fn defines_trap_type(used: &HashSet<Rt>, typed: bool) -> bool {
+    !typed_trap_variants(used, typed).is_empty()
+}
+
+fn uses_trunc(used: &HashSet<Rt>) -> bool {
+    used.iter().any(|rt| TRUNC_RTS.contains(rt))
+}
+
+/// The `Wasm2RsTrap` variants the used helpers raise; empty when untyped.
+fn typed_trap_variants(used: &HashSet<Rt>, typed: bool) -> Vec<TrapVariant> {
+    if !typed {
+        return Vec::new();
+    }
+    let mut variants = Vec::new();
+    for (rt, variant) in [
+        (Rt::TrapUnreachable, TrapVariant::Unreachable),
+        (
+            Rt::TrapIndirectTypeMismatch,
+            TrapVariant::IndirectCallTypeMismatch,
+        ),
+        (Rt::TrapCallStackExhausted, TrapVariant::CallStackExhausted),
+    ] {
+        if used.contains(&rt) {
+            variants.push(variant);
+        }
+    }
+    if uses_trunc(used) {
+        variants.push(TrapVariant::InvalidConversionToInteger);
+        variants.push(TrapVariant::IntegerOverflow);
+    }
+    variants
 }
 
 /// The trapping float->int truncation helpers.
