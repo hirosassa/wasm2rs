@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Split output can keep large data segments in side files (R1(c)): `--data-files` writes each data segment of 4 KiB or more to `data_{n}.bin` next to `lib.rs`, which includes it with `include_bytes!`. Library: `transpile_split_files`, `transpile_split_files_with_options` and `transpile_component_split_files` hand `OutputFile { name, content: FileContent }` values (text or bytes) to the sink; the existing `transpile_split*` keep the inline output.
 - `--component` supports the `utf16` canonical string encoding for lifted exports (MoonBit components with string exports, #344): the glue transcodes between a Rust `String` and UTF-16 guest memory at the boundary. An unpaired surrogate or an unaligned pointer traps (a panic) instead of being replaced.
 
 - `--component` supports the `utf16` canonical string encoding for lowered imports too (#351): the strings a guest passes to a host import are read as UTF-16, and the strings the host returns are written as UTF-16 code units. An unpaired surrogate or an unaligned pointer traps instead of being replaced.

@@ -525,3 +525,45 @@ fn the_cli_splits_a_component_into_a_directory() {
         "the glue needs a manifest with wasm2rs-wasi"
     );
 }
+
+#[test]
+fn a_split_component_moves_a_large_data_segment_to_a_side_file() {
+    let bytes = vec![0xabu8; 5000];
+    let escaped: String = bytes.iter().map(|b| format!("\\{b:02x}")).collect();
+    let core = CORE.replace(
+        "(memory (export \"memory\") 1)",
+        &format!("(memory (export \"memory\") 1) (data (i32.const 8192) \"{escaped}\")"),
+    );
+    let component = component_of(WORLD, &core);
+    let options = ComponentOptions::default();
+    let mut files = Vec::new();
+    wasm2rs::transpile_component_split_files(
+        &component,
+        &options,
+        &SplitOptions::single_file(),
+        |f| {
+            files.push(f);
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let names: Vec<_> = files.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["data_0.bin", "lib.rs"]);
+    assert_eq!(files[0].content, wasm2rs::FileContent::Bytes(bytes));
+    let wasm2rs::FileContent::Text(root) = &files[1].content else {
+        panic!("lib.rs is text");
+    };
+    assert!(root.contains("include_bytes!(\"data_0.bin\")"), "{root}");
+    // The glue is still appended to the root.
+    assert!(root.contains("Exports") || root.contains("Glue"), "{root}");
+
+    let mut inline = Vec::new();
+    transpile_component_split(&component, &options, &SplitOptions::single_file(), |f| {
+        inline.push(f);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(inline.len(), 1);
+    assert!(!inline[0].code.contains("include_bytes!"));
+}

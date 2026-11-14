@@ -1,6 +1,6 @@
 //! Command-line entry point:
 //! `wasm2rs [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports]
-//! [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
+//! [--import-memory] [--reentrant-imports] [--data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
 //! `wasm2rs --help` / `wasm2rs --version` to print the usage / the version, or
 //! `wasm2rs --dump <input.wasm>` to summarize a module, or
 //! `wasm2rs --extract-core <component.wasm> <dir>` to write a component's core
@@ -10,9 +10,12 @@
 //! that lowers it to the flat `Imports` trait; with `--external-types=<path>`, only the `Glue`,
 //! naming the `Host` trait and the interface-qualified types of the library at `<path>`).
 //!
-//! `wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>]
+//! `wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files]
 //! <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]` to write a component's program (its core module, or the linked modules of an adapter component) plus the typed `Glue`
 //! and `Exports` (like `wasm2rs::transpile_component`).
+//!
+//! `--data-files` (only with a split output) moves each data segment of 4 KiB or more into a
+//! `data_{n}.bin` file next to `lib.rs`, which `lib.rs` includes with `include_bytes!`.
 //!
 //! An unknown `--option` is refused; `--` ends the options, so a path that starts with `-` can
 //! still be given.
@@ -35,10 +38,7 @@
 
 use std::process::ExitCode;
 
-use wasm2rs::{
-    SourceFile, SplitOptions, TranspileError, TranspileOptions, cargo_manifest,
-    transpile_split_with_options,
-};
+use wasm2rs::{FileContent, SplitOptions, TranspileError, TranspileOptions, cargo_manifest};
 
 // Transpiling a huge module churns roughly a gigabyte of output through
 // countless short-lived `String` allocations. The system allocator keeps the
@@ -55,7 +55,7 @@ use wasm2rs::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --help | --version\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] [--data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files] <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --help | --version\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -127,6 +127,7 @@ fn run() -> Result<(), String> {
     let mut named_imports = false;
     let mut import_memory = false;
     let mut reentrant_imports = false;
+    let mut data_files = false;
     let mut entry_exports: Option<Vec<String>> = None;
     let mut split_dispatch = 0usize;
     let mut jobs = 0usize;
@@ -197,6 +198,7 @@ fn run() -> Result<(), String> {
             "--named-imports" => named_imports = true,
             "--import-memory" => import_memory = true,
             "--reentrant-imports" => reentrant_imports = true,
+            "--data-files" => data_files = true,
             _ => return Err(format!("unknown option {arg}; try --help")),
         }
     }
@@ -220,6 +222,7 @@ fn run() -> Result<(), String> {
             (named_imports, "--named-imports"),
             (import_memory, "--import-memory"),
             (reentrant_imports, "--reentrant-imports"),
+            (data_files, "--data-files"),
             (split_dispatch > 0, "--split-dispatch"),
             (jobs > 0, "--jobs"),
             (call_depth_limit.is_some(), "--call-depth-limit"),
@@ -276,8 +279,23 @@ fn run() -> Result<(), String> {
             // No manifest: the glue refers to the `wasm2rs-wasi` library, which only the
             // user's own `Cargo.toml` can depend on.
             return write_split(&dir, None, |sink| {
-                wasm2rs::transpile_component_split(&wasm, &options, &split, sink).map(|_| ())
+                if data_files {
+                    wasm2rs::transpile_component_split_files(&wasm, &options, &split, |file| {
+                        sink_file(sink, file)
+                    })
+                } else {
+                    wasm2rs::transpile_component_split(&wasm, &options, &split, |file| {
+                        sink(&file.name, file.code.as_bytes())
+                    })
+                }
+                .map(|_| ())
             });
+        }
+        if data_files {
+            return Err(
+                "--data-files needs a split output (funcs_per_file or max_bytes_per_file)"
+                    .to_string(),
+            );
         }
         let rust = wasm2rs::transpile_component(&wasm, &options).map_err(|e| e.to_string())?;
         return write_output(output, &rust);
@@ -354,8 +372,19 @@ fn run() -> Result<(), String> {
             max_bytes_per_file,
         };
         return write_split(&dir, Some(cargo_manifest(&crate_name(&dir))), |sink| {
-            transpile_split_with_options(&wasm, &split, &topts, sink)
+            if data_files {
+                wasm2rs::transpile_split_files_with_options(&wasm, &split, &topts, |file| {
+                    sink_file(sink, file)
+                })
+            } else {
+                wasm2rs::transpile_split_with_options(&wasm, &split, &topts, |file| {
+                    sink(&file.name, file.code.as_bytes())
+                })
+            }
         });
+    }
+    if data_files {
+        return Err(DATA_FILES_NEEDS_SPLIT.to_string());
     }
 
     let pieces =
@@ -393,14 +422,29 @@ fn parse_usize_arg(arg: Option<String>, name: &str) -> Result<usize, String> {
     }
 }
 
-/// Transpile into `dir`, writing each generated file as it is produced so no
+const DATA_FILES_NEEDS_SPLIT: &str =
+    "--data-files needs a split output (funcs_per_file or max_bytes_per_file)";
+
+/// Receives each generated file as `(name, bytes)`.
+type FileSink<'a> = dyn FnMut(&str, &[u8]) -> Result<(), TranspileError> + 'a;
+
+/// Hand one output file (source text or a binary side file) to a `write_split` sink.
+fn sink_file(sink: &mut FileSink<'_>, file: wasm2rs::OutputFile) -> Result<(), TranspileError> {
+    match &file.content {
+        FileContent::Text(code) => sink(&file.name, code.as_bytes()),
+        FileContent::Bytes(bytes) => sink(&file.name, bytes),
+        _ => Err(TranspileError::Internal(
+            "an output file of an unknown kind".into(),
+        )),
+    }
+}
+
+/// Transpile into `dir`, writing each generated file (`name`, bytes) as it is produced so no
 /// more than one chunk's worth is held in memory at a time.
 fn write_split(
     dir: &str,
     manifest: Option<String>,
-    transpile: impl FnOnce(
-        &mut dyn FnMut(SourceFile) -> Result<(), TranspileError>,
-    ) -> Result<(), TranspileError>,
+    transpile: impl FnOnce(&mut FileSink<'_>) -> Result<(), TranspileError>,
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
 
@@ -415,9 +459,9 @@ fn write_split(
     }
 
     let mut write_err: Option<String> = None;
-    let result = transpile(&mut |file| {
-        let path = std::path::Path::new(dir).join(&file.name);
-        std::fs::write(&path, &file.code).map_err(|e| {
+    let result = transpile(&mut |name, bytes| {
+        let path = std::path::Path::new(dir).join(name);
+        std::fs::write(&path, bytes).map_err(|e| {
             write_err = Some(format!("cannot write {}: {e}", path.display()));
             wasm2rs::TranspileError::Internal("chunk write failed".into())
         })

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use wasmparser::{FunctionBody, Operator, ValType};
 
-use crate::{TranspileError, TranspileOptions};
+use crate::{OutputFile, TranspileError, TranspileOptions};
 
 /// The typed-continuations analysis for one module, grouped so the four tightly
 /// coupled tables travel together and the call sites read `ctx.cont.bodies` etc.
@@ -637,24 +637,27 @@ impl ModuleDeps {
         self.state_structs.extend(meta.state_structs);
     }
 }
-/// Translate a whole module into a single Rust source string.
+/// Rough output bytes per code-section byte (x2, i.e. 8.5), measured on a large module; only
+/// sizes the up-front reservation, so an underestimate costs a regrow at worst.
+const OUTPUT_PER_CODE_BYTE_X2: u64 = 17;
+
+/// Translate a whole module into a single Rust source, as head, function bodies and tail.
 ///
 /// A module that declares linear memory, a table or globals carries mutable
 /// state, so it is emitted as a `pub struct Instance` with the functions as
 /// `&mut self` methods. A stateless module keeps its functions as free
 /// `pub fn`s, matching the earlier phases exactly.
-pub(crate) fn generate_module(parts: &ModuleParts<'_>) -> Result<String, TranspileError> {
-    generate_module_pieces(parts).map(crate::SourcePieces::into_string)
-}
-
-/// Rough output bytes per code-section byte (x2, i.e. 8.5), measured on a large module; only
-/// sizes the up-front reservation, so an underestimate costs a regrow at worst.
-const OUTPUT_PER_CODE_BYTE_X2: u64 = 17;
-
-/// [`generate_module`] without the final join: the module as head, function
-/// bodies and tail.
 pub(crate) fn generate_module_pieces(
     parts: &ModuleParts<'_>,
+) -> Result<crate::SourcePieces, TranspileError> {
+    generate_module_pieces_with(parts, None)
+}
+
+/// [`generate_module_pieces`] that, given `side`, moves large data segments out of the text
+/// into the files it collects (see [`render::segment_statics`]).
+fn generate_module_pieces_with(
+    parts: &ModuleParts<'_>,
+    side: Option<&mut DataFiles>,
 ) -> Result<crate::SourcePieces, TranspileError> {
     let (ctx, stateful) = build_ctx(parts)?;
 
@@ -748,7 +751,14 @@ pub(crate) fn generate_module_pieces(
         // The bodies (the bulk of the output) stay in their own buffer between
         // the head and the tail, so they are never copied into a second
         // module-sized buffer.
-        render::render_module_head(&mut out, parts, &ctx, &deps.helpers, &deps.dispatch_sigs)?;
+        render::render_module_head(
+            &mut out,
+            parts,
+            &ctx,
+            &deps.helpers,
+            &deps.dispatch_sigs,
+            side,
+        )?;
         let mut tail = String::new();
         render::render_module_tail(&mut tail, parts, &ctx, &deps.dispatch_sigs)?;
         Ok(crate::SourcePieces {
@@ -776,7 +786,7 @@ fn split_at_ends<'a>(buf: &'a str, ends: &[usize]) -> Vec<&'a str> {
 /// peak memory stays around one chunk's worth rather than the whole program.
 /// When nothing forces a split — the module fits in `funcs_per_file` functions
 /// and no `max_bytes_per_file` cap is set — the output is byte-identical to
-/// [`generate_module`], emitted as a single `lib.rs`.
+/// the single-file rendering, emitted as a single `lib.rs`.
 ///
 /// Otherwise the defined functions are chunked into `funcs_{n}.rs` files and a
 /// `lib.rs` root ties them together: for a stateless module the chunks hold free
@@ -794,7 +804,8 @@ pub(crate) fn generate_module_split(
     parts: &ModuleParts<'_>,
     funcs_per_file: usize,
     max_bytes_per_file: usize,
-    emit: &mut dyn FnMut(String, String) -> Result<(), TranspileError>,
+    data_files: bool,
+    emit: &mut dyn FnMut(OutputFile) -> Result<(), TranspileError>,
 ) -> Result<(), TranspileError> {
     let per = if funcs_per_file == 0 {
         usize::MAX
@@ -808,8 +819,11 @@ pub(crate) fn generate_module_split(
     };
     // With nothing forcing a split, keep the exact single-file rendering.
     if parts.funcs.len() <= per && byte_cap == usize::MAX {
-        let code = generate_module(parts)?;
-        return emit("lib.rs".to_string(), code);
+        let mut side = DataFiles::new();
+        let code =
+            generate_module_pieces_with(parts, data_files.then_some(&mut side))?.into_string();
+        emit_side_files(side, emit)?;
+        return emit(OutputFile::text("lib.rs", code));
     }
 
     let (ctx, stateful) = build_ctx(parts)?;
@@ -848,10 +862,10 @@ pub(crate) fn generate_module_split(
             if stateful {
                 chunk.push_str("}\n");
             }
-            emit(
+            emit(OutputFile::text(
                 format!("funcs_{chunk_index}.rs"),
                 std::mem::take(&mut chunk),
-            )?;
+            ))?;
             chunk_index += 1;
             funcs_in_chunk = 0;
         }
@@ -861,10 +875,10 @@ pub(crate) fn generate_module_split(
         if stateful {
             chunk.push_str("}\n");
         }
-        emit(
+        emit(OutputFile::text(
             format!("funcs_{chunk_index}.rs"),
             std::mem::take(&mut chunk),
-        )?;
+        ))?;
         chunk_index += 1;
     }
     let n_chunks = chunk_index;
@@ -881,7 +895,15 @@ pub(crate) fn generate_module_split(
         simd: &deps.simd,
         dispatch_sigs: &deps.dispatch_sigs,
     };
-    let mut root = render_lib_root(parts, &ctx, stateful, &root_deps, n_chunks)?;
+    let mut side = DataFiles::new();
+    let mut root = render_lib_root(
+        parts,
+        &ctx,
+        stateful,
+        &root_deps,
+        n_chunks,
+        data_files.then_some(&mut side),
+    )?;
     // Everything that must sit above the root, outermost first, assembled once
     // and placed in front in a single insertion (the root carries the data
     // statics, so re-formatting it per piece would copy it each time):
@@ -908,7 +930,17 @@ pub(crate) fn generate_module_split(
         prefix.push('\n');
     }
     root.insert_str(0, &prefix);
-    emit("lib.rs".to_string(), root)
+    emit_side_files(side, emit)?;
+    emit(OutputFile::text("lib.rs", root))
+}
+
+/// Hand the collected `data_{n}.bin` files to `emit`, ahead of the `lib.rs` that includes them.
+fn emit_side_files(
+    side: DataFiles,
+    emit: &mut dyn FnMut(OutputFile) -> Result<(), TranspileError>,
+) -> Result<(), TranspileError> {
+    side.into_iter()
+        .try_for_each(|(name, bytes)| emit(OutputFile::bytes(name, bytes)))
 }
 /// Generate the Rust source of one function, appending it to `out` (each
 /// non-empty line prefixed by `line_prefix`, used to indent a method inside a

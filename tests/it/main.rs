@@ -67,6 +67,7 @@ mod control_flow;
 mod convert;
 mod data;
 mod data_compact;
+mod data_files;
 mod dispatch_targets;
 mod dump;
 mod elem_exprs;
