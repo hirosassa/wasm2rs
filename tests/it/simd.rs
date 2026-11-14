@@ -1578,9 +1578,7 @@ fn splat_and_extending_loads_trap_exactly_at_the_end_of_memory() {
     assert_eq!(i.func1(65532), u128::from_le_bytes([5, 6, 7, 8, 5, 6, 7, 8, 5, 6, 7, 8, 5, 6, 7, 8]));
     assert!(traps(&mut || i.func1(65533)));
     // 16x4 zero-extend of 01..08 -> u32 lanes 0x0201, 0x0403, 0x0605, 0x0807
-    let e16 = [0x0201u32, 0x0403, 0x0605, 0x0807];
-    let want16 = e16.iter().fold(0u128, |a, &x| a | (x as u128) << (32 * e16.iter().position(|&y| y == x).unwrap()));
-    assert_eq!(i.func2(65528), want16);
+    assert_eq!(i.func2(65528), 0x0201u128 | 0x0403u128 << 32 | 0x0605u128 << 64 | 0x0807u128 << 96);
     assert!(traps(&mut || i.func2(65529)));
     // 32x2 zero-extend -> u64 lanes 0x04030201, 0x08070605
     assert_eq!(i.func3(65528), 0x04030201u128 | (0x08070605u128 << 64));

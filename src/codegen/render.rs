@@ -383,8 +383,8 @@ fn segment_statics(
 /// The descriptor table behind `wasi_fds`: slot `N - 4` holds descriptor `N`,
 /// and `free` lists the closed slots below the high-water mark so `path_open`
 /// takes the lowest free descriptor (the POSIX rule) without scanning. It
-/// derefs to the slot `Vec` for lookups; only `alloc` and `release` (and
-/// `fd_renumber`, which frees its source slot) change which slots are free.
+/// derefs to the slot `Vec` for lookups; only `alloc` and `release` change
+/// which slots are free.
 const WASI_FDS_DEF: &str = "\
 #[allow(dead_code)]
 #[derive(Default)]
