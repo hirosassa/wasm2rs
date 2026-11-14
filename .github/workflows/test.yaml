@@ -62,23 +62,24 @@ jobs:
       - name: Test wasm2rs-wasi with the http-client feature
         run: cargo test -p wasm2rs-wasi --features http-client --test http_client
 
-      # The Rust wasi-threads E2E test must run here, not skip (see
-      # docs/wasi-threads-e2e.md). The wasi-sdk tests skip here; the
-      # e2e-wasi-sdk job runs them. The full suite runs on stable only; beta and
-      # nightly just have to compile it.
       # The tests compile each generated program with rustc, which dominates a cold run. The
       # binaries are content-addressed (the key hashes the generated source, the rustc flags and
-      # the rustc version), so a cache restored from an older generator is never wrongly hit: it
-      # only fails to hit. The restore key is therefore safe to fall back on.
+      # the rustc version), so a cache restored from an older generator or toolchain is never wrongly
+      # hit: it only fails to hit. The key is unique per run so that main always saves a fresh
+      # cache, and restoring the newest one by prefix is therefore safe.
       - name: Restore the generated-program cache
         if: matrix.rust == 'stable'
         id: testcache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/wasm2rs-testcache
-          key: testcache-${{ runner.os }}-${{ hashFiles('src/**', 'Cargo.lock') }}
+          key: testcache-${{ runner.os }}-${{ github.run_id }}
           restore-keys: testcache-${{ runner.os }}-
 
+      # The Rust wasi-threads E2E test must run here, not skip (see
+      # docs/wasi-threads-e2e.md). The wasi-sdk tests skip here; the
+      # e2e-wasi-sdk job runs them. The full suite runs on stable only; beta and
+      # nightly just have to compile it.
       - name: Run cargo test
         if: matrix.rust == 'stable'
         run: cargo test --release --workspace
@@ -88,11 +89,11 @@ jobs:
           WASM2RS_TESTCACHE_MAX_GIB: 2
 
       - name: Save the generated-program cache
-        if: matrix.rust == 'stable' && github.ref == 'refs/heads/main' && steps.testcache.outputs.cache-hit != 'true'
+        if: matrix.rust == 'stable' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/wasm2rs-testcache
-          key: testcache-${{ runner.os }}-${{ hashFiles('src/**', 'Cargo.lock') }}
+          key: ${{ steps.testcache.outputs.cache-primary-key }}
 
       - name: Build the tests (compile compatibility only)
         if: matrix.rust != 'stable'

@@ -93,9 +93,7 @@ fn changed_generator_output_gets_a_new_cache_entry() {
     opts.unsafe_memory = true;
     let b = wasm2rs::transpile_with_options(&wasm, &opts).expect("transpile");
     assert_ne!(a, b, "precondition: the option changes the emitted source");
-    let (pa, pb) = (
-        common::build("gen_key_a", &format!("{a}\nfn main() {{}}\n")),
-        common::build("gen_key_b", &format!("{b}\nfn main() {{}}\n")),
-    );
+    let pa = common::build("gen_key_a", &format!("{a}\nfn main() {{}}\n"));
+    let pb = common::build("gen_key_b", &format!("{b}\nfn main() {{}}\n"));
     assert_ne!(pa, pb);
 }
