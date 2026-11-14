@@ -1,6 +1,7 @@
 //! Command-line entry point:
 //! `wasm2rs [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports]
-//! <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
+//! [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
+//! `wasm2rs --help` / `wasm2rs --version` to print the usage / the version, or
 //! `wasm2rs --dump <input.wasm>` to summarize a module, or
 //! `wasm2rs --extract-core <component.wasm> <dir>` to write a component's core
 //! modules to `<dir>/module{n}.wasm`, or
@@ -12,6 +13,9 @@
 //! `wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>]
 //! <component.wasm> [output]` to write a component's program (its core module, or the linked modules of an adapter component) plus the typed `Glue`
 //! and `Exports` (like `wasm2rs::transpile_component`).
+//!
+//! An unknown `--option` is refused; `--` ends the options, so a path that starts with `-` can
+//! still be given.
 //!
 //! Reads a WebAssembly binary and writes the transpiled Rust source. With no
 //! `funcs_per_file`/`max_bytes_per_file`, the whole module is one file, written
@@ -40,7 +44,7 @@ use wasm2rs::{SplitOptions, TranspileOptions, cargo_manifest, transpile_split_wi
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] <component.wasm> [output]\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] <component.wasm> [output]\n       wasm2rs --help | --version\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -117,7 +121,12 @@ fn run() -> Result<(), String> {
     let mut jobs = 0usize;
     let mut call_depth_limit: Option<u32> = None;
     let mut positional: Vec<String> = Vec::new();
+    let mut options_ended = false;
     for arg in std::env::args().skip(1) {
+        if options_ended || !arg.starts_with('-') || arg == "-" {
+            positional.push(arg);
+            continue;
+        }
         if let Some(n) = arg.strip_prefix("--split-dispatch=") {
             split_dispatch = n
                 .parse()
@@ -157,6 +166,15 @@ fn run() -> Result<(), String> {
             continue;
         }
         match arg.as_str() {
+            "--" => options_ended = true,
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                return Ok(());
+            }
+            "--version" | "-V" => {
+                println!("wasm2rs {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
             "--unsafe-memory" => unsafe_memory = true,
             "--simd-intrinsics" => simd_intrinsics = true,
             "--dump" => dump = true,
@@ -168,7 +186,7 @@ fn run() -> Result<(), String> {
             "--named-imports" => named_imports = true,
             "--import-memory" => import_memory = true,
             "--reentrant-imports" => reentrant_imports = true,
-            _ => positional.push(arg),
+            _ => return Err(format!("unknown option {arg}; try --help")),
         }
     }
     let mut args = positional.into_iter();
@@ -376,16 +394,35 @@ fn write_split(
     let mut write_err: Option<String> = None;
     let result = transpile_split_with_options(wasm, &opts, topts, |file| {
         let path = std::path::Path::new(dir).join(&file.name);
-        if let Err(e) = std::fs::write(&path, &file.code) {
-            // Record the first I/O failure and stop; the transpile itself is
-            // still `Ok`, so this is surfaced separately below.
+        std::fs::write(&path, &file.code).map_err(|e| {
             write_err = Some(format!("cannot write {}: {e}", path.display()));
-        }
-        Ok(())
+            wasm2rs::TranspileError::Internal("chunk write failed".into())
+        })
     });
-    result.map_err(|e| e.to_string())?;
+    // The sink's error only aborts generation; the recorded write failure is the
+    // root cause, so it wins.
     match write_err {
         Some(e) => Err(e),
-        None => Ok(()),
+        None => result.map_err(|e| e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every flag `USAGE` advertises must also be documented in the module doc, so
+    /// the two cannot drift apart.
+    #[test]
+    fn module_doc_mentions_every_usage_flag() {
+        let doc: String = include_str!("main.rs")
+            .lines()
+            .take_while(|l| l.starts_with("//!"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for flag in super::USAGE
+            .split(|c: char| !(c == '-' || c.is_ascii_alphanumeric()))
+            .filter(|t| t.starts_with("--"))
+        {
+            assert!(doc.contains(flag), "module doc is missing {flag}");
+        }
     }
 }
