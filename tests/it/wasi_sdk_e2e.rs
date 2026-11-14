@@ -11,9 +11,7 @@ use wasmparser::{ExternalKind, Imports, Parser, Payload, TypeRef};
 
 /// A fresh scratch directory for one test's sources and build output.
 fn work_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("wasm2rs_sdk_e2e_{name}"));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    crate::common::scratch_dir(&format!("wasm2rs_sdk_e2e_{name}"))
 }
 
 /// The `clang` of the wasi-sdk named by `WASI_SDK_PATH` (or `/opt/wasi-sdk`).

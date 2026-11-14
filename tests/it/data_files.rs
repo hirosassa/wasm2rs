@@ -60,8 +60,7 @@ fn side_names(files: &[OutputFile]) -> Vec<&str> {
 /// Write `files` (side files included) into a temp dir, append `main` to `lib.rs`, build with
 /// `rustc -D warnings` and run it.
 fn compile_run(name: &str, files: &[OutputFile], main_body: &str) {
-    let dir = std::env::temp_dir().join(format!("wasm2rs_df_{name}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = crate::common::scratch_dir(&format!("wasm2rs_df_{name}"));
     for f in files {
         match &f.content {
             FileContent::Text(code) => {

@@ -19,8 +19,7 @@ fn compile(test: &str, wat: &str, extra: &str) -> (std::path::PathBuf, std::path
     let wasm = wat::parse_str(wat).expect("valid wat");
     let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
 
-    let dir = std::env::temp_dir().join(format!("wasm2rs_wasifs_{test}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = crate::common::scratch_dir(&format!("wasm2rs_wasifs_{test}"));
     let src = dir.join("gen.rs");
     let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
 
@@ -1353,26 +1352,35 @@ fn main() {
 }
 
 // A guest-created symlink must not carry later path operations out of the
-// preopen. `esc -> ../wasm2rs_symlink_outside` is a *relative* target (so
+// preopen. `esc -> ../<outside>` is a *relative* target (so
 // creating it is legal), but resolving through it lands outside the preopen:
 // reading, creating, or truncating there must be ENOTCAPABLE, as must opening
 // a dangling symlink whose target is outside (O_CREAT would create it).
 // An absolute symlink target is refused up front.
 #[test]
 fn guest_created_symlink_cannot_escape_the_preopen() {
+    // The preopen is a sibling of `outside` (both live in the scratch root), so the relative
+    // target `../<outside>` reaches the real directory that holds the seeded secret.
+    let outside = crate::common::scratch_dir("so");
+    let name = outside
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("utf-8 scratch dir name")
+        .to_owned();
+    let (esc_target, dang_target) = (format!("../{name}"), format!("../{name}/new2"));
     let wat = fs_module(
         r#"(import "wasi_snapshot_preview1" "path_symlink"
              (func $sl (param i32 i32 i32 i32 i32) (result i32)))
            (data (i32.const 200) "esc")
-           (data (i32.const 210) "../wasm2rs_symlink_outside")
+           (data (i32.const 210) "@ESC@")
            (data (i32.const 240) "esc/secret.txt")
            (data (i32.const 260) "esc/new.txt")
            (data (i32.const 280) "dang")
-           (data (i32.const 290) "../wasm2rs_symlink_outside/new2")
+           (data (i32.const 290) "@DANG@")
            (data (i32.const 330) "/etc")
            (data (i32.const 340) "abs")"#,
         r#"(func (export "mk_esc") (result i32)
-             (call $sl (i32.const 210) (i32.const 26) (i32.const 3) (i32.const 200) (i32.const 3)))
+             (call $sl (i32.const 210) (i32.const @ESC_LEN@) (i32.const 3) (i32.const 200) (i32.const 3)))
            (func (export "read_through") (result i32)
              (call $po (i32.const 3) (i32.const 0) (i32.const 240) (i32.const 14)
                        (i32.const 0) (i64.const 2) (i64.const 0) (i32.const 0) (i32.const 400)))
@@ -1380,13 +1388,17 @@ fn guest_created_symlink_cannot_escape_the_preopen() {
              (call $po (i32.const 3) (i32.const 0) (i32.const 260) (i32.const 11)
                        (i32.const 1) (i64.const 64) (i64.const 0) (i32.const 0) (i32.const 400)))
            (func (export "mk_dangling") (result i32)
-             (call $sl (i32.const 290) (i32.const 31) (i32.const 3) (i32.const 280) (i32.const 4)))
+             (call $sl (i32.const 290) (i32.const @DANG_LEN@) (i32.const 3) (i32.const 280) (i32.const 4)))
            (func (export "create_dangling") (result i32)
              (call $po (i32.const 3) (i32.const 0) (i32.const 280) (i32.const 4)
                        (i32.const 1) (i64.const 64) (i64.const 0) (i32.const 0) (i32.const 400)))
            (func (export "mk_abs") (result i32)
              (call $sl (i32.const 330) (i32.const 4) (i32.const 3) (i32.const 340) (i32.const 3)))"#,
-    );
+    )
+    .replace("@ESC_LEN@", &esc_target.len().to_string())
+    .replace("@DANG_LEN@", &dang_target.len().to_string())
+    .replace("@ESC@", &esc_target)
+    .replace("@DANG@", &dang_target);
     let extra = r#"
 fn main() {
     let mut i = Instance::new();
@@ -1398,8 +1410,6 @@ fn main() {
     assert_eq!(i.func7(), 76, "an absolute symlink target must be ENOTCAPABLE");
 }
 "#;
-    let outside = std::env::temp_dir().join("wasm2rs_symlink_outside");
-    std::fs::create_dir_all(&outside).expect("outside dir");
     std::fs::write(outside.join("secret.txt"), b"secret").expect("seed secret");
     let _ = std::fs::remove_file(outside.join("new.txt"));
     let _ = std::fs::remove_file(outside.join("new2"));

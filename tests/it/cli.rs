@@ -15,8 +15,7 @@ fn write_sample_wasm(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         (func (export "b") (result i32) i32.const 2)
         (func (export "c") (result i32) i32.const 3))"#;
     let wasm = wat::parse_str(wat).expect("valid wat");
-    let dir = std::env::temp_dir().join(format!("wasm2rs_cli_{name}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = crate::common::scratch_dir(&format!("wasm2rs_cli_{name}"));
     let input = dir.join("in.wasm");
     std::fs::write(&input, wasm).expect("write wasm");
     (dir, input)
@@ -173,7 +172,8 @@ fn non_numeric_split_argument_is_rejected() {
 /// error that names the path.
 #[test]
 fn unreadable_input_file_fails_with_a_read_error() {
-    let missing = std::env::temp_dir().join("wasm2rs_definitely_missing_input.wasm");
+    let missing =
+        crate::common::scratch_dir("cli_missing_input").join("definitely_missing_input.wasm");
     let _ = std::fs::remove_file(&missing);
 
     let out = Command::new(wasm2rs_bin())
@@ -197,8 +197,7 @@ fn write_memory_wasm(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         (func (export "l") (param i32) (result i32) (i32.load (local.get 0)))
         (func (export "s") (param i32 i32) (i32.store (local.get 0) (local.get 1))))"#;
     let wasm = wat::parse_str(wat).expect("valid wat");
-    let dir = std::env::temp_dir().join(format!("wasm2rs_cli_{name}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = crate::common::scratch_dir(&format!("wasm2rs_cli_{name}"));
     let input = dir.join("in.wasm");
     std::fs::write(&input, wasm).expect("write wasm");
     (dir, input)
@@ -326,8 +325,7 @@ fn named_imports_flag_names_the_trait_methods_single_and_split() {
             (func (export "f") (call 0 (i32.const 1))))"#,
     )
     .expect("valid wat");
-    let dir = std::env::temp_dir().join("wasm2rs_cli_named_imports");
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = crate::common::scratch_dir("wasm2rs_cli_named_imports");
     let input = dir.join("in.wasm");
     std::fs::write(&input, wasm).expect("write wasm");
 
@@ -544,8 +542,7 @@ fn write_data_wasm(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
             (func (export "b") (result i32) i32.const 2))"#,
         "\\ab".repeat(5000)
     );
-    let dir = std::env::temp_dir().join(format!("wasm2rs_cli_{name}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = crate::common::scratch_dir(&format!("wasm2rs_cli_{name}"));
     let input = dir.join("in.wasm");
     std::fs::write(&input, wat::parse_str(wat).expect("valid wat")).expect("write wasm");
     (dir, input)

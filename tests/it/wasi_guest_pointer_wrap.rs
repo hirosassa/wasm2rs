@@ -97,8 +97,7 @@ fn spans_past_4g_trap_with_32bit_usize() {
         let program = format!(
             "{generated}\nfn main() {{ let mut m = Instance::new(); println!(\"RESULT {{}}\", m.func1()); }}\n"
         );
-        let dir = std::env::temp_dir().join(format!("wasm2rs_wasi_wrap_w32_{name}"));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = common::scratch_dir(&format!("wasm2rs_wasi_wrap_w32_{name}"));
         let (src, wasm, js) = (dir.join("m.rs"), dir.join("m.wasm"), dir.join("run.mjs"));
         std::fs::write(&src, program).unwrap();
         std::fs::write(

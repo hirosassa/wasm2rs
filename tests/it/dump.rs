@@ -153,8 +153,7 @@ fn the_host_trait_verdict_matches_what_codegen_generates() {
 
 fn write_wasm(name: &str) -> std::path::PathBuf {
     let wasm = wat::parse_str(r#"(module (func (export "a") (result i32) i32.const 1))"#).unwrap();
-    let dir = std::env::temp_dir().join(format!("wasm2rs_dump_{name}"));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::common::scratch_dir(&format!("wasm2rs_dump_{name}"));
     let path = dir.join("in.wasm");
     std::fs::write(&path, wasm).unwrap();
     path
