@@ -82,6 +82,8 @@ pub(super) struct Records {
     list: Vec<(Decl, Placed)>,
     /// Type nodes visited so far, against [`NODE_BUDGET`].
     visited: Cell<usize>,
+    /// Some type is a `future<T>` or `stream<T>`: the output declares their handle types.
+    uses_async_handles: bool,
 }
 
 /// `kebab-case` as a `CamelCase` Rust type name that is not one of the std names the
@@ -325,6 +327,16 @@ impl Records {
                 self.add_resource(r);
                 Ok(())
             }
+            WitType::Future(t) | WitType::Stream(t) => {
+                if !self.prefix.is_empty() {
+                    return Err(unsupported(
+                        "future and stream types with external types (the library declares no \
+                         handle types for them)",
+                    ));
+                }
+                self.uses_async_handles = true;
+                t.as_deref().map_or(Ok(()), |t| self.add_in(t))
+            }
             _ => Ok(()),
         }
     }
@@ -402,6 +414,16 @@ impl Records {
                 Some(placed) => self.path(placed, prefix),
                 None => type_name(&r.name),
             },
+            WitType::Future(t) | WitType::Stream(t) => {
+                // The handle types are top-level: a module reaches them through `super::`.
+                let at = if self.qualified { prefix } else { "" };
+                let kind = if matches!(ty, WitType::Future(_)) {
+                    "WitFuture"
+                } else {
+                    "WitStream"
+                };
+                format!("{at}{kind}<{}>", inner(t)?)
+            }
         })
     }
 }
@@ -660,6 +682,9 @@ pub(super) fn write_declarations(
     out.push_str("\npub trait Host {\n");
     for (f, name) in funcs.iter().zip(names) {
         let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
+        if f.is_async {
+            out.push_str("    ///\n    /// An `async func` (WASI 0.3): the host completes it before returning.\n");
+        }
         let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
         let sig = typed_signature(records, name, f, &idents)?;
         if default_trap {
@@ -710,6 +735,9 @@ pub(super) fn doc_text(interface: &str, name: &str) -> String {
 /// The type declarations: top-level, or (qualified) one `pub mod` per defining interface,
 /// ordered by module and name so that the text does not depend on the order of the functions.
 pub(super) fn write_types(out: &mut String, records: &Records) -> Result<(), TranspileError> {
+    if records.uses_async_handles {
+        out.push_str(ASYNC_HANDLES);
+    }
     if !records.qualified {
         for placed in &records.resources {
             write_resource(out, &placed.name);
@@ -751,6 +779,44 @@ pub(super) fn write_types(out: &mut String, records: &Records) -> Result<(), Tra
     }
     Ok(())
 }
+
+/// The typed ends of `future<T>` and `stream<T>` (WASI 0.3): the handle in the component's
+/// table. Reading or writing through them needs the async runtime, which is not generated yet.
+const ASYNC_HANDLES: &str = r#"
+/// The readable end of a `future<T>`.
+pub struct WitFuture<T>(pub u32, pub std::marker::PhantomData<fn() -> T>);
+
+/// The readable end of a `stream<T>`.
+pub struct WitStream<T>(pub u32, pub std::marker::PhantomData<fn() -> T>);
+
+macro_rules! wit_handle_impls {
+    ($($name:ident),*) => {$(
+        impl<T> $name<T> {
+            pub fn new(handle: u32) -> Self {
+                $name(handle, std::marker::PhantomData)
+            }
+        }
+        impl<T> Clone for $name<T> {
+            fn clone(&self) -> Self {
+                *self
+            }
+        }
+        impl<T> Copy for $name<T> {}
+        impl<T> std::fmt::Debug for $name<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}({})", stringify!($name), self.0)
+            }
+        }
+        impl<T> PartialEq for $name<T> {
+            fn eq(&self, other: &Self) -> bool {
+                self.0 == other.0
+            }
+        }
+        impl<T> Eq for $name<T> {}
+    )*};
+}
+wit_handle_impls!(WitFuture, WitStream);
+"#;
 
 pub(super) fn write_resource(out: &mut String, name: &str) {
     let _ = writeln!(

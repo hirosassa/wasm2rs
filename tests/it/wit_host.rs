@@ -196,21 +196,19 @@ fn an_interface_without_functions_adds_nothing() {
 #[test]
 fn unsupported_types_are_errors_naming_the_type() {
     let cases = [
-        ("future", r#"(export "f" (func (param "v" (future u8))))"#),
-        ("stream", r#"(export "f" (func (result (stream u8))))"#),
         (
             "error-context",
             r#"(export "f" (func (param "v" error-context)))"#,
         ),
         (
-            "future",
+            "error-context",
             // Nested inside a supported type.
-            r#"(export "f" (func (result (list (option (future u8))))))"#,
+            r#"(export "f" (func (result (list (option error-context)))))"#,
         ),
         (
-            "stream",
+            "error-context",
             // An unsupported payload inside a variant.
-            r#"(type $st (stream u8))
+            r#"(type $st error-context)
                (type $w (variant (case "a" $st)))
                (export "v" (type $v (eq $w)))
                (export "f" (func (param "v" $v)))"#,
@@ -230,7 +228,7 @@ fn an_unused_unsupported_type_is_not_an_error() {
     let wasm = component(
         "",
         "a:b/c",
-        r#"(type $st (stream u8))
+        r#"(type $st error-context)
            (type $w (variant (case "a" $st)))
                (export "v" (type $v (eq $w)))
            (export "kind" (type (eq $v)))
@@ -368,10 +366,10 @@ fn the_cli_fails_on_a_core_module_and_unsupported_types() {
     let variant = run(&component(
         "",
         "a:b/c",
-        r#"(export "f" (func (param "v" (future u8))))"#,
+        r#"(export "f" (func (param "v" error-context)))"#,
     ));
     assert!(!variant.status.success());
-    assert!(String::from_utf8_lossy(&variant.stderr).contains("future"));
+    assert!(String::from_utf8_lossy(&variant.stderr).contains("error-context"));
 }
 
 /// `--wit-host` generates no code from the module, so it refuses extra arguments and the
@@ -1148,8 +1146,11 @@ fn a_resource_drop_the_component_lowers_is_declared() {
 /// The glue's `impl Imports for Glue` and the trait derived from the core's imports agree
 /// (whether or not the core imports the drop), and the glue builds with `host_impl`.
 fn glue_builds_with(core: &str, host_impl: &str) {
-    let component = component_around(core);
-    let glue = wasm2rs::wit_host_glue(&component).unwrap();
+    glue_of_builds_with(&component_around(core), core, host_impl);
+}
+
+fn glue_of_builds_with(component: &[u8], core: &str, host_impl: &str) {
+    let glue = wasm2rs::wit_host_glue(component).unwrap();
     let opts = TranspileOptions::default()
         .with_named_imports(true)
         .with_reentrant_imports(true);
@@ -1376,29 +1377,22 @@ fn a_drop_that_is_not_tied_to_an_imported_resource_keeps_every_resource_drop() {
 }
 
 #[test]
-fn an_async_function_is_unsupported_and_names_the_function() {
+fn an_async_function_without_result_has_no_return_type() {
     let wasm = component("", "a:b/c", r#"(export "f" (func async (param "a" u8)))"#);
-    let err = wit_host_trait(&wasm).unwrap_err().to_string();
-    assert!(
-        err.contains("async function (WASI 0.3") && err.contains("in function `f` of `a:b/c`"),
-        "{err}"
-    );
+    assert!(host(&wasm).contains("fn a_b_c_f(&mut self, a: u8);"));
 }
 
 #[test]
-fn an_async_function_among_synchronous_ones_fails_the_whole_interface() {
-    // Unlike an unused *type*, a function the trait must declare cannot be skipped.
+fn an_async_function_among_synchronous_ones_marks_only_itself() {
     let wasm = component(
         "",
         "a:b/c",
         r#"(export "ok" (func (result u8)))
            (export "slow" (func async))"#,
     );
-    let err = wit_host_trait(&wasm).unwrap_err().to_string();
-    assert!(
-        err.contains("async function (WASI 0.3") && err.contains("in function `slow`"),
-        "{err}"
-    );
+    let rust = host(&wasm);
+    assert_eq!(rust.matches("An `async func`").count(), 1, "{rust}");
+    assert!(rust.contains("fn a_b_c_ok(&mut self) -> u8;"), "{rust}");
 }
 
 #[test]
@@ -1529,4 +1523,82 @@ fn the_type_node_budget_is_exactly_two_hundred_thousand() {
     sizes[9] = 9_991;
     let err = tuples_of(&sizes).unwrap_err().to_string();
     assert!(err.contains("200000 type nodes"), "{err}");
+}
+
+#[test]
+fn an_async_function_becomes_a_typed_method_marked_async() {
+    let wasm = component(
+        "",
+        "a:b/c",
+        r#"(export "slow" (func async (param "n" u32) (result u32)))"#,
+    );
+    let rust = host(&wasm);
+    assert!(
+        rust.contains("fn a_b_c_slow(&mut self, n: u32) -> u32;"),
+        "{rust}"
+    );
+    assert!(rust.contains("An `async func` (WASI 0.3)"), "{rust}");
+}
+
+#[test]
+fn future_and_stream_are_typed_handles() {
+    let wasm = component(
+        "",
+        "a:b/c",
+        r#"(export "numbers" (func (result (stream u32))))
+           (export "one" (func (param "f" (future string)) (result (option (future)))))"#,
+    );
+    let rust = host(&wasm);
+    assert!(rust.contains("pub struct WitStream<T>"), "{rust}");
+    assert!(rust.contains("pub struct WitFuture<T>"), "{rust}");
+    assert!(
+        rust.contains("fn a_b_c_numbers(&mut self) -> WitStream<u32>;"),
+        "{rust}"
+    );
+    assert!(
+        rust.contains("fn a_b_c_one(&mut self, f: WitFuture<String>) -> Option<WitFuture<()>>;"),
+        "{rust}"
+    );
+}
+
+#[test]
+fn handle_types_are_declared_only_when_used() {
+    let wasm = component("", "a:b/c", r#"(export "f" (func (result u8)))"#);
+    assert!(!host(&wasm).contains("WitFuture"));
+}
+
+/// A component around `core` (wrapped by `wit-component`) importing `a:b/i`, whose WIT is
+/// `body`.
+fn p3_component_around(body: &str, core: &str) -> Vec<u8> {
+    use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve
+        .push_str(
+            "test.wit",
+            &format!("package a:b; interface i {{ {body} }} world w {{ import i; }}"),
+        )
+        .unwrap();
+    let world = resolve.select_world(&[package], Some("w")).unwrap();
+    let mut module = wat::parse_str(core).unwrap();
+    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
+    ComponentEncoder::default()
+        .module(&module)
+        .unwrap()
+        .validate(true)
+        .encode()
+        .unwrap()
+}
+
+#[test]
+fn the_glue_passes_future_and_stream_handles_as_i32() {
+    let core = r#"(module (import "a:b/i" "pump" (func (param i32) (result i32))))"#;
+    let component = p3_component_around("pump: func(s: stream<u8>) -> future<u32>;", core);
+    let glue = wasm2rs::wit_host_glue(&component).unwrap();
+    assert!(glue.contains("<WitStream<u8>>::new("), "{glue}");
+    assert!(glue.contains("self.0.a_b_i_pump(a0)"), "{glue}");
+    glue_of_builds_with(
+        &component,
+        core,
+        "struct H;\nimpl Host for H {\n    fn a_b_i_pump(&mut self, s: WitStream<u8>) -> WitFuture<u32> {\n        WitFuture::new(s.0)\n    }\n}",
+    );
 }

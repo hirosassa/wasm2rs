@@ -485,25 +485,23 @@ fn p3_export(ty: &str, options: &str, core_sig: &str) -> String {
 fn an_async_typed_function_lifted_without_the_async_option_is_rejected() {
     let err = rejection(&p3_export("(func async)", "", ""));
     assert!(
-        err.contains("`go`") && err.contains("async function (WASI 0.3"),
+        err.contains("`go`") && err.contains("async function") && err.contains("WASI 0.3"),
         "{err}"
     );
     assert!(!err.contains("stackful"), "{err}");
 }
 
 #[test]
-fn p3_value_types_are_rejected_by_name() {
-    for (ty, name) in [
-        ("(func (param \"p\" (future u32)))", "future"),
-        ("(func (param \"p\" (stream u8)))", "stream"),
-        ("(func (param \"p\" error-context))", "error-context"),
-    ] {
-        let err = rejection(&p3_export(ty, "(memory $m)", "(param i32)"));
-        assert!(
-            err.contains("`go`") && err.contains(name) && err.contains("WASI 0.3"),
-            "{name}: {err}"
-        );
-    }
+fn error_context_is_rejected_by_name() {
+    let err = rejection(&p3_export(
+        "(func (param \"p\" error-context))",
+        "(memory $m)",
+        "(param i32)",
+    ));
+    assert!(
+        err.contains("`go`") && err.contains("error-context") && err.contains("WASI 0.3"),
+        "{err}"
+    );
 }
 
 #[test]

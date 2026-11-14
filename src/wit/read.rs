@@ -14,7 +14,8 @@ use wasmparser::{
 use super::{WitEnum, WitFlags, WitFunc, WitRecord, WitResource, WitType, WitVariant};
 use crate::TranspileError;
 
-pub(super) type Sig = (Vec<(String, WitType)>, Option<WitType>);
+/// Parameters, result and whether the function is `async`.
+pub(super) type Sig = (Vec<(String, WitType)>, Option<WitType>, bool);
 
 /// A reading step that failed: the name of the unsupported (or ill-formed) type. It
 /// is reported only when a function uses the type.
@@ -222,18 +223,15 @@ pub(super) fn defined(scope: &Scope, d: &ComponentDefinedType<'_>) -> Soft<WitTy
         }
         ComponentDefinedType::Own(i) => WitType::Own(resource_at(scope, *i)?),
         ComponentDefinedType::Borrow(i) => WitType::Borrow(resource_at(scope, *i)?),
-        ComponentDefinedType::Future(_) => return Err(P3_FUTURE.into()),
-        ComponentDefinedType::Stream(_) => return Err(P3_STREAM.into()),
+        ComponentDefinedType::Future(t) => WitType::Future(opt_val(scope, *t)?),
+        ComponentDefinedType::Stream(t) => WitType::Stream(opt_val(scope, *t)?),
         ComponentDefinedType::Map(..) => return Err("map".into()),
         ComponentDefinedType::FixedLengthList(..) => return Err("fixed-length list".into()),
     })
 }
 
-// WASI 0.3 (component-model async) features are named one by one: each needs the async
-// canonical ABI and a task scheduler, which this reader and the generated glue do not have.
-const P3_ASYNC_FUNC: &str = "async function (WASI 0.3: needs the async canonical ABI and a task scheduler, which are not implemented)";
-const P3_FUTURE: &str = "future type (WASI 0.3: asynchronous values need the async canonical ABI, which is not implemented)";
-const P3_STREAM: &str = "stream type (WASI 0.3: asynchronous streams need the async canonical ABI, which is not implemented)";
+// `error-context` is part of the async canonical ABI; it is read as a type only once the
+// scheduler can create and drop it.
 const P3_ERROR_CONTEXT: &str =
     "error-context type (WASI 0.3: part of the async canonical ABI, which is not implemented)";
 
@@ -241,16 +239,13 @@ const P3_ERROR_CONTEXT: &str =
 pub(super) const MAX_FLAGS: usize = 32;
 
 pub(super) fn func_sig(scope: &Scope, f: &ComponentFuncType<'_>) -> Soft<Sig> {
-    if f.async_ {
-        return Err(P3_ASYNC_FUNC.into());
-    }
     // One level of sharing is copied; the types below stay shared.
     let params = fields(scope, &f.params)?
         .into_iter()
         .map(|(name, ty)| (name, (*ty).clone()))
         .collect();
     let result = f.result.map(|r| val(scope, r)).transpose()?;
-    Ok((params, result.map(|r| (*r).clone())))
+    Ok((params, result.map(|r| (*r).clone()), f.async_))
 }
 
 /// The definition a type declaration makes, in the context of `stack` (innermost last).
@@ -384,7 +379,7 @@ pub(super) fn instantiate(
     let funcs = declared
         .funcs
         .iter()
-        .map(|(n, sig)| (n.clone(), sig.clone().map(|(ps, r)| subst.sig(ps, r))))
+        .map(|(n, sig)| (n.clone(), sig.clone().map(|(ps, r, a)| subst.sig(ps, r, a))))
         .collect();
     let types = declared
         .types
@@ -467,14 +462,22 @@ impl Subst {
             }),
             WitType::Own(r) => WitType::Own(self.resource(r)),
             WitType::Borrow(r) => WitType::Borrow(self.resource(r)),
+            WitType::Future(t) => WitType::Future(self.opt(t)),
+            WitType::Stream(t) => WitType::Stream(self.opt(t)),
             other => other.clone(),
         }
     }
 
-    fn sig(&mut self, params: Vec<(String, WitType)>, result: Option<WitType>) -> Sig {
+    fn sig(
+        &mut self,
+        params: Vec<(String, WitType)>,
+        result: Option<WitType>,
+        is_async: bool,
+    ) -> Sig {
         (
             params.into_iter().map(|(n, t)| (n, self.ty(&t))).collect(),
             result.map(|t| self.ty(&t)),
+            is_async,
         )
     }
 
@@ -482,7 +485,7 @@ impl Subst {
         match d {
             Def::Val(Ok(t)) => Def::Val(Ok(self.arc(t))),
             Def::Func(sig) => Def::Func(Arc::new(
-                sig.as_ref().clone().map(|(ps, r)| self.sig(ps, r)),
+                sig.as_ref().clone().map(|(ps, r, a)| self.sig(ps, r, a)),
             )),
             Def::Resource(r) => Def::Resource(self.resource(r)),
             other => other.clone(),
@@ -785,7 +788,7 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
     let mut funcs = Vec::new();
     for (interface, inst) in &imports {
         for (name, sig) in &inst.funcs {
-            let (params, result) = sig.clone().map_err(|what| {
+            let (params, result, is_async) = sig.clone().map_err(|what| {
                 unsupported(format!("{what} in function `{name}` of `{interface}`"))
             })?;
             funcs.push(WitFunc {
@@ -793,6 +796,7 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
                 name: name.clone(),
                 params,
                 result,
+                is_async,
             });
         }
         // The core module imports `[resource-drop]<name>` from the interface that defines
@@ -810,6 +814,7 @@ pub fn wit_functions(component: &[u8]) -> Result<Vec<WitFunc>, TranspileError> {
                 name: format!("[resource-drop]{}", r.name),
                 params: vec![("handle".to_string(), WitType::Own(r.clone()))],
                 result: None,
+                is_async: false,
             });
         }
     }
