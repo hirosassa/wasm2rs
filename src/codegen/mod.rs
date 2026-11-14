@@ -394,6 +394,18 @@ fn byte_string_literal(out: &mut String, bytes: &[u8]) {
     }
 }
 /// A module-scope `static DATA{d}` holding one data segment's bytes.
+/// A data segment this many bytes or longer goes to a side file when side files are on.
+pub(crate) const DATA_FILE_MIN_BYTES: usize = 4096;
+
+/// The `data_{d}.bin` side files a render collected, as `(name, bytes)`.
+pub(crate) type DataFiles = Vec<(String, Vec<u8>)>;
+
+/// `DATA{d}` backed by a side file: the bytes are embedded with `include_bytes!`
+/// (the path is relative to the source file, so the `.bin` sits next to `lib.rs`).
+fn data_include_line(d: usize, name: &str, len: usize) -> String {
+    format!("static DATA{d}: [u8; {len}] = *include_bytes!(\"{name}\");")
+}
+
 fn data_static_line(d: usize, bytes: &[u8]) -> String {
     // Worst case: 4 characters per byte plus a continuation per line.
     let mut line = String::with_capacity(bytes.len().saturating_mul(4).saturating_add(64));

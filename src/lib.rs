@@ -28,7 +28,7 @@ mod wit_abi;
 
 pub use component::{
     ComponentOptions, transpile_component, transpile_component_split,
-    transpile_component_with_exports,
+    transpile_component_split_files, transpile_component_with_exports,
 };
 pub use dump::{ModuleSummary, dump};
 pub use extract::extract_core_modules;
@@ -125,6 +125,42 @@ impl From<std::fmt::Error> for TranspileError {
 pub struct SourceFile {
     pub name: String,
     pub code: String,
+}
+
+/// The content of an [`OutputFile`]: source text, or raw bytes for a side file
+/// that the source pulls in with `include_bytes!`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileContent {
+    Text(String),
+    Bytes(Vec<u8>),
+}
+
+/// One file of a split output written by [`transpile_split_files`]: the Rust
+/// sources of [`SourceFile`] plus the binary side files (`data_{n}.bin`, the
+/// bytes of a large data segment) that sit next to `lib.rs`.
+///
+/// `name` is relative to the output directory, as for [`SourceFile`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OutputFile {
+    pub name: String,
+    pub content: FileContent,
+}
+
+impl OutputFile {
+    pub(crate) fn text(name: impl Into<String>, code: String) -> Self {
+        Self {
+            name: name.into(),
+            content: FileContent::Text(code),
+        }
+    }
+
+    pub(crate) fn bytes(name: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self {
+            name: name.into(),
+            content: FileContent::Bytes(bytes),
+        }
+    }
 }
 
 /// A single-file output as three consecutive pieces: the text before the
@@ -436,7 +472,13 @@ pub fn transpile_split<F>(wasm: &[u8], opts: &SplitOptions, sink: F) -> Result<(
 where
     F: FnMut(SourceFile) -> Result<(), TranspileError>,
 {
-    transpile_split_impl(wasm, opts, &TranspileOptions::default(), sink)
+    transpile_split_impl(
+        wasm,
+        opts,
+        &TranspileOptions::default(),
+        false,
+        text_sink(sink),
+    )
 }
 
 /// Transpile a wasm binary with explicit [`TranspileOptions`] into a single Rust
@@ -473,8 +515,11 @@ pub(crate) fn transpile_ir_with_host_imports(
             parts,
             single.funcs_per_file,
             single.max_bytes_per_file,
-            &mut |_, text| {
-                code = Some(text);
+            false,
+            &mut |file| {
+                if let FileContent::Text(text) = file.content {
+                    code = Some(text);
+                }
                 Ok(())
             },
         )
@@ -490,11 +535,12 @@ pub(crate) fn transpile_ir_split_with_glue<F>(
     ir: parse::ModuleIr<'_>,
     topts: &TranspileOptions,
     split: &SplitOptions,
+    data_files: bool,
     glue: impl FnOnce(Vec<wit::CoreImport>, bool) -> Result<String, TranspileError>,
     mut sink: F,
 ) -> Result<(), TranspileError>
 where
-    F: FnMut(SourceFile) -> Result<(), TranspileError>,
+    F: FnMut(OutputFile) -> Result<(), TranspileError>,
 {
     generate_from_ir(ir, topts, |parts| {
         let imports = host_core_imports(parts);
@@ -503,12 +549,14 @@ where
             parts,
             split.funcs_per_file,
             split.max_bytes_per_file,
-            &mut |name, mut code| {
-                if name == "lib.rs" {
+            data_files,
+            &mut |mut file| {
+                if let (true, FileContent::Text(code)) = (file.name == "lib.rs", &mut file.content)
+                {
                     code.push('\n');
                     code.push_str(&glue);
                 }
-                sink(SourceFile { name, code })
+                sink(file)
             },
         )
     })
@@ -557,24 +605,74 @@ pub fn transpile_split_with_options<F>(
 where
     F: FnMut(SourceFile) -> Result<(), TranspileError>,
 {
-    transpile_split_impl(wasm, split, opts, sink)
+    transpile_split_impl(wasm, split, opts, false, text_sink(sink))
+}
+
+/// [`transpile_split`] that also moves the bytes of each large data segment (4 KiB or more)
+/// into a `data_{n}.bin` side file, which `lib.rs` pulls in with `include_bytes!`.
+///
+/// The side files must be written next to `lib.rs` (the path is relative to it). `rustc`
+/// parses the bytes as a raw file instead of a huge string literal, so a data-heavy module
+/// compiles faster and its sources stay small. Smaller segments stay inline, and the
+/// behaviour of the module is identical to [`transpile_split`]'s.
+pub fn transpile_split_files<F>(
+    wasm: &[u8],
+    opts: &SplitOptions,
+    sink: F,
+) -> Result<(), TranspileError>
+where
+    F: FnMut(OutputFile) -> Result<(), TranspileError>,
+{
+    transpile_split_files_with_options(wasm, opts, &TranspileOptions::default(), sink)
+}
+
+/// [`transpile_split_files`] with explicit [`TranspileOptions`].
+pub fn transpile_split_files_with_options<F>(
+    wasm: &[u8],
+    split: &SplitOptions,
+    opts: &TranspileOptions,
+    sink: F,
+) -> Result<(), TranspileError>
+where
+    F: FnMut(OutputFile) -> Result<(), TranspileError>,
+{
+    transpile_split_impl(wasm, split, opts, true, sink)
+}
+
+/// Adapt a sink of source files to the file-generic one: the inline (no side files)
+/// generator only ever emits text.
+pub(crate) fn text_sink<F>(mut sink: F) -> impl FnMut(OutputFile) -> Result<(), TranspileError>
+where
+    F: FnMut(SourceFile) -> Result<(), TranspileError>,
+{
+    move |file| match file.content {
+        FileContent::Text(code) => sink(SourceFile {
+            name: file.name,
+            code,
+        }),
+        FileContent::Bytes(_) => Err(TranspileError::Internal(
+            "a side file was emitted without side files enabled".into(),
+        )),
+    }
 }
 
 fn transpile_split_impl<F>(
     wasm: &[u8],
     opts: &SplitOptions,
     topts: &TranspileOptions,
+    data_files: bool,
     mut sink: F,
 ) -> Result<(), TranspileError>
 where
-    F: FnMut(SourceFile) -> Result<(), TranspileError>,
+    F: FnMut(OutputFile) -> Result<(), TranspileError>,
 {
     transpile_impl(wasm, topts, |parts| {
         codegen::generate_module_split(
             parts,
             opts.funcs_per_file,
             opts.max_bytes_per_file,
-            &mut |name, code| sink(SourceFile { name, code }),
+            data_files,
+            &mut sink,
         )
     })
 }

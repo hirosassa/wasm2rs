@@ -535,3 +535,75 @@ fn split_write_keeps_the_first_error_and_stops() {
     );
     assert!(!out_dir.join("lib.rs").exists(), "generation did not stop");
 }
+
+/// A module with one 5000-byte data segment, written like [`write_sample_wasm`].
+fn write_data_wasm(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let wat = format!(
+        r#"(module (memory 1) (data (i32.const 0) "{}")
+            (func (export "a") (result i32) i32.const 1)
+            (func (export "b") (result i32) i32.const 2))"#,
+        "\\ab".repeat(5000)
+    );
+    let dir = std::env::temp_dir().join(format!("wasm2rs_cli_{name}"));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let input = dir.join("in.wasm");
+    std::fs::write(&input, wat::parse_str(wat).expect("valid wat")).expect("write wasm");
+    (dir, input)
+}
+
+#[test]
+fn data_files_writes_the_segment_next_to_lib_rs() {
+    let (dir, input) = write_data_wasm("data_files");
+    let out_dir = dir.join("out");
+    let _ = std::fs::remove_dir_all(&out_dir);
+
+    let status = Command::new(wasm2rs_bin())
+        .arg("--data-files")
+        .arg(&input)
+        .arg(&out_dir)
+        .arg("1")
+        .status()
+        .expect("run wasm2rs");
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read(out_dir.join("data_0.bin")).unwrap(),
+        vec![0xab; 5000]
+    );
+    let root = std::fs::read_to_string(out_dir.join("lib.rs")).unwrap();
+    assert!(root.contains("include_bytes!(\"data_0.bin\")"), "{root}");
+}
+
+#[test]
+fn without_data_files_the_segment_stays_inline() {
+    let (dir, input) = write_data_wasm("no_data_files");
+    let out_dir = dir.join("out");
+    let _ = std::fs::remove_dir_all(&out_dir);
+
+    let status = Command::new(wasm2rs_bin())
+        .arg(&input)
+        .arg(&out_dir)
+        .arg("1")
+        .status()
+        .expect("run wasm2rs");
+    assert!(status.success());
+    assert!(!out_dir.join("data_0.bin").exists());
+    let root = std::fs::read_to_string(out_dir.join("lib.rs")).unwrap();
+    assert!(!root.contains("include_bytes!"), "{root}");
+}
+
+#[test]
+fn data_files_needs_a_split_output() {
+    let (dir, input) = write_data_wasm("data_files_unsplit");
+    let out = Command::new(wasm2rs_bin())
+        .arg("--data-files")
+        .arg(&input)
+        .arg(dir.join("out.rs"))
+        .output()
+        .expect("run wasm2rs");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--data-files needs a split output"),
+        "{stderr}"
+    );
+}

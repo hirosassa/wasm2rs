@@ -5,10 +5,10 @@ use super::render_cont::{continuation_method_lines, continuation_runtime_lines};
 use super::runtime::render_rt_helpers;
 use super::wasi::{WasiAccess, confine_lines, guest_range_lines};
 use super::{
-    ALLOW, DataSegment, ElemSegment, ExportInfo, GlobalExportInfo, Helper, ImportInfo,
-    ImportedGlobalInfo, ModuleCtx, ModuleParts, SegOffset, TableFill, WASM_PAGE_SIZE, WasiFn,
-    data_static_line, indent, index_u32, is_gc_table_element, rust_type, rust_types,
-    table_elem_rust, table_null,
+    ALLOW, DATA_FILE_MIN_BYTES, DataFiles, DataSegment, ElemSegment, ExportInfo, GlobalExportInfo,
+    Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx, ModuleParts, SegOffset, TableFill,
+    WASM_PAGE_SIZE, WasiFn, data_include_line, data_static_line, indent, index_u32,
+    is_gc_table_element, rust_type, rust_types, table_elem_rust, table_null,
 };
 use crate::TranspileError;
 use wasmparser::ValType;
@@ -106,8 +106,9 @@ fn render_module(
     sources: &[&str],
     used: &HashSet<(Helper, u32)>,
     dispatch_sigs: &HashSet<u32>,
+    side: Option<&mut DataFiles>,
 ) -> Result<(), TranspileError> {
-    render_module_head(out, parts, ctx, used, dispatch_sigs)?;
+    render_module_head(out, parts, ctx, used, dispatch_sigs, side)?;
     // Stream each function's source straight into `out`, indenting as it is
     // written: no per-line `String`, no intermediate line vector and no final
     // `join` copy of the whole module.
@@ -126,6 +127,7 @@ pub(super) fn render_module_head(
     ctx: &ModuleCtx<'_>,
     used: &HashSet<(Helper, u32)>,
     dispatch_sigs: &HashSet<u32>,
+    side: Option<&mut DataFiles>,
 ) -> Result<(), TranspileError> {
     let layout = Layout::of(parts);
 
@@ -173,7 +175,7 @@ pub(super) fn render_module_head(
     }
     // Module-scope statics backing the data and element segments.
     let trimmed = trimmed_data(parts, ctx, &layout);
-    lines.extend(segment_statics(parts.data, &trimmed, parts.elements));
+    lines.extend(segment_statics(parts.data, &trimmed, parts.elements, side));
     // Typed-continuations runtime: the step result, the per-continuation frame
     // structs and the tagged object stored in the instance's `conts` table.
     if !ctx.cont.bodies.is_empty() {
@@ -341,13 +343,24 @@ fn segment_statics(
     data: &[DataSegment],
     trimmed: &[Option<TrimmedData<'_>>],
     elements: &[ElemSegment],
+    mut side: Option<&mut DataFiles>,
 ) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for (d, seg) in data.iter().enumerate() {
-        match trimmed.get(d).and_then(Option::as_ref) {
-            Some(t) if t.bytes.is_empty() => {}
-            Some(t) => lines.push(data_static_line(d, t.bytes)),
-            None => lines.push(data_static_line(d, &seg.bytes)),
+        let bytes = match trimmed.get(d).and_then(Option::as_ref) {
+            Some(t) if t.bytes.is_empty() => continue,
+            Some(t) => t.bytes,
+            None => &seg.bytes[..],
+        };
+        // A large segment's bytes go to a file `rustc` reads raw, instead of a
+        // string literal it has to lex; `DATA{d}` keeps its type either way.
+        match side.as_deref_mut() {
+            Some(files) if bytes.len() >= DATA_FILE_MIN_BYTES => {
+                let name = format!("data_{d}.bin");
+                lines.push(data_include_line(d, &name, bytes.len()));
+                files.push((name, bytes.to_vec()));
+            }
+            _ => lines.push(data_static_line(d, bytes)),
         }
     }
     for (e, seg) in elements.iter().enumerate() {
@@ -1878,6 +1891,7 @@ pub(super) fn render_lib_root(
     stateful: bool,
     deps: &RootDeps<'_>,
     n_chunks: usize,
+    side: Option<&mut DataFiles>,
 ) -> Result<String, TranspileError> {
     let mut out = String::new();
     let rt_helpers = render_rt_helpers(deps.rt);
@@ -1894,7 +1908,15 @@ pub(super) fn render_lib_root(
     if stateful {
         // The header impl carries no function bodies; those are added by the
         // chunk files' own `impl Instance` blocks.
-        render_module(&mut out, parts, ctx, &[], deps.helpers, deps.dispatch_sigs)?;
+        render_module(
+            &mut out,
+            parts,
+            ctx,
+            &[],
+            deps.helpers,
+            deps.dispatch_sigs,
+            side,
+        )?;
         out.push('\n');
     }
 

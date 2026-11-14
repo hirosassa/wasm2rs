@@ -15,8 +15,8 @@ use crate::wit::{
     CoreWiring, Supplier, core_wiring, is_wit_function, wit_functions, wit_host_glue_for_module,
 };
 use crate::{
-    SourceFile, SplitOptions, TranspileError, TranspileOptions, WitExport, WitOptions,
-    transpile_ir_split_with_glue, wit_exports,
+    OutputFile, SourceFile, SplitOptions, TranspileError, TranspileOptions, WitExport, WitOptions,
+    text_sink, transpile_ir_split_with_glue, wit_exports,
 };
 
 /// Options of [`transpile_component`].
@@ -120,6 +120,37 @@ pub fn transpile_component_split<F>(
 where
     F: FnMut(SourceFile) -> Result<(), TranspileError>,
 {
+    transpile_component_split_impl(component, options, split, false, text_sink(sink))
+}
+
+/// [`transpile_component_split`] that also moves the bytes of each large data segment into a
+/// `data_{n}.bin` side file next to `lib.rs` (see [`transpile_split_files`](crate::transpile_split_files)).
+///
+/// # Errors
+///
+/// As [`transpile_component_split`].
+pub fn transpile_component_split_files<F>(
+    component: &[u8],
+    options: &ComponentOptions,
+    split: &SplitOptions,
+    sink: F,
+) -> Result<Vec<WitExport>, TranspileError>
+where
+    F: FnMut(OutputFile) -> Result<(), TranspileError>,
+{
+    transpile_component_split_impl(component, options, split, true, sink)
+}
+
+fn transpile_component_split_impl<F>(
+    component: &[u8],
+    options: &ComponentOptions,
+    split: &SplitOptions,
+    data_files: bool,
+    sink: F,
+) -> Result<Vec<WitExport>, TranspileError>
+where
+    F: FnMut(OutputFile) -> Result<(), TranspileError>,
+{
     let layout = scan(component)?;
     let exports = wit_exports(component)?;
     // Without `exports` nothing generates the callback loop that drives an async lift, and its
@@ -148,13 +179,22 @@ where
             parse_module(module, &transpile)?,
             &transpile,
             split,
+            data_files,
             |core_imports, imports_trait| {
                 wit_host_glue_for_module(component, &wit, &core_imports, None, imports_trait)
             },
             sink,
         )?,
         Program::Linked => {
-            link::transpile_linked(component, &layout, &exports, &transpile, &wit, split, sink)?;
+            link::transpile_linked(
+                component,
+                &layout,
+                &exports,
+                &transpile,
+                &wit,
+                (split, data_files),
+                sink,
+            )?;
         }
     }
     Ok(exports)

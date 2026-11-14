@@ -14,7 +14,7 @@ use crate::link::{ImportSources, LinkModule, Source, link, rewrite_bodies};
 use crate::parse::{ModuleIr, parse_module};
 use crate::wit::{HostFunc, Supplier, WiredInstance, core_wiring, wit_host_glue_for_module};
 use crate::{
-    SourceFile, SplitOptions, TranspileError, TranspileOptions, WitExport, WitOptions,
+    OutputFile, SplitOptions, TranspileError, TranspileOptions, WitExport, WitOptions,
     transpile_ir_split_with_glue,
 };
 
@@ -99,8 +99,8 @@ pub(super) fn transpile_linked(
     exports: &[WitExport],
     transpile: &TranspileOptions,
     wit: &WitOptions,
-    split: &SplitOptions,
-    sink: impl FnMut(SourceFile) -> Result<(), TranspileError>,
+    (split, data_files): (&SplitOptions, bool),
+    sink: impl FnMut(OutputFile) -> Result<(), TranspileError>,
 ) -> Result<(), TranspileError> {
     let wiring = core_wiring(component)?;
     let mut members = Vec::new();
@@ -216,6 +216,7 @@ pub(super) fn transpile_linked(
         ir,
         transpile,
         split,
+        data_files,
         |mut core_imports, imports_trait| {
             // A host import the transpiler runs as native WASI is not in `core_imports`; that
             // is harmless while no import allocates through a `realloc` of its own.

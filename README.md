@@ -79,6 +79,7 @@ wasm2rs --dump module.wasm                       # inspect without generating co
 
 - **Single file**: when both `funcs_per_file` and `max_bytes_per_file` are `0` (the default), the module is emitted as one Rust source file (to `output`, or stdout).
 - **Split output**: when either cap is positive, `output` is a directory holding a `lib.rs` crate root, `funcs_0.rs`, `funcs_1.rs`, … and a ready-to-use `Cargo.toml`. Build it with `cargo build --release` inside that directory.
+- **Data files** (`--data-files`, split output only): each data segment of 4 KiB or more is written to a `data_{n}.bin` file next to `lib.rs`, which `lib.rs` includes with `include_bytes!`, instead of being spelled as a string literal. The behaviour is identical; `rustc` just reads the bytes raw. Library: `transpile_split_files` / `transpile_split_files_with_options` / `transpile_component_split_files` hand `OutputFile`s (text or bytes) to the sink.
 
 ## Components
 

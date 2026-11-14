@@ -1345,8 +1345,10 @@ mod tests {
         let ir = link(modules, &rewritten)?;
         let mut code = None;
         generate_from_ir(ir, topts, |parts| {
-            codegen::generate_module_split(parts, usize::MAX, usize::MAX, &mut |_, text| {
-                code = Some(text);
+            codegen::generate_module_split(parts, usize::MAX, usize::MAX, false, &mut |file| {
+                if let crate::FileContent::Text(text) = file.content {
+                    code = Some(text);
+                }
                 Ok(())
             })
         })?;
