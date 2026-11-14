@@ -963,8 +963,8 @@ impl super::FuncGen<'_> {
     /// `any.convert_extern`: externalise an `externref` back into an `anyref`.
     /// The null externref (`u32::MAX`) maps to `GcRef::Null`; any other value is
     /// an index into `extern_box` (produced by `extern.convert_any`) whose handle
-    /// is cloned back out. A host-provided externref is out of scope (it would
-    /// index outside the box and trap).
+    /// is cloned back out. A host-provided externref is out of scope: an index
+    /// outside the box is an explicit `invalid externref` trap.
     pub(super) fn any_convert_extern(&mut self) -> Result<(), TranspileError> {
         let e = self.pop()?;
         let rt = RefType::new(
@@ -975,9 +975,11 @@ impl super::FuncGen<'_> {
             },
         )
         .ok_or_else(|| TranspileError::Unsupported("cannot form anyref type".into()))?;
+        let fail = self.trap_or_panic(Rt::TrapInvalidExternRef, "invalid externref");
         let code = format!(
             "{{ let __e = ({}); if __e == u32::MAX {{ GcRef::Null }} \
-             else {{ self.extern_box[__e as usize].clone() }} }}",
+             else {{ match self.extern_box.get(__e as usize) {{ \
+             Some(__x) => __x.clone(), None => {fail} }} }} }}",
             e.code
         );
         self.materialize(code, ValType::Ref(rt))

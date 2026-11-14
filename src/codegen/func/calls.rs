@@ -396,6 +396,11 @@ impl<'a> super::FuncGen<'a> {
         // earlier borrow live across it. Copying out the `u32` releases it.
         let entry = self.fresh_temp();
         self.line(format!("let {entry} = ({}) as u32;", funcref.code));
+        // `call_ref` of null is the spec's null-reference trap; the shared dispatch
+        // method would report it as an indirect-call type mismatch (the right trap for
+        // `call_indirect`), so the null case is cut off before reaching it.
+        let fail = self.trap_or_panic(Rt::TrapNullReference, "null function reference");
+        self.line(format!("if {entry} == u32::MAX {{ {fail} }}"));
         self.dispatch_sigs.insert(type_index);
         if use_tc {
             return self.park_dispatch(type_index, &entry, &arg_list);

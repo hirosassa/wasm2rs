@@ -1224,3 +1224,87 @@ fn array_new_widens_its_size_as_unsigned() {
         assert_eq!(inst.len(b), 0);"#,
     );
 }
+
+/// `call_ref` of a null funcref and `any.convert_extern` of a host-supplied
+/// externref that is not a handle `extern.convert_any` produced (#416).
+const NULL_FUNCREF_AND_EXTERN: &str = r#"(module
+    (type $ft (func (result i32)))
+    (elem declare func $f)
+    (func $f (result i32) i32.const 7)
+    (func (export "call_ok") (result i32) (call_ref $ft (ref.func $f)))
+    (func (export "call_null") (result i32) (call_ref $ft (ref.null $ft)))
+    (func (export "call_param") (param (ref null $ft)) (result i32) (call_ref $ft (local.get 0)))
+    (func (export "tail_null") (result i32) (return_call_ref $ft (ref.null $ft)))
+    (func (export "c_null") (result i32)
+      try (result i32) (call_ref $ft (ref.null $ft)) catch_all i32.const 0 end)
+    (func (export "conv") (param externref) (result i32)
+      (ref.is_null (any.convert_extern (local.get 0))))
+    (func (export "c_conv") (param externref) (result i32)
+      try (result i32) (ref.is_null (any.convert_extern (local.get 0))) catch_all i32.const 0 end))"#;
+
+#[test]
+fn call_ref_null_and_bad_externref_are_typed() {
+    compile_run_with(
+        "typed_call_ref_null",
+        NULL_FUNCREF_AND_EXTERN,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            assert_eq!(inst.call_ok(), 7);
+            let t = trap_of(|| inst.call_null());
+            assert!(matches!(t, Wasm2RsTrap::NullReference));
+            assert_eq!(t.to_string(), "null reference");
+            assert!(matches!(trap_of(|| inst.call_param(u32::MAX)), Wasm2RsTrap::NullReference));
+            assert!(matches!(trap_of(|| inst.tail_null()), Wasm2RsTrap::NullReference));
+            assert!(matches!(trap_of(|| inst.c_null()), Wasm2RsTrap::NullReference));
+            assert_eq!(inst.conv(u32::MAX), 1);
+            let t = trap_of(|| inst.conv(5));
+            assert!(matches!(t, Wasm2RsTrap::InvalidExternRef));
+            assert_eq!(t.to_string(), "invalid externref");
+            assert!(matches!(trap_of(|| inst.c_conv(5)), Wasm2RsTrap::InvalidExternRef));
+            assert!(!HOOK_RAN.load(std::sync::atomic::Ordering::SeqCst));"#
+        ),
+    );
+}
+
+#[test]
+fn call_ref_null_and_bad_externref_are_string_panics_when_untyped() {
+    compile_run_with(
+        "untyped_call_ref_null",
+        NULL_FUNCREF_AND_EXTERN,
+        TranspileOptions::default().with_named_exports(true),
+        r#"
+            fn msg<R>(f: impl FnOnce() -> R) -> String {
+                let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                    .err()
+                    .expect("a trap");
+                match p.downcast::<String>() {
+                    Ok(s) => *s,
+                    Err(p) => p.downcast::<&str>().expect("a string payload").to_string(),
+                }
+            }
+            let mut inst = Instance::new();
+            assert_eq!(inst.call_ok(), 7);
+            assert_eq!(msg(|| inst.call_null()), "null function reference");
+            assert_eq!(msg(|| inst.call_param(u32::MAX)), "null function reference");
+            assert_eq!(msg(|| inst.tail_null()), "null function reference");
+            assert_eq!(inst.conv(u32::MAX), 1);
+            assert_eq!(msg(|| inst.conv(5)), "invalid externref");
+            assert_eq!(msg(|| inst.c_conv(5)), "invalid externref");"#,
+    );
+}
+
+#[test]
+fn call_ref_emits_an_explicit_null_check_only_when_typed() {
+    // A module with a `call_ref` but no null funcref in sight still compiles to the
+    // same dispatch; the explicit check is the only added code, in both modes.
+    let wat = r#"(module (type $ft (func))
+        (func $f) (elem declare func $f)
+        (func (export "go") (call_ref $ft (ref.func $f))))"#;
+    let untyped = transpile_typed(wat, false);
+    let typed = transpile_typed(wat, true);
+    assert!(!untyped.contains("Wasm2RsTrap"), "{untyped}");
+    assert!(typed.contains("trap_null_reference"), "{typed}");
+    assert!(!typed.contains("InvalidExternRef"), "{typed}");
+}
