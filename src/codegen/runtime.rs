@@ -38,6 +38,9 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::TrapMemoryOob => "trap_memory_oob",
         Rt::TrapTableOob => "trap_table_oob",
         Rt::TrapUnalignedAtomic => "trap_unaligned_atomic_access",
+        Rt::TrapNullReference => "trap_null_reference",
+        Rt::TrapCastFailure => "trap_cast_failure",
+        Rt::TrapArrayOob => "trap_array_oob",
         Rt::I32DivS => "i32_div_s",
         Rt::I32DivU => "i32_div_u",
         Rt::I32RemS => "i32_rem_s",
@@ -56,7 +59,7 @@ pub(super) fn is_rt_name(name: &str) -> bool {
 
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
-const RT_ORDER: [Rt; 41] = [
+const RT_ORDER: [Rt; 44] = [
     Rt::TrapType,
     Rt::DelegateExc,
     Rt::CallDepth,
@@ -70,6 +73,9 @@ const RT_ORDER: [Rt; 41] = [
     Rt::TrapMemoryOob,
     Rt::TrapTableOob,
     Rt::TrapUnalignedAtomic,
+    Rt::TrapNullReference,
+    Rt::TrapCastFailure,
+    Rt::TrapArrayOob,
     Rt::I32DivS,
     Rt::I32DivU,
     Rt::I32RemS,
@@ -171,6 +177,9 @@ fn typed_trap_variants(used: &HashSet<Rt>, typed: bool) -> Vec<TrapVariant> {
         (Rt::TrapMemoryOob, TrapVariant::OutOfBoundsMemoryAccess),
         (Rt::TrapTableOob, TrapVariant::OutOfBoundsTableAccess),
         (Rt::TrapUnalignedAtomic, TrapVariant::UnalignedAtomicAccess),
+        (Rt::TrapNullReference, TrapVariant::NullReference),
+        (Rt::TrapCastFailure, TrapVariant::CastFailure),
+        (Rt::TrapArrayOob, TrapVariant::OutOfBoundsArrayAccess),
     ]
     .into_iter()
     .filter(|(rt, _)| used.contains(rt))
@@ -214,6 +223,9 @@ enum TrapVariant {
     OutOfBoundsMemoryAccess,
     OutOfBoundsTableAccess,
     UnalignedAtomicAccess,
+    NullReference,
+    CastFailure,
+    OutOfBoundsArrayAccess,
 }
 
 impl TrapVariant {
@@ -228,6 +240,9 @@ impl TrapVariant {
             TrapVariant::OutOfBoundsMemoryAccess => "OutOfBoundsMemoryAccess",
             TrapVariant::OutOfBoundsTableAccess => "OutOfBoundsTableAccess",
             TrapVariant::UnalignedAtomicAccess => "UnalignedAtomicAccess",
+            TrapVariant::NullReference => "NullReference",
+            TrapVariant::CastFailure => "CastFailure",
+            TrapVariant::OutOfBoundsArrayAccess => "OutOfBoundsArrayAccess",
         }
     }
 
@@ -243,6 +258,9 @@ impl TrapVariant {
             TrapVariant::OutOfBoundsMemoryAccess => "out of bounds memory access",
             TrapVariant::OutOfBoundsTableAccess => "out of bounds table access",
             TrapVariant::UnalignedAtomicAccess => "unaligned atomic access",
+            TrapVariant::NullReference => "null reference",
+            TrapVariant::CastFailure => "cast failure",
+            TrapVariant::OutOfBoundsArrayAccess => "out of bounds array access",
         }
     }
 }
@@ -338,6 +356,13 @@ fn rt_lines(rt: Rt, typed: bool, variants: &[TrapVariant]) -> Vec<String> {
             TrapVariant::UnalignedAtomicAccess,
             typed,
         ),
+        Rt::TrapNullReference => {
+            trap_fn_lines("trap_null_reference", TrapVariant::NullReference, typed)
+        }
+        Rt::TrapCastFailure => trap_fn_lines("trap_cast_failure", TrapVariant::CastFailure, typed),
+        Rt::TrapArrayOob => {
+            trap_fn_lines("trap_array_oob", TrapVariant::OutOfBoundsArrayAccess, typed)
+        }
         Rt::I32DivS => div_rem_lines("i32_div_s", "i32", DivRem::DivS),
         Rt::I32DivU => div_rem_lines("i32_div_u", "i32", DivRem::DivU),
         Rt::I32RemS => div_rem_lines("i32_rem_s", "i32", DivRem::RemS),

@@ -655,10 +655,11 @@ impl<'a> super::FuncGen<'a> {
     /// handle. Keeps the operand's stability (a pure read).
     fn i31_get(&mut self, payload_expr: &str) -> Result<(), TranspileError> {
         let r = self.pop()?;
+        let fail = self.null_panic("i31.get on null");
         self.push_combined(
             format!(
                 "(match ({}) {{ GcRef::I31(__v) => {payload_expr}, \
-                 _ => panic!(\"i31.get on null\") }})",
+                 _ => {fail} }})",
                 r.code
             ),
             ValType::I32,

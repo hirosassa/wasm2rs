@@ -271,7 +271,12 @@ pub struct TranspileOptions {
     /// `IntegerOverflow` of `div_s`), and linear-memory and table out-of-bounds
     /// accesses, and on a shared memory a misaligned atomic access
     /// (`UnalignedAtomicAccess`) or an out-of-bounds atomic or plain access
-    /// (`OutOfBoundsMemoryAccess`, the same trap as on an unshared memory). The
+    /// (`OutOfBoundsMemoryAccess`, the same trap as on an unshared memory), and the
+    /// GC traps: a null reference (`NullReference`: `struct`/`array`/`i31`
+    /// dereference, `ref.as_non_null`, `throw_ref`), a failed `ref.cast`
+    /// (`CastFailure`) and an out-of-range array access (`OutOfBoundsArrayAccess`;
+    /// an overrun of a data/element segment by `array.new_data` and friends is the
+    /// memory/table trap). The
     /// generated source then defines `Wasm2RsTrap` (only the variants it uses), a
     /// `Send + 'static` enum implementing `Display` (with the message the string
     /// panic carried) and `std::error::Error`, and each of these traps is a
@@ -286,8 +291,8 @@ pub struct TranspileOptions {
     /// this option) while division and table accesses are still typed.
     ///
     /// `resume_unwind` does not run the panic hook, so these traps print nothing to
-    /// stderr; report them from the payload instead. Every other trap (GC,
-    /// continuations, `exnref`, glue) is still a string panic. Off by default,
+    /// stderr; report them from the payload instead. Every other trap
+    /// (continuations, glue) is still a string panic. Off by default,
     /// which leaves the generated code unchanged.
     ///
     /// [`unsafe_memory`]: TranspileOptions::unsafe_memory

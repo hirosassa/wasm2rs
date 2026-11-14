@@ -352,6 +352,15 @@ impl<'a> FuncGen<'a> {
         })
     }
 
+    /// The cold trap function a GC or `exnref` operation raises under `typed_traps`
+    /// (`None` otherwise: the untyped code keeps its string `panic!`).
+    pub(super) fn typed_trap(&mut self, rt: Rt) -> Option<&'static str> {
+        self.ctx.typed_traps.then(|| {
+            self.used_rt.insert(rt);
+            super::runtime::rt_name(rt)
+        })
+    }
+
     /// The runtime helpers used, plus the cold out-of-bounds traps the used
     /// instance-method memory/table helpers call (those are rendered separately,
     /// so they cannot register the trap themselves).

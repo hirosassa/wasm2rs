@@ -190,6 +190,13 @@ pub(crate) enum Rt {
     /// The out-of-line `unaligned atomic access` trap (typed traps only: shared-memory
     /// atomics, and notify/wait on an unshared memory).
     TrapUnalignedAtomic,
+    /// The out-of-line `null reference` trap of a GC/`exnref` dereference (typed
+    /// traps only).
+    TrapNullReference,
+    /// The out-of-line `cast failure` trap of `ref.cast` (typed traps only).
+    TrapCastFailure,
+    /// The out-of-line `out of bounds array access` trap (typed traps only).
+    TrapArrayOob,
     /// Explicit-check integer division/remainder (typed traps only): they replace
     /// Rust's `/` and `%`, whose built-in panics cannot carry a typed payload.
     I32DivS,
