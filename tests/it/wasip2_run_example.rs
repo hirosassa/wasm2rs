@@ -5,6 +5,8 @@
 
 use std::process::{Command, Output};
 
+use crate::common;
+
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
 
@@ -114,20 +116,27 @@ fn run_example(component: &[u8], tag: &str, args: &[&str]) -> Output {
 
 /// Like [`run_example`], with `rustc -C opt-level=<opt_level>` for the program.
 fn run_example_at(component: &[u8], tag: &str, args: &[&str], opt_level: &str) -> Output {
+    example_command(component, tag, args, opt_level)
+        .output()
+        .unwrap()
+}
+
+/// The command [`run_example_at`] runs, sharing the example build through [`common`].
+fn example_command(component: &[u8], tag: &str, args: &[&str], opt_level: &str) -> Command {
     let dir =
         std::env::temp_dir().join(format!("wasm2rs-run-example-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let wasm = dir.join("component.wasm");
     std::fs::write(&wasm, component).unwrap();
-    Command::new(env!("CARGO"))
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(["run", "--quiet", "--example", "wasip2_run", "--"])
         .arg(&wasm)
         .args(args)
         .env("WASIP2_WORK_DIR", dir.join("work"))
-        .env("WASM2RS_EXAMPLE_OPT_LEVEL", opt_level)
-        .output()
-        .unwrap()
+        .env("WASM2RS_EXAMPLE_OPT_LEVEL", opt_level);
+    common::share_example_build(&mut cmd);
+    cmd
 }
 
 #[test]
@@ -415,4 +424,48 @@ fn a_run_that_is_not_lifted_directly_exits_2_with_the_unsupported_message() {
     assert!(stderr.contains("unsupported"), "{stderr}");
     assert!(!stderr.contains("does not export"), "{stderr}");
     assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// With `$WASM2RS_EXAMPLE_CACHE_DIR` the example keeps the program it built under a
+/// content-addressed `ex-*` name, and a second run of the same component executes that file
+/// instead of building again (told apart by replacing the cached program with a script).
+#[cfg(unix)]
+#[test]
+fn a_repeated_example_run_reuses_the_cached_program() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let cache =
+        std::env::temp_dir().join(format!("wasm2rs-run-example-cache-{}", std::process::id()));
+    std::fs::remove_dir_all(&cache).ok();
+    let run = |tag: &str| {
+        example_command(&component(), tag, &["probe"], "0")
+            .env("WASM2RS_EXAMPLE_CACHE_DIR", &cache)
+            .output()
+            .unwrap()
+    };
+    let first = run("reuse-a");
+    assert!(first.status.success(), "{first:?}");
+    let cached: Vec<_> = std::fs::read_dir(&cache)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(cached.len(), 1, "{cached:?}");
+    assert!(
+        cached[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("ex-")
+    );
+
+    std::fs::write(&cached[0], "#!/bin/sh\necho from-cache\n").unwrap();
+    std::fs::set_permissions(&cached[0], std::fs::Permissions::from_mode(0o755)).unwrap();
+    let second = run("reuse-b");
+    assert_eq!(
+        String::from_utf8_lossy(&second.stdout).trim(),
+        "from-cache",
+        "{second:?}"
+    );
+    std::fs::remove_dir_all(&cache).ok();
 }

@@ -68,10 +68,11 @@ fn main() {
             std::process::exit(2);
         });
     let run_method = export_method(&run_interface, "run");
-    let argv0 = &input;
+    // argv[0] goes in at run time, not into the source: the same component then builds to the
+    // same program wherever it lies (see `$WASM2RS_EXAMPLE_CACHE_DIR`)
     let main = format!(
         "fn main() {{\n    \
-         let args = std::iter::once({argv0:?}.to_string()).chain(std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned())).collect();\n    \
+         let args = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();\n    \
          let env = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();\n    \
          let mut host = wasm2rs_wasi::WasiHost::new(env).with_arguments(args);\n    \
          if let Some(dir) = std::env::var_os(\"WASIP2_PREOPEN\") {{\n        \
@@ -97,6 +98,7 @@ fn main() {
         std::process::exit(2);
     };
     let code = Command::new(&bin)
+        .arg(&input)
         .args(&guest_args)
         .status()
         .expect("run program")

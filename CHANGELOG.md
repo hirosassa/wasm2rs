@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--component` supports the `utf16` canonical string encoding for lowered imports too (#351): the strings a guest passes to a host import are read as UTF-16, and the strings the host returns are written as UTF-16 code units. An unpaired surrogate or an unaligned pointer traps instead of being replaced.
 
 ### Changed
+- The test suite builds faster: the `wasip2_run`/`wasip2_serve` example tests share one `wasm2rs-wasi` build and cache the programs they build under `$TMPDIR/wasm2rs-testcache` (the examples take `WASM2RS_EXAMPLE_WASI_TARGET` and `WASM2RS_EXAMPLE_CACHE_DIR`, both opt-in; unset, they build as before), and that cache is pruned at the start of a test run (entries unused for 14 days or beyond 10 GiB, leftover `work-*` directories; the per-checkout `wasi-target-*` build directories are not pruned; `WASM2RS_TESTCACHE_MAX_AGE_DAYS` / `WASM2RS_TESTCACHE_MAX_GIB`). `examples/wasip2_run` passes argv[0] to the program at run time instead of embedding it in the source.
 - Breaking (library): `WitExport::utf8: bool` is replaced by `WitExport::encoding: WitStringEncoding` (`Utf8` or `Utf16`).
 - An import lowered with `compact-utf16`, or with both `utf8` and `utf16`, whose signature holds a string is now an `Unsupported` error naming it; its strings used to be read as UTF-8 without any error. `compact-utf16` lifts stay unsupported, with a message naming the encoding.
 

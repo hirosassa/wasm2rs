@@ -122,6 +122,7 @@ mod table64;
 mod table_max;
 mod table_ops;
 mod tail_call;
+mod testcache_prune;
 mod tier2;
 mod trap_before_branch;
 mod traps;

@@ -25,6 +25,8 @@
 )]
 #![allow(dead_code, reason = "not every test binary uses every helper")]
 
+pub mod prune;
+
 use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -232,12 +234,8 @@ fn wasi_lib() -> &'static WasiLib {
     static LIB: OnceLock<WasiLib> = OnceLock::new();
     LIB.get_or_init(|| {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        // One target directory per checkout: worktrees with different host sources must not
-        // overwrite each other's rlib.
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        root.hash(&mut h);
-        let cache_dir = std::env::temp_dir().join("wasm2rs-testcache");
-        let target = cache_dir.join(format!("wasi-target-{:016x}", h.finish()));
+        let cache_dir = cache_dir();
+        let target = cache_dir.join(format!("wasi-target-{}", checkout_id()));
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let out = Command::new(cargo)
             .args([
@@ -302,12 +300,58 @@ fn wasi_lib() -> &'static WasiLib {
     })
 }
 
+/// The shared cache directory, created, and pruned once per process (see [`prune`]).
+fn cache_dir() -> std::path::PathBuf {
+    static PRUNED: OnceLock<()> = OnceLock::new();
+    let dir = std::env::temp_dir().join("wasm2rs-testcache");
+    std::fs::create_dir_all(&dir).expect("create cache dir");
+    PRUNED.get_or_init(|| {
+        // Concurrent test processes would each scan 45k entries for nothing: the stamp's mtime
+        // says when somebody last pruned.
+        let stamp = dir.join(".pruned");
+        let recent = std::fs::metadata(&stamp)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age < std::time::Duration::from_secs(10 * 60));
+        if !recent {
+            std::fs::write(&stamp, b"").ok();
+            prune::prune(
+                &dir,
+                std::time::SystemTime::now(),
+                &prune::Policy::from_env(),
+            );
+        }
+    });
+    dir
+}
+
+/// Points `cmd` (a `cargo run --example wasip2_*` of the tests) at the shared cache: the
+/// `wasm2rs-wasi` build of the example is made once per checkout instead of once per run, and the
+/// program it builds is reused when its inputs are the same.
+pub fn share_example_build(cmd: &mut Command) -> &mut Command {
+    let dir = cache_dir();
+    cmd.env(
+        "WASM2RS_EXAMPLE_WASI_TARGET",
+        dir.join(format!("example-wasi-target-{}", checkout_id())),
+    )
+    .env("WASM2RS_EXAMPLE_CACHE_DIR", &dir)
+}
+
+/// Names a target directory per checkout: worktrees with different host sources must not
+/// overwrite each other's rlib.
+fn checkout_id() -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 fn build_with(name: &str, program: &str, wasi: Option<&WasiLib>) -> std::path::PathBuf {
-    let cache_dir = std::env::temp_dir().join("wasm2rs-testcache");
-    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    let cache_dir = cache_dir();
     let exe = if cfg!(windows) { ".exe" } else { "" };
     let bin = cache_dir.join(format!("{}{exe}", cache_key(program, wasi)));
     if bin.exists() {
+        prune::touch(&bin);
         return bin;
     }
 
