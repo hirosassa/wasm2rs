@@ -143,12 +143,32 @@ impl<'a> super::FuncGen<'a> {
         Ok(())
     }
 
+    /// Push a div/rem result: inline when the divisor is a constant that can
+    /// never trap (see [`const_divisor`]), otherwise pinned by `materialize`.
+    /// `signed` also rules out `-1`, which makes `iN::MIN / -1` overflow.
+    fn push_div_rem(
+        &mut self,
+        code: String,
+        lhs: &Val,
+        rhs: &Val,
+        signed: bool,
+    ) -> Result<(), TranspileError> {
+        match const_divisor(rhs) {
+            Some(d) if d != 0 && !(signed && d == -1) => {
+                self.push_combined(code, lhs.ty, &[lhs, rhs])
+            }
+            _ => self.materialize(code, lhs.ty),
+        }
+    }
+
     /// Signed division. Rust's `/` panics on both a zero divisor and
     /// `iN::MIN / -1`, matching the two wasm `div_s` traps.
     pub(super) fn div_signed(&mut self) -> Result<(), TranspileError> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
-        self.materialize(format!("{} / {}", lhs.code, rhs.code), lhs.ty)
+        // Parenthesised: this can now be inlined next to a higher-precedence `as`.
+        let code = format!("({} / {})", lhs.code, rhs.code);
+        self.push_div_rem(code, &lhs, &rhs, true)
     }
 
     /// Signed remainder. `wrapping_rem` panics on a zero divisor and yields 0
@@ -156,7 +176,8 @@ impl<'a> super::FuncGen<'a> {
     pub(super) fn rem_signed(&mut self) -> Result<(), TranspileError> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
-        self.materialize(format!("({}).wrapping_rem({})", lhs.code, rhs.code), lhs.ty)
+        let code = format!("({}).wrapping_rem({})", lhs.code, rhs.code);
+        self.push_div_rem(code, &lhs, &rhs, true)
     }
 
     /// Unsigned division (`op` = `/`) or remainder (`op` = `%`): reinterpret both
@@ -167,13 +188,11 @@ impl<'a> super::FuncGen<'a> {
         let lhs = self.pop()?;
         let unsigned = unsigned_type(lhs.ty)?;
         let signed = rust_type(lhs.ty, self.ctx.type_kinds)?;
-        self.materialize(
-            format!(
-                "(({} as {unsigned}) {op} ({} as {unsigned})) as {signed}",
-                lhs.code, rhs.code
-            ),
-            lhs.ty,
-        )
+        let code = format!(
+            "(({} as {unsigned}) {op} ({} as {unsigned})) as {signed}",
+            lhs.code, rhs.code
+        );
+        self.push_div_rem(code, &lhs, &rhs, false)
     }
 
     /// A logical (unsigned) shift right: shift the unsigned reinterpretation so
@@ -376,4 +395,15 @@ fn quiet_rt(ty: ValType) -> Rt {
     } else {
         Rt::QuietF64
     }
+}
+
+/// The value of `v` if it is exactly an `iN.const` literal as rendered by
+/// `i32_literal`/`i64_literal`. `iN::MIN` renders as an associated constant and
+/// is deliberately not recognised: it stays on the (always safe) trapping path.
+fn const_divisor(v: &Val) -> Option<i64> {
+    v.code
+        .strip_suffix("i32")
+        .or_else(|| v.code.strip_suffix("i64"))?
+        .parse()
+        .ok()
 }

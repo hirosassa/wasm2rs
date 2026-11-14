@@ -200,3 +200,140 @@ fn constant_signed_remainder_of_min_by_minus_one_is_zero() {
         "assert_eq!(func0(), 0);",
     );
 }
+
+const DIV_REM_OPS: [&str; 4] = ["div_s", "div_u", "rem_s", "rem_u"];
+
+/// A constant divisor of 0 (any op) or -1 (signed div overflow) must still
+/// trap when the dividend is a runtime value, for every width/signedness.
+#[test]
+fn constant_divisor_traps_with_runtime_dividend() {
+    for ty in ["i32", "i64"] {
+        for op in DIV_REM_OPS {
+            let zero = format!(
+                r#"(module (func (export "f") (param {ty}) (result {ty}) local.get 0 {ty}.const 0 {ty}.{op}))"#
+            );
+            let message = if op.starts_with("div") {
+                "divide by zero"
+            } else {
+                "remainder"
+            };
+            crate::common::expect_trap_with(
+                &format!("cdiv_rt_zero_{ty}_{op}"),
+                &zero,
+                "func0(7);",
+                message,
+            );
+        }
+        let overflow = format!(
+            r#"(module (func (export "f") (param {ty}) (result {ty}) local.get 0 {ty}.const -1 {ty}.div_s))"#
+        );
+        crate::common::expect_trap_with(
+            &format!("cdiv_rt_ovf_{ty}"),
+            &overflow,
+            &format!("func0({ty}::MIN);"),
+            "overflow",
+        );
+        // Same instruction, a dividend that is not MIN: no trap.
+        crate::common::compile_run(
+            &format!("cdiv_rt_ovf_ok_{ty}"),
+            &overflow,
+            &format!("assert_eq!(func0(6), -6);\n    assert_eq!(func0({ty}::MAX), -{ty}::MAX);"),
+        );
+    }
+}
+
+/// A dropped division by a constant zero must still trap (it is not pure).
+#[test]
+fn dropped_constant_zero_divisor_still_traps() {
+    crate::common::expect_trap_with(
+        "cdiv_drop_zero",
+        r#"(module (func (export "f") (param i32) local.get 0 i32.const 0 i32.div_u drop))"#,
+        "func0(1);",
+        "divide by zero",
+    );
+    crate::common::expect_trap_with(
+        "cdiv_drop_minus1",
+        r#"(module (func (export "f") (param i64) local.get 0 i64.const -1 i64.div_s drop))"#,
+        "func0(i64::MIN);",
+        "overflow",
+    );
+}
+
+/// Non-trapping constant divisors compute the right value for all 8 ops, and
+/// unsigned ops treat -1 as the largest divisor rather than a trap.
+#[test]
+fn constant_nonzero_divisor_results() {
+    crate::common::compile_run(
+        "cdiv_results",
+        r#"(module
+          (func (export "a") (param i32) (result i32) local.get 0 i32.const 3 i32.div_s)
+          (func (export "b") (param i32) (result i32) local.get 0 i32.const 3 i32.div_u)
+          (func (export "c") (param i32) (result i32) local.get 0 i32.const 3 i32.rem_s)
+          (func (export "d") (param i32) (result i32) local.get 0 i32.const 3 i32.rem_u)
+          (func (export "e") (param i64) (result i64) local.get 0 i64.const 3 i64.div_s)
+          (func (export "f") (param i64) (result i64) local.get 0 i64.const 3 i64.div_u)
+          (func (export "g") (param i64) (result i64) local.get 0 i64.const 3 i64.rem_s)
+          (func (export "h") (param i64) (result i64) local.get 0 i64.const 3 i64.rem_u)
+          (func (export "i") (param i32) (result i32) local.get 0 i32.const -1 i32.div_u)
+          (func (export "j") (param i64) (result i64) local.get 0 i64.const -1 i64.rem_u)
+          (func (export "k") (param i32) (result i32) local.get 0 i32.const -1 i32.rem_s))"#,
+        "assert_eq!(func0(-7), -2);\n    \
+         assert_eq!(func1(-7), 1431655763);\n    \
+         assert_eq!(func2(-7), -1);\n    \
+         assert_eq!(func3(-7), 0);\n    \
+         assert_eq!(func4(-7), -2);\n    \
+         assert_eq!(func5(-7), 6148914691236517203);\n    \
+         assert_eq!(func6(-7), -1);\n    \
+         assert_eq!(func7(-7), 0);\n    \
+         assert_eq!(func8(-1), 1);\n    \
+         assert_eq!(func9(5), 5);\n    \
+         assert_eq!(func10(i32::MIN), 0);",
+    );
+}
+
+/// A non-zero (and, for signed ops, non-`-1`) constant divisor cannot trap, so
+/// it must stay an inline expression rather than being pinned in a `let`.
+#[test]
+fn constant_nonzero_divisor_is_not_materialized() {
+    let gen_for = |wat: &str| wasm2rs::transpile(&wat::parse_str(wat).expect("wat")).expect("ok");
+    let pure = gen_for(
+        r#"(module (func (param i32) (result i32) local.get 0 i32.const 3 i32.div_s i32.const 5 i32.rem_u))"#,
+    );
+    assert!(!pure.contains("let v"), "expected no temporaries:\n{pure}");
+    for body in [
+        "i32.const 0 i32.div_s",
+        "i32.const -1 i32.div_s",
+        "i32.const -1 i32.rem_s",
+        "i32.const 0 i32.rem_u",
+    ] {
+        let wat = format!("(module (func (param i32) (result i32) local.get 0 {body}))");
+        assert!(
+            gen_for(&wat).contains("let v"),
+            "{body} must stay materialized"
+        );
+    }
+}
+
+/// An inlined constant-divisor quotient must be parenthesised so a following
+/// `as`-based consumer (unsigned compare, shift count, extend, wrap) casts the
+/// whole quotient rather than just the divisor.
+#[test]
+fn inlined_constant_quotient_feeds_cast_consumers() {
+    crate::common::compile_run(
+        "cdiv_chain",
+        r#"(module
+          (func (export "a") (param i32) (result i32) local.get 0 i32.const 3 i32.div_s i32.const 5 i32.rem_u)
+          (func (export "b") (param i32) (result i32) local.get 0 i32.const 3 i32.div_s i32.const 100 i32.lt_u)
+          (func (export "c") (param i32) (result i64) local.get 0 i32.const 3 i32.div_s i64.extend_i32_u)
+          (func (export "d") (param i32) (result i32) i32.const 1 local.get 0 i32.const 3 i32.div_s i32.shl)
+          (func (export "e") (param i64) (result i32) local.get 0 i64.const 3 i64.div_s i32.wrap_i64)
+          (func (export "f") (param i32) (result i32) local.get 0 i32.const 3 i32.div_s i32.extend8_s))"#,
+        "assert_eq!(func0(-7), (-2i32 as u32 % 5) as i32);\n    \
+         assert_eq!(func1(-7), 0);\n    \
+         assert_eq!(func1(30), 1);\n    \
+         assert_eq!(func2(-7), 0xFFFF_FFFE);\n    \
+         assert_eq!(func3(9), 8);\n    \
+         assert_eq!(func4(-9), -3);\n    \
+         assert_eq!(func5(768), 0);",
+    );
+}
