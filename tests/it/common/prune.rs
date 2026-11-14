@@ -1,5 +1,5 @@
-//! Pruning of the shared test cache (`$TMPDIR/wasm2rs-testcache`), which is content-addressed
-//! and would otherwise only grow.
+//! Pruning of the shared test cache (`$TMPDIR/wasm2rs-testcache`, or `$WASM2RS_TESTCACHE_DIR`),
+//! which is content-addressed and would otherwise only grow.
 //!
 //! Safe to run from several test processes at once: every removal ignores errors (another
 //! process may have removed the entry first) and a cache hit refreshes the mtime, so only
