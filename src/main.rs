@@ -395,14 +395,12 @@ fn write_split(
     let result = transpile_split_with_options(wasm, &opts, topts, |file| {
         let path = std::path::Path::new(dir).join(&file.name);
         std::fs::write(&path, &file.code).map_err(|e| {
-            // Keep the I/O failure for reporting; the sink's own error only
-            // aborts the remaining generation.
             write_err = Some(format!("cannot write {}: {e}", path.display()));
-            wasm2rs::TranspileError::Internal("chunk write failed".to_string())
+            wasm2rs::TranspileError::Internal("chunk write failed".into())
         })
     });
-    // The first write failure is the root cause of the abort, so it wins over the
-    // transpile error that stopping produced.
+    // The sink's error only aborts generation; the recorded write failure is the
+    // root cause, so it wins.
     match write_err {
         Some(e) => Err(e),
         None => result.map_err(|e| e.to_string()),
