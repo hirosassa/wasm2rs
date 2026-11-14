@@ -969,8 +969,8 @@ fn glue_text(
 /// lowered as `compact-utf16`, or lowered with two encodings (the glue has one method per
 /// function), is refused.
 fn utf16_lowers(component: &[u8], funcs: &[WitFunc]) -> Result<Vec<bool>, TranspileError> {
-    let mut utf16 = vec![false; funcs.len()];
-    let mut utf8 = vec![false; funcs.len()];
+    // The encoding each function is lowered with, once one holding a string is seen.
+    let mut encodings: Vec<Option<&'static str>> = vec![None; funcs.len()];
     for (host, encoding) in super::exports::lowers(component)? {
         let Some(at) = funcs
             .iter()
@@ -978,9 +978,7 @@ fn utf16_lowers(component: &[u8], funcs: &[WitFunc]) -> Result<Vec<bool>, Transp
         else {
             continue;
         };
-        let (Some(f), Some(u16_slot), Some(u8_slot)) =
-            (funcs.get(at), utf16.get_mut(at), utf8.get_mut(at))
-        else {
+        let (Some(f), Some(slot)) = (funcs.get(at), encodings.get_mut(at)) else {
             continue;
         };
         let mut budget = crate::wit_abi::Budget::new();
@@ -994,26 +992,23 @@ fn utf16_lowers(component: &[u8], funcs: &[WitFunc]) -> Result<Vec<bool>, Transp
         if !holds {
             continue;
         }
-        match encoding {
-            "utf16" => *u16_slot = true,
-            "utf8" => *u8_slot = true,
-            _ => {
-                return Err(unsupported(format!(
-                    "import `{}#{}` is lowered with `string-encoding={encoding}`, which is not \
-                     supported; only `utf8` and `utf16` are",
-                    host.interface, host.name
-                )));
-            }
+        if !matches!(encoding, "utf8" | "utf16") {
+            return Err(unsupported(format!(
+                "import `{}#{}` is lowered with `string-encoding={encoding}`, which is not \
+                 supported; only `utf8` and `utf16` are",
+                host.interface, host.name
+            )));
         }
-        if *u16_slot && *u8_slot {
+        if slot.is_some_and(|seen| seen != encoding) {
             return Err(unsupported(format!(
                 "import `{}#{}` is lowered both as utf8 and as utf16: the glue has one method \
                  per function",
                 host.interface, host.name
             )));
         }
+        *slot = Some(encoding);
     }
-    Ok(utf16)
+    Ok(encodings.iter().map(|e| *e == Some("utf16")).collect())
 }
 
 /// One glue method per core import, in import order.
@@ -1028,7 +1023,9 @@ fn core_methods<'a>(
         let Some(index) = resolve_core_import(funcs, &import.module, &import.field)? else {
             continue;
         };
-        let (Some(func), Some(host)) = (funcs.get(index), host_names.get(index)) else {
+        let (Some(func), Some(host), Some(&utf16)) =
+            (funcs.get(index), host_names.get(index), utf16.get(index))
+        else {
             return Err(TranspileError::Internal(
                 "a resolved core import is not a component function".into(),
             ));
@@ -1038,7 +1035,7 @@ fn core_methods<'a>(
             name: &import.ident,
             host,
             realloc: import.realloc.as_deref(),
-            utf16: utf16.get(index).copied().unwrap_or(false),
+            utf16,
         });
     }
     Ok(methods)
