@@ -611,6 +611,7 @@ pub(crate) fn transpile_ir_split_with_glue<F>(
     topts: &TranspileOptions,
     split: &SplitOptions,
     data_files: bool,
+    external_types: Option<&str>,
     glue: impl FnOnce(Vec<wit::CoreImport>, bool) -> Result<String, TranspileError>,
     mut sink: F,
 ) -> Result<(), TranspileError>
@@ -629,7 +630,7 @@ where
                 if file.name == "lib.rs"
                     && let FileContent::Text(code) = &mut file.content
                 {
-                    wit::report_glue_trap_in_spawn(code, &glue);
+                    wit::report_glue_trap_in_spawn(code, &glue, external_types);
                     code.push('\n');
                     code.push_str(&glue);
                 }

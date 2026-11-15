@@ -217,6 +217,7 @@ pub(super) fn transpile_linked(
         transpile,
         split,
         data_files,
+        wit.external_types.as_deref(),
         |mut core_imports, imports_trait| {
             // A host import the transpiler runs as native WASI is not in `core_imports`; that
             // is harmless while no import allocates through a `realloc` of its own.

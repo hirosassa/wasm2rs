@@ -344,19 +344,33 @@ fn type_traps(out: &mut String, start: usize) {
 }
 
 /// Makes the thread-spawn wrappers of `code` (the core module, which does not know the glue
-/// appended to it) print a `Wasm2RsGlueTrap` payload as they do a `Wasm2RsTrap`, when `glue`
-/// defines that type. A typed payload skips the panic hook, so the wrapper is the only one to
-/// say why the thread died. Without the type `code` is left as it is.
+/// appended to it) print the typed trap payloads that only the glue side can name, as they do
+/// a `Wasm2RsTrap`: a `Wasm2RsGlueTrap` when `glue` defines that type, and the
+/// `wasm2rs_wasi::WasiTrap` of a host built with `typed_traps` when `external_types` is the
+/// `wasm2rs-wasi` library (any other library is not known to declare it). A typed payload skips
+/// the panic hook, so the wrapper is the only one to say why the thread died. With neither,
+/// `code` is left as it is.
 ///
 /// The wrapper (see `spawn_thread_lines`) either downcasts `Wasm2RsTrap` (the module defines
-/// it) or just catches the panic; both shapes get the glue's downcast.
-pub(crate) fn report_glue_trap_in_spawn(code: &mut String, glue: &str) {
+/// it) or just catches the panic; both shapes get the downcasts.
+pub(crate) fn report_glue_trap_in_spawn(
+    code: &mut String,
+    glue: &str,
+    external_types: Option<&str>,
+) {
     const CORE_TRAP: &str = "if let Some(trap) = payload.downcast_ref::<Wasm2RsTrap>() {";
     const CATCH_ANY: &str = "if std::panic::catch_unwind(run).is_err() {";
-    const GLUE_TRAP: &str = "if let Some(trap) = payload.downcast_ref::<Wasm2RsGlueTrap>() {";
-    if !glue.contains("enum Wasm2RsGlueTrap") {
+    let mut payload_types = Vec::new();
+    if glue.contains("enum Wasm2RsGlueTrap") {
+        payload_types.push("Wasm2RsGlueTrap");
+    }
+    if matches!(external_types, Some("wasm2rs_wasi" | "::wasm2rs_wasi")) {
+        payload_types.push("wasm2rs_wasi::WasiTrap");
+    }
+    if payload_types.is_empty() {
         return;
     }
+    let branch = |ty: &str| format!("if let Some(trap) = payload.downcast_ref::<{ty}>() {{");
     let mut out = String::with_capacity(code.len());
     let mut in_core_branch = false;
     for line in code.split_inclusive('\n') {
@@ -367,19 +381,24 @@ pub(crate) fn report_glue_trap_in_spawn(code: &mut String, glue: &str) {
                     out,
                     "{indent}if let Err(payload) = std::panic::catch_unwind(run) {{"
                 );
-                let _ = writeln!(out, "{indent}    {GLUE_TRAP}");
-                let _ = writeln!(out, "{indent}        eprintln!(\"{{trap}}\");");
+                for (i, ty) in payload_types.iter().enumerate() {
+                    let lead = if i == 0 { "" } else { "} else " };
+                    let _ = writeln!(out, "{indent}    {lead}{}", branch(ty));
+                    let _ = writeln!(out, "{indent}        eprintln!(\"{{trap}}\");");
+                }
                 let _ = writeln!(out, "{indent}    }}");
             }
             CORE_TRAP => {
                 in_core_branch = true;
                 out.push_str(line);
             }
-            // the closing brace of the core branch takes the glue branch as its `else`
+            // the closing brace of the core branch takes the other branches as its `else`
             "}" if in_core_branch => {
                 in_core_branch = false;
-                let _ = writeln!(out, "{indent}}} else {GLUE_TRAP}");
-                let _ = writeln!(out, "{indent}    eprintln!(\"{{trap}}\");");
+                for ty in &payload_types {
+                    let _ = writeln!(out, "{indent}}} else {}", branch(ty));
+                    let _ = writeln!(out, "{indent}    eprintln!(\"{{trap}}\");");
+                }
                 let _ = writeln!(out, "{indent}}}");
             }
             _ => out.push_str(line),
@@ -1577,7 +1596,7 @@ mod tests {
         // the child uses a typed helper, so the wrapper already downcasts `Wasm2RsTrap`
         let mut code = spawning(true);
         assert!(code.contains("downcast_ref::<Wasm2RsTrap>()"), "{code}");
-        report_glue_trap_in_spawn(&mut code, GLUE);
+        report_glue_trap_in_spawn(&mut code, GLUE, None);
         assert!(code.contains(GLUE_PRINT), "{code}");
         assert!(
             code.contains("} else if let Some(trap) = payload.downcast_ref::<Wasm2RsGlueTrap>()"),
@@ -1589,7 +1608,7 @@ mod tests {
     fn a_wrapper_that_only_catches_gets_its_own_downcast() {
         // the shape `spawn_thread_lines` emits when the module defines no `Wasm2RsTrap`
         let mut code = "        if std::panic::catch_unwind(run).is_err() {\n            eprintln!(\"x\");\n        }\n".to_string();
-        report_glue_trap_in_spawn(&mut code, GLUE);
+        report_glue_trap_in_spawn(&mut code, GLUE, None);
         assert!(
             code.starts_with("        if let Err(payload) = std::panic::catch_unwind(run) {\n"),
             "{code}"
@@ -1603,8 +1622,41 @@ mod tests {
         for typed in [false, true] {
             let before = spawning(typed);
             let mut code = before.clone();
-            report_glue_trap_in_spawn(&mut code, "pub struct Glue;\n");
+            report_glue_trap_in_spawn(&mut code, "pub struct Glue;\n", None);
             assert_eq!(code, before);
         }
+    }
+
+    const WASI_PRINT: &str = "payload.downcast_ref::<wasm2rs_wasi::WasiTrap>()";
+
+    #[test]
+    fn a_spawn_wrapper_prints_the_wasi_trap_of_the_default_library() {
+        // both wrapper shapes: the module defines `Wasm2RsTrap` (typed) or it does not
+        for typed in [false, true] {
+            let mut code = spawning(typed);
+            report_glue_trap_in_spawn(&mut code, "pub struct Glue;\n", Some("wasm2rs_wasi"));
+            assert!(code.contains(WASI_PRINT), "{code}");
+            assert!(
+                code.contains("Err(payload) = std::panic::catch_unwind(run)"),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wasi_trap_follows_the_glue_trap() {
+        let mut code = spawning(true);
+        report_glue_trap_in_spawn(&mut code, GLUE, Some("wasm2rs_wasi"));
+        let glue = code.find(GLUE_PRINT).unwrap_or(usize::MAX);
+        let wasi = code.find(WASI_PRINT).unwrap_or(usize::MAX);
+        assert!(glue < wasi, "{code}");
+    }
+
+    #[test]
+    fn a_library_other_than_wasm2rs_wasi_is_not_assumed_to_have_wasi_trap() {
+        let before = spawning(true);
+        let mut code = before.clone();
+        report_glue_trap_in_spawn(&mut code, "pub struct Glue;\n", Some("my_host::wasi"));
+        assert_eq!(code, before);
     }
 }

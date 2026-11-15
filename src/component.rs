@@ -181,6 +181,7 @@ where
             &transpile,
             split,
             data_files,
+            wit.external_types.as_deref(),
             |core_imports, imports_trait| {
                 wit_host_glue_for_module(component, &wit, &core_imports, None, imports_trait)
             },
