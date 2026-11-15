@@ -200,12 +200,7 @@ impl WasiHost {
             let body = self
                 .http_bodies
                 .get(slot)
-                .unwrap_or_else(|| {
-                    raise(
-                        self.typed_traps,
-                        WasiTrap::InvalidResourceHandle { resource: "stream" },
-                    )
-                })
+                .unwrap_or_else(|| invalid_handle(self.typed_traps, "stream"))
                 .shared();
             return match body.read(buf.len()) {
                 http::BodyRead::Data(data) => Ok(data),
@@ -219,12 +214,10 @@ impl WasiHost {
         }
         if let Some(slot) = tcp_slot(stream) {
             // never blocks: an empty list means "nothing yet"
-            let conn = self.tcp_in.get_mut(slot).unwrap_or_else(|| {
-                raise(
-                    self.typed_traps,
-                    WasiTrap::InvalidResourceHandle { resource: "stream" },
-                )
-            });
+            let conn = self
+                .tcp_in
+                .get_mut(slot)
+                .unwrap_or_else(|| invalid_handle(self.typed_traps, "stream"));
             if buf.is_empty() {
                 // a zero length succeeds only while the connection is open: peek, consume nothing
                 return match conn.peek(&mut [0u8; 1]) {
@@ -247,12 +240,10 @@ impl WasiHost {
         let Some(index) = file_index(stream) else {
             return Err(StreamError::Closed);
         };
-        let file = self.files.get_mut(index).unwrap_or_else(|| {
-            raise(
-                self.typed_traps,
-                WasiTrap::InvalidResourceHandle { resource: "stream" },
-            )
-        });
+        let file = self
+            .files
+            .get_mut(index)
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "stream"));
         if buf.is_empty() {
             // a zero length succeeds only before the end of the file: look, consume nothing
             let at_end = file

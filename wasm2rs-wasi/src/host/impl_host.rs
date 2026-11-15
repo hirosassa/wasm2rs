@@ -174,11 +174,11 @@ impl Host for WasiHost {
         let body = self
             .http_out_bodies
             .take(idx(this.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http outgoing-body"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-body"));
         let trailers = trailers.map(|handle| {
             self.http_fields
                 .take(idx(handle.0))
-                .unwrap_or_else(|| http_missing(self.typed_traps, "http fields"))
+                .unwrap_or_else(|| invalid_handle(self.typed_traps, "http fields"))
         });
         let entries = trailers.map(|t| t.entries());
         if let Some(entries) = &entries
@@ -233,7 +233,7 @@ impl Host for WasiHost {
         let request = self
             .http_in_requests
             .get_mut(idx(self_.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http incoming-request"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http incoming-request"));
         let body = request.body.take().ok_or(())?;
         let trailers = request.trailers.take();
         let reader = Box::new(std::io::Cursor::new(body));
@@ -309,12 +309,12 @@ impl Host for WasiHost {
         let answer = response.map(|handle| {
             self.http_out_responses
                 .take(idx(handle.0))
-                .unwrap_or_else(|| http_missing(self.typed_traps, "http outgoing-response"))
+                .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-response"))
         });
         *self
             .http_outparams
             .get_mut(&param.0)
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http response-outparam")) =
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http response-outparam")) =
             Some(answer);
     }
 
@@ -566,7 +566,7 @@ impl Host for WasiHost {
         let mut body = self
             .http_bodies
             .take(idx(this.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http incoming-body"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http incoming-body"));
         let trailers = body
             .trailers
             .take()
@@ -607,7 +607,7 @@ impl Host for WasiHost {
     ) -> Pollable {
         self.http_trailers
             .get(idx(self_.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http future-trailers"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http future-trailers"));
         self.subscribe(None)
     }
 
@@ -619,7 +619,7 @@ impl Host for WasiHost {
         let slot = self
             .http_trailers
             .get_mut(idx(self_.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http future-trailers"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http future-trailers"));
         let Some(trailers) = slot.take() else {
             return Some(Err(()));
         };
@@ -2009,14 +2009,10 @@ impl Host for WasiHost {
         &mut self,
         self_: ResolveAddressStream,
     ) -> Result<Option<IpAddress>, NetErrorCode> {
-        let stream = self.resolutions.get_mut(idx(self_.0)).unwrap_or_else(|| {
-            raise(
-                self.typed_traps,
-                WasiTrap::InvalidResourceHandle {
-                    resource: "resolve-address-stream",
-                },
-            )
-        });
+        let stream = self
+            .resolutions
+            .get_mut(idx(self_.0))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "resolve-address-stream"));
         Ok(stream.pop_front().map(ip_address))
     }
 

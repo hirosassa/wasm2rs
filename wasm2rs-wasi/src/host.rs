@@ -224,23 +224,17 @@ impl Drop for WasiHost {
     }
 }
 
-/// The slot of a `wasi:http` resource handle that the guest must still own: using a dropped
-/// one traps, like any other bad handle.
-fn http_missing(typed: bool, resource: &'static str) -> ! {
-    raise(typed, WasiTrap::InvalidResourceHandle { resource })
-}
-
 impl WasiHost {
     fn http_fields(&self, h: Fields) -> &http::HttpFields {
         self.http_fields
             .get(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http fields"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http fields"))
     }
 
     fn http_fields_mut(&mut self, h: Fields) -> &mut http::HttpFields {
         self.http_fields
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http fields"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http fields"))
     }
 
     fn http_new_fields(&mut self, fields: http::HttpFields) -> Fields {
@@ -251,7 +245,7 @@ impl WasiHost {
     fn http_take_fields(&mut self, h: Fields) -> http::HttpFields {
         self.http_fields
             .take(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http fields"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http fields"))
     }
 
     /// A new `outgoing-body` and the handle its owner keeps; `too_large` is the `error-code`
@@ -269,73 +263,73 @@ impl WasiHost {
     fn http_option(&self, h: RequestOptions) -> &http::HttpOptions {
         self.http_options
             .get(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http request-options"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http request-options"))
     }
 
     fn http_option_mut(&mut self, h: RequestOptions) -> &mut http::HttpOptions {
         self.http_options
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http request-options"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http request-options"))
     }
 
     fn http_request(&self, h: OutgoingRequest) -> &http::HttpOutgoingRequest {
         self.http_requests
             .get(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http outgoing-request"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-request"))
     }
 
     fn http_request_mut(&mut self, h: OutgoingRequest) -> &mut http::HttpOutgoingRequest {
         self.http_requests
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http outgoing-request"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-request"))
     }
 
     fn http_future_mut(&mut self, h: FutureIncomingResponse) -> &mut http::HttpFuture {
         self.http_futures
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http future-incoming-response"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http future-incoming-response"))
     }
 
     fn http_in_request(&self, h: IncomingRequest) -> &http::HttpIncomingRequest {
         self.http_in_requests
             .get(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http incoming-request"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http incoming-request"))
     }
 
     fn http_out_response(&self, h: OutgoingResponse) -> &http::HttpOutgoingResponse {
         self.http_out_responses
             .get(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http outgoing-response"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-response"))
     }
 
     fn http_out_response_mut(&mut self, h: OutgoingResponse) -> &mut http::HttpOutgoingResponse {
         self.http_out_responses
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http outgoing-response"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-response"))
     }
 
     fn http_response(&self, h: IncomingResponse) -> &http::HttpIncomingResponse {
         self.http_responses
             .get(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http incoming-response"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http incoming-response"))
     }
 
     fn http_response_mut(&mut self, h: IncomingResponse) -> &mut http::HttpIncomingResponse {
         self.http_responses
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http incoming-response"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http incoming-response"))
     }
 
     fn http_out_body_mut(&mut self, h: OutgoingBody) -> &mut http::HttpOutgoingBody {
         self.http_out_bodies
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http outgoing-body"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-body"))
     }
 
     fn http_body_mut(&mut self, h: IncomingBody) -> &mut http::HttpIncomingBody {
         self.http_bodies
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http incoming-body"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http incoming-body"))
     }
 
     /// Whether `get` of the future in `http_futures` that `r` refers to has an answer (a dropped one
@@ -364,11 +358,11 @@ impl WasiHost {
         let mut request = self
             .http_requests
             .take(idx(handle.0))
-            .unwrap_or_else(|| http_missing(self.typed_traps, "http outgoing-request"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-request"));
         let options = options.map(|o| {
             self.http_options
                 .take(idx(o.0))
-                .unwrap_or_else(|| http_missing(self.typed_traps, "http request-options"))
+                .unwrap_or_else(|| invalid_handle(self.typed_traps, "http request-options"))
         });
         let authority = request
             .authority

@@ -37,14 +37,7 @@ pub enum WasiTrap {
 impl fmt::Display for WasiTrap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // the texts the traps had before they were typed
-            WasiTrap::InvalidResourceHandle { resource: "stream" } => {
-                f.write_str("read from an unknown or dropped stream")
-            }
-            WasiTrap::InvalidResourceHandle { resource } => match resource.strip_prefix("http ") {
-                Some(kind) => write!(f, "wasi:http: unknown {kind} handle"),
-                None => write!(f, "unknown or dropped {resource}"),
-            },
+            WasiTrap::InvalidResourceHandle { resource } => write_invalid_handle(f, resource),
             WasiTrap::HandleTableExhausted => f.write_str("handle table exhausted"),
             WasiTrap::RandomSourceMissing => {
                 f.write_str("wasi:random: no random source (enable `os-random` or use the builder)")
@@ -53,6 +46,17 @@ impl fmt::Display for WasiTrap {
                 write!(f, "wasi:random: the random source failed: {message}")
             }
         }
+    }
+}
+
+/// The untyped panic messages are kept byte for byte, so the three shapes stay.
+fn write_invalid_handle(f: &mut fmt::Formatter<'_>, resource: &str) -> fmt::Result {
+    if resource == "stream" {
+        f.write_str("read from an unknown or dropped stream")
+    } else if let Some(kind) = resource.strip_prefix("http ") {
+        write!(f, "wasi:http: unknown {kind} handle")
+    } else {
+        write!(f, "unknown or dropped {resource}")
     }
 }
 

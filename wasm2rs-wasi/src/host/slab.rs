@@ -17,11 +17,18 @@ pub(super) fn trap(msg: impl std::fmt::Display) -> ! {
 /// Raises `trap`: a `WasiTrap` payload that bypasses the panic hook when `typed` (the host's
 /// `typed_traps`), otherwise the panic that carries its message.
 #[cold]
-pub(super) fn raise(typed: bool, trap: WasiTrap) -> ! {
+pub(super) fn raise(typed: bool, cause: WasiTrap) -> ! {
     if typed {
-        std::panic::resume_unwind(Box::new(trap))
+        std::panic::resume_unwind(Box::new(cause))
+    } else {
+        trap(cause)
     }
-    self::trap(trap)
+}
+
+/// Traps on a handle the guest never got or already dropped (it must still own it).
+#[cold]
+pub(super) fn invalid_handle(typed: bool, resource: &'static str) -> ! {
+    raise(typed, WasiTrap::InvalidResourceHandle { resource })
 }
 
 /// Locks the stdin buffer; one poisoned by a panicking thread traps like any broken invariant.

@@ -456,5 +456,10 @@ pub(super) fn file_times(
 pub(super) fn file_stream_handle(typed: bool, slot: usize) -> u32 {
     FIRST_FILE_STREAM
         .checked_add(to_handle(typed, slot))
-        .unwrap_or_else(|| raise(typed, WasiTrap::HandleTableExhausted))
+        .unwrap_or_else(|| {
+            if typed {
+                raise(typed, WasiTrap::HandleTableExhausted)
+            }
+            trap("stream handle table exhausted")
+        })
 }
