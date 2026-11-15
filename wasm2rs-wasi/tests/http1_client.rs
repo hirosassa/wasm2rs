@@ -110,7 +110,7 @@ fn request_trailers_are_sent_after_a_chunked_body() {
     assert_eq!(seen.trailers, ["x-sum: 42", "x-sum: 43"]);
     assert!(seen.head[0].starts_with("POST /p?q=1 HTTP/1.1"));
     let lower: Vec<_> = seen.head.iter().map(|l| l.to_ascii_lowercase()).collect();
-    assert!(lower.contains(&"transfer-encoding: chunked".to_string()));
+    assert!(lower.iter().any(|l| l == "transfer-encoding: chunked"));
     assert!(!lower.iter().any(|l| l.starts_with("content-length")));
     assert!(lower.iter().any(|l| l == &format!("host: {addr}")));
 }
