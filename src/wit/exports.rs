@@ -18,6 +18,7 @@ use crate::TranspileError;
 
 /// A function the component exports, and the core module export it is lifted from.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WitExport {
     /// The function. `interface` is the exported interface instance (e.g.
     /// `wasi:cli/run@0.2.0`), or empty for a function exported at the top level of the
