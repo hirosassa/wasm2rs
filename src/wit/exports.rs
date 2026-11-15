@@ -17,7 +17,11 @@ use super::wiring::{CoreWiring, HostFunc, Supplier, WiredInstance};
 use crate::TranspileError;
 
 /// A function the component exports, and the core module export it is lifted from.
+///
+/// The struct is `#[non_exhaustive]`: get one from [`wit_exports`] and bind its fields with
+/// `WitExport { func, .. }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WitExport {
     /// The function. `interface` is the exported interface instance (e.g.
     /// `wasi:cli/run@0.2.0`), or empty for a function exported at the top level of the

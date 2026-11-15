@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "wasm2rs"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "mimalloc",
  "wasm-encoder",
@@ -563,14 +563,14 @@ dependencies = [
 
 [[package]]
 name = "wasm2rs-macros"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "wasm2rs",
 ]
 
 [[package]]
 name = "wasm2rs-wasi"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
