@@ -1552,3 +1552,108 @@ fn gc_ops_evaluate_operands_before_the_null_check_of_the_ref() {
         ),
     );
 }
+
+// ---- continuations (stage 4a) ----
+
+const CONT_TRAPS: &str = r#"(module
+    (elem declare func $gen $nop)
+    (type $ft (func (result i32)))
+    (type $ct (cont $ft))
+    (type $bt (func (param i32) (result i32)))
+    (tag $yield (param i32))
+    (func $gen (result i32) i32.const 1 suspend $yield i32.const 2)
+    (func $nop (result i32) i32.const 3)
+    (func (export "stale") (result i32)
+      (local $k (ref null $ct))
+      (local.set $k (cont.new $ct (ref.func $nop)))
+      (drop (resume $ct (local.get $k)))
+      (resume $ct (local.get $k)))
+    (func (export "stale_throw") (result i32)
+      (local $k (ref null $ct))
+      (local.set $k (cont.new $ct (ref.func $nop)))
+      (drop (resume $ct (local.get $k)))
+      (resume_throw $ct $yield (i32.const 0) (local.get $k)))
+    (func (export "unhandled") (result i32)
+      (resume $ct (cont.new $ct (ref.func $gen))))
+    (func (export "null_new") (result i32)
+      (resume $ct (cont.new $ct (ref.null $ft))))
+    (func (export "null_resume") (result i32)
+      (resume $ct (ref.null $ct)))
+    (func (export "exhaust") (result i32)
+      (loop $l
+        (drop (cont.new $ct (ref.func $nop)))
+        (br $l))
+      i32.const 0))"#;
+
+#[test]
+fn continuation_traps_are_typed_and_keep_their_messages() {
+    compile_run_with(
+        "typed_traps_cont",
+        CONT_TRAPS,
+        TranspileOptions::default()
+            .with_typed_traps(true)
+            .with_named_exports(true),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            let t = trap_of(|| inst.stale());
+            assert!(matches!(t, Wasm2RsTrap::ConsumedContinuation), "{{t:?}}");
+            assert_eq!(t.to_string(), "consumed continuation");
+            let mut inst = Instance::new();
+            assert!(matches!(trap_of(|| inst.stale_throw()), Wasm2RsTrap::ConsumedContinuation));
+            let mut inst = Instance::new();
+            let t = trap_of(|| inst.unhandled());
+            assert!(matches!(t, Wasm2RsTrap::UnhandledSuspendTag), "{{t:?}}");
+            assert_eq!(t.to_string(), "unhandled continuation suspend tag");
+            let mut inst = Instance::new();
+            let t = trap_of(|| inst.null_new());
+            assert!(matches!(t, Wasm2RsTrap::NullReference), "{{t:?}}");
+            let mut inst = Instance::new();
+            let t = trap_of(|| inst.null_resume());
+            assert!(matches!(t, Wasm2RsTrap::NullReference), "{{t:?}}");
+            let mut inst = Instance::new();
+            let t = trap_of(|| inst.exhaust());
+            assert!(matches!(t, Wasm2RsTrap::ContinuationTableExhausted), "{{t:?}}");
+            assert_eq!(t.to_string(), "continuation table exhausted");
+            assert!(!HOOK_RAN.load(std::sync::atomic::Ordering::SeqCst));"#
+        ),
+    );
+}
+
+#[test]
+fn continuation_traps_are_string_panics_when_untyped() {
+    compile_run_with(
+        "untyped_traps_cont",
+        CONT_TRAPS,
+        TranspileOptions::default().with_named_exports(true),
+        &format!(
+            r#"{MSG_OF}
+            let cases: [(fn(&mut Instance) -> i32, &str); 4] = [
+                (Instance::stale, "resume of a consumed continuation"),
+                (Instance::stale_throw, "resume_throw of a consumed continuation"),
+                (Instance::unhandled, "resume: unhandled continuation suspend tag"),
+                (Instance::exhaust, "cont.new: continuation table exhausted"),
+            ];
+            for (export, want) in cases {{
+                let mut inst = Instance::new();
+                assert_eq!(msg_of(|| export(&mut inst)), want);
+            }}"#
+        ),
+    );
+}
+
+#[test]
+fn continuation_trap_variants_are_emitted_only_when_typed_and_used() {
+    let untyped = transpile_typed(CONT_TRAPS, false);
+    assert!(!untyped.contains("Wasm2RsTrap"), "{untyped}");
+    let typed = transpile_typed(CONT_TRAPS, true);
+    for v in [
+        "ConsumedContinuation",
+        "UnhandledSuspendTag",
+        "ContinuationTableExhausted",
+    ] {
+        assert!(typed.contains(v), "{v} missing");
+    }
+    let plain = transpile_typed(r#"(module (func (export "u") unreachable))"#, true);
+    assert!(!plain.contains("ConsumedContinuation"), "{plain}");
+}

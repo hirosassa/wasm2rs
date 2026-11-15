@@ -703,6 +703,7 @@ fn generate_module_pieces_with(
     }
     add_shared_memory_traps(&mut deps, &ctx);
     add_gc_traps(&mut deps, &ctx);
+    add_cont_traps(&mut deps, &ctx);
 
     // Free-function runtime helpers live at module scope, above the functions
     // (or the `struct Instance`) that call them, in both module shapes.
@@ -780,6 +781,18 @@ fn generate_module_pieces_with(
 fn add_shared_memory_traps(deps: &mut ModuleDeps, ctx: &ModuleCtx<'_>) {
     if ctx.typed_traps && ctx.memory_shared {
         deps.rt.extend([Rt::TrapMemoryOob, Rt::TrapUnalignedAtomic]);
+    }
+}
+
+/// The continuation handle table's methods (`cont_new`, `cont_alloc`, `cont_slot`) call
+/// cold traps whenever the module has continuations (typed traps only).
+fn add_cont_traps(deps: &mut ModuleDeps, ctx: &ModuleCtx<'_>) {
+    if ctx.typed_traps && !ctx.cont.bodies.is_empty() {
+        deps.rt.extend([
+            Rt::TrapConsumedContinuation,
+            Rt::TrapContinuationTableExhausted,
+            Rt::TrapNullReference,
+        ]);
     }
 }
 
@@ -931,6 +944,7 @@ pub(crate) fn generate_module_split(
     }
     add_shared_memory_traps(&mut deps, &ctx);
     add_gc_traps(&mut deps, &ctx);
+    add_cont_traps(&mut deps, &ctx);
 
     // The root is emitted last, once the used-helper/dispatch sets are complete.
     let root_deps = render::RootDeps {
