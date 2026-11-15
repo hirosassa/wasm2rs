@@ -343,6 +343,51 @@ fn type_traps(out: &mut String, start: usize) {
     out.push_str(&text);
 }
 
+/// Makes the thread-spawn wrappers of `code` (the core module, which does not know the glue
+/// appended to it) print a `Wasm2RsGlueTrap` payload as they do a `Wasm2RsTrap`, when `glue`
+/// defines that type. A typed payload skips the panic hook, so the wrapper is the only one to
+/// say why the thread died. Without the type `code` is left as it is.
+///
+/// The wrapper (see `spawn_thread_lines`) either downcasts `Wasm2RsTrap` (the module defines
+/// it) or just catches the panic; both shapes get the glue's downcast.
+pub(crate) fn report_glue_trap_in_spawn(code: &mut String, glue: &str) {
+    const CORE_TRAP: &str = "if let Some(trap) = payload.downcast_ref::<Wasm2RsTrap>() {";
+    const CATCH_ANY: &str = "if std::panic::catch_unwind(run).is_err() {";
+    const GLUE_TRAP: &str = "if let Some(trap) = payload.downcast_ref::<Wasm2RsGlueTrap>() {";
+    if !glue.contains("enum Wasm2RsGlueTrap") {
+        return;
+    }
+    let mut out = String::with_capacity(code.len());
+    let mut in_core_branch = false;
+    for line in code.split_inclusive('\n') {
+        let indent = &line[..line.len() - line.trim_start().len()];
+        match line.trim() {
+            CATCH_ANY => {
+                let _ = writeln!(
+                    out,
+                    "{indent}if let Err(payload) = std::panic::catch_unwind(run) {{"
+                );
+                let _ = writeln!(out, "{indent}    {GLUE_TRAP}");
+                let _ = writeln!(out, "{indent}        eprintln!(\"{{trap}}\");");
+                let _ = writeln!(out, "{indent}    }}");
+            }
+            CORE_TRAP => {
+                in_core_branch = true;
+                out.push_str(line);
+            }
+            // the closing brace of the core branch takes the glue branch as its `else`
+            "}" if in_core_branch => {
+                in_core_branch = false;
+                let _ = writeln!(out, "{indent}}} else {GLUE_TRAP}");
+                let _ = writeln!(out, "{indent}    eprintln!(\"{{trap}}\");");
+                let _ = writeln!(out, "{indent}}}");
+            }
+            _ => out.push_str(line),
+        }
+    }
+    *code = out;
+}
+
 /// The `Wasm2RsGlueTrap` definition with just the `variants`.
 fn trap_type(variants: &[&GlueTrap]) -> String {
     let mut s = String::from(
@@ -1505,4 +1550,62 @@ fn write_export(
     }
     out.push_str("    }\n");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{TranspileOptions, transpile_with_options};
+
+    /// A module with a wasi-threads child running `child_body`, transpiled with `typed_traps`.
+    fn spawning(child_body: &str, typed: bool) -> String {
+        let wat = format!(
+            r#"(module
+              (import "env" "memory" (memory 1 1 shared))
+              (import "wasi" "thread-spawn" (func $spawn (param i32) (result i32)))
+              (func (export "wasi_thread_start") (param i32 i32) {child_body})
+              (func (export "run") (result i32) i32.const 0 call $spawn))"#
+        );
+        let wasm = wat::parse_str(wat).unwrap();
+        transpile_with_options(&wasm, &TranspileOptions::default().with_typed_traps(typed)).unwrap()
+    }
+
+    const GLUE: &str = "pub enum Wasm2RsGlueTrap {}\n";
+    const GLUE_PRINT: &str = "payload.downcast_ref::<Wasm2RsGlueTrap>()";
+
+    #[test]
+    fn a_spawn_wrapper_prints_the_glue_trap_after_the_core_trap() {
+        // the child uses a typed helper, so the wrapper already downcasts `Wasm2RsTrap`
+        let mut code = spawning("unreachable", true);
+        assert!(code.contains("downcast_ref::<Wasm2RsTrap>()"), "{code}");
+        report_glue_trap_in_spawn(&mut code, GLUE);
+        assert!(code.contains(GLUE_PRINT), "{code}");
+        assert!(
+            code.contains("} else if let Some(trap) = payload.downcast_ref::<Wasm2RsGlueTrap>()"),
+            "{code}"
+        );
+    }
+
+    #[test]
+    fn a_wrapper_that_only_catches_gets_its_own_downcast() {
+        // the shape `spawn_thread_lines` emits when the module defines no `Wasm2RsTrap`
+        let mut code = "        if std::panic::catch_unwind(run).is_err() {\n            eprintln!(\"x\");\n        }\n".to_string();
+        report_glue_trap_in_spawn(&mut code, GLUE);
+        assert!(
+            code.starts_with("        if let Err(payload) = std::panic::catch_unwind(run) {\n"),
+            "{code}"
+        );
+        assert!(code.contains(GLUE_PRINT), "{code}");
+        assert!(code.contains("eprintln!(\"x\");"), "{code}");
+    }
+
+    #[test]
+    fn code_is_untouched_without_the_glue_trap_type() {
+        for typed in [false, true] {
+            let before = spawning("unreachable", typed);
+            let mut code = before.clone();
+            report_glue_trap_in_spawn(&mut code, "pub struct Glue;\n");
+            assert_eq!(code, before);
+        }
+    }
 }

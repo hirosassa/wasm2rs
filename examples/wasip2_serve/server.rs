@@ -361,7 +361,12 @@ fn call_guest(inst: &mut Instance<Glue<WasiHost>>, parts: IncomingRequestParts) 
         Ok(Some(Ok(response))) => Served::Response(response),
         Ok(Some(Err(code))) => Served::Error(code),
         Ok(None) => Served::NoResponse,
-        Err(_) => Served::Trapped,
+        Err(payload) => {
+            // A typed payload skips the panic hook, so its cause is printed here; any other
+            // panic is a string the hook has printed already.
+            REPORT_TYPED_TRAP
+            Served::Trapped
+        }
     }
 }
 

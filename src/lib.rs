@@ -606,6 +606,7 @@ where
                 if file.name == "lib.rs"
                     && let FileContent::Text(code) = &mut file.content
                 {
+                    wit::report_glue_trap_in_spawn(code, &glue);
                     code.push('\n');
                     code.push_str(&glue);
                 }

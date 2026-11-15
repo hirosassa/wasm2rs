@@ -70,17 +70,7 @@ fn main() {
     let run_method = export_method(&run_interface, "run");
     // argv[0] goes in at run time, not into the source: the same component then builds to the
     // same program wherever it lies (see `$WASM2RS_EXAMPLE_CACHE_DIR`)
-    // `Wasm2RsTrap` is defined only when the guest uses one of the typed traps.
-    // `WasiTrap` is what a host built with `typed_traps` raises; this one is not, but the
-    // report names both so it stays right if the host is configured that way.
-    let report_wasi_trap = "if let Some(trap) = payload.downcast_ref::<wasm2rs_wasi::WasiTrap>() { eprintln!(\"wasip2_run: trap: {trap}\"); }";
-    let report_trap = if generated.contains("enum Wasm2RsTrap") {
-        format!(
-            "if let Some(trap) = payload.downcast_ref::<Wasm2RsTrap>() {{ eprintln!(\"wasip2_run: trap: {{trap}}\"); }} else {report_wasi_trap}"
-        )
-    } else {
-        report_wasi_trap.to_string()
-    };
+    let report_trap = common::report_typed_trap(&generated, "wasip2_run");
     let main = format!(
         "fn main() {{\n    \
          let args = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();\n    \
@@ -91,7 +81,7 @@ fn main() {
          host = if writable {{ host.with_writable_preopen(dir.into()) }} else {{ host.with_preopen(dir.into()) }};\n    }}\n    \
          let mut inst = Instance::new(Glue(host));\n    \
          // The guest is transpiled with `typed_traps`: its `unreachable`, indirect-call, stack and\n    \
-         // conversion traps are a `Wasm2RsTrap` payload, which skips the panic hook, so it is reported\n    \
+         // conversion traps (and the glue's canonical-ABI ones) are typed payloads, which skip the panic hook, so they are reported\n    \
          // here. Any other panic (another trap, or one in a host import) is a string payload whose\n    \
          // message the hook has printed already. Either way it becomes the trap exit code.\n    \
          let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Exports::{run_method}(&mut inst))) {{\n        \

@@ -16,6 +16,8 @@ use crate::wasip2_typed_http_incoming::{
 struct Server {
     child: Child,
     addr: String,
+    /// Where the example's stderr goes.
+    stderr: PathBuf,
 }
 
 impl Drop for Server {
@@ -54,6 +56,7 @@ fn work_dir(tag: &str) -> PathBuf {
 )]
 fn serve_component(wasm: &Path, dir: &Path, extra: &[&str]) -> Server {
     // `cargo run` and the example both `exec` the next program on unix: the child is the server
+    let stderr = dir.join("stderr.log");
     let mut cmd = Command::new(env!("CARGO"));
     cmd.current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(["run", "--quiet", "--example", "wasip2_serve", "--"])
@@ -61,13 +64,15 @@ fn serve_component(wasm: &Path, dir: &Path, extra: &[&str]) -> Server {
         .args(["--listen", "127.0.0.1:0"])
         .args(extra)
         .env("WASIP2_WORK_DIR", dir.join("work"))
-        .stdout(Stdio::piped());
+        .stdout(Stdio::piped())
+        .stderr(std::fs::File::create(&stderr).unwrap());
     crate::common::share_example_build(&mut cmd);
     let mut child = cmd.spawn().unwrap();
     let stdout = child.stdout.take().unwrap();
     let mut server = Server {
         child,
         addr: String::new(),
+        stderr,
     };
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -188,6 +193,22 @@ fn the_server_answers_after_a_guest_trap() {
     let (status, _, body) = parse(&exchange(&server, post("/", "alive").as_bytes()));
     assert_eq!((status, body), (202, b"alive".to_vec()));
     assert_eq!(parse(&exchange(&server, delete.as_bytes())).0, 500);
+}
+
+#[test]
+fn a_typed_guest_trap_prints_its_cause() {
+    // `resume_unwind` skips the panic hook, so the server is the only one to say why
+    let trap = "(call $method (local.get $req) (i32.const 100))
+      (if (i32.eq (i32.load8_u (i32.const 100)) (i32.const 4)) (then unreachable))";
+    let server = serve(&guest(&echo_handle(trap)), "trap_cause");
+    let delete = "DELETE / HTTP/1.1\r\nHost: h\r\nAccept: a\r\n\r\n";
+    assert_eq!(parse(&exchange(&server, delete.as_bytes())).0, 500);
+    let stderr = std::fs::read_to_string(&server.stderr).unwrap();
+    assert!(
+        stderr.contains("wasip2_serve: trap: unreachable"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
 }
 
 #[test]
