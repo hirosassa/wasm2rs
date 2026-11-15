@@ -5,7 +5,7 @@
 //! later spliced. At a few positions the wrapper is then redundant, and
 //! `rustc`'s `unused_parens` early lint pays for each one by copying the rest of
 //! the source file (`SourceMap::span_to_next_source`), which is quadratic on a
-//! very large module (see `docs/f4-rustc-time-spike.md`). `#[allow]` does not
+//! very large module (587 s -> 61 s on a large JS component without them). `#[allow]` does not
 //! avoid that work, so the parentheses must not be emitted at all.
 //!
 //! Only positions where the parentheses can never change the parse are
