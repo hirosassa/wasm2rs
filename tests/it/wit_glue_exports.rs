@@ -48,9 +48,12 @@ fn encoded_as(wit: &str, core: &str, encoding: StringEncoding) -> Vec<u8> {
         .unwrap()
 }
 
+/// Untyped traps are pinned: these tests read the glue's string panics from stderr, and
+/// the typed glue traps are covered by `wit_glue_typed_traps`.
 fn exports_on() -> WitOptions {
     WitOptions {
         exports: true,
+        typed_traps: false,
         ..WitOptions::default()
     }
 }

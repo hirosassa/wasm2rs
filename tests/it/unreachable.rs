@@ -80,7 +80,7 @@ fn unreachable_in_branch_traps() {
 #[test]
 fn unreachable_routed_through_cold_helper() {
     let wasm = wat::parse_str(M).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
+    let generated = crate::common::transpile_untyped(&wasm);
 
     assert!(
         generated.contains("#[cold]") && generated.contains("#[inline(never)]"),

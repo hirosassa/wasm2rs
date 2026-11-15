@@ -207,7 +207,7 @@ fn unreachable_body_transpiles_to_a_trap() {
         "#,
     );
 
-    let rust = transpile(&wasm).expect("transpile ok");
+    let rust = crate::common::transpile_untyped(&wasm);
     assert!(rust.contains("panic!(\"unreachable\")"), "{rust}");
 }
 
@@ -383,7 +383,7 @@ fn call_indirect_dispatches_through_table_match() {
         "#,
     );
 
-    let rust = transpile(&wasm).expect("transpile ok");
+    let rust = crate::common::transpile_untyped(&wasm);
 
     // The table is a `Vec<u32>` of function indices seeded from the element
     // segment; dispatch reads the entry through the `table()` accessor into a

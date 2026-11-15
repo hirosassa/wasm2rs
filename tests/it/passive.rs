@@ -18,7 +18,9 @@ fn assert_traps_with(bin: &std::path::Path, needle: &str) {
 
 fn compile(test: &str, wat: &str, main_body: &str) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
+    // The trap tests below pin Rust's own slice-panic text, which only the untyped
+    // output produces (the typed OOB traps are covered by `typed_traps`).
+    let generated = crate::common::transpile_untyped(&wasm);
 
     let dir = crate::common::scratch_dir(&format!("wasm2rs_passive_{test}"));
     let src = dir.join("gen.rs");

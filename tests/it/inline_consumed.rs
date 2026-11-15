@@ -16,7 +16,8 @@ use common::compile_run;
 /// Transpile `wat` to Rust source for shape assertions.
 fn transpile(wat: &str) -> String {
     let wasm = wat::parse_str(wat).expect("valid wat");
-    wasm2rs::transpile(&wasm).expect("transpile ok")
+    // These tests assert generated text, including the untyped trap `panic!`s.
+    crate::common::transpile_untyped(&wasm)
 }
 
 #[test]

@@ -322,10 +322,11 @@ fn shared_memory_is_accepted() {
 
 pub const NOTIFY_TRAPS_MAIN: &str = r#"fn main() {
     let mut inst = Instance::new();
-    // Panic message of a call that must trap.
+    // Message of a call that must trap: a typed payload's `Display` or a string panic.
     fn trap_msg(f: impl FnOnce()) -> String {
         let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
             .expect_err("expected a trap");
+        /*TYPED_PAYLOAD*/
         err.downcast_ref::<String>().cloned()
             .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
             .unwrap_or_default()
@@ -349,13 +350,23 @@ pub const NOTIFY_TRAPS_MAIN: &str = r#"fn main() {
     assert!(trap_msg(|| { inst.func4(-4); }).contains("out of"));
 }"#;
 
+/// [`NOTIFY_TRAPS_MAIN`] for the given trap mode.
+pub fn notify_traps_main(typed: bool) -> String {
+    let typed_payload = if typed {
+        "if let Some(t) = err.downcast_ref::<Wasm2RsTrap>() { return t.to_string(); }"
+    } else {
+        ""
+    };
+    NOTIFY_TRAPS_MAIN.replace("/*TYPED_PAYLOAD*/", typed_payload)
+}
+
 #[test]
 fn notify_on_unshared_memory_traps_when_misaligned_or_out_of_bounds() {
     // The threads proposal makes `memory.atomic.notify` trap on a misaligned or
     // out-of-bounds address even when the memory is not shared (it then returns 0
     // otherwise). The effective address is addr + offset in unbounded arithmetic,
     // so a u32 sum that would wrap must still trap, in debug and release alike.
-    common::compile_run_raw(
+    common::compile_run_raw_both_modes(
         "atomic_notify_traps_unshared",
         r#"(module
             (memory 1)
@@ -369,6 +380,6 @@ fn notify_on_unshared_memory_traps_when_misaligned_or_out_of_bounds() {
               local.get 0 i32.const 5 i64.const 0 memory.atomic.wait32)
             (func (export "wait_off") (param i32) (result i32)
               local.get 0 i32.const 5 i64.const 0 memory.atomic.wait32 offset=8))"#,
-        NOTIFY_TRAPS_MAIN,
+        notify_traps_main,
     );
 }
