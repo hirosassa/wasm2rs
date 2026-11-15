@@ -1,7 +1,7 @@
 # Bounds-check cost on memory-heavy workloads
 
 `examples/bench_memory.rs` transpiles each workload in `benches/memory/` three ways —
-default (bounds-checked), `--typed-traps` (explicit checks raising a typed trap, see
+`--no-typed-traps` ("safe": Rust's own bounds checks, the default before typed traps became the default), `--typed-traps` (explicit checks raising a typed trap, see
 below) and `--unsafe-memory` (every check dropped, so it is the
 upper bound on what removing checks could gain) — builds all with
 `rustc -O` (`opt-level=3`), and times `run(n)` in-process. The median of 7 runs is
@@ -129,7 +129,7 @@ division and remainder call `i32_div_s`-style helpers (`#[inline(always)]`, zero
 check, `MIN / -1` check for `div_s`, then `wrapping_*`), and every memory and table
 access uses `get`/`get_mut(..).unwrap_or_else(|| trap_memory_oob())` (a `#[cold]
 #[inline(never)]` function) instead of `[..]`; `copy_within` gets an explicit range
-check first. With the option off nothing changes: the output is byte-identical (3,608
+check first. With the option off (`--no-typed-traps`) nothing changes: the output is byte-identical (3,608
 modules extracted from the spec suite, compared against the previous commit's binary).
 
 Measured with the harness above (Apple M4 Max, rustc 1.99.1, 9 interleaved runs,
@@ -153,10 +153,10 @@ Object size of the generated module compiled alone (`--crate-type=lib --emit=obj
 | random | 2272 | 2968 | 1800 | 1.306 |
 | divrem | 1264 | 2064 | 1264 | 1.633 |
 
-- Speed: no measurable cost over the default checks. Rust's `/` and slice indexing
+- Speed: no measurable cost over the untyped checks. Rust's `/` and slice indexing
   already test the same conditions; the explicit form tests them with a cold call
   instead of a panic path, which LLVM lays out as well (matmul even came out 6%
-  faster, likely layout). The typed build is therefore not slower than the default.
+  faster, likely layout). The typed build is therefore not slower than the untyped build.
 - Size: these modules are a few functions, so the object is dominated by a fixed cost
   of about 0.45 KB for `Wasm2RsTrap` (its `Display`/`Error` impls and
   `resume_unwind`; a module with only `unreachable` grows from 2008 to 2456 bytes in

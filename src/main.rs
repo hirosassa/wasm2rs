@@ -5,7 +5,7 @@
 //! `wasm2rs --dump <input.wasm>` to summarize a module, or
 //! `wasm2rs --extract-core <component.wasm> <dir>` to write a component's core
 //! modules to `<dir>/module{n}.wasm`, or
-//! `wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]` to write a
+//! `wasm2rs --wit-host [--glue [--typed-traps | --no-typed-traps] [--external-types=<path>]] <component.wasm> [output]` to write a
 //! typed `Host` trait for the interfaces the component imports (with `--glue`, also the `Glue`
 //! that lowers it to the flat `Imports` trait; with `--external-types=<path>`, only the `Glue`,
 //! naming the `Host` trait and the interface-qualified types of the library at `<path>`).
@@ -55,10 +55,7 @@ use wasm2rs::{FileContent, SplitOptions, TranspileError, TranspileOptions, cargo
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// Whether typed traps are on when neither `--typed-traps` nor `--no-typed-traps` is given.
-const DEFAULT_TYPED_TRAPS: bool = false;
-
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] [--data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files] <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --help | --version\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] [--data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files] <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --help | --version\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--typed-traps | --no-typed-traps] [--external-types=<path>]] <component.wasm> [output]";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -120,7 +117,7 @@ fn run() -> Result<(), String> {
     // order. `--unsafe-memory` opts into unchecked linear-memory access.
     let mut unsafe_memory = false;
     let mut simd_intrinsics = false;
-    // `None` until `--typed-traps` / `--no-typed-traps` says; see `DEFAULT_TYPED_TRAPS`.
+    // `None` until `--typed-traps` / `--no-typed-traps` says; the default is `TranspileOptions::typed_traps`'s.
     let mut typed_traps_flag: Option<bool> = None;
     let mut dump = false;
     let mut extract_core = false;
@@ -214,7 +211,7 @@ fn run() -> Result<(), String> {
             _ => return Err(format!("unknown option {arg}; try --help")),
         }
     }
-    let typed_traps = typed_traps_flag.unwrap_or(DEFAULT_TYPED_TRAPS);
+    let typed_traps = typed_traps_flag.unwrap_or(TranspileOptions::default().typed_traps);
     let mut args = positional.into_iter();
     let input = args.next().ok_or(USAGE)?;
     let output = args.next();
@@ -224,6 +221,8 @@ fn run() -> Result<(), String> {
     // `--dump`, `--extract-core` and `--wit-host` generate no code, so they refuse extra
     // arguments and the flags that only change generated code instead of silently
     // ignoring them.
+    // Like `--external-types`, the typed-traps flags are ones that `--wit-host --glue` itself takes.
+    let takes_typed_traps = wit_host && glue;
     let refuse_extras = |mode: &str, takes: &str, extra_args: bool| {
         if extra_args {
             return Err(format!("{mode} takes only {takes}"));
@@ -231,8 +230,14 @@ fn run() -> Result<(), String> {
         let code_flags = [
             (unsafe_memory, "--unsafe-memory"),
             (simd_intrinsics, "--simd-intrinsics"),
-            (typed_traps_flag == Some(true), "--typed-traps"),
-            (typed_traps_flag == Some(false), "--no-typed-traps"),
+            (
+                typed_traps_flag == Some(true) && !takes_typed_traps,
+                "--typed-traps",
+            ),
+            (
+                typed_traps_flag == Some(false) && !takes_typed_traps,
+                "--no-typed-traps",
+            ),
             (named_exports, "--named-exports"),
             (named_imports, "--named-imports"),
             (import_memory, "--import-memory"),
@@ -242,7 +247,7 @@ fn run() -> Result<(), String> {
             (jobs > 0, "--jobs"),
             (call_depth_limit.is_some(), "--call-depth-limit"),
             (entry_exports.is_some(), "--entry-exports"),
-            // The one code flag that `--wit-host --glue` itself takes.
+            // A code flag that `--wit-host --glue` itself takes.
             (external_types.is_some() && !wit_host, "--external-types"),
         ];
         match code_flags
@@ -337,6 +342,7 @@ fn run() -> Result<(), String> {
         let rust = if glue {
             let options = wasm2rs::WitOptions {
                 external_types,
+                typed_traps,
                 ..wasm2rs::WitOptions::default()
             };
             wasm2rs::wit_host_glue_with_options(&wasm, &options)
