@@ -1,8 +1,8 @@
 //! Fuzzing harness for the HTTP/1.x half of `examples/wasip2_serve`.
 //!
 //! The server is *not* copied: `examples/wasip2_serve/server.rs` is `include!`d below, with
-//! stand-ins for the three names the generated module gives it (`Instance`, `Glue`,
-//! `Exports`, only used by the guest call, which is never reached from here). The parser and
+//! stand-ins for the names the generated program gives it (`Instance`, `Glue`,
+//! `Exports`, `report_typed_trap`, only used by the guest call, which is never reached from here). The parser and
 //! the response writer are then driven over a real loopback socket (they take a `TcpStream`).
 
 pub mod model;
@@ -46,6 +46,9 @@ mod server {
             }
         }
     }
+
+    /// Printed by the example's generated program; nothing to report here.
+    fn report_typed_trap(_: Box<dyn std::any::Any + Send>) {}
 
     pub struct Exports;
 

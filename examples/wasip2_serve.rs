@@ -57,16 +57,14 @@ fn main() {
         .next()
         .unwrap_or_default()
         .replace(['.', '-'], "_");
-    let server = include_str!("wasip2_serve/server.rs")
-        .replace(
-            "export_wasi_http_incoming_handler_0_2_0_handle",
-            &format!("export_wasi_http_incoming_handler_{version}_handle"),
-        )
-        .replace(
-            "REPORT_TYPED_TRAP",
-            &common::report_typed_trap(&generated, "wasip2_serve"),
-        );
-    let source = format!("{generated}\n{server}\n");
+    let server = include_str!("wasip2_serve/server.rs").replace(
+        "export_wasi_http_incoming_handler_0_2_0_handle",
+        &format!("export_wasi_http_incoming_handler_{version}_handle"),
+    );
+    let report = common::report_typed_trap(&generated, "wasip2_serve");
+    let source = format!(
+        "{generated}\nfn report_typed_trap(payload: Box<dyn std::any::Any + Send>) {{\n    {report}\n}}\n{server}\n"
+    );
     let Some(bin) = common::build_program(&dir, &source) else {
         fail(
             "rustc failed. If the errors above are E0407 (not a member of trait `Host`), the \
