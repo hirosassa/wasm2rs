@@ -60,7 +60,7 @@ fn client_error(error: impl std::fmt::Display) -> HttpClientError {
     HttpClientError::new(error.to_string())
 }
 
-fn io_kind(kind: std::io::ErrorKind) -> HttpClientErrorKind {
+pub(crate) fn io_kind(kind: std::io::ErrorKind) -> HttpClientErrorKind {
     use std::io::ErrorKind;
     match kind {
         ErrorKind::ConnectionRefused => HttpClientErrorKind::ConnectionRefused,

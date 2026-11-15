@@ -50,6 +50,11 @@ pub use trap::WasiTrap;
 mod ureq_client;
 #[cfg(feature = "http-client")]
 pub use ureq_client::UreqClient;
+#[cfg(feature = "http-client")]
+#[path = "host/http1_client.rs"]
+mod http1_client;
+#[cfg(feature = "http-client")]
+pub use http1_client::Http1Client;
 
 #[cfg(feature = "os-random")]
 pub use host::OsRandom;
