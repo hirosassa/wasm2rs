@@ -19,7 +19,8 @@ the shared memory, and WASI on shared memory.
 ### Emscripten pthreads
 
 A module importing `env.__pthread_create_js` is generated with that import
-native: it starts a thread, runs `_emscripten_thread_init`, `_emscripten_tls_init`,
+native: it starts a thread, sets up its stack (`emscripten_stack_set_limits`,
+`_emscripten_stack_restore`, when exported), runs `_emscripten_thread_init`, `_emscripten_tls_init`,
 the start routine from the table and `_emscripten_thread_exit`, as emscripten's
 Worker does. These exports must exist, the memory must be shared and the table
 module-defined, otherwise transpiling is rejected. The JS-only bookkeeping

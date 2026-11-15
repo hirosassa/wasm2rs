@@ -33,6 +33,7 @@ struct Layout {
     wasi_files: bool,
     wasi_preopen: bool,
     wasi_threads: bool,
+    emscripten_stack: bool,
     global_base: usize,
 }
 
@@ -75,6 +76,9 @@ impl Layout {
             .imports
             .iter()
             .any(|im| im.wasi.is_some_and(WasiFn::spawns_threads));
+        let emscripten_stack = EMSCRIPTEN_STACK_ENTRIES
+            .iter()
+            .all(|(name, ..)| parts.exports.iter().any(|e| e.name == *name));
         Layout {
             has_imports: needs_host_trait(parts),
             mem_imported,
@@ -82,6 +86,7 @@ impl Layout {
             wasi_files,
             wasi_preopen,
             wasi_threads,
+            emscripten_stack,
             // Defined globals are named by their full index, i.e. after the
             // imported globals in the shared global index space.
             global_base: parts.imported_globals.len(),
@@ -1353,23 +1358,40 @@ fn thread_spawn_lines(layout: &Layout, typed_trap_type: bool) -> Vec<String> {
 
 /// `env.__pthread_create_js(pthread_ptr, attr, start, arg)`: what an emscripten
 /// JS host answers by starting a Worker. Run a fresh sibling instance over the
-/// same shared memory on a new thread and replay the Worker's start-up: init the
+/// same shared memory on a new thread and replay the Worker's start-up: set up
+/// its stack (when the module exports the stack functions), init the
 /// thread with its pthread pointer, init its TLS, call the table entry `start`
 /// with `arg`, then exit the thread with the result. The child is detached; a
 /// trap in it ends the whole process. Returns 0, or EAGAIN (6) if no thread could
 /// be started.
 fn pthread_create_js_lines(layout: &Layout, typed_trap_type: bool) -> Vec<String> {
+    let mut run = Vec::new();
+    if layout.emscripten_stack {
+        // A Worker's `establishStackSpace`, which must come first: until then
+        // the fresh instance's `__stack_pointer` is the module's initial one,
+        // the parent's live stack, and any call would clobber it. `stack` and
+        // `stack_size` are at offsets 48 and 52 of the wasm32 `struct pthread`
+        // (as in emscripten's own JS).
+        run.extend([
+            "let pthread = u64::from(a0 as u32);",
+            "let stack_high = t.memory.atomic_load(pthread + 48, 4) as u32;",
+            "let stack_size = t.memory.atomic_load(pthread + 52, 4) as u32;",
+            "t.emscripten_stack_set_limits(stack_high as i32, stack_high.wrapping_sub(stack_size) as i32);",
+            "t._emscripten_stack_restore(stack_high as i32);",
+        ]);
+    }
+    run.extend([
+        "t._emscripten_thread_init(a0, 0, 0, 1, 0, 0);",
+        "t._emscripten_tls_init();",
+        "let r = t.emscripten_call_start(a2 as u32, a3);",
+        "t._emscripten_thread_exit(r);",
+    ]);
     spawn_thread_lines(
         layout,
         typed_trap_type,
         "fn emscripten_pthread_create_js(&mut self, a0: i32, a1: i32, a2: i32, a3: i32) -> i32 {",
         &[],
-        &[
-            "t._emscripten_thread_init(a0, 0, 0, 1, 0, 0);",
-            "t._emscripten_tls_init();",
-            "let r = t.emscripten_call_start(a2 as u32, a3);",
-            "t._emscripten_thread_exit(r);",
-        ],
+        &run,
         "\"emscripten pthread trapped; terminating the process\"",
         ("0", "6"),
     )
@@ -1524,6 +1546,17 @@ const EMSCRIPTEN_ENTRIES: [(&str, &[ValType], &[ValType]); 3] = {
     ]
 };
 
+/// The stack exports a Worker's start-up calls first. Optional: a module
+/// exporting both has its child threads' stacks set up (see
+/// `pthread_create_js_lines`); emscripten always exports them.
+const EMSCRIPTEN_STACK_ENTRIES: [(&str, &[ValType], &[ValType]); 2] = {
+    use ValType::I32;
+    [
+        ("emscripten_stack_set_limits", &[I32, I32], &[]),
+        ("_emscripten_stack_restore", &[I32], &[]),
+    ]
+};
+
 /// The export names the generated code itself calls into, and whether the
 /// module also reads the table through them (`emscripten_call_start` calls a
 /// table entry by index). Used to keep them live under `entry_exports`.
@@ -1532,6 +1565,9 @@ pub(super) fn internal_entry_names(imports: &[ImportInfo]) -> (Vec<&'static str>
     let mut names = vec![WASI_THREAD_START];
     if imports_wasi(WasiFn::PthreadCreateJs) || imports_wasi(WasiFn::EmscriptenInitMainThread) {
         names.extend(EMSCRIPTEN_ENTRIES.iter().map(|(name, ..)| *name));
+    }
+    if imports_wasi(WasiFn::PthreadCreateJs) {
+        names.extend(EMSCRIPTEN_STACK_ENTRIES.iter().map(|(name, ..)| *name));
     }
     (names, imports_wasi(WasiFn::PthreadCreateJs))
 }
@@ -1568,6 +1604,9 @@ pub(super) fn entry_point_lines(
             lines.extend(named_entry(parts, ctx, name, params, results)?);
         }
         if imports_wasi(WasiFn::PthreadCreateJs) {
+            for (name, params, results) in EMSCRIPTEN_STACK_ENTRIES {
+                lines.extend(named_entry(parts, ctx, name, params, results)?);
+            }
             lines.extend(call_start_lines(ctx)?);
         }
     }

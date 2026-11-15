@@ -69,6 +69,76 @@ fn a_created_pthread_runs_the_emscripten_start_up_sequence() {
     );
 }
 
+#[test]
+fn a_created_pthread_gets_its_own_stack_before_any_start_up_code_runs() {
+    // A Worker's first act is `establishStackSpace(pthread_ptr)`: it reads the
+    // thread's stack top and size from the pthread struct (offsets 48 and 52),
+    // sets the stack limits and restores `__stack_pointer` to the top. Until
+    // then a fresh instance holds the module's initial pointer (1000), i.e. the
+    // parent's live stack. The child records the pointer it sees in thread init
+    // (addr 0) and in the start routine (addr 8), and the limits (addrs 20, 24).
+    compile_run(
+        "emscripten_pthread_stack",
+        r#"(module
+            (import "env" "memory" (memory 1 1 shared))
+            (import "env" "__pthread_create_js"
+              (func $create (param i32 i32 i32 i32) (result i32)))
+            (global $sp (mut i32) (i32.const 1000))
+            (table 2 funcref)
+            (elem (i32.const 1) $start)
+            (func (export "_emscripten_thread_init")
+              (param i32 i32 i32 i32 i32 i32)
+              i32.const 0
+              global.get $sp
+              i32.atomic.store)
+            (func (export "_emscripten_tls_init") (result i32) i32.const 0)
+            (func (export "emscripten_stack_set_limits") (param i32 i32)
+              i32.const 20 local.get 0 i32.atomic.store
+              i32.const 24 local.get 1 i32.atomic.store)
+            (func (export "_emscripten_stack_restore") (param i32)
+              local.get 0
+              global.set $sp)
+            (func $start (param i32) (result i32)
+              i32.const 8
+              global.get $sp
+              i32.atomic.store
+              i32.const 0)
+            (func (export "_emscripten_thread_exit") (param i32)
+              i32.const 12
+              i32.const 1
+              i32.atomic.store
+              i32.const 12
+              i32.const 1
+              memory.atomic.notify
+              drop)
+            (func (export "run") (result i32)
+              i32.const 148 i32.const 4096 i32.atomic.store
+              i32.const 152 i32.const 512 i32.atomic.store
+              i32.const 100
+              i32.const 0
+              i32.const 1
+              i32.const 0
+              call $create
+              if unreachable end
+              i32.const 12
+              i32.const 0
+              i64.const 5000000000
+              memory.atomic.wait32
+              drop
+              i32.const 0 i32.atomic.load i32.const 4096 i32.eq
+              i32.const 8 i32.atomic.load i32.const 4096 i32.eq
+              i32.const 1 i32.shl
+              i32.or
+              i32.const 20 i32.atomic.load i32.const 4096 i32.eq
+              i32.const 2 i32.shl
+              i32.or
+              i32.const 24 i32.atomic.load i32.const 3584 i32.eq
+              i32.const 3 i32.shl
+              i32.or))"#,
+        "let mut inst = Instance::new(SharedMemory::new(65536)); assert_eq!(inst.func7(), 0b1111);",
+    );
+}
+
 const CREATE: &str = r#"(import "env" "__pthread_create_js"
               (func (param i32 i32 i32 i32) (result i32)))"#;
 
