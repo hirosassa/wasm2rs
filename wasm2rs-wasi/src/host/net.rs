@@ -296,9 +296,14 @@ impl WasiHost {
 
     /// The socket behind a handle.
     pub(super) fn socket(&mut self, handle: u32) -> &mut NetSocket {
-        self.sockets
-            .get_mut(idx(handle))
-            .unwrap_or_else(|| trap("unknown or dropped tcp-socket"))
+        self.sockets.get_mut(idx(handle)).unwrap_or_else(|| {
+            raise(
+                self.typed_traps,
+                WasiTrap::InvalidResourceHandle {
+                    resource: "tcp-socket",
+                },
+            )
+        })
     }
 
     /// `check_address` for the address of a peer to connect or send to: also not port 0 nor an
@@ -587,9 +592,14 @@ pub(super) fn is_host_name(name: &str) -> bool {
 impl WasiHost {
     /// The UDP socket behind a handle.
     pub(super) fn udp_socket(&mut self, handle: u32) -> &mut UdpSock {
-        self.udp_sockets
-            .get_mut(idx(handle))
-            .unwrap_or_else(|| trap("unknown or dropped udp-socket"))
+        self.udp_sockets.get_mut(idx(handle)).unwrap_or_else(|| {
+            raise(
+                self.typed_traps,
+                WasiTrap::InvalidResourceHandle {
+                    resource: "udp-socket",
+                },
+            )
+        })
     }
 
     pub(super) fn udp_start_bind(&mut self, handle: u32, addr: SocketAddr) -> Result<(), Net> {
@@ -705,10 +715,14 @@ impl WasiHost {
         slot: u32,
         max: u64,
     ) -> Result<Vec<(Vec<u8>, SocketAddr)>, Net> {
-        let end = self
-            .udp_in
-            .get(idx(slot))
-            .unwrap_or_else(|| trap("unknown or dropped incoming-datagram-stream"));
+        let end = self.udp_in.get(idx(slot)).unwrap_or_else(|| {
+            raise(
+                self.typed_traps,
+                WasiTrap::InvalidResourceHandle {
+                    resource: "incoming-datagram-stream",
+                },
+            )
+        });
         end.require_current();
         let mut got = Vec::new();
         let mut buf = vec![0u8; 65536];
@@ -731,10 +745,14 @@ impl WasiHost {
 
     /// Traps if the outgoing stream at `slot` is stale (`check-send`).
     pub(super) fn udp_check_send(&self, slot: u32) {
-        let end = self
-            .udp_out
-            .get(idx(slot))
-            .unwrap_or_else(|| trap("unknown or dropped outgoing-datagram-stream"));
+        let end = self.udp_out.get(idx(slot)).unwrap_or_else(|| {
+            raise(
+                self.typed_traps,
+                WasiTrap::InvalidResourceHandle {
+                    resource: "outgoing-datagram-stream",
+                },
+            )
+        });
         end.require_current();
     }
 
@@ -751,10 +769,14 @@ impl WasiHost {
             to_u64(datagrams.len()) <= UDP_SEND_BATCH,
             "send: more datagrams than check-send permits"
         );
-        let end = self
-            .udp_out
-            .get(idx(slot))
-            .unwrap_or_else(|| trap("unknown or dropped outgoing-datagram-stream"));
+        let end = self.udp_out.get(idx(slot)).unwrap_or_else(|| {
+            raise(
+                self.typed_traps,
+                WasiTrap::InvalidResourceHandle {
+                    resource: "outgoing-datagram-stream",
+                },
+            )
+        });
         end.require_current();
         let max = if end.ipv6 {
             UDP_MAX_PAYLOAD_V6

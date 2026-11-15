@@ -40,6 +40,9 @@ mod generated;
 pub use generated::*;
 
 mod host;
+mod trap;
+
+pub use trap::WasiTrap;
 
 // Declared here, not in `host.rs`, so that the client stays a file of its own.
 #[cfg(feature = "http-client")]
