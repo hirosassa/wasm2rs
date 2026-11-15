@@ -12,6 +12,7 @@ type Entries = Vec<(String, Vec<u8>)>;
 
 /// Longest head or trailer section accepted, against a peer that never ends a line.
 const MAX_HEAD: usize = 64 * 1024;
+const MAX_INTERIM: u8 = 16;
 const MAX_HEAD_U64: u64 = 64 * 1024;
 
 /// Executes `wasi:http` requests over plain `http://`, with trailers in both directions.
@@ -72,7 +73,10 @@ fn split_url(url: &str) -> Result<(&str, u16, String), HttpClientError> {
         t if t.starts_with('?') => format!("/{t}"),
         t => t.to_string(),
     };
+    // userinfo is not sent: `host:` carries the host and port only
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a);
     let (host, port) = match authority.rsplit_once(':') {
+        Some((h, "")) if !h.ends_with(':') => (h, 80),
         Some((h, p)) if !p.contains(']') => (
             h,
             p.parse::<u16>()
@@ -120,12 +124,19 @@ fn connect(host: &str, port: u16, timeout: Option<Duration>) -> Result<TcpStream
     ))
 }
 
+fn push_field(out: &mut Vec<u8>, name: &str, value: &[u8]) {
+    out.extend_from_slice(name.as_bytes());
+    out.extend_from_slice(b": ");
+    out.extend_from_slice(value);
+    out.extend_from_slice(b"\r\n");
+}
+
 fn write_request(
     stream: &mut TcpStream,
     request: &HttpRequest,
     authority: &str,
     target: &str,
-) -> Result<(), HttpClientError> {
+) -> Result<io::Result<()>, HttpClientError> {
     let chunked = !request.trailers.is_empty();
     let mut out = format!("{} {target} HTTP/1.1\r\n", request.method).into_bytes();
     let mut has_host = false;
@@ -136,23 +147,18 @@ fn write_request(
         let lower = name.to_ascii_lowercase();
         has_host |= lower == "host";
         // ours: the message is framed here, and every request ends the connection
-        if lower == "connection"
-            || (chunked && matches!(lower.as_str(), "content-length" | "transfer-encoding"))
-        {
+        if matches!(
+            lower.as_str(),
+            "connection" | "content-length" | "transfer-encoding"
+        ) {
             continue;
         }
-        out.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(b": ");
-        out.extend_from_slice(value);
-        out.extend_from_slice(b"\r\n");
+        push_field(&mut out, name, value);
     }
     if !has_host {
         out.extend_from_slice(format!("host: {authority}\r\n").as_bytes());
     }
     out.extend_from_slice(b"connection: close\r\n");
-    let framed_by_guest = request.headers.iter().any(|(n, _)| {
-        n.eq_ignore_ascii_case("content-length") || n.eq_ignore_ascii_case("transfer-encoding")
-    });
     if chunked {
         out.extend_from_slice(b"transfer-encoding: chunked\r\n\r\n");
         if !request.body.is_empty() {
@@ -162,27 +168,23 @@ fn write_request(
         }
         out.extend_from_slice(b"0\r\n");
         for (name, value) in &request.trailers {
-            out.extend_from_slice(name.as_bytes());
-            out.extend_from_slice(b": ");
-            out.extend_from_slice(value);
-            out.extend_from_slice(b"\r\n");
+            push_field(&mut out, name, value);
         }
         out.extend_from_slice(b"\r\n");
     } else {
-        if !framed_by_guest
-            && (!request.body.is_empty()
-                || matches!(request.method.as_str(), "POST" | "PUT" | "PATCH"))
-        {
+        // the guest's own length is not trusted: it may not match the bytes it wrote
+        if !request.body.is_empty() || matches!(request.method.as_str(), "POST" | "PUT" | "PATCH") {
             out.extend_from_slice(format!("content-length: {}\r\n", request.body.len()).as_bytes());
         }
         out.extend_from_slice(b"\r\n");
         out.extend_from_slice(&request.body);
     }
-    stream.write_all(&out).map_err(io_error)?;
-    stream.flush().map_err(io_error)
+    // A server may answer (413, 401) without reading the body and close: the write error is
+    // then kept back, so that its response is still read.
+    Ok(stream.write_all(&out))
 }
 
-fn read_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+fn read_line(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
     let mut raw = Vec::new();
     let n = reader
         .by_ref()
@@ -205,9 +207,7 @@ fn read_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
     if raw.ends_with(b"\r") {
         raw.pop();
     }
-    String::from_utf8(raw)
-        .map(Some)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 line"))
+    Ok(Some(raw))
 }
 
 /// Header or trailer lines up to the empty line.
@@ -227,19 +227,40 @@ fn read_fields(reader: &mut impl BufRead) -> io::Result<Entries> {
                 "fields too large",
             ));
         }
-        let (name, value) = line
-            .split_once(':')
-            .filter(|(n, _)| !n.is_empty() && !n.contains([' ', '\t']))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed field line"))?;
-        fields.push((name.to_string(), value.trim().as_bytes().to_vec()));
+        let malformed = || io::Error::new(io::ErrorKind::InvalidData, "malformed field line");
+        let colon = line.iter().position(|&b| b == b':').ok_or_else(malformed)?;
+        let (name, value) = line.split_at(colon);
+        // the name is ASCII (HTTP's token); the value may hold any byte (obs-text)
+        let name = std::str::from_utf8(name)
+            .ok()
+            .filter(|n| n.is_ascii() && !n.is_empty() && !n.contains([' ', '\t']))
+            .ok_or_else(malformed)?;
+        let value = value.get(1..).unwrap_or_default().trim_ascii();
+        fields.push((name.to_string(), value.to_vec()));
     }
 }
 
-fn find<'a>(fields: &'a Entries, name: &str) -> Option<&'a [u8]> {
-    fields
+/// Every value of `name`, joined with commas as a repeated header is read (`None`: absent).
+fn find(fields: &Entries, name: &str) -> Option<Vec<u8>> {
+    let mut values = fields
         .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .filter(|(n, _)| n.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.as_slice())
+        .peekable();
+    values.peek()?;
+    Some(values.collect::<Vec<_>>().join(&b", "[..]))
+}
+
+/// The one value of a `content-length` (possibly repeated, or a list of equal values).
+fn content_length(value: &[u8]) -> Option<u64> {
+    let mut lengths = value.split(|&b| b == b',').map(|v| {
+        std::str::from_utf8(v.trim_ascii())
+            .ok()?
+            .parse::<u64>()
+            .ok()
+    });
+    let first = lengths.next()??;
+    lengths.all(|l| l == Some(first)).then_some(first)
 }
 
 /// Decodes a chunked body and keeps the trailers it ends with.
@@ -255,7 +276,8 @@ impl<R: BufRead> ChunkedBody<R> {
         let size_line = read_line(&mut self.reader)?
             .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
         // chunk extensions are ignored
-        let size = size_line.split(';').next().unwrap_or_default().trim();
+        let size = size_line.split(|&b| b == b';').next().unwrap_or_default();
+        let size = std::str::from_utf8(size).unwrap_or_default().trim();
         self.left = u64::from_str_radix(size, 16)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size"))?;
         if self.left == 0 {
@@ -290,7 +312,7 @@ impl<R: BufRead> Read for ChunkedBody<R> {
             .saturating_sub(u64::try_from(n).unwrap_or(u64::MAX));
         if self.left == 0 {
             let end = read_line(&mut self.reader)?;
-            if end.as_deref() != Some("") {
+            if end.as_deref() != Some(b"") {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "missing chunk end",
@@ -361,12 +383,23 @@ impl HttpClient for Http1Client {
             format!("{host}:{port}")
         };
         let mut stream = connect(host, port, nanos(request.connect_timeout))?;
-        write_request(&mut stream, &request, &authority, &target)?;
+        // `request-options` has no write timeout: the wait for the head bounds the write too
+        stream
+            .set_write_timeout(nanos(request.first_byte_timeout))
+            .map_err(io_error)?;
+        let write_result = write_request(&mut stream, &request, &authority, &target)?;
 
         let head_timeout = nanos(request.first_byte_timeout);
         stream.set_read_timeout(head_timeout).map_err(io_error)?;
         let mut reader = BufReader::new(stream.try_clone().map_err(io_error)?);
         let head_error = |e: io::Error| match e.kind() {
+            // the server stopped reading the request: that is the more telling error
+            _ if write_result.is_err() => io_error(
+                write_result
+                    .as_ref()
+                    .err()
+                    .map_or_else(|| io::Error::from(e.kind()), |w| io::Error::from(w.kind())),
+            ),
             io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => HttpClientError::with_kind(
                 HttpClientErrorKind::ResponseTimeout,
                 "timed out waiting for the response head",
@@ -374,24 +407,37 @@ impl HttpClient for Http1Client {
             io::ErrorKind::InvalidData => protocol_error(e.to_string()),
             _ => io_error(e),
         };
+        let mut interim = 0u8;
         let (status, headers) = loop {
-            let status_line = read_line(&mut reader).map_err(head_error)?.ok_or_else(|| {
-                HttpClientError::with_kind(
-                    HttpClientErrorKind::ConnectionTerminated,
-                    "the connection closed before the response head",
-                )
-            })?;
-            let mut parts = status_line.splitn(3, ' ');
+            let status_line =
+                read_line(&mut reader)
+                    .map_err(head_error)?
+                    .ok_or_else(|| match &write_result {
+                        Err(w) => io_error(io::Error::from(w.kind())),
+                        Ok(()) => HttpClientError::with_kind(
+                            HttpClientErrorKind::ConnectionTerminated,
+                            "the connection closed before the response head",
+                        ),
+                    })?;
+            // the reason phrase may hold any byte and is not read
+            let mut parts = status_line.splitn(3, |&b| b == b' ');
             let version = parts.next().unwrap_or_default();
-            let status = parts.next().and_then(|s| s.parse::<u16>().ok());
-            let (true, Some(status)) = (version.starts_with("HTTP/1."), status) else {
+            let status = parts
+                .next()
+                .and_then(|s| std::str::from_utf8(s).ok()?.parse::<u16>().ok());
+            let (true, Some(status)) = (version.starts_with(b"HTTP/1."), status) else {
                 return Err(protocol_error(format!(
-                    "malformed status line `{status_line}`"
+                    "malformed status line `{}`",
+                    String::from_utf8_lossy(&status_line)
                 )));
             };
             let headers = read_fields(&mut reader).map_err(head_error)?;
             // interim responses are not the answer (101 would switch protocols: not supported)
             if (100..200).contains(&status) && status != 101 {
+                interim = interim.saturating_add(1);
+                if interim > MAX_INTERIM {
+                    return Err(protocol_error("too many interim responses"));
+                }
                 continue;
             }
             break (status, headers);
@@ -399,27 +445,25 @@ impl HttpClient for Http1Client {
 
         let bodyless = request.method == "HEAD" || matches!(status, 101 | 204 | 304);
         let chunked = find(&headers, "transfer-encoding").is_some_and(|v| {
-            String::from_utf8_lossy(v)
+            String::from_utf8_lossy(&v)
                 .to_ascii_lowercase()
                 .contains("chunked")
         });
-        let trailers = Arc::new(Mutex::new(Entries::new()));
-        let mut trailers_reader = None;
+        let mut trailers = None;
         let body: Box<dyn Read + Send> = if bodyless {
             Box::new(io::empty())
         } else if chunked {
-            trailers_reader = Some(Arc::clone(&trailers));
+            let shared = Arc::new(Mutex::new(Entries::new()));
+            trailers = Some(take_trailers(Arc::clone(&shared)));
             Box::new(ChunkedBody {
                 reader,
                 left: 0,
                 done: false,
-                trailers,
+                trailers: shared,
             })
         } else if let Some(len) = find(&headers, "content-length") {
-            let len = std::str::from_utf8(len)
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .ok_or_else(|| protocol_error("invalid content-length"))?;
+            let len =
+                content_length(&len).ok_or_else(|| protocol_error("invalid content-length"))?;
             Box::new(SizedBody {
                 reader: reader.take(len),
             })
@@ -436,7 +480,7 @@ impl HttpClient for Http1Client {
             status,
             headers,
             body,
-            trailers: trailers_reader.map(take_trailers),
+            trailers,
         })
     }
 }

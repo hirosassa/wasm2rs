@@ -8,12 +8,16 @@ use std::net::{TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
 use wasm2rs_wasi::{Http1Client, HttpClient, HttpClientErrorKind, HttpRequest};
 
-fn serve<T: Send + 'static>(
-    handler: impl FnOnce(TcpStream) -> T + Send + 'static,
-) -> (String, JoinHandle<T>) {
+/// Accepts one connection, reads the request off it and answers with `reply`.
+fn serve(reply: &'static [u8]) -> (String, JoinHandle<Seen>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let handle = thread::spawn(move || handler(listener.accept().unwrap().0));
+    let handle = thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        let seen = read_request(&stream);
+        stream.write_all(reply).unwrap();
+        seen
+    });
     (addr, handle)
 }
 
@@ -23,6 +27,11 @@ fn line(reader: &mut impl BufRead) -> String {
     s.trim_end_matches(['\r', '\n']).to_string()
 }
 
+/// Header or trailer lines up to the empty line.
+fn fields(reader: &mut impl BufRead) -> Vec<String> {
+    std::iter::from_fn(|| Some(line(reader)).filter(|l| !l.is_empty())).collect()
+}
+
 /// What the server saw: the head lines, the decoded body and the trailer lines.
 struct Seen {
     head: Vec<String>,
@@ -30,16 +39,9 @@ struct Seen {
     trailers: Vec<String>,
 }
 
-fn read_request(stream: TcpStream) -> Seen {
+fn read_request(stream: &TcpStream) -> Seen {
     let mut reader = BufReader::new(stream);
-    let mut head = Vec::new();
-    loop {
-        let l = line(&mut reader);
-        if l.is_empty() {
-            break;
-        }
-        head.push(l);
-    }
+    let head = fields(&mut reader);
     let header = |name: &str| {
         head.iter().find_map(|l| {
             let (k, v) = l.split_once(':')?;
@@ -59,41 +61,16 @@ fn read_request(stream: TcpStream) -> Seen {
             body.extend(chunk);
             assert_eq!(line(&mut reader), "");
         }
-        loop {
-            let l = line(&mut reader);
-            if l.is_empty() {
-                break;
-            }
-            trailers.push(l);
-        }
+        trailers = fields(&mut reader);
     } else if let Some(len) = header("content-length") {
         body = vec![0; len.parse().unwrap()];
         reader.read_exact(&mut body).unwrap();
     }
-    // keep the stream for the reply
-    let stream = reader.into_inner();
-    thread_local_reply(stream);
     Seen {
         head,
         body,
         trailers,
     }
-}
-
-thread_local! {
-    static REPLY: std::cell::RefCell<Option<TcpStream>> = const { std::cell::RefCell::new(None) };
-}
-
-fn thread_local_reply(stream: TcpStream) {
-    REPLY.with(|r| *r.borrow_mut() = Some(stream));
-}
-
-fn reply(raw: &[u8]) {
-    REPLY.with(|r| {
-        let mut s = r.borrow_mut().take().unwrap();
-        s.write_all(raw).unwrap();
-        s.flush().unwrap();
-    });
 }
 
 fn request(method: &str, addr: &str) -> HttpRequest {
@@ -109,17 +86,19 @@ fn request(method: &str, addr: &str) -> HttpRequest {
     }
 }
 
+fn read_body(mut body: impl Read) -> Vec<u8> {
+    let mut out = Vec::new();
+    body.read_to_end(&mut out).unwrap();
+    out
+}
+
 fn pair(k: &str, v: &str) -> (String, Vec<u8>) {
     (k.to_string(), v.as_bytes().to_vec())
 }
 
 #[test]
 fn request_trailers_are_sent_after_a_chunked_body() {
-    let (addr, server) = serve(|s| {
-        let seen = read_request(s);
-        reply(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
-        seen
-    });
+    let (addr, server) = serve(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
     let mut req = request("POST", &addr);
     req.headers.push(pair("content-length", "999"));
     req.body = b"hello".to_vec();
@@ -138,11 +117,7 @@ fn request_trailers_are_sent_after_a_chunked_body() {
 
 #[test]
 fn a_body_without_trailers_keeps_its_length() {
-    let (addr, server) = serve(|s| {
-        let seen = read_request(s);
-        reply(b"HTTP/1.1 204 No Content\r\n\r\n");
-        seen
-    });
+    let (addr, server) = serve(b"HTTP/1.1 204 No Content\r\n\r\n");
     let mut req = request("POST", &addr);
     req.body = b"abc".to_vec();
     Http1Client::new().send(req).unwrap();
@@ -153,94 +128,62 @@ fn a_body_without_trailers_keeps_its_length() {
 
 #[test]
 fn response_trailers_are_read_after_the_body() {
-    let (addr, server) = serve(|s| {
-        read_request(s);
-        reply(
-            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\ntrailer: x-digest\r\n\r\n\
+    let (addr, server) = serve(
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\ntrailer: x-digest\r\n\r\n\
               5\r\nhello\r\n6\r\n world\r\n0\r\nx-digest: abc\r\nx-digest: def\r\n\r\n",
-        );
-    });
+    );
     let response = Http1Client::new().send(request("GET", &addr)).unwrap();
     server.join().unwrap();
     assert_eq!(response.status, 200);
-    let mut body = Vec::new();
-    let mut reader = response.body;
-    reader.read_to_end(&mut body).unwrap();
-    assert_eq!(body, b"hello world");
+    assert_eq!(read_body(response.body), b"hello world");
     let trailers = (response.trailers.unwrap())();
     assert_eq!(trailers, [pair("x-digest", "abc"), pair("x-digest", "def")]);
 }
 
 #[test]
 fn a_chunked_response_without_trailers_has_none() {
-    let (addr, server) = serve(|s| {
-        read_request(s);
-        reply(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
-    });
+    let (addr, server) =
+        serve(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
     let response = Http1Client::new().send(request("GET", &addr)).unwrap();
     server.join().unwrap();
-    let mut body = Vec::new();
-    let mut reader = response.body;
-    reader.read_to_end(&mut body).unwrap();
-    assert_eq!(body, b"abc");
+    assert_eq!(read_body(response.body), b"abc");
     assert!(response.trailers.is_none_or(|t| t().is_empty()));
 }
 
 #[test]
 fn content_length_and_close_delimited_bodies_are_read() {
-    let (addr, server) = serve(|s| {
-        read_request(s);
-        reply(b"HTTP/1.1 200 OK\r\nx-a: 1\r\ncontent-length: 3\r\n\r\nabcEXTRA");
-    });
+    let (addr, server) = serve(b"HTTP/1.1 200 OK\r\nx-a: 1\r\ncontent-length: 3\r\n\r\nabcEXTRA");
     let response = Http1Client::new().send(request("GET", &addr)).unwrap();
     server.join().unwrap();
     assert_eq!(
         response.headers,
         [pair("x-a", "1"), pair("content-length", "3")]
     );
-    let mut body = Vec::new();
-    let mut reader = response.body;
-    reader.read_to_end(&mut body).unwrap();
-    assert_eq!(body, b"abc");
+    assert_eq!(read_body(response.body), b"abc");
 
-    let (addr, server) = serve(|s| {
-        read_request(s);
-        reply(b"HTTP/1.0 200 OK\r\n\r\nuntil close");
-    });
+    let (addr, server) = serve(b"HTTP/1.0 200 OK\r\n\r\nuntil close");
     let response = Http1Client::new().send(request("GET", &addr)).unwrap();
     server.join().unwrap();
-    let mut body = Vec::new();
-    let mut reader = response.body;
-    reader.read_to_end(&mut body).unwrap();
-    assert_eq!(body, b"until close");
+    assert_eq!(read_body(response.body), b"until close");
 }
 
 #[test]
 fn head_responses_have_no_body_and_interim_responses_are_skipped() {
-    let (addr, server) = serve(|s| {
-        read_request(s);
-        reply(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n");
-    });
+    let (addr, server) =
+        serve(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n");
     let response = Http1Client::new().send(request("HEAD", &addr)).unwrap();
     server.join().unwrap();
     assert_eq!(response.status, 200);
-    let mut body = Vec::new();
-    let mut reader = response.body;
-    reader.read_to_end(&mut body).unwrap();
-    assert!(body.is_empty());
+    assert!(read_body(response.body).is_empty());
 }
 
 #[test]
 fn a_truncated_chunked_body_is_an_error_not_an_end() {
-    let (addr, server) = serve(|s| {
-        read_request(s);
-        reply(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhel");
-    });
+    let (addr, server) = serve(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhel");
     let response = Http1Client::new().send(request("GET", &addr)).unwrap();
     server.join().unwrap();
-    let mut body = Vec::new();
     let mut reader = response.body;
-    assert!(reader.read_to_end(&mut body).is_err());
+    assert!(reader.read_to_end(&mut Vec::new()).is_err());
 }
 
 #[test]
@@ -262,4 +205,55 @@ fn a_head_request_with_a_body_is_refused() {
     let mut req = request("HEAD", "127.0.0.1:1");
     req.body = b"x".to_vec();
     assert!(Http1Client::new().send(req).is_err());
+}
+
+#[test]
+fn non_utf8_header_and_reason_bytes_are_kept() {
+    let (addr, server) =
+        serve(b"HTTP/1.1 200 Gr\xfc\xdf\r\nx-name: caf\xe9\r\ncontent-length: 0\r\n\r\n");
+    let response = Http1Client::new().send(request("GET", &addr)).unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        response.headers[0],
+        ("x-name".to_string(), b"caf\xe9".to_vec())
+    );
+}
+
+#[test]
+fn the_guests_content_length_never_disagrees_with_the_body() {
+    let (addr, server) = serve(b"HTTP/1.1 204 No Content\r\n\r\n");
+    let mut req = request("POST", &addr);
+    req.headers.push(pair("content-length", "3"));
+    req.body = b"0123456789".to_vec();
+    Http1Client::new().send(req).unwrap();
+    let seen = server.join().unwrap();
+    assert_eq!(seen.body, b"0123456789");
+}
+
+#[test]
+fn repeated_framing_headers_are_combined() {
+    let (addr, server) = serve(
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: gzip\r\ntransfer-encoding: chunked\r\n\r\n\
+          3\r\nabc\r\n0\r\nx-t: 1\r\n\r\n",
+    );
+    let response = Http1Client::new().send(request("GET", &addr)).unwrap();
+    server.join().unwrap();
+    let trailers = response.trailers.unwrap();
+    assert_eq!(read_body(response.body), b"abc");
+    assert_eq!(trailers(), [pair("x-t", "1")]);
+
+    let (addr, server) = serve(b"HTTP/1.1 200 OK\r\ncontent-length: 3, 3\r\n\r\nabc");
+    let response = Http1Client::new().send(request("GET", &addr)).unwrap();
+    server.join().unwrap();
+    assert_eq!(read_body(response.body), b"abc");
+}
+
+#[test]
+fn userinfo_and_an_empty_port_in_the_url() {
+    let (addr, server) = serve(b"HTTP/1.1 204 No Content\r\n\r\n");
+    let mut req = request("GET", &addr);
+    req.url = format!("http://user:pw@{addr}/");
+    Http1Client::new().send(req).unwrap();
+    let seen = server.join().unwrap();
+    assert!(seen.head.iter().any(|l| l == &format!("host: {addr}")));
 }
