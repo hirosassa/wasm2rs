@@ -230,7 +230,7 @@ impl SplitOptions {
 /// start from [`TranspileOptions::default`] and either assign fields or chain the
 /// `with_*` methods (`TranspileOptions::default().with_named_exports(true)`).
 /// A struct literal, even with `..Default::default()`, only works inside this crate.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct TranspileOptions {
     /// Emit unchecked (`unsafe`) linear-memory access: every load/store and bulk
@@ -299,8 +299,8 @@ pub struct TranspileOptions {
     /// stderr; report them from the payload instead. Every other trap is still a
     /// string panic; the component glue's canonical-ABI traps are typed by
     /// [`WitOptions::typed_traps`] (set from this option by `transpile_component`) as a
-    /// separate `Wasm2RsGlueTrap`. Off by default,
-    /// which leaves the generated code unchanged.
+    /// separate `Wasm2RsGlueTrap`. **On by default**; set it to `false` for the
+    /// string panics (and the code generated before typed traps were the default).
     ///
     /// [`unsafe_memory`]: TranspileOptions::unsafe_memory
     pub typed_traps: bool,
@@ -373,6 +373,29 @@ pub struct TranspileOptions {
     /// `wasi::thread-spawn`. Has no effect on a module without a host function
     /// import. Off by default, since it changes every `Imports` method signature.
     pub reentrant_imports: bool,
+}
+
+/// Whether [`TranspileOptions::typed_traps`] and [`WitOptions::typed_traps`] are on by
+/// default. The one place the default lives: both `Default` impls read it, and the CLI
+/// through `TranspileOptions::default`.
+pub(crate) const DEFAULT_TYPED_TRAPS: bool = true;
+
+impl Default for TranspileOptions {
+    fn default() -> Self {
+        Self {
+            unsafe_memory: false,
+            simd_intrinsics: false,
+            call_depth_limit: None,
+            typed_traps: DEFAULT_TYPED_TRAPS,
+            split_dispatch: 0,
+            entry_exports: None,
+            jobs: 0,
+            named_exports: false,
+            named_imports: false,
+            import_memory: false,
+            reentrant_imports: false,
+        }
+    }
 }
 
 impl TranspileOptions {

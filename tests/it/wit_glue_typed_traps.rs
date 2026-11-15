@@ -197,29 +197,32 @@ fn a_return_pointer_out_of_bounds_is_typed() {
 }
 
 #[test]
-fn the_option_is_off_by_default_and_changes_only_the_traps() {
+fn the_option_is_on_by_default_and_changes_only_the_traps() {
     let wasm = component(SHOUT);
     let default = wit_host_glue_with_options(&wasm, &WitOptions::default()).unwrap();
     assert_eq!(default, wasm2rs::wit_host_glue(&wasm).unwrap());
-    assert!(!default.contains("Wasm2RsGlueTrap"), "{default}");
+    assert!(default.contains("pub enum Wasm2RsGlueTrap"), "{default}");
     assert!(
-        default.contains("panic!(\"wasm2rs wit glue: {msg}\")"),
+        default.contains("Wasm2RsGlueTrap::InvalidUtf8"),
         "{default}"
     );
+    // Only the variants the glue can raise are defined: no async export, no callback code.
+    assert!(!default.contains("InvalidCallbackCode"), "{default}");
+    assert!(!default.contains("panic!"), "{default}");
 
-    let typed = wit_host_glue_with_options(
+    let untyped = wit_host_glue_with_options(
         &wasm,
         &WitOptions {
-            typed_traps: true,
+            typed_traps: false,
             ..WitOptions::default()
         },
     )
     .unwrap();
-    assert!(typed.contains("pub enum Wasm2RsGlueTrap"), "{typed}");
-    assert!(typed.contains("Wasm2RsGlueTrap::InvalidUtf8"), "{typed}");
-    // Only the variants the glue can raise are defined: no async export, no callback code.
-    assert!(!typed.contains("InvalidCallbackCode"), "{typed}");
-    assert!(!typed.contains("panic!"), "{typed}");
+    assert!(!untyped.contains("Wasm2RsGlueTrap"), "{untyped}");
+    assert!(
+        untyped.contains("panic!(\"wasm2rs wit glue: {msg}\")"),
+        "{untyped}"
+    );
 }
 
 #[test]

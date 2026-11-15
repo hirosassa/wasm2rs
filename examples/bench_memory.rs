@@ -1,5 +1,5 @@
 //! Measures what bounds checks cost on memory-heavy workloads: each workload in
-//! `benches/memory/` is transpiled three ways — default (Rust's built-in checks),
+//! `benches/memory/` is transpiled three ways — `typed_traps(false)` (Rust's built-in checks),
 //! `typed_traps` (explicit checks raising a typed trap) and `unsafe_memory` (every
 //! memory check dropped, the upper bound on what removing checks could gain) —
 //! built with `rustc -O`, and timed in-process. Prints speed, plus the size of the

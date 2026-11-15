@@ -7,11 +7,23 @@
 use std::process::Command;
 
 use crate::common;
-use wasm2rs::{TranspileOptions, transpile_with_options, wit_host_glue, wit_host_trait};
+use wasm2rs::{
+    TranspileOptions, WitOptions, transpile_with_options, wit_host_glue,
+    wit_host_glue_with_options, wit_host_trait,
+};
 
 /// A component importing `a:b/c`, whose instance type declares `body` (types and exports).
 pub(crate) fn component(body: &str) -> Vec<u8> {
     wat::parse_str(format!(r#"(component (import "a:b/c" (instance {body})))"#)).unwrap()
+}
+
+/// The glue for `wasm` with `typed_traps` off, so its traps are string panics.
+fn untyped_glue(wasm: &[u8]) -> String {
+    let options = WitOptions {
+        typed_traps: false,
+        ..WitOptions::default()
+    };
+    wit_host_glue_with_options(wasm, &options).unwrap()
 }
 
 /// Builds the program from the transpiled `core_wat` (its imports must be `a:b/c`
@@ -22,7 +34,11 @@ pub(crate) fn build_and_run(
     core_wat: &str,
     rest: &str,
 ) -> std::process::Output {
-    let glue = wit_host_glue(&component(body)).unwrap();
+    // The string panics are what `run_panics` matches on stderr; `wit_glue_typed_traps` runs
+    // the typed side.
+    // The string panics are what `run_panics` matches on stderr; `wit_glue_typed_traps` runs
+    // the typed side.
+    let glue = untyped_glue(&component(body));
     let core = wat::parse_str(core_wat).unwrap();
     let opts = TranspileOptions::default()
         .with_named_imports(true)
@@ -681,6 +697,38 @@ fn the_cli_glue_flag_prints_the_glue_and_needs_wit_host() {
         .unwrap();
     assert!(with_string.status.success());
     assert!(String::from_utf8_lossy(&with_string.stdout).contains("glue_abi::string("));
+}
+
+/// `--wit-host --glue` takes `--no-typed-traps` (the glue's traps are typed by default);
+/// without `--glue` there is no glue to type, so the flag is refused there.
+#[test]
+fn the_cli_glue_takes_no_typed_traps_and_the_trait_alone_refuses_it() {
+    let dir = common::scratch_dir("wit_glue_no_typed_traps");
+    let input = dir.join("c.wasm");
+    let wasm = component(r#"(export "f" (func (param "s" string)))"#);
+    std::fs::write(&input, &wasm).unwrap();
+    let cli = |flags: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_wasm2rs"))
+            .arg("--wit-host")
+            .args(flags)
+            .arg(&input)
+            .output()
+            .unwrap()
+    };
+
+    let untyped = cli(&["--glue", "--no-typed-traps"]);
+    assert!(untyped.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&untyped.stdout),
+        untyped_glue(&wasm)
+    );
+    let typed = cli(&["--glue", "--typed-traps"]);
+    assert!(typed.status.success());
+    assert_eq!(typed.stdout, cli(&["--glue"]).stdout);
+
+    let trait_only = cli(&["--no-typed-traps"]);
+    assert!(!trait_only.status.success());
+    assert!(String::from_utf8_lossy(&trait_only.stderr).contains("--no-typed-traps"));
 }
 
 #[test]

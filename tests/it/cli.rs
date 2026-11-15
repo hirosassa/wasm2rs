@@ -627,19 +627,18 @@ fn cli_stdout(args: &[&std::ffi::OsStr]) -> Result<String, String> {
     }
 }
 
-/// `--no-typed-traps` opts out of typed traps. While typed traps are off by
-/// default it changes nothing, so its output is byte-identical to the default's;
-/// `--typed-traps` is what differs.
+/// Typed traps are on by default, so `--typed-traps` changes nothing (its output is
+/// byte-identical to the default's) and `--no-typed-traps` is what differs.
 #[test]
-fn no_typed_traps_keeps_the_default_output() {
+fn typed_traps_are_the_default_and_no_typed_traps_opts_out() {
     let (_dir, input) = write_trapping_wasm("no_typed_traps");
     let input = input.as_os_str();
     let default = cli_stdout(&[input]).expect("default");
-    let off = cli_stdout(&["--no-typed-traps".as_ref(), input]).expect("--no-typed-traps");
     let on = cli_stdout(&["--typed-traps".as_ref(), input]).expect("--typed-traps");
-    assert_eq!(off, default);
+    let off = cli_stdout(&["--no-typed-traps".as_ref(), input]).expect("--no-typed-traps");
+    assert_eq!(on, default);
+    assert!(default.contains("Wasm2RsTrap"), "{default}");
     assert!(!off.contains("Wasm2RsTrap"), "{off}");
-    assert!(on.contains("Wasm2RsTrap"), "{on}");
 }
 
 /// The two flags contradict each other, in either order, rather than one

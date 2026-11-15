@@ -570,7 +570,7 @@ fn off_keeps_stage_two_traps_as_rust_panics_and_emits_no_new_helpers() {
     }
 }
 
-/// With `the_option_is_off_by_default_and_changes_only_the_traps` (`WitOptions`), the
+/// With `the_option_is_on_by_default_and_changes_only_the_traps` (`WitOptions`), the
 /// only test that pins the default itself; every other test names its mode, so
 /// changing the default means changing just these two.
 #[test]
@@ -578,7 +578,7 @@ fn typed_traps_default_matches_the_explicit_setting() {
     for wat in [TRAPS, DIV_REM, MEMORY, TABLE] {
         assert_eq!(
             transpile_with(wat, TranspileOptions::default()),
-            transpile_typed(wat, false),
+            transpile_typed(wat, true),
         );
     }
 }

@@ -576,7 +576,7 @@ pub enum WitNaming {
 
 /// Options of [`wit_host_trait_with_options`] and [`wit_host_glue_with_options`]. The default
 /// is what [`wit_host_trait`] and [`wit_host_glue`] produce.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WitOptions {
     /// How the types are named.
     pub naming: WitNaming,
@@ -607,10 +607,22 @@ pub struct WitOptions {
     /// It is separate from the `Wasm2RsTrap` of [`typed_traps`] because the glue is text
     /// appended to a core module that may define that type with other variants or not at
     /// all. Internal invariants, the async scaffolding and a default `Host` method stay
-    /// panics. Off by default, so the output is unchanged.
+    /// panics. **On by default**; set it to `false` for the string panics.
     ///
     /// [`typed_traps`]: crate::TranspileOptions::typed_traps
     pub typed_traps: bool,
+}
+
+impl Default for WitOptions {
+    fn default() -> Self {
+        Self {
+            naming: WitNaming::default(),
+            external_types: None,
+            default_trap: false,
+            exports: false,
+            typed_traps: crate::DEFAULT_TYPED_TRAPS,
+        }
+    }
 }
 
 impl WitOptions {

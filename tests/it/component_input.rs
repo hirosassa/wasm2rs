@@ -367,9 +367,9 @@ fn the_cli_component_flag_writes_what_transpile_component_returns() {
         input.as_os_str(),
         output.as_os_str(),
     ]);
-    // The CLI emits untyped traps unless `--typed-traps` is passed.
+    // The CLI emits typed traps unless `--no-typed-traps` is passed.
     let expected =
-        transpile_component(&component_of(WORLD, CORE), &options_with_typed_traps(false)).unwrap();
+        transpile_component(&component_of(WORLD, CORE), &options_with_typed_traps(true)).unwrap();
     assert_eq!(std::fs::read_to_string(output).unwrap(), expected);
 }
 

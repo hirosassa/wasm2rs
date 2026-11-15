@@ -81,8 +81,9 @@ No `rustc` at run time: the transpile (plus glue) happens in `build.rs` (`wasm2r
 | Random | `RandomSource` trait for `random` and `insecure`/`insecure-seed`; the default must be a CSPRNG for `wasi:random/random` (today's splitmix64 is not) |
 | stdin / stdout / stderr | `Read + Send` / `Write + Send` objects or inherit the process streams. The stdin reader runs on a thread started at the guest's first use; stdout and stderr are flushed by the guest's flush, at `wasi:cli/exit` and on drop |
 
-Errors in configuration are `Result`s. A guest-triggered trap stays a panic with the same message
-contract as today (the generated code turns it into a trap).
+Errors in configuration are `Result`s. A guest-triggered trap stays a panic, and `WasiHostBuilder::typed_traps` (off by default, unlike the
+generated code's `typed_traps`, which is on by default) opts the host's own traps into a typed `WasiTrap`
+payload; otherwise the message contract is the same as before (the generated code turns it into a trap).
 
 ### What moves
 
