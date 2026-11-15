@@ -127,7 +127,7 @@ Commit messages: a short imperative summary, optionally with a `feat:` / `fix:` 
 ## Releasing (maintainers)
 
 1. Move `[Unreleased]` entries in `CHANGELOG.md` under the new version heading.
-2. Bump `version` in `Cargo.toml` and in `wasm2rs-macros/Cargo.toml` (its own version and its `wasm2rs` dependency), then refresh `Cargo.lock`. `wasm2rs-wasi` has its own version in `wasm2rs-wasi/Cargo.toml`; bump it only when that crate changed.
+2. Bump `version` in `Cargo.toml` and in `wasm2rs-macros/Cargo.toml` (its own version and its `wasm2rs` dependency), then refresh `Cargo.lock`. `wasm2rs-wasi` has its own version in `wasm2rs-wasi/Cargo.toml`; bump it only when that crate changed. `fuzz/Cargo.lock` pins `wasm2rs-wasi` too (CI builds it with `--locked`): run `cargo update -w` in `fuzz/` after a `wasm2rs-wasi` bump.
 3. Tag the release (`vX.Y.Z`, matching the `wasm2rs` version); `.github/workflows/release.yaml` builds the prebuilt binaries and publishes `wasm2rs`, then `wasm2rs-macros`, then `wasm2rs-wasi` (skipped if that version is already on crates.io).
 
 ## License
