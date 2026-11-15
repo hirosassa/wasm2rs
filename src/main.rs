@@ -1,5 +1,5 @@
 //! Command-line entry point:
-//! `wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports]
+//! `wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports]
 //! [--import-memory] [--reentrant-imports] [--data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
 //! `wasm2rs --help` / `wasm2rs --version` to print the usage / the version, or
 //! `wasm2rs --dump <input.wasm>` to summarize a module, or
@@ -10,7 +10,7 @@
 //! that lowers it to the flat `Imports` trait; with `--external-types=<path>`, only the `Glue`,
 //! naming the `Host` trait and the interface-qualified types of the library at `<path>`).
 //!
-//! `wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files]
+//! `wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files]
 //! <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]` to write a component's program (its core module, or the linked modules of an adapter component) plus the typed `Glue`
 //! and `Exports` (like `wasm2rs::transpile_component`).
 //!
@@ -55,7 +55,10 @@ use wasm2rs::{FileContent, SplitOptions, TranspileError, TranspileOptions, cargo
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] [--data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files] <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --help | --version\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
+/// Whether typed traps are on when neither `--typed-traps` nor `--no-typed-traps` is given.
+const DEFAULT_TYPED_TRAPS: bool = false;
+
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] [--data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files] <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --help | --version\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--external-types=<path>]] <component.wasm> [output]";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -117,7 +120,8 @@ fn run() -> Result<(), String> {
     // order. `--unsafe-memory` opts into unchecked linear-memory access.
     let mut unsafe_memory = false;
     let mut simd_intrinsics = false;
-    let mut typed_traps = false;
+    // `None` until `--typed-traps` / `--no-typed-traps` says; see `DEFAULT_TYPED_TRAPS`.
+    let mut typed_traps_flag: Option<bool> = None;
     let mut dump = false;
     let mut extract_core = false;
     let mut component = false;
@@ -190,7 +194,13 @@ fn run() -> Result<(), String> {
             }
             "--unsafe-memory" => unsafe_memory = true,
             "--simd-intrinsics" => simd_intrinsics = true,
-            "--typed-traps" => typed_traps = true,
+            "--typed-traps" | "--no-typed-traps" => {
+                let on = arg == "--typed-traps";
+                if typed_traps_flag.is_some_and(|prev| prev != on) {
+                    return Err("--typed-traps and --no-typed-traps contradict each other".into());
+                }
+                typed_traps_flag = Some(on);
+            }
             "--dump" => dump = true,
             "--extract-core" => extract_core = true,
             "--component" => component = true,
@@ -204,6 +214,7 @@ fn run() -> Result<(), String> {
             _ => return Err(format!("unknown option {arg}; try --help")),
         }
     }
+    let typed_traps = typed_traps_flag.unwrap_or(DEFAULT_TYPED_TRAPS);
     let mut args = positional.into_iter();
     let input = args.next().ok_or(USAGE)?;
     let output = args.next();
@@ -220,7 +231,8 @@ fn run() -> Result<(), String> {
         let code_flags = [
             (unsafe_memory, "--unsafe-memory"),
             (simd_intrinsics, "--simd-intrinsics"),
-            (typed_traps, "--typed-traps"),
+            (typed_traps_flag == Some(true), "--typed-traps"),
+            (typed_traps_flag == Some(false), "--no-typed-traps"),
             (named_exports, "--named-exports"),
             (named_imports, "--named-imports"),
             (import_memory, "--import-memory"),

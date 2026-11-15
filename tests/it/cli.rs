@@ -604,3 +604,72 @@ fn data_files_needs_a_split_output() {
         "{stderr}"
     );
 }
+
+/// A module with an `unreachable`, so `--typed-traps` has something to type.
+fn write_trapping_wasm(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let wasm = wat::parse_str(r#"(module (func (export "f") unreachable))"#).expect("valid wat");
+    let dir = crate::common::scratch_dir(&format!("wasm2rs_cli_{name}"));
+    let input = dir.join("in.wasm");
+    std::fs::write(&input, wasm).expect("write wasm");
+    (dir, input)
+}
+
+/// The CLI's stdout (and exit success) for `args`.
+fn cli_stdout(args: &[&std::ffi::OsStr]) -> Result<String, String> {
+    let out = Command::new(wasm2rs_bin())
+        .args(args)
+        .output()
+        .expect("run wasm2rs");
+    if out.status.success() {
+        Ok(String::from_utf8(out.stdout).expect("utf8 output"))
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+/// `--no-typed-traps` opts out of typed traps. While typed traps are off by
+/// default it changes nothing, so its output is byte-identical to the default's;
+/// `--typed-traps` is what differs.
+#[test]
+fn no_typed_traps_keeps_the_default_output() {
+    let (_dir, input) = write_trapping_wasm("no_typed_traps");
+    let input = input.as_os_str();
+    let default = cli_stdout(&[input]).expect("default");
+    let off = cli_stdout(&["--no-typed-traps".as_ref(), input]).expect("--no-typed-traps");
+    let on = cli_stdout(&["--typed-traps".as_ref(), input]).expect("--typed-traps");
+    assert_eq!(off, default);
+    assert!(!off.contains("Wasm2RsTrap"), "{off}");
+    assert!(on.contains("Wasm2RsTrap"), "{on}");
+}
+
+/// The two flags contradict each other, in either order, rather than one
+/// silently winning.
+#[test]
+fn typed_traps_and_no_typed_traps_conflict() {
+    let (_dir, input) = write_trapping_wasm("typed_traps_conflict");
+    let input = input.as_os_str();
+    for pair in [
+        ["--typed-traps", "--no-typed-traps"],
+        ["--no-typed-traps", "--typed-traps"],
+    ] {
+        let err = cli_stdout(&[pair[0].as_ref(), pair[1].as_ref(), input]).expect_err("conflict");
+        assert!(
+            err.contains("--typed-traps") && err.contains("--no-typed-traps"),
+            "{err}"
+        );
+    }
+}
+
+/// `--no-typed-traps` is a code-generation flag, so `--dump` (which generates no
+/// code) refuses it by name like `--typed-traps`.
+#[test]
+fn dump_refuses_no_typed_traps() {
+    let (_dir, input) = write_trapping_wasm("no_typed_traps_dump");
+    let err = cli_stdout(&[
+        "--dump".as_ref(),
+        "--no-typed-traps".as_ref(),
+        input.as_os_str(),
+    ])
+    .expect_err("--dump refuses it");
+    assert!(err.contains("--no-typed-traps"), "{err}");
+}
