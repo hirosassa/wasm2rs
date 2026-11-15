@@ -17,7 +17,7 @@
 //! guest's `handle` returned; its body then follows the guest's `outgoing-body` (a finished one
 //! goes with a `Content-Length`, an open one or one with trailers is chunked, and one idle for
 //! `--body-timeout` is cut): no response set is 500, an `error-code` set is 502
-//! (its name in the body), and a guest trap (panic) is 500 too, after which the instance is
+//! (its name in the body), and a guest trap (panic) is 500 too (the cause of a typed trap is printed to stderr), after which the instance is
 //! created anew and the server keeps going. Instance state otherwise lasts across requests.
 //!
 //! Exit codes: 2 when the build fails or the component does not lift
@@ -49,7 +49,7 @@ fn main() {
 
     let component = std::fs::read(&input).expect("read component");
     let (generated, interface) =
-        common::transpile_exporting(&component, HANDLER_INTERFACE, "handle", false)
+        common::transpile_exporting(&component, HANDLER_INTERFACE, "handle", true)
             .unwrap_or_else(|err| fail(err));
     // `server.rs` names the method by version; a toolchain may export a newer patch (`@0.2.12`).
     let version = interface
@@ -61,7 +61,10 @@ fn main() {
         "export_wasi_http_incoming_handler_0_2_0_handle",
         &format!("export_wasi_http_incoming_handler_{version}_handle"),
     );
-    let source = format!("{generated}\n{server}\n");
+    let report = common::report_typed_trap(&generated, "wasip2_serve");
+    let source = format!(
+        "{generated}\nfn report_typed_trap(payload: Box<dyn std::any::Any + Send>) {{\n    {report}\n}}\n{server}\n"
+    );
     let Some(bin) = common::build_program(&dir, &source) else {
         fail(
             "rustc failed. If the errors above are E0407 (not a member of trait `Host`), the \

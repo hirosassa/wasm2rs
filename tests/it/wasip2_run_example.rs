@@ -381,6 +381,35 @@ world w {
 }
 
 #[test]
+fn a_canonical_abi_trap_of_the_glue_is_reported_from_its_payload() {
+    // `cabi_realloc` answers a pointer past the end of memory, so lowering the argument list
+    // into it traps in the glue. That is a `Wasm2RsGlueTrap` payload (`resume_unwind`: no
+    // panic hook), so only the example's report can say why the program trapped.
+    let core = r#"
+(module
+  (import "wasi:cli/environment@0.2.0" "get-arguments" (func $args (param i32)))
+  (memory (export "memory") 1)
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const -16))
+  (func (export "wasi:cli/run@0.2.0#run") (result i32) (call $args (i32.const 72)) (i32.const 0)))
+"#;
+    let world = r#"
+package test:t;
+world w {
+  import wasi:cli/environment@0.2.0;
+  export wasi:cli/run@0.2.0;
+}
+"#;
+    let out = run_example(&component_of(world, core), "glue_trap", &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(134), "{stderr}");
+    assert!(
+        stderr.contains("wasip2_run: trap: wasm2rs wit glue: pointer out of bounds"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+#[test]
 fn a_component_without_a_run_export_exits_2_with_a_message() {
     let world = r#"
 package test:t;

@@ -34,6 +34,25 @@ pub fn transpile_exporting(
     Ok((code, found.func.interface.clone()))
 }
 
+/// Statements that print the `Display` of a typed trap payload held in `payload` (a
+/// `Box<dyn Any + Send>` from `catch_unwind`), as `{prefix}: trap: <cause>`; nothing for any other
+/// payload (a string panic has been printed by the hook already). A typed payload is raised with
+/// `resume_unwind`, so the hook never saw it. `Wasm2RsTrap` and `Wasm2RsGlueTrap` are named only
+/// when `generated` defines them; `WasiTrap` is what a host built with `typed_traps` raises.
+pub fn report_typed_trap(generated: &str, prefix: &str) -> String {
+    ["Wasm2RsTrap", "Wasm2RsGlueTrap"]
+        .into_iter()
+        .filter(|name| generated.contains(&format!("enum {name}")))
+        .chain(["wasm2rs_wasi::WasiTrap"])
+        .map(|ty| {
+            format!(
+                "if let Some(trap) = payload.downcast_ref::<{ty}>() {{ eprintln!(\"{prefix}: trap: {{trap}}\"); }}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" else ")
+}
+
 /// Whether `a` and `b` name the same interface at versions that differ in the patch number at most.
 fn same_minor_version(a: &str, b: &str) -> bool {
     fn minor(name: &str) -> Option<(&str, &str)> {
