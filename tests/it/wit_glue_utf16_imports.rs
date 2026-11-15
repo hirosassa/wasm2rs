@@ -70,10 +70,22 @@ fn encoded_world(wit: &str, core: &str) -> Vec<u8> {
 /// Builds the program (transpiled core, the glue with exports, `host`, then a `main` running
 /// `body` on `inst`, whose host records into `said`) and returns its output.
 fn build_and_run(name: &str, send_body: &str, host: &str, body: &str) -> std::process::Output {
+    build_and_run_typed(name, send_body, host, body, false)
+}
+
+/// [`build_and_run`] with the glue's `typed_traps` set to `typed`.
+fn build_and_run_typed(
+    name: &str,
+    send_body: &str,
+    host: &str,
+    body: &str,
+    typed: bool,
+) -> std::process::Output {
     let core = core(send_body);
     let component = encoded(&core);
     let options = WitOptions {
         exports: true,
+        typed_traps: typed,
         ..WitOptions::default()
     };
     let glue = wit_host_glue_with_options(&component, &options).unwrap();
@@ -90,7 +102,7 @@ fn build_and_run(name: &str, send_body: &str, host: &str, body: &str) -> std::pr
              {body}\n\
          }}\n"
     );
-    let bin = common::build(&format!("wit_glue_utf16_imports_{name}"), &program);
+    let bin = common::build(&format!("wit_glue_utf16_imports_{name}_{typed}"), &program);
     Command::new(bin).output().unwrap()
 }
 
@@ -148,6 +160,36 @@ fn an_unpaired_surrogate_passed_to_an_import_traps_instead_of_being_replaced() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("invalid UTF-16"), "{stderr}");
+}
+
+#[test]
+fn utf16_traps_are_typed_with_typed_traps() {
+    for (name, send, variant) in [
+        (
+            "say_lone",
+            "(call $say (i32.const 80) (i32.const 1))",
+            "InvalidUtf16",
+        ),
+        (
+            "say_odd",
+            "(call $say (i32.const 65) (i32.const 1))",
+            "ComponentUnalignedPointer",
+        ),
+    ] {
+        let out = build_and_run_typed(
+            name,
+            send,
+            &host(""),
+            &format!(
+                "let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| \
+                     Exports::send(&mut inst))).unwrap_err();\n\
+                 assert_eq!(*p.downcast::<Wasm2RsGlueTrap>().unwrap(), \
+                     Wasm2RsGlueTrap::{variant});"
+            ),
+            true,
+        );
+        assert_ok(&out);
+    }
 }
 
 #[test]

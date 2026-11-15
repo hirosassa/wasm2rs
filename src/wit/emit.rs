@@ -598,6 +598,19 @@ pub struct WitOptions {
     /// `string` or `list` through the lift's `cabi_realloc`), then the `post-return` runs if
     /// the lift has one. Off by default, so the output is unchanged.
     pub exports: bool,
+    /// Glue only: the canonical-ABI traps (a pointer out of bounds or unaligned, invalid
+    /// UTF-8/UTF-16, an invalid `char` or discriminant, lifted data too large, an unknown
+    /// callback code) unwind with a typed `Wasm2RsGlueTrap` payload (`resume_unwind`, so the
+    /// panic hook prints nothing) instead of a string panic. The glue then defines the
+    /// `Wasm2RsGlueTrap` enum (only the variants it raises), a `Send + 'static` type
+    /// implementing `Display` (the message of the string panic) and `std::error::Error`.
+    /// It is separate from the `Wasm2RsTrap` of [`typed_traps`] because the glue is text
+    /// appended to a core module that may define that type with other variants or not at
+    /// all. Internal invariants, the async scaffolding and a default `Host` method stay
+    /// panics. Off by default, so the output is unchanged.
+    ///
+    /// [`typed_traps`]: crate::TranspileOptions::typed_traps
+    pub typed_traps: bool,
 }
 
 impl WitOptions {
@@ -1075,7 +1088,14 @@ fn glue_text(
             })
             .collect(),
     };
-    glue::write(&mut out, &methods, &records, exported, imports_trait)?;
+    glue::write(
+        &mut out,
+        &methods,
+        &records,
+        exported,
+        imports_trait,
+        options.typed_traps,
+    )?;
     Ok(out)
 }
 

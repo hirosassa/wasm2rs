@@ -296,8 +296,10 @@ pub struct TranspileOptions {
     /// this option) while division and table accesses are still typed.
     ///
     /// `resume_unwind` does not run the panic hook, so these traps print nothing to
-    /// stderr; report them from the payload instead. Every other trap
-    /// (continuations, glue) is still a string panic. Off by default,
+    /// stderr; report them from the payload instead. Every other trap is still a
+    /// string panic; the component glue's canonical-ABI traps are typed by
+    /// [`WitOptions::typed_traps`] (set from this option by `transpile_component`) as a
+    /// separate `Wasm2RsGlueTrap`. Off by default,
     /// which leaves the generated code unchanged.
     ///
     /// [`unsafe_memory`]: TranspileOptions::unsafe_memory
