@@ -1,9 +1,7 @@
 # The typed WASI preview2 host: design note
 
 This note describes the typed WASI preview2 host of the `wasm2rs-wasi` crate as it is now:
-`WasiHost`, written against the `Host` trait that the crate owns. It is library API. For how the
-component was analysed and how the host came about, see
-[component-model-poc.md](component-model-poc.md); for the library's design and plan, see
+`WasiHost`, written against the `Host` trait that the crate owns. It is library API. For the library's design and plan, see
 [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md); for the `--wit-host` / `--glue` flags, see the
 README. Each section names the code or test that backs it.
 

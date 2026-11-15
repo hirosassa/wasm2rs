@@ -1,5 +1,5 @@
 //! The generated source drops redundant parentheses (they make `rustc` quadratic on
-//! huge modules, see `docs/f4-rustc-time-spike.md`), but must not drop any that
+//! huge modules), but must not drop any that
 //! change the parse. The first test runs expressions whose meaning depends on
 //! their parentheses (negative receivers, casts before comparisons, mixed
 //! precedence, ranges-free unary chains, block tails starting with `if`/`match`)

@@ -1,5 +1,7 @@
 # Component toolchain survey (2026-11-12, wasm2rs 0.4.0)
 
+> **Snapshot as of 0.4.0.** Results, timings and issue numbers below describe that release and are not kept up to date.
+
 Goal: find out which real-world `wasm32-wasip2` components `--component` handles today, so the
 follow-ups (#184, #185, #186 and new ones) are ordered by what users hit first.
 
@@ -84,7 +86,7 @@ minutes (user 270 s, sys 332 s: the system time points at memory pressure). Not 
 issue, but it makes large guests impractical. Worth a separate measurement (`--split`, lower
 opt-level, `-Z time-passes`) once F3 lets D build at all.
 
-Measured in [f4-rustc-time-spike.md](f4-rustc-time-spike.md): the time is a quadratic `rustc` early-lint
+Measured earlier: the time is a quadratic `rustc` early-lint
 cost on redundant parentheses in one huge file (587 s -> 61 s on the JS `program.rs` without them), not a large function and not LLVM.
 
 After F3 and F4-1 the remaining cost for D is in **LLVM at `-C opt-level=1`**, which the metadata-only

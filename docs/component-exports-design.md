@@ -7,8 +7,7 @@ and lifts from a preview1 adapter module (a direct export of the instantiated ad
 modules are linked into one `Instance`, see [core-module-linking-design.md](core-module-linking-design.md)).
 Still refused: lifts that allocate through different `realloc` functions of several modules (#314).
 `wit_exports` itself still reads only a lift that is a direct export of an instantiated core module.
-Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library, A1, done),
-[component-model-poc.md](component-model-poc.md) (how the component analysis came about).
+Background: [wasm2rs-wasi-design.md](wasm2rs-wasi-design.md) (the host library, A1, done).
 
 ## Problem
 

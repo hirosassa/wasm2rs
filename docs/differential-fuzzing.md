@@ -30,28 +30,6 @@ Outcomes: `match`, `skip`, `unsupported` (wasm2rs rejected the module),
 `MISMATCH`, `BROKEN` (does not compile, crashes or hangs). Findings are written to
 `fuzz-diff/findings/seed-N.{wasm,txt}`.
 
-## First run (seeds 0–1700)
-
-About 1500 modules compared equal. Findings:
-
-1. **A trapping operation whose value is discarded by a function-level `br` is
-   dropped**, so the trap never happens (`i32.const 1; i32.load; br 0` on an empty
-   memory). Most mismatches (seeds 162, 282, 316, 1046, 1346, 1358) are this. Fixed
-   (a branch or return keeps the trapping operand it discards).
-2. **`memory.grow` ignored the declared maximum**; it only enforced 65536 pages
-   (seeds 796, 1080). Fixed (0.3.0): `memory.grow` fails (returns -1)
-   past each memory's declared maximum.
-3. Two runs hang in wasm2rs after a first call that traps (seeds 973, 1010); not
-   yet reduced, possibly related to 1.
-4. `unsupported` (about 5%): active element/data segments used by
-   `table.init`/`memory.init`/`*.drop` ("not passive"), and negative data offsets.
-   Both are now supported (an active segment reads as empty after instantiation,
-   and an `i32` offset is unsigned).
-
-1 and 2 are pinned by regression tests in `fuzz-diff/src/lib.rs`
-(`a_trapping_load_before_a_function_level_br_still_traps`,
-`memory_grow_respects_the_declared_maximum`).
-
 ## Feature profiles
 
 `cargo run --release -- FIRST COUNT --profile NAME` widens the generator beyond the

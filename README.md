@@ -159,10 +159,10 @@ mod foo {
 - [Library API](docs/library-api.md): `TranspileOptions`, split API, `build.rs`, proc macros, components, WIT API
 - [Component toolchain survey](docs/component-toolchain-survey.md): which real components run, with timings and reproduction commands
 - [WASI p2 status](docs/wasi-p2-status.md), [typed host design](docs/typed-host-design.md), [`wasm2rs-wasi` design](docs/wasm2rs-wasi-design.md), [`wasi:http` design](docs/wasi-http-design.md)
-- [Component input](docs/component-input-design.md), [component exports](docs/component-exports-design.md), [component model PoC](docs/component-model-poc.md)
-- [Core module linking](docs/core-module-linking-design.md), [dynamic linking (`componentize-py`)](docs/f2-dynamic-linking-design.md), [`rustc` time on large components](docs/f4-rustc-time-spike.md)
+- [Component input](docs/component-input-design.md), [component exports](docs/component-exports-design.md)
+- [Core module linking](docs/core-module-linking-design.md), [dynamic linking (`componentize-py`)](docs/f2-dynamic-linking-design.md)
 - [wasi-threads end-to-end tests](docs/wasi-threads-e2e.md)
-- [WASI 0.3 spike](docs/wasi-p3-spike.md), [WASI additions after 0.2.0](docs/wasi-post-0.2.0-additions.md), [Cargo profile benchmark](docs/cargo-manifest-profile-bench.md)
+- [WASI 0.3 spike](docs/wasi-p3-spike.md), [WASI additions after 0.2.0](docs/wasi-post-0.2.0-additions.md)
 - [Differential fuzzing](docs/differential-fuzzing.md), [HTTP fuzzing server](docs/fuzzing-http-server.md), [bounds-check benchmark](docs/bounds-check-bench.md)
 - [CONTRIBUTING](CONTRIBUTING.md) and [CHANGELOG](CHANGELOG.md)
 

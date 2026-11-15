@@ -6,8 +6,7 @@ configuration surface), and so are the follow-ups: component input and `include_
 `wasi:http` ([wasi-http-design.md](wasi-http-design.md)). The "Problem" section describes the state
 before P1.
 Background: [typed-host-design.md](typed-host-design.md) describes the host as it is today
-(it described the host as `examples/wasip2_host/typed.rs`; since P1 that code is `wasm2rs-wasi/src/host.rs`); [component-model-poc.md](component-model-poc.md)
-describes how the component analysis came about.
+(it described the host as `examples/wasip2_host/typed.rs`; since P1 that code is `wasm2rs-wasi/src/host.rs`).
 
 ## Problem
 
