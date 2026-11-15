@@ -154,3 +154,35 @@ fn display_keeps_the_untyped_messages() {
         assert_eq!(trap.to_string(), text);
     }
 }
+
+#[test]
+fn with_typed_traps_toggles_the_payload_of_a_host_built_without_the_builder() {
+    let mut host = WasiHost::new(Vec::new()).with_typed_traps(true);
+    let t = typed_trap(|| host.wasi_sockets_tcp_method_tcp_socket_is_listening(TcpSocket(77)));
+    assert_eq!(
+        t,
+        WasiTrap::InvalidResourceHandle {
+            resource: "tcp-socket"
+        }
+    );
+
+    // the last call wins: switching it off restores the message string
+    let mut host = host.with_typed_traps(false);
+    let m = string_trap(|| host.wasi_sockets_tcp_method_tcp_socket_is_listening(TcpSocket(77)));
+    assert_eq!(m, "unknown or dropped tcp-socket");
+}
+
+#[test]
+fn a_legacy_preopen_of_a_file_stays_a_string_panic_when_typed() {
+    let file = common::scratch("typed-preopen-file").join("plain");
+    std::fs::write(&file, b"x").unwrap();
+    let m = string_trap(|| {
+        WasiHost::new(Vec::new())
+            .with_typed_traps(true)
+            .with_preopen(file.clone())
+    });
+    assert_eq!(
+        m,
+        format!("preopen: preopen {}: not a directory", file.display())
+    );
+}
