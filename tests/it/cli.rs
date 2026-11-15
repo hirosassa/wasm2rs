@@ -638,7 +638,7 @@ fn no_typed_traps_keeps_the_default_output() {
     let off = cli_stdout(&["--no-typed-traps".as_ref(), input]).expect("--no-typed-traps");
     let on = cli_stdout(&["--typed-traps".as_ref(), input]).expect("--typed-traps");
     assert_eq!(off, default);
-    assert!(!off.contains("Wasm2RsTrap"));
+    assert!(!off.contains("Wasm2RsTrap"), "{off}");
     assert!(on.contains("Wasm2RsTrap"), "{on}");
 }
 
@@ -660,10 +660,10 @@ fn typed_traps_and_no_typed_traps_conflict() {
     }
 }
 
-/// `--no-typed-traps` is a code-generation flag: the modes that generate no code
-/// refuse it like `--typed-traps`, and `--component` accepts it.
+/// `--no-typed-traps` is a code-generation flag, so `--dump` (which generates no
+/// code) refuses it by name like `--typed-traps`.
 #[test]
-fn no_typed_traps_is_refused_where_no_code_is_generated() {
+fn dump_refuses_no_typed_traps() {
     let (_dir, input) = write_trapping_wasm("no_typed_traps_dump");
     let err = cli_stdout(&[
         "--dump".as_ref(),
