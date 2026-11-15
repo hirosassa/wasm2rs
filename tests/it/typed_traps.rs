@@ -342,6 +342,12 @@ const MEMORY_BODY: &str = r#"
             assert_eq!(inst.load32(4), 0x07070707);
             oob!(inst.init(65535, 0, 4));
             oob!(inst.init(0, 1, 4));
+            // A negative i32 operand is a huge unsigned one: a trap, not an
+            // overflow of `d + n`.
+            oob!(inst.init(-1, 0, 1));
+            oob!(inst.init(0, -1, 1));
+            oob!(inst.init(0, 0, -1));
+            oob!(inst.init(-1, -1, -1));
             inst.init(8, 0, 4);
             assert_eq!(inst.load32(8), i32::from_le_bytes(*b"abcd"));"#;
 
@@ -422,7 +428,86 @@ fn table_out_of_bounds_traps_with_a_typed_variant() {
             oob!(inst.copy_x(1, 0, 4));
             inst.init(0, 0, 2);
             oob!(inst.init(3, 0, 2));
-            oob!(inst.init(0, 1, 2));"#
+            oob!(inst.init(0, 1, 2));
+            oob!(inst.init(-1, 0, 1));
+            oob!(inst.init(0, -1, 1));
+            oob!(inst.init(0, 0, -1));
+            oob!(inst.init(-1, -1, -1));"#
+        ),
+    );
+}
+
+const GC_TABLE: &str = r#"(module
+    (table $t 4 4 exnref)
+    (elem $e exnref (ref.null exn) (ref.null exn))
+    (func (export "init") (param i32 i32 i32) (table.init $t $e (local.get 0) (local.get 1) (local.get 2))))"#;
+
+#[test]
+fn gc_table_init_traps_on_negative_operands() {
+    compile_run_with(
+        "typed_traps_gc_table_init",
+        GC_TABLE,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            macro_rules! oob {{ ($e:expr) => {{
+                assert!(matches!(trap_of(|| $e), Wasm2RsTrap::OutOfBoundsTableAccess));
+            }} }}
+            inst.init(0, 0, 2);
+            oob!(inst.init(3, 0, 2));
+            oob!(inst.init(-1, 0, 1));
+            oob!(inst.init(0, -1, 1));
+            oob!(inst.init(0, 0, -1));"#
+        ),
+    );
+}
+
+const MEMORY64: &str = r#"(module
+    (memory i64 1 1)
+    (data $d "abcd")
+    (func (export "init") (param i64 i32 i32) (memory.init $d (local.get 0) (local.get 1) (local.get 2))))"#;
+
+#[test]
+fn memory64_init_traps_on_a_negative_destination() {
+    compile_run_with(
+        "typed_traps_memory64_init",
+        MEMORY64,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            macro_rules! oob {{ ($e:expr) => {{
+                assert!(matches!(trap_of(|| $e), Wasm2RsTrap::OutOfBoundsMemoryAccess));
+            }} }}
+            inst.init(0, 0, 4);
+            oob!(inst.init(-1, 0, 1));
+            oob!(inst.init(65535, 0, 4));
+            oob!(inst.init(0, -1, 1));
+            oob!(inst.init(0, 0, -1));"#
+        ),
+    );
+}
+
+#[test]
+fn table64_init_traps_on_a_negative_destination() {
+    compile_run_with(
+        "typed_traps_table64_init",
+        r#"(module
+            (table $t i64 4 4 funcref)
+            (elem $e funcref (ref.null func) (ref.null func))
+            (func (export "init") (param i64 i32 i32) (table.init $t $e (local.get 0) (local.get 1) (local.get 2))))"#,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            macro_rules! oob {{ ($e:expr) => {{
+                assert!(matches!(trap_of(|| $e), Wasm2RsTrap::OutOfBoundsTableAccess));
+            }} }}
+            inst.init(0, 0, 2);
+            oob!(inst.init(-1, 0, 1));
+            oob!(inst.init(3, 0, 2));
+            oob!(inst.init(0, -1, 1));"#
         ),
     );
 }
@@ -472,7 +557,10 @@ fn cross_memory_copy_and_shared_module_table_helpers_are_typed() {
             let mut inst = Instance::new();
             inst.xcopy(0, 0, 4);
             assert!(matches!(trap_of(|| inst.xcopy(65535, 0, 4)), Wasm2RsTrap::OutOfBoundsMemoryAccess));
-            assert!(matches!(trap_of(|| inst.xcopy(0, 65535, 4)), Wasm2RsTrap::OutOfBoundsMemoryAccess));"#
+            assert!(matches!(trap_of(|| inst.xcopy(0, 65535, 4)), Wasm2RsTrap::OutOfBoundsMemoryAccess));
+            assert!(matches!(trap_of(|| inst.xcopy(-1, 0, 1)), Wasm2RsTrap::OutOfBoundsMemoryAccess));
+            assert!(matches!(trap_of(|| inst.xcopy(0, -1, 1)), Wasm2RsTrap::OutOfBoundsMemoryAccess));
+            assert!(matches!(trap_of(|| inst.xcopy(0, 0, -1)), Wasm2RsTrap::OutOfBoundsMemoryAccess));"#
         ),
     );
     let shared = transpile_with(
