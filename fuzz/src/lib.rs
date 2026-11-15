@@ -2,7 +2,7 @@
 //!
 //! The server is *not* copied: `examples/wasip2_serve/server.rs` is `include!`d below, with
 //! stand-ins for the names the generated program gives it (`Instance`, `Glue`,
-//! `Exports`, `report_typed_trap`, only used by the guest call, which is never reached from here). The parser and
+//! `Exports`, `report_typed_trap`; the guest is never reached from here, nor does its start function trap). The parser and
 //! the response writer are then driven over a real loopback socket (they take a `TcpStream`).
 
 pub mod model;
