@@ -84,6 +84,7 @@ No `rustc` at run time: the transpile (plus glue) happens in `build.rs` (`wasm2r
 Errors in configuration are `Result`s. A guest-triggered trap stays a panic, and `WasiHostBuilder::typed_traps` (off by default, unlike the
 generated code's `typed_traps`, which is on by default) opts the host's own traps into a typed `WasiTrap`
 payload; otherwise the message contract is the same as before (the generated code turns it into a trap).
+The spawn wrappers of a `--component` output (wasi-threads, emscripten) downcast `WasiTrap` too, to print its cause when it unwinds out of a spawned thread; they do so only when the external types library is `wasm2rs_wasi`.
 
 ### What moves
 

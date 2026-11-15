@@ -30,7 +30,7 @@ pub use emit::{
     wit_host_trait_with_options,
 };
 pub use exports::{WitAsyncAbi, WitExport, WitStringEncoding, wit_exports};
-pub(crate) use glue::report_glue_trap_in_spawn;
+pub(crate) use glue::report_typed_traps_in_spawn;
 pub use read::wit_functions;
 
 pub(crate) use emit::{CoreImport, is_wit_function, wit_host_glue_for_module};
