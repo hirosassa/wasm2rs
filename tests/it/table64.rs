@@ -253,3 +253,30 @@ fn bulk_table_ops_in_range_still_work_on_a_64_bit_table() {
          inst.func3(0, 0, 4); inst.func4(0, 0, 4);",
     );
 }
+
+/// The `exnref` (GC) table shape copies through a temporary, so even a same-table
+/// copy reports the slice-range panic.
+#[test]
+fn exnref_table64_bulk_ops_with_an_overflowing_range_trap_out_of_range() {
+    const WAT: &str = r#"(module
+      (table $a i64 4 exnref)
+      (table $b i64 4 exnref)
+      (func (export "fill") (param i64 i64)
+        local.get 0 ref.null exn local.get 1 table.fill $a)
+      (func (export "across") (param i64 i64 i64)
+        local.get 0 local.get 1 local.get 2 table.copy $a $b)
+      (func (export "within") (param i64 i64 i64)
+        local.get 0 local.get 1 local.get 2 table.copy $a $a))"#;
+    for (name, call) in [
+        ("fill", "inst.func0(-1, 4);"),
+        ("across", "inst.func1(-1, 0, 4);"),
+        ("within", "inst.func2(0, -1, 4);"),
+    ] {
+        common::expect_trap_with(
+            &format!("t64_exnref_overflow_{name}"),
+            WAT,
+            &format!("let mut inst = Instance::new(); {call}"),
+            "out of range for slice",
+        );
+    }
+}
