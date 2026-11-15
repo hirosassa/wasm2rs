@@ -200,6 +200,15 @@ pub(crate) enum Rt {
     /// The out-of-line `invalid externref` trap of `any.convert_extern` (typed traps
     /// only).
     TrapInvalidExternRef,
+    /// The out-of-line trap of a resume/`cont.bind` of a consumed or stale
+    /// continuation handle (typed traps only).
+    TrapConsumedContinuation,
+    /// The out-of-line trap of a suspend/switch whose tag no `resume` handles
+    /// (typed traps only).
+    TrapUnhandledSuspendTag,
+    /// The out-of-line trap of `cont.new` once the handle table is full (typed traps
+    /// only).
+    TrapContinuationTableExhausted,
     /// Explicit-check integer division/remainder (typed traps only): they replace
     /// Rust's `/` and `%`, whose built-in panics cannot carry a typed payload.
     I32DivS,

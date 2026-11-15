@@ -277,7 +277,11 @@ pub struct TranspileOptions {
     /// (`CastFailure`) and an out-of-range array access (`OutOfBoundsArrayAccess`;
     /// an overrun of a data/element segment by `array.new_data` and friends is the
     /// memory/table trap), and an `InvalidExternRef` (`any.convert_extern` of a
-    /// host-supplied externref that is not a handle the module produced). The
+    /// host-supplied externref that is not a handle the module produced), and the
+    /// continuation traps (`ConsumedContinuation`: a `resume`, `resume_throw` or
+    /// `cont.bind` of a consumed or stale handle; `UnhandledSuspendTag`: a
+    /// `suspend`/`switch` no `resume` handles; `ContinuationTableExhausted`: a full
+    /// `cont.new` handle table). The
     /// generated source then defines `Wasm2RsTrap` (only the variants it uses), a
     /// `Send + 'static` enum implementing `Display` (with the message the string
     /// panic carried) and `std::error::Error`, and each of these traps is a

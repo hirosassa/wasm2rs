@@ -42,6 +42,9 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::TrapCastFailure => "trap_cast_failure",
         Rt::TrapArrayOob => "trap_array_oob",
         Rt::TrapInvalidExternRef => "trap_invalid_extern_ref",
+        Rt::TrapConsumedContinuation => "trap_consumed_continuation",
+        Rt::TrapUnhandledSuspendTag => "trap_unhandled_suspend_tag",
+        Rt::TrapContinuationTableExhausted => "trap_continuation_table_exhausted",
         Rt::I32DivS => "i32_div_s",
         Rt::I32DivU => "i32_div_u",
         Rt::I32RemS => "i32_rem_s",
@@ -60,7 +63,7 @@ pub(super) fn is_rt_name(name: &str) -> bool {
 
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
-const RT_ORDER: [Rt; 45] = [
+const RT_ORDER: [Rt; 48] = [
     Rt::TrapType,
     Rt::DelegateExc,
     Rt::CallDepth,
@@ -78,6 +81,9 @@ const RT_ORDER: [Rt; 45] = [
     Rt::TrapCastFailure,
     Rt::TrapArrayOob,
     Rt::TrapInvalidExternRef,
+    Rt::TrapConsumedContinuation,
+    Rt::TrapUnhandledSuspendTag,
+    Rt::TrapContinuationTableExhausted,
     Rt::I32DivS,
     Rt::I32DivU,
     Rt::I32RemS,
@@ -183,6 +189,18 @@ fn typed_trap_variants(used: &HashSet<Rt>, typed: bool) -> Vec<TrapVariant> {
         (Rt::TrapCastFailure, TrapVariant::CastFailure),
         (Rt::TrapArrayOob, TrapVariant::OutOfBoundsArrayAccess),
         (Rt::TrapInvalidExternRef, TrapVariant::InvalidExternRef),
+        (
+            Rt::TrapConsumedContinuation,
+            TrapVariant::ConsumedContinuation,
+        ),
+        (
+            Rt::TrapUnhandledSuspendTag,
+            TrapVariant::UnhandledSuspendTag,
+        ),
+        (
+            Rt::TrapContinuationTableExhausted,
+            TrapVariant::ContinuationTableExhausted,
+        ),
     ]
     .into_iter()
     .filter(|(rt, _)| used.contains(rt))
@@ -230,6 +248,9 @@ enum TrapVariant {
     CastFailure,
     OutOfBoundsArrayAccess,
     InvalidExternRef,
+    ConsumedContinuation,
+    UnhandledSuspendTag,
+    ContinuationTableExhausted,
 }
 
 impl TrapVariant {
@@ -248,6 +269,9 @@ impl TrapVariant {
             TrapVariant::CastFailure => "CastFailure",
             TrapVariant::OutOfBoundsArrayAccess => "OutOfBoundsArrayAccess",
             TrapVariant::InvalidExternRef => "InvalidExternRef",
+            TrapVariant::ConsumedContinuation => "ConsumedContinuation",
+            TrapVariant::UnhandledSuspendTag => "UnhandledSuspendTag",
+            TrapVariant::ContinuationTableExhausted => "ContinuationTableExhausted",
         }
     }
 
@@ -267,6 +291,9 @@ impl TrapVariant {
             TrapVariant::CastFailure => "cast failure",
             TrapVariant::OutOfBoundsArrayAccess => "out of bounds array access",
             TrapVariant::InvalidExternRef => "invalid externref",
+            TrapVariant::ConsumedContinuation => "consumed continuation",
+            TrapVariant::UnhandledSuspendTag => "unhandled continuation suspend tag",
+            TrapVariant::ContinuationTableExhausted => "continuation table exhausted",
         }
     }
 }
@@ -372,6 +399,21 @@ fn rt_lines(rt: Rt, typed: bool, variants: &[TrapVariant]) -> Vec<String> {
         Rt::TrapInvalidExternRef => trap_fn_lines(
             "trap_invalid_extern_ref",
             TrapVariant::InvalidExternRef,
+            typed,
+        ),
+        Rt::TrapConsumedContinuation => trap_fn_lines(
+            "trap_consumed_continuation",
+            TrapVariant::ConsumedContinuation,
+            typed,
+        ),
+        Rt::TrapUnhandledSuspendTag => trap_fn_lines(
+            "trap_unhandled_suspend_tag",
+            TrapVariant::UnhandledSuspendTag,
+            typed,
+        ),
+        Rt::TrapContinuationTableExhausted => trap_fn_lines(
+            "trap_continuation_table_exhausted",
+            TrapVariant::ContinuationTableExhausted,
             typed,
         ),
         Rt::I32DivS => div_rem_lines("i32_div_s", "i32", DivRem::DivS),

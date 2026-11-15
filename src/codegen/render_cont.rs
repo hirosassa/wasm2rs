@@ -6,7 +6,8 @@
 //! per-function `cont_step_func{N}` state machines that these types feed are
 //! lowered separately (in the `func` submodule).
 
-use super::{ModuleCtx, default_value, rust_type};
+use super::runtime::rt_name;
+use super::{ModuleCtx, Rt, default_value, rust_type};
 use crate::TranspileError;
 
 /// Bits of a continuation handle that index the slot table (about a million
@@ -116,6 +117,28 @@ fn frame_start_literal(ctx: &ModuleCtx<'_>, n: u32) -> String {
     format!("ContFrame{n} {{ {} }}", fields.join(", "))
 }
 
+/// The Rust expression raising a continuation trap: a call to its cold typed trap
+/// function under `typed_traps`, else a `panic!` with `message` (the module-scope
+/// counterpart of `FuncGen::trap_or_panic`).
+fn trap_or_panic(ctx: &ModuleCtx<'_>, rt: Rt, message: &str) -> String {
+    if ctx.typed_traps {
+        format!("{}()", rt_name(rt))
+    } else {
+        format!("panic!(\"{message}\")")
+    }
+}
+
+/// The `self.cont_slot(..)` call of an operation: the typed `cont_slot` takes no
+/// message (every consumed-handle trap is one `ConsumedContinuation`), the untyped
+/// one names the operation that found the handle consumed.
+fn cont_slot_call(ctx: &ModuleCtx<'_>, what: &str) -> String {
+    if ctx.typed_traps {
+        "self.cont_slot(__h)".to_string()
+    } else {
+        format!("self.cont_slot(__h, \"{what} of a consumed continuation\")")
+    }
+}
+
 /// The `cont_new`/`cont_step` methods on `Instance`. `cont_new` allocates a
 /// fresh resumable frame for the referenced function and returns its handle
 /// (`[generation | slot index]`, see [`CONT_IDX_BITS`]); `cont_step`
@@ -124,6 +147,19 @@ fn frame_start_literal(ctx: &ModuleCtx<'_>, n: u32) -> String {
 /// suspended; on return the slot is recycled and its generation advanced, so any
 /// handle still naming the old occupant traps as consumed.
 pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
+    // The typed `cont_slot` raises one `ConsumedContinuation` for every caller; the
+    // untyped one panics with the caller's operation-specific message.
+    let (cont_slot_sig, cont_slot_miss) = if ctx.typed_traps {
+        (
+            "fn cont_slot(&self, __h: u32) -> usize {",
+            format!("{}()", rt_name(Rt::TrapConsumedContinuation)),
+        )
+    } else {
+        (
+            "fn cont_slot(&self, __h: u32, __what: &str) -> usize {",
+            "panic!(\"{}\", __what)".to_string(),
+        )
+    };
     let mut lines = vec![
         "pub fn cont_new(&mut self, __funcidx: u32) -> u32 {".to_string(),
         "    let __obj = match __funcidx {".to_string(),
@@ -132,6 +168,14 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         lines.push(format!(
             "        {n}u32 => ContObj::C{n}({}),",
             frame_start_literal(ctx, *n)
+        ));
+    }
+    // A null funcref (`u32::MAX`) is a null reference when typed; any other miss is
+    // an internal invariant (the analysis only admits continuation bodies).
+    if ctx.typed_traps {
+        lines.push(format!(
+            "        u32::MAX => {}(),",
+            rt_name(Rt::TrapNullReference)
         ));
     }
     lines.extend([
@@ -152,8 +196,14 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         "        }".to_string(),
         "        None => {".to_string(),
         "            let __i = self.conts.len() as u32;".to_string(),
-        "            if __i >= CONT_IDX_MASK { panic!(\"cont.new: continuation table exhausted\"); }"
-            .to_string(),
+        format!(
+            "            if __i >= CONT_IDX_MASK {{ {}; }}",
+            trap_or_panic(
+                ctx,
+                Rt::TrapContinuationTableExhausted,
+                "cont.new: continuation table exhausted"
+            )
+        ),
         "            self.conts.push(ContSlot { epoch: 0, obj: __obj });".to_string(),
         "            (__i, 0)".to_string(),
         "        }".to_string(),
@@ -168,12 +218,21 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         String::new(),
         // The live slot behind `__h`: it must still hold its continuation and carry
         // the handle's generation (a recycled slot has moved on).
-        "fn cont_slot(&self, __h: u32, __what: &str) -> usize {".to_string(),
+        cont_slot_sig.to_string(),
+    ]);
+    // A null handle is a null reference when typed (untyped keeps its message).
+    if ctx.typed_traps {
+        lines.push(format!(
+            "    if __h == u32::MAX {{ {}(); }}",
+            rt_name(Rt::TrapNullReference)
+        ));
+    }
+    lines.extend([
         "    let __i = (__h & CONT_IDX_MASK) as usize;".to_string(),
         "    match self.conts.get(__i) {".to_string(),
         "        Some(__s) if __s.obj.is_some() && __s.epoch == ((__h >> CONT_IDX_BITS) & CONT_GEN_MASK) => __i,"
             .to_string(),
-        "        _ => panic!(\"{}\", __what),".to_string(),
+        format!("        _ => {cont_slot_miss},"),
         "    }".to_string(),
         "}".to_string(),
         String::new(),
@@ -190,7 +249,7 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         String::new(),
         "#[allow(dead_code)]".to_string(),
         "pub fn cont_discard(&mut self, __h: u32) {".to_string(),
-        "    let __i = self.cont_slot(__h, \"resume_throw of a consumed continuation\");".to_string(),
+        format!("    let __i = {};", cont_slot_call(ctx, "resume_throw")),
         "    self.cont_release(__i);".to_string(),
         "}".to_string(),
         String::new(),
@@ -198,7 +257,7 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         // continuation's first step they are the body's parameters; a
         // parameter-less body simply ignores the (empty) slice.
         "pub fn cont_step(&mut self, __h: u32, __args: &[i64]) -> StepResult {".to_string(),
-        "    let __i = self.cont_slot(__h, \"resume of a consumed continuation\");".to_string(),
+        format!("    let __i = {};", cont_slot_call(ctx, "resume")),
         "    let mut __obj = self.conts[__i].obj.take().expect(\"resume of a consumed continuation\");"
             .to_string(),
         "    let __r = match &mut *__obj {".to_string(),
@@ -239,7 +298,7 @@ pub(super) fn continuation_method_lines(ctx: &ModuleCtx<'_>) -> Vec<String> {
         // resume prepends the prefix to its own arguments (see `cont_step`).
         "#[allow(dead_code)]".to_string(),
         "pub fn cont_bind(&mut self, __h: u32, __prefix: &[i64]) -> u32 {".to_string(),
-        "    let __i = self.cont_slot(__h, \"cont.bind of a consumed continuation\");".to_string(),
+        format!("    let __i = {};", cont_slot_call(ctx, "cont.bind")),
         "    match self.conts[__i].obj.as_deref_mut().expect(\"cont.bind of a consumed continuation\") {"
             .to_string(),
     ]);

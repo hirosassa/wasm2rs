@@ -609,7 +609,11 @@ impl<'a> super::FuncGen<'a> {
                 }
             }
         }
-        self.line("_ => panic!(\"resume: unhandled continuation suspend tag\"),");
+        let unhandled = self.trap_or_panic(
+            Rt::TrapUnhandledSuspendTag,
+            "resume: unhandled continuation suspend tag",
+        );
+        self.line(format!("_ => {unhandled},"));
         self.line("}");
         if has_switch {
             self.line("}");
