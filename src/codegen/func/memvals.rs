@@ -886,7 +886,7 @@ impl<'a> super::FuncGen<'a> {
                 if is64 {
                     index_expr64(code)
                 } else {
-                    format!("({code}) as usize")
+                    format!("({code}) as u32 as usize")
                 }
             };
             let s = index(&src.code, self.is_memory64(src_mem));

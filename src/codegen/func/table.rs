@@ -1,6 +1,6 @@
 use wasmparser::{AbstractHeapType, HeapType, PackedIndex, RefType, ValType};
 
-use super::super::helpers::{checked_place, mem_accessor, table_accessor};
+use super::super::helpers::{checked_place, index_expr64, mem_accessor, table_accessor};
 use super::super::{
     CompositeKind, Helper, Rt, Val, is_bottom_u32_heap, is_cont_heap, is_gc_table_element,
     table_elem_rust,
@@ -18,6 +18,25 @@ pub(super) enum BulkCheck {
     /// Typed segment source only: the destination is a shared memory's bytes, whose
     /// indexing already raises the typed trap.
     TypedSegment(&'static str),
+}
+
+/// The `(n, s, d)` index expressions of a bulk init. The `i32` operands are
+/// reinterpreted as unsigned (a bare `as usize` would sign-extend, so a negative
+/// operand could overflow `d + n` instead of reaching the bounds check); a
+/// 64-bit destination is clamped instead.
+fn bulk_init_indices(
+    dest: &Val,
+    src: &Val,
+    len: &Val,
+    dest_is64: bool,
+) -> (String, String, String) {
+    let idx32 = |v: &Val| format!("({}) as u32 as usize", v.code);
+    let d = if dest_is64 {
+        index_expr64(&dest.code)
+    } else {
+        idx32(dest)
+    };
+    (idx32(len), idx32(src), d)
 }
 
 impl<'a> super::FuncGen<'a> {
@@ -301,7 +320,7 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
-    /// Emit a bulk copy of `len` elements from a retained passive segment
+    /// Emit a bulk copy of `n` elements from a retained passive segment
     /// (`src_seg`, e.g. `self.data0`) into `dst` (e.g. `self.mem_mut()`). A range
     /// exceeding either side — including a dropped, now-empty segment — panics,
     /// reproducing the wasm trap; the destination is bounds-checked first, so no
@@ -312,9 +331,7 @@ impl<'a> super::FuncGen<'a> {
         &mut self,
         dst: &str,
         src_seg: &str,
-        dest: &Val,
-        src: &Val,
-        len: &Val,
+        (n, s, d): (String, String, String),
         check: BulkCheck,
     ) {
         let (dst_slice, seg_slice) = match check {
@@ -337,9 +354,8 @@ impl<'a> super::FuncGen<'a> {
             ),
         };
         self.line(format!(
-            "{{ let seg = {src_seg}; let n = ({}) as usize; let s = ({}) as usize; \
-             let d = ({}) as usize; {dst_slice}.copy_from_slice({seg_slice}); }}",
-            len.code, src.code, dest.code
+            "{{ let seg = {src_seg}; let n = {n}; let s = {s}; let d = {d}; \
+             {dst_slice}.copy_from_slice({seg_slice}); }}"
         ));
     }
 
@@ -374,7 +390,8 @@ impl<'a> super::FuncGen<'a> {
             self.typed_memory_trap()
                 .map_or(BulkCheck::Panic, BulkCheck::Typed)
         };
-        self.emit_bulk_init(&dst, &seg, &dest, &src, &len, check);
+        let indices = bulk_init_indices(&dest, &src, &len, self.is_memory64(mem));
+        self.emit_bulk_init(&dst, &seg, indices, check);
         Ok(())
     }
 
@@ -397,16 +414,16 @@ impl<'a> super::FuncGen<'a> {
         } else {
             "{ let empty: &[u32] = &[]; empty }".to_string()
         };
+        let indices = bulk_init_indices(&dest, &src, &len, self.is_table64(table));
         if self.is_gc_table(table) {
             // A managed table's segment holds only `ref.null` items, so initialising
             // it writes nulls; the range is still checked against the segment.
             let seg_range = self.table_place("seg", "s..s + n", false);
             let dst_range = self.table_place(&format!("self.{get_mut}()"), "d..d + n", true);
+            let (n, s, d) = indices;
             self.line(format!(
-                "{{ let seg = {seg}; let n = ({}) as usize; let s = ({}) as usize; \
-                 let d = ({}) as usize; let _ = &{seg_range}; \
-                 {dst_range}.fill(GcRef::Null); }}",
-                len.code, src.code, dest.code
+                "{{ let seg = {seg}; let n = {n}; let s = {s}; let d = {d}; \
+                 let _ = &{seg_range}; {dst_range}.fill(GcRef::Null); }}"
             ));
             return Ok(());
         }
@@ -414,7 +431,7 @@ impl<'a> super::FuncGen<'a> {
         let check = self
             .typed_table_trap()
             .map_or(BulkCheck::Panic, BulkCheck::Typed);
-        self.emit_bulk_init(&format!("self.{get_mut}()"), &seg, &dest, &src, &len, check);
+        self.emit_bulk_init(&format!("self.{get_mut}()"), &seg, indices, check);
         Ok(())
     }
 
