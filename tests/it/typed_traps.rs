@@ -1139,7 +1139,6 @@ fn gc_array_copy_checks_both_nulls_before_any_range() {
     );
 }
 
-
 /// #413: a discarded `i31.get_*` of a null still traps, and before any later
 /// side effect (it used to be treated as a pure, droppable read).
 const I31_DISCARDED: &str = r#"(module
