@@ -204,11 +204,7 @@ enum CoreFunc {
     Builtin(Builtin),
     /// `resource.new`, `resource.rep` or `resource.drop` of a resource the component defines,
     /// with the core function of its destructor.
-    LocalResource {
-        op: ResourceOp,
-        resource: u32,
-        dtor: Option<u32>,
-    },
+    LocalResource(LocalResourceOp),
 }
 
 #[derive(Clone)]
@@ -579,11 +575,12 @@ impl Reader {
                     _ => ResourceOp::Drop,
                 };
                 let (id, dtor) = local_resource(stack, resource).unwrap_or_default();
-                self.core_funcs.push(CoreFunc::LocalResource {
-                    op,
-                    resource: id,
-                    dtor,
-                });
+                self.core_funcs
+                    .push(CoreFunc::LocalResource(LocalResourceOp {
+                        op,
+                        resource: id,
+                        has_dtor: dtor.is_some(),
+                    }));
             }
             other => {
                 // A skipped push would shift every later core function index.
@@ -743,13 +740,7 @@ impl Reader {
                     }
                 }
                 Some(CoreFunc::Builtin(builtin)) => Some(Supplier::Builtin(*builtin)),
-                Some(CoreFunc::LocalResource { op, resource, dtor }) => {
-                    Some(Supplier::LocalResource(LocalResourceOp {
-                        op: *op,
-                        resource: *resource,
-                        has_dtor: dtor.is_some(),
-                    }))
-                }
+                Some(CoreFunc::LocalResource(op)) => Some(Supplier::LocalResource(*op)),
                 _ => None,
             },
             ExternalKind::Memory => space(&self.core_memories),

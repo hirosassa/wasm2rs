@@ -22,7 +22,7 @@
 //! says: an out-of-range or unaligned pointer, invalid UTF-8, a bad discriminant or `char` is a
 //! trap, which here is a panic.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use super::emit::{Records, case_idents, doc_text, flags_int, typed_signature, unique_idents};
@@ -560,7 +560,7 @@ struct Gen<'a> {
     /// Strings are UTF-16 (the lift or lowering being generated says `string-encoding=utf16`).
     utf16: bool,
     /// The ids of the resources the component defines (`Locals::resources`).
-    locals: &'a BTreeSet<u32>,
+    locals: &'a BTreeMap<u32, Option<String>>,
     /// The code being generated is an export's: its `own` handles of a local resource are
     /// made or taken in the table `rt` (see `ResourceTable`).
     exporting: bool,
@@ -579,7 +579,7 @@ impl Gen<'_> {
         let (WitType::Own(r) | WitType::Borrow(r)) = ty else {
             return Ok(false);
         };
-        if !self.locals.contains(&r.id) {
+        if !self.locals.contains_key(&r.id) {
             return Ok(false);
         }
         if !self.exporting {
@@ -1173,8 +1173,7 @@ pub(super) fn write(
     }
     let start = out.len();
     let mut sig_budget = Budget::new();
-    let local_ids: BTreeSet<u32> = locals.resources.keys().copied().collect();
-    let defines = !local_ids.is_empty();
+    let defines = !locals.resources.is_empty();
     if defines && !generic {
         return Err(TranspileError::Internal(
             "a resource the component defines in a module without an `Imports` trait".into(),
@@ -1188,7 +1187,7 @@ pub(super) fn write(
         allocates: false,
         alloc: ALLOC_MODULE.to_string(),
         utf16: false,
-        locals: &local_ids,
+        locals: &locals.resources,
         exporting: false,
         rt_used: false,
     };
@@ -1445,7 +1444,7 @@ fn write_exports(
     );
     let mut forwarders = String::new();
     for (e, name) in exports.iter().zip(export_names) {
-        write_export(out, &mut forwarders, gen_, e, name, !resources.is_empty())?;
+        write_export(out, &mut forwarders, gen_, e, name)?;
     }
     for (method, ty, resource) in &drops {
         let call = match resources.get(resource) {
@@ -1608,7 +1607,6 @@ fn write_export(
     gen_: &mut Gen<'_>,
     e: &WitExport,
     name: &str,
-    defines_resources: bool,
 ) -> Result<(), TranspileError> {
     let f = &e.func;
     gen_.utf16 = e.encoding == WitStringEncoding::Utf16;
@@ -1796,7 +1794,7 @@ fn write_export(
         return Ok(());
     }
     // The destructors of the handles the guest dropped run after its call has returned.
-    let drain = if defines_resources {
+    let drain = if !gen_.locals.is_empty() {
         "        glue_run_dtors(g);\n"
     } else {
         ""
@@ -1835,9 +1833,7 @@ fn write_export(
         (Some(ty), None) => {
             let _ = writeln!(out, "        {call};");
             let lifted = gen_.lift(ty, &Src::Flat(0))?;
-            let mut lift = String::new();
-            let _ = writeln!(lift, "        let v = {lifted};");
-            wrap_rt(out, &lift, std::mem::take(&mut gen_.rt_used));
+            let _ = writeln!(out, "        let v = {lifted};");
             out.push_str(&post_call(""));
             out.push_str(drain);
             out.push_str("        v\n");

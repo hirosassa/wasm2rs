@@ -160,7 +160,7 @@ fn an_owned_handle_in_a_result_read_from_memory_is_taken_out_of_the_table() {
 
 #[test]
 fn a_handle_the_guest_never_made_traps() {
-    let out = build_and_run(
+    run(
         "bad_handle",
         "let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {\n\
              Exports::t_p_i_static_counter_bad_rep(&mut inst, Resource0(1))\n\
@@ -170,11 +170,6 @@ fn a_handle_the_guest_never_made_traps() {
              payload.downcast_ref::<Wasm2RsGlueTrap>(),\n\
              Some(&Wasm2RsGlueTrap::InvalidResourceHandle)\n\
          );",
-    );
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
     );
 }
 

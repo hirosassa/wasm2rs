@@ -57,7 +57,7 @@ pub(crate) enum ResourceOp {
 }
 
 /// A resource built-in of a resource the component defines.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LocalResourceOp {
     pub op: ResourceOp,
     /// The resource's id (`WitResource::id`).
