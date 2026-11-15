@@ -2,7 +2,7 @@
 //! functions read by [`read`](super::read).
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -1124,13 +1124,14 @@ fn glue_text(
             .collect(),
         resources: local_imports
             .iter()
-            .map(|import| {
-                (
-                    import.resource,
-                    import.dtor.as_deref().and_then(glue::export_method),
-                )
-            })
-            .collect(),
+            .fold(BTreeMap::new(), |mut all, import| {
+                // Every import of a resource names the same destructor.
+                let dtor = all.entry(import.resource).or_insert(None);
+                if dtor.is_none() {
+                    *dtor = import.dtor.as_deref().and_then(glue::export_method);
+                }
+                all
+            }),
     };
     glue::write(
         &mut out,

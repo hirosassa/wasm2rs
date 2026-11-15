@@ -1110,10 +1110,12 @@ impl ResourceTable {
     }
 }
 
+#[allow(dead_code)]
 fn glue_take_resources<H: Host>(g: &mut Instance<Glue<H>>) -> ResourceTable {
     g.with_host(|h, _| std::mem::take(&mut h.1))
 }
 
+#[allow(dead_code)]
 fn glue_put_resources<H: Host>(g: &mut Instance<Glue<H>>, table: ResourceTable) {
     g.with_host(|h, _| h.1 = table)
 }
@@ -1492,7 +1494,7 @@ fn write_local_method(out: &mut String, m: &LocalMethod<'_>) {
 /// call that dropped them has returned (a destructor may drop more handles).
 fn write_run_dtors(out: &mut String, resources: &BTreeMap<u32, Option<String>>) {
     out.push_str(
-        "\nfn glue_run_dtors<H: Host>(g: &mut Instance<Glue<H>>) {\n    \
+        "\n#[allow(dead_code, unused_variables, clippy::match_single_binding)]\nfn glue_run_dtors<H: Host>(g: &mut Instance<Glue<H>>) {\n    \
          while let Some((resource, rep)) = g.with_host(|h, _| h.1.dropped.pop()) {\n        \
          match resource {\n",
     );

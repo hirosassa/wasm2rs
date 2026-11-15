@@ -150,7 +150,17 @@ pub(crate) fn local_resource_imports(
                         field: field.clone(),
                         op: op.op,
                         resource: op.resource,
-                        dtor: op.has_dtor.then(|| dtor_export(module, field)).flatten(),
+                        dtor: if op.has_dtor {
+                            Some(dtor_export(module, field).ok_or_else(|| {
+                                unsupported(format!(
+                                    "the core import `{module}` `{field}` is a resource built-in \
+                                     of a resource with a destructor, but its names do not say \
+                                     which export is the destructor"
+                                ))
+                            })?)
+                        } else {
+                            None
+                        },
                     });
                 }
             }
@@ -566,21 +576,21 @@ impl Reader {
             }
             CanonicalFunction::ResourceNew { resource }
             | CanonicalFunction::ResourceRep { resource }
-            | CanonicalFunction::ResourceDrop { resource }
-                if local_resource(stack, resource).is_some() =>
-            {
+            | CanonicalFunction::ResourceDrop { resource } => {
                 let op = match func {
                     CanonicalFunction::ResourceNew { .. } => ResourceOp::New,
                     CanonicalFunction::ResourceRep { .. } => ResourceOp::Rep,
                     _ => ResourceOp::Drop,
                 };
-                let (id, dtor) = local_resource(stack, resource).unwrap_or_default();
-                self.core_funcs
-                    .push(CoreFunc::LocalResource(LocalResourceOp {
+                // A resource the component imports is served by the host (`Builtin::Resource`).
+                self.core_funcs.push(match local_resource(stack, resource) {
+                    Some((id, dtor)) => CoreFunc::LocalResource(LocalResourceOp {
                         op,
                         resource: id,
                         has_dtor: dtor.is_some(),
-                    }));
+                    }),
+                    None => CoreFunc::Builtin(Builtin::Resource),
+                });
             }
             other => {
                 // A skipped push would shift every later core function index.
