@@ -193,3 +193,63 @@ fn an_unsupported_elem_offset_operator_is_rejected_by_validation() {
     assert!(err.contains("failed to parse wasm"), "{err}");
     assert!(err.contains("non-constant operator"), "{err}");
 }
+
+/// Two distinct 64-bit tables plus a 32-bit one, so `table.copy` takes the inline
+/// cross-table path instead of the same-table `copy_within`.
+const BULK_OVERFLOW: &str = r#"(module
+  (table $a i64 4 funcref)
+  (table $b i64 4 funcref)
+  (table $c 4 funcref)
+  (func (export "fill") (param i64 i64)
+    local.get 0 ref.null func local.get 1 table.fill $a)
+  (func (export "copy_across") (param i64 i64 i64)
+    local.get 0 local.get 1 local.get 2 table.copy $a $b)
+  (func (export "copy_within") (param i64 i64 i64)
+    local.get 0 local.get 1 local.get 2 table.copy $a $a)
+  (func (export "copy_to32") (param i32 i64 i32)
+    local.get 0 local.get 1 local.get 2 table.copy $c $a)
+  (func (export "copy_from32") (param i64 i32 i32)
+    local.get 0 local.get 1 local.get 2 table.copy $a $c))"#;
+
+/// An i64 operand whose `d + n` exceeds `u64::MAX` is an out-of-range trap (the
+/// slice-range message, or `copy_within`'s own for a same-table copy), not an
+/// arithmetic-overflow panic or a wrap into range.
+#[test]
+fn bulk_table_ops_with_an_overflowing_i64_range_trap_out_of_range() {
+    for (name, call) in [
+        ("fill_dest", "inst.func0(-1, 4);"),
+        ("fill_len", "inst.func0(1, -1);"),
+        ("copy_across_dest", "inst.func1(-1, 0, 4);"),
+        ("copy_across_src", "inst.func1(0, -1, 4);"),
+        ("copy_across_len", "inst.func1(1, 1, -1);"),
+        ("copy_within_dest", "inst.func2(-1, 0, 4);"),
+        ("copy_within_src", "inst.func2(0, -1, 4);"),
+        ("copy_within_len", "inst.func2(1, 1, -1);"),
+        ("copy_to32_src", "inst.func3(0, -1, 4);"),
+        ("copy_from32_dest", "inst.func4(-1, 0, 4);"),
+    ] {
+        let needle = if name.starts_with("copy_within") {
+            // `copy_within` words it either way, depending on which operand overflows.
+            "out of "
+        } else {
+            "out of range for slice"
+        };
+        common::expect_trap_with(
+            &format!("t64_overflow_{name}"),
+            BULK_OVERFLOW,
+            &format!("let mut inst = Instance::new(); {call}"),
+            needle,
+        );
+    }
+}
+
+#[test]
+fn bulk_table_ops_in_range_still_work_on_a_64_bit_table() {
+    common::compile_run(
+        "t64_overflow_in_range",
+        BULK_OVERFLOW,
+        "let mut inst = Instance::new();\n \
+         inst.func0(0, 4); inst.func1(0, 0, 4); inst.func2(1, 0, 3);\n \
+         inst.func3(0, 0, 4); inst.func4(0, 0, 4);",
+    );
+}

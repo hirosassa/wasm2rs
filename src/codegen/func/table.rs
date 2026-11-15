@@ -59,6 +59,18 @@ impl<'a> super::FuncGen<'a> {
         }
     }
 
+    /// Like [`Self::table_index_expr`] for an operand of a bulk range
+    /// (`table.fill`/`table.copy`): a 64-bit operand is clamped to `isize::MAX`
+    /// (no table is that large), so `d + n` of two clamped operands cannot
+    /// overflow `usize` and an out-of-range span reaches the bounds check.
+    fn table_range_expr(&self, table: u32, code: &str) -> String {
+        if self.is_table64(table) {
+            index_expr64(code)
+        } else {
+            self.table_index_expr(table, code)
+        }
+    }
+
     /// The place expression `{base}[{index}]` of a table slot or range: Rust's
     /// slice panic by default, or a checked `get`/`get_mut` (per `mutable`)
     /// raising the cold table trap under `typed_traps`.
@@ -132,15 +144,12 @@ impl<'a> super::FuncGen<'a> {
         let (src_get, _) = table_accessor(src_table);
         // The length is an `i64` only when both tables are 64-bit.
         let len_expr = if self.is_table64(dst_table) && self.is_table64(src_table) {
-            format!(
-                "usize::try_from(({}) as u64).unwrap_or(usize::MAX)",
-                len.code
-            )
+            index_expr64(&len.code)
         } else {
             format!("({}) as u32 as usize", len.code)
         };
-        let src_expr = self.table_index_expr(src_table, &src.code);
-        let dest_expr = self.table_index_expr(dst_table, &dest.code);
+        let src_expr = self.table_range_expr(src_table, &src.code);
+        let dest_expr = self.table_range_expr(dst_table, &dest.code);
         let elem = table_elem_rust(self.table_element(dst_table));
         let body = if dst_table == src_table && !gc {
             match self.typed_table_trap() {
@@ -286,8 +295,8 @@ impl<'a> super::FuncGen<'a> {
         let range = self.table_place(&format!("self.{get_mut}()"), "d..d + n", true);
         self.line(format!(
             "{{ let d = {}; let v = {value}; let n = {}; {range}.fill(v); }}",
-            self.table_index_expr(table, &dest.code),
-            self.table_index_expr(table, &len.code)
+            self.table_range_expr(table, &dest.code),
+            self.table_range_expr(table, &len.code)
         ));
         Ok(())
     }

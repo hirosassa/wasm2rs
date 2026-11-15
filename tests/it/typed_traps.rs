@@ -513,6 +513,46 @@ fn table64_init_traps_on_a_negative_destination() {
 }
 
 #[test]
+fn table64_fill_and_copy_trap_on_an_overflowing_range() {
+    compile_run_with(
+        "typed_traps_table64_bulk",
+        r#"(module
+            (table $a i64 4 funcref)
+            (table $b i64 4 funcref)
+            (table $c 4 funcref)
+            (func (export "fill") (param i64 i64)
+              local.get 0 ref.null func local.get 1 table.fill $a)
+            (func (export "across") (param i64 i64 i64)
+              local.get 0 local.get 1 local.get 2 table.copy $a $b)
+            (func (export "within") (param i64 i64 i64)
+              local.get 0 local.get 1 local.get 2 table.copy $a $a)
+            (func (export "to32") (param i32 i64 i32)
+              local.get 0 local.get 1 local.get 2 table.copy $c $a)
+            (func (export "from32") (param i64 i32 i32)
+              local.get 0 local.get 1 local.get 2 table.copy $a $c))"#,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            macro_rules! oob {{ ($e:expr) => {{
+                assert!(matches!(trap_of(|| $e), Wasm2RsTrap::OutOfBoundsTableAccess));
+            }} }}
+            inst.fill(0, 4); inst.across(0, 0, 4); inst.within(1, 0, 3);
+            oob!(inst.fill(-1, 4));
+            oob!(inst.fill(1, -1));
+            oob!(inst.across(-1, 0, 4));
+            oob!(inst.across(0, -1, 4));
+            oob!(inst.across(1, 1, -1));
+            oob!(inst.within(-1, 0, 4));
+            oob!(inst.within(0, -1, 4));
+            oob!(inst.within(1, 1, -1));
+            oob!(inst.to32(0, -1, 4));
+            oob!(inst.from32(-1, 0, 4));"#
+        ),
+    );
+}
+
+#[test]
 fn off_keeps_stage_two_traps_as_rust_panics_and_emits_no_new_helpers() {
     for wat in [DIV_REM, MEMORY, TABLE] {
         let plain = transpile_typed(wat, false);
