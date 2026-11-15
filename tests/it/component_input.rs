@@ -146,8 +146,11 @@ fn transpile_options_typed_traps_types_the_glue_traps_too() {
     };
     let code = transpile_component(&component_of(WORLD, CORE), &typed).unwrap();
     assert!(code.contains("pub enum Wasm2RsGlueTrap"), "{code}");
-    let plain =
-        transpile_component(&component_of(WORLD, CORE), &ComponentOptions::default()).unwrap();
+    let untyped = ComponentOptions {
+        transpile: TranspileOptions::default().with_typed_traps(false),
+        ..ComponentOptions::default()
+    };
+    let plain = transpile_component(&component_of(WORLD, CORE), &untyped).unwrap();
     assert!(!plain.contains("Wasm2RsGlueTrap"), "{plain}");
 }
 
@@ -363,8 +366,12 @@ fn the_cli_component_flag_writes_what_transpile_component_returns() {
         input.as_os_str(),
         output.as_os_str(),
     ]);
-    let expected =
-        transpile_component(&component_of(WORLD, CORE), &ComponentOptions::default()).unwrap();
+    // The CLI emits untyped traps unless `--typed-traps` is passed.
+    let untyped = ComponentOptions {
+        transpile: TranspileOptions::default().with_typed_traps(false),
+        ..ComponentOptions::default()
+    };
+    let expected = transpile_component(&component_of(WORLD, CORE), &untyped).unwrap();
     assert_eq!(std::fs::read_to_string(output).unwrap(), expected);
 }
 

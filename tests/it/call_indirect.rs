@@ -104,7 +104,7 @@ fn type_mismatch_trap_routed_through_cold_helper() {
             (call_indirect (type $binop) (local.get 1) (local.get 2) (local.get 0))))
         "#;
     let wasm = wat::parse_str(TWO_SIGS).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
+    let generated = crate::common::transpile_untyped(&wasm);
 
     assert!(
         generated.contains("#[cold]")

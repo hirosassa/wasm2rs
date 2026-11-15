@@ -97,7 +97,9 @@ fn off_by_default_keeps_string_traps_and_emits_no_trap_type() {
     let wasm = wat::parse_str(TRAPS).expect("valid wat");
     let plain = wasm2rs::transpile_with_options(
         &wasm,
-        &TranspileOptions::default().with_call_depth_limit(Some(100)),
+        &TranspileOptions::default()
+            .with_typed_traps(false)
+            .with_call_depth_limit(Some(100)),
     )
     .expect("transpile ok");
     assert!(!plain.contains("Wasm2RsTrap"), "{plain}");
@@ -565,7 +567,18 @@ fn off_keeps_stage_two_traps_as_rust_panics_and_emits_no_new_helpers() {
         ] {
             assert!(!plain.contains(absent), "{absent} in the untyped output");
         }
-        assert_eq!(plain, transpile_with(wat, TranspileOptions::default()));
+    }
+}
+
+/// The only test that pins the default itself; every other test names its mode, so
+/// changing the default means changing just this assertion.
+#[test]
+fn typed_traps_default_matches_the_explicit_setting() {
+    for wat in [TRAPS, DIV_REM, MEMORY, TABLE] {
+        assert_eq!(
+            transpile_with(wat, TranspileOptions::default()),
+            transpile_typed(wat, false),
+        );
     }
 }
 
@@ -1000,18 +1013,11 @@ const GC_TRAPS: &str = r#"(module
 fn gc_off_by_default_keeps_string_traps() {
     let plain = transpile_with(
         GC_TRAPS,
-        TranspileOptions::default().with_named_exports(true),
+        TranspileOptions::default()
+            .with_named_exports(true)
+            .with_typed_traps(false),
     );
     assert!(!plain.contains("Wasm2RsTrap"), "{plain}");
-    assert_eq!(
-        plain,
-        transpile_with(
-            GC_TRAPS,
-            TranspileOptions::default()
-                .with_named_exports(true)
-                .with_typed_traps(false)
-        )
-    );
 }
 
 #[test]
@@ -1400,7 +1406,9 @@ fn call_ref_null_and_bad_externref_are_string_panics_when_untyped() {
     compile_run_with(
         "untyped_call_ref_null",
         NULL_FUNCREF_AND_EXTERN,
-        TranspileOptions::default().with_named_exports(true),
+        TranspileOptions::default()
+            .with_typed_traps(false)
+            .with_named_exports(true),
         &format!(
             r#"{MSG_OF}
             let mut inst = Instance::new();
@@ -1625,7 +1633,9 @@ fn continuation_traps_are_string_panics_when_untyped() {
     compile_run_with(
         "untyped_traps_cont",
         CONT_TRAPS,
-        TranspileOptions::default().with_named_exports(true),
+        TranspileOptions::default()
+            .with_typed_traps(false)
+            .with_named_exports(true),
         &format!(
             r#"{MSG_OF}
             let cases: [(fn(&mut Instance) -> i32, &str); 4] = [

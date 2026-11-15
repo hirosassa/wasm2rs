@@ -438,6 +438,17 @@ fn program_for(wat: &str, main_body: &str) -> String {
     format!("{generated}\nfn main() {{\n{main_body}\n}}\n")
 }
 
+/// Transpile `wasm` with the untyped (string-panic) traps, for tests that assert the
+/// generated text or Rust's own panic message. Typed traps are covered by the
+/// `typed_traps` suites.
+pub fn transpile_untyped(wasm: &[u8]) -> String {
+    wasm2rs::transpile_with_options(
+        wasm,
+        &wasm2rs::TranspileOptions::default().with_typed_traps(false),
+    )
+    .expect("transpile ok")
+}
+
 /// Transpile a single module, run `main_body`, and assert it exits 0.
 pub fn compile_run(name: &str, wat: &str, main_body: &str) {
     let bin = build(name, &program_for(wat, main_body));
@@ -467,6 +478,25 @@ pub fn compile_run_wasm(name: &str, wasm: &[u8], main_body: &str) {
 pub fn compile_run_raw(name: &str, wat: &str, trailer: &str) {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
+    run_raw(name, &generated, trailer);
+}
+
+/// [`compile_run_raw`] in both trap modes: `trailer` is built for `typed_traps` off
+/// (`false`) and on (`true`), so it can name the typed payload only where it exists.
+pub fn compile_run_raw_both_modes(name: &str, wat: &str, trailer: impl Fn(bool) -> String) {
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    for typed in [false, true] {
+        let opts = wasm2rs::TranspileOptions::default().with_typed_traps(typed);
+        let generated = wasm2rs::transpile_with_options(&wasm, &opts).expect("transpile ok");
+        run_raw(
+            &format!("{name}_typed_{typed}"),
+            &generated,
+            &trailer(typed),
+        );
+    }
+}
+
+fn run_raw(name: &str, generated: &str, trailer: &str) {
     let program = format!("{generated}\n{trailer}\n");
     let bin = build(name, &program);
     let run = Command::new(&bin).status().expect("run generated binary");
@@ -506,10 +536,47 @@ pub fn expect_trap(name: &str, wat: &str, main_body: &str) {
     );
 }
 
-/// Assert that running `main_body` traps *and* that the panic output on stderr
-/// contains `needle`, pinning the trap reason.
-pub fn expect_trap_with(name: &str, wat: &str, main_body: &str, needle: &str) {
-    let bin = build(name, &program_for(wat, main_body));
+/// The message a typed trap (`TranspileOptions::typed_traps`) carries for the reason
+/// the untyped output reports as `needle`. Most variants reuse the untyped message
+/// verbatim; only the traps that untyped output leaves to Rust's own arithmetic and
+/// indexing panics are worded differently.
+fn typed_needle(needle: &str) -> &str {
+    match needle {
+        "divide with overflow" => "integer overflow",
+        "index out of bounds" | "out of range for slice" | "out of range" => "out of bounds",
+        "remainder" => "divide by zero",
+        "ref.cast failed" => "cast failure",
+        other => other,
+    }
+}
+
+/// Runs `__body` and reports a trap on stderr whichever way it was raised. A typed
+/// trap unwinds with `resume_unwind`, so it prints nothing by itself; the message is
+/// the payload's `Display`, or the string of a trap that stays a string panic.
+fn typed_main(generated: &str, main_body: &str) -> String {
+    let typed_payload = if generated.contains("pub enum Wasm2RsTrap") {
+        "if let Some(t) = p.downcast_ref::<Wasm2RsTrap>() { t.to_string() } else "
+    } else {
+        ""
+    };
+    format!(
+        "{generated}\nfn __body() {{\n{main_body}\n}}\nfn main() {{
+    std::panic::set_hook(Box::new(|_| {{}}));
+    if let Err(p) = std::panic::catch_unwind(__body) {{
+        let msg = {typed_payload}if let Some(s) = p.downcast_ref::<&str>() {{
+            s.to_string()
+        }} else {{
+            p.downcast_ref::<String>().cloned().unwrap_or_default()
+        }};
+        eprintln!(\"trap: {{msg}}\");
+        std::process::exit(101);
+    }}
+}}\n"
+    )
+}
+
+fn run_expecting_trap(name: &str, program: &str, needle: &str) {
+    let bin = build(name, program);
     let run = Command::new(&bin).output().expect("run generated binary");
     assert!(
         !run.status.success(),
@@ -519,5 +586,35 @@ pub fn expect_trap_with(name: &str, wat: &str, main_body: &str, needle: &str) {
     assert!(
         stderr.contains(needle),
         "trap reason mismatch for {name}: expected stderr to contain {needle:?}\n--- stderr ---\n{stderr}",
+    );
+}
+
+/// Assert that running `main_body` traps *and* that the reason contains `needle`,
+/// in both trap modes: the untyped output panics with a string that must appear on
+/// stderr, the `typed_traps` output unwinds with a typed payload whose message is
+/// reported by [`typed_main`]. Pinning both keeps the test meaningful whichever
+/// mode is the default.
+pub fn expect_trap_with(name: &str, wat: &str, main_body: &str, needle: &str) {
+    let wasm = wat::parse_str(wat).expect("valid wat");
+    let untyped = wasm2rs::transpile_with_options(
+        &wasm,
+        &wasm2rs::TranspileOptions::default().with_typed_traps(false),
+    )
+    .expect("transpile ok");
+    run_expecting_trap(
+        name,
+        &format!("{untyped}\nfn main() {{\n{main_body}\n}}\n"),
+        needle,
+    );
+
+    let typed = wasm2rs::transpile_with_options(
+        &wasm,
+        &wasm2rs::TranspileOptions::default().with_typed_traps(true),
+    )
+    .expect("transpile ok");
+    run_expecting_trap(
+        &format!("{name}_typed"),
+        &typed_main(&typed, main_body),
+        typed_needle(needle),
     );
 }

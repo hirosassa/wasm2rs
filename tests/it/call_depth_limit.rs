@@ -11,28 +11,48 @@ use wasm2rs::TranspileOptions;
 
 use crate::common;
 
-fn transpile_limited(wat: &str, limit: u32) -> String {
+fn transpile_limited_with(wat: &str, limit: u32, typed: bool) -> String {
     let wasm = wat::parse_str(wat).expect("valid wat");
     wasm2rs::transpile_with_options(
         &wasm,
-        &TranspileOptions::default().with_call_depth_limit(Some(limit)),
+        &TranspileOptions::default()
+            .with_call_depth_limit(Some(limit))
+            .with_typed_traps(typed),
     )
     .expect("transpile ok")
 }
 
-/// Transpile `wat` with the limit, run `main_body`, and assert it exits 0.
-fn compile_run_limited(name: &str, wat: &str, limit: u32, main_body: &str) {
-    let generated = transpile_limited(wat, limit);
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    let bin = common::build(name, &program);
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{name}"
-    );
+fn transpile_limited(wat: &str, limit: u32) -> String {
+    transpile_limited_with(wat, limit, false)
 }
 
-/// Runs `f` and asserts it panics with `call stack exhausted`.
+/// Transpile `wat` with the limit, run `main_body`, and assert it exits 0, once with
+/// untyped traps (a string panic) and once with `typed_traps` (a `Wasm2RsTrap`).
+fn compile_run_limited(name: &str, wat: &str, limit: u32, main_body: &str) {
+    for typed in [false, true] {
+        let typed_payload = if typed {
+            "if let Some(t) = payload.downcast_ref::<Wasm2RsTrap>() {
+        assert_eq!(*t, Wasm2RsTrap::CallStackExhausted);
+        return;
+    }"
+        } else {
+            ""
+        };
+        let main_body = main_body.replace("/*TYPED_PAYLOAD*/", typed_payload);
+        let generated = transpile_limited_with(wat, limit, typed);
+        let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
+        let bin = common::build(&format!("{name}_typed_{typed}"), &program);
+        let run = Command::new(&bin).status().expect("run generated binary");
+        assert!(
+            run.success(),
+            "generated program assertions failed:\n{name} (typed_traps: {typed})"
+        );
+    }
+}
+
+/// Runs `f` and asserts it panics with `call stack exhausted`, as a string panic or,
+/// under `typed_traps`, as the matching `Wasm2RsTrap` (the placeholder is filled in
+/// by `compile_run_limited`).
 const EXPECT_EXHAUSTED: &str = r#"
 fn expect_exhausted<R>(f: impl FnOnce() -> R) {
     let prev = std::panic::take_hook();
@@ -43,6 +63,7 @@ fn expect_exhausted<R>(f: impl FnOnce() -> R) {
         Err(p) => p,
         Ok(_) => panic!("expected call stack exhausted"),
     };
+    /*TYPED_PAYLOAD*/
     let msg = payload
         .downcast_ref::<&str>()
         .map(|s| s.to_string())
