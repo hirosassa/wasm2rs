@@ -63,7 +63,7 @@ Main flags (all of them are described in [docs/cli-reference.md](docs/cli-refere
 | `--component` | Transpile a WebAssembly component (e.g. `wasm32-wasip2` output) in one step. |
 | `--dump` | Print a summary of the module and generate no code. |
 
-Also available: `--named-exports`, `--named-imports`, `--import-memory`, `--reentrant-imports`, `--split-dispatch`, `--call-depth-limit=N`, `--no-typed-traps` (traps are typed `Wasm2RsTrap` payloads by default; this keeps the string panics), `--typed-traps`, `--extract-core`, `--wit-host`, `--glue`, `--external-types`.
+Also available: `--named-exports`, `--named-imports`, `--import-memory`, `--reentrant-imports`, `--split-dispatch`, `--call-depth-limit=N`, `--data-files`, `--no-typed-traps` (traps are typed `Wasm2RsTrap` payloads by default, which print nothing to stderr; this keeps the string panics), `--typed-traps` (the default), `--extract-core`, `--wit-host`, `--glue`, `--external-types`.
 
 ### Examples
 
@@ -116,7 +116,7 @@ The examples build the component with `rustc -C opt-level=1`; set `WASM2RS_EXAMP
 ### Known limits
 
 - **Large components: start at `opt-level=0`.** The JS and Python components produce 125 MB and 122 MB of Rust, and LLVM time is the bottleneck, not wasm2rs (about 1 s to transpile Python).
-- **One source only.** `--component` refuses the split arguments (`funcs_per_file`, `max_bytes_per_file`); the other generated-code flags that it supports are `--unsafe-memory`, `--simd-intrinsics`, `--jobs`, `--split-dispatch`, `--call-depth-limit` and `--external-types`.
+- **Generated-code flags.** `--component` supports `--unsafe-memory`, `--simd-intrinsics`, `--typed-traps` / `--no-typed-traps`, `--jobs`, `--split-dispatch`, `--call-depth-limit`, `--external-types` and the split arguments (`funcs_per_file`, `max_bytes_per_file`, with `--data-files`; the split output has no `Cargo.toml`, since it depends on `wasm2rs-wasi`). It refuses `--entry-exports`, `--import-memory` and the `--named-*` / `--reentrant-imports` flags it sets itself.
 - **Linked core modules (adapters, dylink libraries) may only use MVP, sign-extension, saturating float-to-int, bulk-memory and reference-types operators.** Any other operator (SIMD, atomics, exceptions, ...) is refused with an error naming it; lifts that allocate through different `realloc` functions of several modules are also refused (#314).
 - `wasip2_serve` serves one request at a time over HTTP/1.x (listening on `127.0.0.1:8080` by default); `wasip2_run` and `wasip2_serve` have no outgoing HTTP client.
 
@@ -162,6 +162,7 @@ mod foo {
 - [Component input](docs/component-input-design.md), [component exports](docs/component-exports-design.md), [component model PoC](docs/component-model-poc.md)
 - [Core module linking](docs/core-module-linking-design.md), [dynamic linking (`componentize-py`)](docs/f2-dynamic-linking-design.md), [`rustc` time on large components](docs/f4-rustc-time-spike.md)
 - [wasi-threads end-to-end tests](docs/wasi-threads-e2e.md)
+- [WASI 0.3 spike](docs/wasi-p3-spike.md), [WASI additions after 0.2.0](docs/wasi-post-0.2.0-additions.md), [Cargo profile benchmark](docs/cargo-manifest-profile-bench.md)
 - [Differential fuzzing](docs/differential-fuzzing.md), [HTTP fuzzing server](docs/fuzzing-http-server.md), [bounds-check benchmark](docs/bounds-check-bench.md)
 - [CONTRIBUTING](CONTRIBUTING.md) and [CHANGELOG](CHANGELOG.md)
 

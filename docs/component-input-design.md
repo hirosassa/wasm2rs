@@ -5,7 +5,7 @@ Update: two statements below are out of date. "Exports from more than one module
 (decision 4.1) and the last bullet of decision 5 (a program module that imports state from another
 core module, as a preview1 adapter does) no longer apply: such components are linked into one
 `Instance`, see [core-module-linking-design.md](core-module-linking-design.md) and the CHANGELOG.
-Every component that took the single-module path before keeps it, with byte-identical output.
+Every component that took the single-module path before keeps it, with unchanged output apart from typed traps now being the default (see `--no-typed-traps`).
 `--component` also accepts `--simd-intrinsics` (A3-3 below lists the flags as of that phase).
 Background: [component-exports-design.md](component-exports-design.md) (`wit_exports`, the `Exports`
 trait, A2), [typed-host-design.md](typed-host-design.md) (the import glue),

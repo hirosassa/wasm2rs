@@ -112,8 +112,8 @@ cargo test --test it emscripten -- --nocapture
 
 ## How a test works
 
-1. The test writes a small source file to a scratch directory under the system
-   temp directory (`wasm2rs_sdk_e2e_<name>`) and builds it to a `.wasm`.
+1. The test writes a small source file to a fresh scratch directory (`common::scratch_dir`, in the suite's cache directory;
+   named `work-wasm2rs_sdk_e2e_<name>-<pid>-<n>`) and builds it to a `.wasm`.
 2. `export_index` reads the module's export section. The generated Rust names a
    function `func{N}` by its index, so the test looks the index up by export name
    (`_initialize`, `run`, `_start`).

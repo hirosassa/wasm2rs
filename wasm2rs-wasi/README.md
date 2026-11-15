@@ -4,8 +4,8 @@ The typed WASI 0.2.0 host for programs transpiled by [wasm2rs](https://github.co
 one fixed `Host` trait for the whole 0.2.0 surface, whose methods trap unless a host implements
 them, and the types it uses (`wasi_filesystem_types::ErrorCode`, ...).
 
-`src/generated.rs` is generated from the official 0.2.0 WIT in `tests/wasi_p2_wit/` plus its `overlay/` (later additions that toolchains import: `exit-with-code`, see `docs/wasi-post-0.2.0-additions.md`) and checked in;
-a test regenerates it and fails on any difference. To refresh it after a generator change, run
+`src/generated.rs` is generated from the official 0.2.0 WIT in the repository's `tests/wasi_p2_wit/` plus its `overlay/` (later additions that toolchains import: `exit-with-code`, see `docs/wasi-post-0.2.0-additions.md` in the repository) and checked in;
+a test regenerates it and fails on any difference. To refresh it after a generator change, run, from the repository root,
 `WASM2RS_BLESS=1 cargo test --test it wasi_generated`.
 
 ## Coverage
@@ -52,6 +52,18 @@ Unset stdin, stdout and stderr are the process's. A given reader is read on a th
 starts when the guest first uses stdin; a given writer is flushed when the guest flushes, at
 `wasi:cli/exit` and when the host is dropped. Without the `os-random` feature (on by default)
 there is no default for `wasi:random/random`, so `random` is required.
+
+## Typed traps
+
+A trap the host raises (an unknown or dropped handle, an exhausted handle table, a missing or
+failing random source) is a panic with a message string by default. `.typed_traps(true)` on the
+builder (or `WasiHost::with_typed_traps`; off by default, unlike `wasm2rs`'s own typed traps) makes
+it unwind with a `WasiTrap` payload instead (`resume_unwind`, so the panic hook prints nothing):
+downcast the `catch_unwind` payload to `WasiTrap` (`Display` is the old message, and it is a
+`std::error::Error`). It is a separate type from the `Wasm2RsTrap` / `Wasm2RsGlueTrap` that the
+generated code raises (both are on by default there); a host that classifies traps checks all
+three. The thread-spawn wrapper of a generated wasi-threads / emscripten program prints a `WasiTrap`
+that ends a spawned thread.
 
 ## HTTP client (feature `http-client`)
 

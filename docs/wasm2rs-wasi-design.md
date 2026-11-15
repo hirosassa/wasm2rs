@@ -119,9 +119,7 @@ escape is closed there, see its confinement note).
 
 - **Test cost.** About 24 wasip2/wit test files compile a generated program with `rustc` at test
   time; switching helpers to the library does not remove that cost.
-- **Lints.** The hardening lints are set in the root `[lints]` only, so the new crate does not
-  inherit them. The host uses `unwrap`/`expect`/`assert!` for traps; either keep that behind scoped
-  `#[expect(..., reason = ...)]` or convert to `Result` internally.
+- **Lints.** Done: the shared hardening lints live in the root `[workspace.lints]` and `wasm2rs-wasi` inherits them (`[lints] workspace = true`), with the stricter panic-prone ones denied in `wasm2rs-wasi/src/lib.rs`. Traps go through `host::slab::trap` (or an `assert!` on a guest contract), not through ad-hoc `unwrap`/`expect`.
 - **Release.** The tag-driven `release.yaml` checks only the root version and publishes the crates
   by hard-coded steps. Done: `wasm2rs-wasi` is a workspace member with its own version, published
   last (skipped when that version is already on crates.io).

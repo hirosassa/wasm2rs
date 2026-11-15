@@ -149,7 +149,7 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) simd_intrinsics: bool,
     /// Opt-in call-depth limit (see `TranspileOptions::call_depth_limit`).
     pub(crate) call_depth_limit: Option<u32>,
-    /// The five helper traps unwind with a typed `Wasm2RsTrap` (see
+    /// The traps unwind with a typed `Wasm2RsTrap` payload (on by default; see
     /// `TranspileOptions::typed_traps`).
     pub(crate) typed_traps: bool,
     /// Every `Imports` method receives the `Instance` (see
