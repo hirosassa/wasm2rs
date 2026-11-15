@@ -1138,3 +1138,89 @@ fn gc_array_copy_checks_both_nulls_before_any_range() {
         ),
     );
 }
+
+/// #413: a discarded `i31.get_*` of a null still traps, and before any later
+/// side effect (it used to be treated as a pure, droppable read).
+const I31_DISCARDED: &str = r#"(module
+    (global $g (mut i32) (i32.const 0))
+    (func (export "drop_get_u") (param i31ref) (drop (i31.get_u (local.get 0))))
+    (func (export "drop_get_s") (param i31ref) (drop (i31.get_s (local.get 0))))
+    (func (export "get_then_set") (param i31ref)
+      (local.get 0) (i31.get_u) (global.set $g (i32.const 1)) (drop))
+    (func (export "g") (result i32) (global.get $g))
+    (func (export "mk") (result i31ref) (ref.i31 (i32.const 5))))"#;
+
+#[test]
+fn a_discarded_i31_get_of_null_still_traps_in_both_modes() {
+    for typed in [false, true] {
+        // `CATCH` names `Wasm2RsTrap`, which only a typed build defines.
+        let prelude = if typed {
+            format!(
+                "{CATCH}\nfn null_trap<R>(f: impl FnOnce() -> R) {{ \
+                 assert!(matches!(trap_of(f), Wasm2RsTrap::NullReference)); }}"
+            )
+        } else {
+            r#"fn null_trap<R>(f: impl FnOnce() -> R) {
+                std::panic::set_hook(Box::new(|_| {}));
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+                let _ = std::panic::take_hook();
+                assert!(r.is_err(), "expected a trap");
+            }"#
+            .to_string()
+        };
+        compile_run_with(
+            &format!("i31_discarded_{typed}"),
+            I31_DISCARDED,
+            typed_named().with_typed_traps(typed),
+            &format!(
+                r#"{prelude}
+            let mut inst = Instance::new();
+            null_trap(|| inst.drop_get_u(GcRef::Null));
+            null_trap(|| inst.drop_get_s(GcRef::Null));
+            null_trap(|| inst.get_then_set(GcRef::Null));
+            // The trap fired before the later `global.set`.
+            assert_eq!(inst.g(), 0);
+            // A non-null operand still evaluates normally.
+            let v = inst.mk();
+            inst.drop_get_u(v.clone());
+            inst.drop_get_s(v.clone());
+            inst.get_then_set(v);
+            assert_eq!(inst.g(), 1);"#
+            ),
+        );
+    }
+}
+
+/// #414: the `array.new*` size is an unsigned i32, so it is widened with
+/// `as u32 as usize` like every other GC length (sign extension turned `-1`
+/// into `usize::MAX`, a std "capacity overflow" panic).
+#[test]
+fn array_new_widens_its_size_as_unsigned() {
+    let wat = r#"(module
+        (memory 1)
+        (type $a (array (mut i32)))
+        (func (export "n") (param i32) (result (ref $a))
+          (array.new $a (i32.const 9) (local.get 0)))
+        (func (export "nd") (param i32) (result (ref $a))
+          (array.new_default $a (local.get 0)))
+        (func (export "len") (param (ref null $a)) (result i32) (array.len (local.get 0))))"#;
+    for typed in [false, true] {
+        let out = transpile_with(wat, typed_named().with_typed_traps(typed));
+        assert!(!out.contains(") as usize; GcRef::Obj"), "{out}");
+        assert_eq!(
+            out.matches("as u32 as usize; GcRef::Obj").count(),
+            2,
+            "{out}"
+        );
+    }
+    compile_run_with(
+        "array_new_size_unsigned",
+        wat,
+        typed_named(),
+        r#"let mut inst = Instance::new();
+        let a = inst.n(3);
+        assert_eq!(inst.len(a), 3);
+        let b = inst.nd(0);
+        assert_eq!(inst.len(b), 0);"#,
+    );
+}
