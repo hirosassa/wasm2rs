@@ -138,19 +138,20 @@ fn the_options_the_glue_needs_are_forced_on() {
     assert!(code.contains("g: &mut Instance"), "reentrant_imports");
 }
 
+fn options_with_typed_traps(typed: bool) -> ComponentOptions {
+    ComponentOptions {
+        transpile: TranspileOptions::default().with_typed_traps(typed),
+        ..ComponentOptions::default()
+    }
+}
+
 #[test]
 fn transpile_options_typed_traps_types_the_glue_traps_too() {
-    let typed = ComponentOptions {
-        transpile: TranspileOptions::default().with_typed_traps(true),
-        ..ComponentOptions::default()
-    };
-    let code = transpile_component(&component_of(WORLD, CORE), &typed).unwrap();
+    let code =
+        transpile_component(&component_of(WORLD, CORE), &options_with_typed_traps(true)).unwrap();
     assert!(code.contains("pub enum Wasm2RsGlueTrap"), "{code}");
-    let untyped = ComponentOptions {
-        transpile: TranspileOptions::default().with_typed_traps(false),
-        ..ComponentOptions::default()
-    };
-    let plain = transpile_component(&component_of(WORLD, CORE), &untyped).unwrap();
+    let plain =
+        transpile_component(&component_of(WORLD, CORE), &options_with_typed_traps(false)).unwrap();
     assert!(!plain.contains("Wasm2RsGlueTrap"), "{plain}");
 }
 
@@ -367,11 +368,8 @@ fn the_cli_component_flag_writes_what_transpile_component_returns() {
         output.as_os_str(),
     ]);
     // The CLI emits untyped traps unless `--typed-traps` is passed.
-    let untyped = ComponentOptions {
-        transpile: TranspileOptions::default().with_typed_traps(false),
-        ..ComponentOptions::default()
-    };
-    let expected = transpile_component(&component_of(WORLD, CORE), &untyped).unwrap();
+    let expected =
+        transpile_component(&component_of(WORLD, CORE), &options_with_typed_traps(false)).unwrap();
     assert_eq!(std::fs::read_to_string(output).unwrap(), expected);
 }
 

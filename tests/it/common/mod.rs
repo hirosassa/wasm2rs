@@ -442,11 +442,12 @@ fn program_for(wat: &str, main_body: &str) -> String {
 /// generated text or Rust's own panic message. Typed traps are covered by the
 /// `typed_traps` suites.
 pub fn transpile_untyped(wasm: &[u8]) -> String {
-    wasm2rs::transpile_with_options(
-        wasm,
-        &wasm2rs::TranspileOptions::default().with_typed_traps(false),
-    )
-    .expect("transpile ok")
+    transpile_traps(wasm, false)
+}
+
+fn transpile_traps(wasm: &[u8], typed: bool) -> String {
+    let opts = wasm2rs::TranspileOptions::default().with_typed_traps(typed);
+    wasm2rs::transpile_with_options(wasm, &opts).expect("transpile ok")
 }
 
 /// Transpile a single module, run `main_body`, and assert it exits 0.
@@ -486,11 +487,9 @@ pub fn compile_run_raw(name: &str, wat: &str, trailer: &str) {
 pub fn compile_run_raw_both_modes(name: &str, wat: &str, trailer: impl Fn(bool) -> String) {
     let wasm = wat::parse_str(wat).expect("valid wat");
     for typed in [false, true] {
-        let opts = wasm2rs::TranspileOptions::default().with_typed_traps(typed);
-        let generated = wasm2rs::transpile_with_options(&wasm, &opts).expect("transpile ok");
         run_raw(
             &format!("{name}_typed_{typed}"),
-            &generated,
+            &transpile_traps(&wasm, typed),
             &trailer(typed),
         );
     }
@@ -539,7 +538,7 @@ pub fn expect_trap(name: &str, wat: &str, main_body: &str) {
 /// The message a typed trap (`TranspileOptions::typed_traps`) carries for the reason
 /// the untyped output reports as `needle`. Most variants reuse the untyped message
 /// verbatim; only the traps that untyped output leaves to Rust's own arithmetic and
-/// indexing panics are worded differently.
+/// indexing panics, or words differently (`ref.cast failed`), are worded differently.
 fn typed_needle(needle: &str) -> &str {
     match needle {
         "divide with overflow" => "integer overflow",
@@ -596,22 +595,14 @@ fn run_expecting_trap(name: &str, program: &str, needle: &str) {
 /// mode is the default.
 pub fn expect_trap_with(name: &str, wat: &str, main_body: &str, needle: &str) {
     let wasm = wat::parse_str(wat).expect("valid wat");
-    let untyped = wasm2rs::transpile_with_options(
-        &wasm,
-        &wasm2rs::TranspileOptions::default().with_typed_traps(false),
-    )
-    .expect("transpile ok");
+    let untyped = transpile_traps(&wasm, false);
     run_expecting_trap(
         name,
         &format!("{untyped}\nfn main() {{\n{main_body}\n}}\n"),
         needle,
     );
 
-    let typed = wasm2rs::transpile_with_options(
-        &wasm,
-        &wasm2rs::TranspileOptions::default().with_typed_traps(true),
-    )
-    .expect("transpile ok");
+    let typed = transpile_traps(&wasm, true);
     run_expecting_trap(
         &format!("{name}_typed"),
         &typed_main(&typed, main_body),
