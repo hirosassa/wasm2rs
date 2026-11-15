@@ -1,5 +1,7 @@
 //! The slab that hands out and recycles the guest-visible handles.
 
+use crate::WasiTrap;
+
 /// Traps the guest. The generated `Host` methods have no error channel for a bad handle or an
 /// exhausted host resource, so a trap is a panic that names the cause (the contract in the
 /// crate docs).
@@ -10,6 +12,23 @@
 )]
 pub(super) fn trap(msg: impl std::fmt::Display) -> ! {
     panic!("{msg}")
+}
+
+/// Raises `trap`: a `WasiTrap` payload that bypasses the panic hook when `typed` (the host's
+/// `typed_traps`), otherwise the panic that carries its message.
+#[cold]
+pub(super) fn raise(typed: bool, cause: WasiTrap) -> ! {
+    if typed {
+        std::panic::resume_unwind(Box::new(cause))
+    } else {
+        trap(cause)
+    }
+}
+
+/// Traps on a handle the guest never got or already dropped (it must still own it).
+#[cold]
+pub(super) fn invalid_handle(typed: bool, resource: &'static str) -> ! {
+    raise(typed, WasiTrap::InvalidResourceHandle { resource })
 }
 
 /// Locks the stdin buffer; one poisoned by a panicking thread traps like any broken invariant.
@@ -39,8 +58,8 @@ pub(super) fn to_usize(len: u64) -> usize {
 }
 
 /// The handle for a slab slot; a table with over `u32::MAX` slots traps.
-pub(super) fn to_handle(slot: usize) -> u32 {
-    u32::try_from(slot).unwrap_or_else(|_| trap("handle table exhausted"))
+pub(super) fn to_handle(typed: bool, slot: usize) -> u32 {
+    u32::try_from(slot).unwrap_or_else(|_| raise(typed, WasiTrap::HandleTableExhausted))
 }
 
 /// A table of live handles: a handle is a slot's index, and the slot of a dropped handle
@@ -131,5 +150,29 @@ impl<T> Slab<T> {
     /// Frees a slot; an unknown or already free one is ignored.
     pub(super) fn remove(&mut self, slot: usize) {
         drop(self.take(slot));
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use super::*;
+    use std::panic::catch_unwind;
+
+    // a table of `u32::MAX + 1` slots cannot be built, so the conversion is called directly
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn a_slot_past_u32_is_handle_table_exhausted() {
+        let slot = usize::try_from(u64::from(u32::MAX) + 1).unwrap_or(usize::MAX);
+        let payload = catch_unwind(|| to_handle(true, slot)).unwrap_err();
+        assert_eq!(
+            payload.downcast_ref::<WasiTrap>(),
+            Some(&WasiTrap::HandleTableExhausted)
+        );
+        let payload = catch_unwind(|| to_handle(false, slot)).unwrap_err();
+        assert_eq!(
+            payload.downcast_ref::<String>().map(String::as_str),
+            Some("handle table exhausted")
+        );
     }
 }

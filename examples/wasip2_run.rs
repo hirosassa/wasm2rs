@@ -71,10 +71,15 @@ fn main() {
     // argv[0] goes in at run time, not into the source: the same component then builds to the
     // same program wherever it lies (see `$WASM2RS_EXAMPLE_CACHE_DIR`)
     // `Wasm2RsTrap` is defined only when the guest uses one of the typed traps.
+    // `WasiTrap` is what a host built with `typed_traps` raises; this one is not, but the
+    // report names both so it stays right if the host is configured that way.
+    let report_wasi_trap = "if let Some(trap) = payload.downcast_ref::<wasm2rs_wasi::WasiTrap>() { eprintln!(\"wasip2_run: trap: {trap}\"); }";
     let report_trap = if generated.contains("enum Wasm2RsTrap") {
-        "if let Some(trap) = payload.downcast_ref::<Wasm2RsTrap>() { eprintln!(\"wasip2_run: trap: {trap}\"); }"
+        format!(
+            "if let Some(trap) = payload.downcast_ref::<Wasm2RsTrap>() {{ eprintln!(\"wasip2_run: trap: {{trap}}\"); }} else {report_wasi_trap}"
+        )
     } else {
-        "let _ = &payload;"
+        report_wasi_trap.to_string()
     };
     let main = format!(
         "fn main() {{\n    \

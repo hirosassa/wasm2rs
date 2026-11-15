@@ -89,6 +89,7 @@ pub struct WasiHostBuilder {
     stdin: Option<Box<dyn Read + Send>>,
     stdout: Option<Box<dyn Write + Send>>,
     stderr: Option<Box<dyn Write + Send>>,
+    typed_traps: bool,
 }
 
 impl WasiHostBuilder {
@@ -182,6 +183,15 @@ impl WasiHostBuilder {
         self
     }
 
+    /// Whether a trap the host raises (an unknown handle, an exhausted handle table, a missing
+    /// or failing random source) unwinds with a [`WasiTrap`](crate::WasiTrap) payload instead
+    /// of a message string (off by default). See [`WasiTrap`](crate::WasiTrap) for what is
+    /// still a string panic.
+    pub fn typed_traps(mut self, on: bool) -> Self {
+        self.typed_traps = on;
+        self
+    }
+
     /// The host, or why the configuration is not valid.
     pub fn build(self) -> Result<WasiHost, ConfigError> {
         let mut host = WasiHost::new(self.env).with_arguments(self.args);
@@ -190,6 +200,7 @@ impl WasiHostBuilder {
         host.stdin_reader = self.stdin;
         host.stdout = self.stdout;
         host.stderr = self.stderr;
+        host.typed_traps = self.typed_traps;
         if let Some(clock) = self.clock {
             host.clock = clock;
         }

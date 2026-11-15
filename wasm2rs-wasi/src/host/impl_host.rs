@@ -130,6 +130,7 @@ impl Host for WasiHost {
     fn wasi_http_types_constructor_outgoing_request(&mut self, headers: Fields) -> OutgoingRequest {
         let fields = self.http_take_fields(headers);
         OutgoingRequest(to_handle(
+            self.typed_traps,
             self.http_requests.insert(HttpOutgoingRequest::new(fields)),
         ))
     }
@@ -173,11 +174,11 @@ impl Host for WasiHost {
         let body = self
             .http_out_bodies
             .take(idx(this.0))
-            .unwrap_or_else(|| http_missing("outgoing-body"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-body"));
         let trailers = trailers.map(|handle| {
             self.http_fields
                 .take(idx(handle.0))
-                .unwrap_or_else(|| http_missing("fields"))
+                .unwrap_or_else(|| invalid_handle(self.typed_traps, "http fields"))
         });
         let entries = trailers.map(|t| t.entries());
         if let Some(entries) = &entries
@@ -232,13 +233,16 @@ impl Host for WasiHost {
         let request = self
             .http_in_requests
             .get_mut(idx(self_.0))
-            .unwrap_or_else(|| http_missing("incoming-request"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http incoming-request"));
         let body = request.body.take().ok_or(())?;
         let trailers = request.trailers.take();
         let reader = Box::new(std::io::Cursor::new(body));
         let mut body = HttpIncomingBody::spawn(reader, None);
         body.trailers = trailers;
-        Ok(IncomingBody(to_handle(self.http_bodies.insert(body))))
+        Ok(IncomingBody(to_handle(
+            self.typed_traps,
+            self.http_bodies.insert(body),
+        )))
     }
 
     /// Takes over the `headers` handle's contents: the guest gave the resource away.
@@ -248,6 +252,7 @@ impl Host for WasiHost {
     ) -> OutgoingResponse {
         let fields = self.http_take_fields(headers);
         OutgoingResponse(to_handle(
+            self.typed_traps,
             self.http_out_responses
                 .insert(HttpOutgoingResponse::new(fields)),
         ))
@@ -304,12 +309,13 @@ impl Host for WasiHost {
         let answer = response.map(|handle| {
             self.http_out_responses
                 .take(idx(handle.0))
-                .unwrap_or_else(|| http_missing("outgoing-response"))
+                .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-response"))
         });
         *self
             .http_outparams
             .get_mut(&param.0)
-            .unwrap_or_else(|| http_missing("response-outparam")) = Some(answer);
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http response-outparam")) =
+            Some(answer);
     }
 
     fn wasi_http_types_resource_drop_incoming_request(&mut self, handle: IncomingRequest) {
@@ -413,7 +419,10 @@ impl Host for WasiHost {
     }
 
     fn wasi_http_types_constructor_request_options(&mut self) -> RequestOptions {
-        RequestOptions(to_handle(self.http_options.insert(HttpOptions::default())))
+        RequestOptions(to_handle(
+            self.typed_traps,
+            self.http_options.insert(HttpOptions::default()),
+        ))
     }
 
     fn wasi_http_types_method_request_options_connect_timeout(
@@ -503,7 +512,7 @@ impl Host for WasiHost {
                 let slot = self
                     .http_responses
                     .insert(HttpIncomingResponse::new(response));
-                Ok(IncomingResponse(to_handle(slot)))
+                Ok(IncomingResponse(to_handle(self.typed_traps, slot)))
             }
             Err(code) => Err(code),
         }))
@@ -528,6 +537,7 @@ impl Host for WasiHost {
     ) -> Result<IncomingBody, ()> {
         let (reader, trailers) = self.http_response_mut(self_).take_body().ok_or(())?;
         Ok(IncomingBody(to_handle(
+            self.typed_traps,
             self.http_bodies
                 .insert(HttpIncomingBody::spawn(reader, trailers)),
         )))
@@ -556,12 +566,15 @@ impl Host for WasiHost {
         let mut body = self
             .http_bodies
             .take(idx(this.0))
-            .unwrap_or_else(|| http_missing("incoming-body"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http incoming-body"));
         let trailers = body
             .trailers
             .take()
             .or_else(|| body.take_received_trailers());
-        FutureTrailers(to_handle(self.http_trailers.insert(Some(trailers))))
+        FutureTrailers(to_handle(
+            self.typed_traps,
+            self.http_trailers.insert(Some(trailers)),
+        ))
     }
 
     /// Only failures of a response body have an `error-code` (`None` for any other `error`).
@@ -594,7 +607,7 @@ impl Host for WasiHost {
     ) -> Pollable {
         self.http_trailers
             .get(idx(self_.0))
-            .unwrap_or_else(|| http_missing("future-trailers"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http future-trailers"));
         self.subscribe(None)
     }
 
@@ -606,7 +619,7 @@ impl Host for WasiHost {
         let slot = self
             .http_trailers
             .get_mut(idx(self_.0))
-            .unwrap_or_else(|| http_missing("future-trailers"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http future-trailers"));
         let Some(trailers) = slot.take() else {
             return Some(Err(()));
         };
@@ -1019,7 +1032,7 @@ impl Host for WasiHost {
             file,
             dir: opened_dir,
         });
-        Ok(Descriptor(to_handle(slot)))
+        Ok(Descriptor(to_handle(self.typed_traps, slot)))
     }
 
     /// A new stream over the file, starting at `offset`: `is-directory` for a directory,
@@ -1031,7 +1044,7 @@ impl Host for WasiHost {
     ) -> Result<InputStream, FsErrorCode> {
         let stream = FileStream::over(self.readable_descriptor_file(self_.0)?, offset, false)?;
         let slot = self.files.insert(stream);
-        Ok(InputStream(file_stream_handle(slot)))
+        Ok(InputStream(file_stream_handle(self.typed_traps, slot)))
     }
 
     /// A new stream writing into the file from `offset`: `read-only` unless the preopen is
@@ -1386,6 +1399,7 @@ impl Host for WasiHost {
     ) -> Result<DirectoryEntryStream, FsErrorCode> {
         let entries = self.list_directory(self_.0)?;
         Ok(DirectoryEntryStream(to_handle(
+            self.typed_traps,
             self.listings.insert(entries.into_iter()),
         )))
     }
@@ -1504,7 +1518,7 @@ impl Host for WasiHost {
             state: NetState::Unbound,
             options: TcpOptions::default(),
         });
-        Ok(TcpSocket(to_handle(slot)))
+        Ok(TcpSocket(to_handle(self.typed_traps, slot)))
     }
 
     fn wasi_sockets_tcp_resource_drop_tcp_socket(&mut self, handle: TcpSocket) {
@@ -1565,8 +1579,8 @@ impl Host for WasiHost {
     ) -> Result<(InputStream, OutputStream), NetErrorCode> {
         let (input, output) = self.tcp_finish_connect(self_.0)?;
         Ok((
-            InputStream(to_handle(input)),
-            OutputStream(to_handle(output)),
+            InputStream(to_handle(self.typed_traps, input)),
+            OutputStream(to_handle(self.typed_traps, output)),
         ))
     }
 
@@ -1577,9 +1591,9 @@ impl Host for WasiHost {
     ) -> Result<(TcpSocket, InputStream, OutputStream), NetErrorCode> {
         let (socket, input, output) = self.tcp_accept(self_.0)?;
         Ok((
-            TcpSocket(to_handle(socket)),
-            InputStream(to_handle(input)),
-            OutputStream(to_handle(output)),
+            TcpSocket(to_handle(self.typed_traps, socket)),
+            InputStream(to_handle(self.typed_traps, input)),
+            OutputStream(to_handle(self.typed_traps, output)),
         ))
     }
 
@@ -1797,7 +1811,7 @@ impl Host for WasiHost {
             state: UdpState::Unbound,
             generation: Arc::new(AtomicU64::new(0)),
         });
-        Ok(UdpSocket(to_handle(slot)))
+        Ok(UdpSocket(to_handle(self.typed_traps, slot)))
     }
 
     fn wasi_sockets_udp_resource_drop_udp_socket(&mut self, handle: UdpSocket) {
@@ -1843,8 +1857,8 @@ impl Host for WasiHost {
     ) -> Result<(IncomingDatagramStream, OutgoingDatagramStream), NetErrorCode> {
         let (input, output) = self.udp_stream(self_.0, remote_address.map(socket_addr))?;
         Ok((
-            IncomingDatagramStream(to_handle(input)),
-            OutgoingDatagramStream(to_handle(output)),
+            IncomingDatagramStream(to_handle(self.typed_traps, input)),
+            OutgoingDatagramStream(to_handle(self.typed_traps, output)),
         ))
     }
 
@@ -1985,6 +1999,7 @@ impl Host for WasiHost {
     ) -> Result<ResolveAddressStream, NetErrorCode> {
         let found = self.resolve_name(&name)?;
         Ok(ResolveAddressStream(to_handle(
+            self.typed_traps,
             self.resolutions.insert(found),
         )))
     }
@@ -1997,7 +2012,7 @@ impl Host for WasiHost {
         let stream = self
             .resolutions
             .get_mut(idx(self_.0))
-            .unwrap_or_else(|| trap("unknown or dropped resolve-address-stream"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "resolve-address-stream"));
         Ok(stream.pop_front().map(ip_address))
     }
 

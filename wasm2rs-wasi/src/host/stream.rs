@@ -123,7 +123,10 @@ impl WasiHost {
             fs,
             http,
         };
-        StreamError::LastOperationFailed(Error(to_handle(self.errors.insert(entry))))
+        StreamError::LastOperationFailed(Error(to_handle(
+            self.typed_traps,
+            self.errors.insert(entry),
+        )))
     }
 
     /// `last_operation_failed` for an I/O failure of `stream`: only a file stream's carries a
@@ -197,7 +200,7 @@ impl WasiHost {
             let body = self
                 .http_bodies
                 .get(slot)
-                .unwrap_or_else(|| trap("read from an unknown or dropped stream"))
+                .unwrap_or_else(|| invalid_handle(self.typed_traps, "stream"))
                 .shared();
             return match body.read(buf.len()) {
                 http::BodyRead::Data(data) => Ok(data),
@@ -214,7 +217,7 @@ impl WasiHost {
             let conn = self
                 .tcp_in
                 .get_mut(slot)
-                .unwrap_or_else(|| trap("read from an unknown or dropped stream"));
+                .unwrap_or_else(|| invalid_handle(self.typed_traps, "stream"));
             if buf.is_empty() {
                 // a zero length succeeds only while the connection is open: peek, consume nothing
                 return match conn.peek(&mut [0u8; 1]) {
@@ -240,7 +243,7 @@ impl WasiHost {
         let file = self
             .files
             .get_mut(index)
-            .unwrap_or_else(|| trap("read from an unknown or dropped stream"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "stream"));
         if buf.is_empty() {
             // a zero length succeeds only before the end of the file: look, consume nothing
             let at_end = file

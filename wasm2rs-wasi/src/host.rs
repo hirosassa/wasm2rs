@@ -102,6 +102,7 @@ mod net;
 mod slab;
 mod stream;
 
+use crate::WasiTrap;
 pub use config::{Access, ConfigError, NetworkPolicy, WasiHostBuilder};
 use fs::*;
 pub use http::{IncomingRequestParts, ServedBody, ServedResponse};
@@ -208,6 +209,8 @@ pub struct WasiHost {
     next_outparam: u32,
     /// The most a request or response body may hold.
     http_max_body: usize,
+    /// Whether a trap is a `WasiTrap` payload (see `WasiHostBuilder::typed_traps`).
+    typed_traps: bool,
     /// The `future-trailers` handed out by `incoming-body.finish`: the trailers of a request the
     /// embedder minted with some, or those the client read after a response body (`none` for
     /// no trailers). `None` once `get` answered.
@@ -221,34 +224,28 @@ impl Drop for WasiHost {
     }
 }
 
-/// The slot of a `wasi:http` resource handle that the guest must still own: using a dropped
-/// one traps, like any other bad handle.
-fn http_missing(kind: &str) -> ! {
-    trap(format_args!("wasi:http: unknown {kind} handle"))
-}
-
 impl WasiHost {
     fn http_fields(&self, h: Fields) -> &http::HttpFields {
         self.http_fields
             .get(idx(h.0))
-            .unwrap_or_else(|| http_missing("fields"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http fields"))
     }
 
     fn http_fields_mut(&mut self, h: Fields) -> &mut http::HttpFields {
         self.http_fields
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing("fields"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http fields"))
     }
 
     fn http_new_fields(&mut self, fields: http::HttpFields) -> Fields {
-        Fields(to_handle(self.http_fields.insert(fields)))
+        Fields(to_handle(self.typed_traps, self.http_fields.insert(fields)))
     }
 
     /// Takes over the `fields` handle's contents, for a constructor the guest gave it to.
     fn http_take_fields(&mut self, h: Fields) -> http::HttpFields {
         self.http_fields
             .take(idx(h.0))
-            .unwrap_or_else(|| http_missing("fields"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http fields"))
     }
 
     /// A new `outgoing-body` and the handle its owner keeps; `too_large` is the `error-code`
@@ -260,79 +257,79 @@ impl WasiHost {
         let body = http::HttpOutgoingBody::new(self.http_max_body, too_large);
         let handle = body.handle();
         let slot = self.http_out_bodies.insert(body);
-        (handle, OutgoingBody(to_handle(slot)))
+        (handle, OutgoingBody(to_handle(self.typed_traps, slot)))
     }
 
     fn http_option(&self, h: RequestOptions) -> &http::HttpOptions {
         self.http_options
             .get(idx(h.0))
-            .unwrap_or_else(|| http_missing("request-options"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http request-options"))
     }
 
     fn http_option_mut(&mut self, h: RequestOptions) -> &mut http::HttpOptions {
         self.http_options
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing("request-options"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http request-options"))
     }
 
     fn http_request(&self, h: OutgoingRequest) -> &http::HttpOutgoingRequest {
         self.http_requests
             .get(idx(h.0))
-            .unwrap_or_else(|| http_missing("outgoing-request"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-request"))
     }
 
     fn http_request_mut(&mut self, h: OutgoingRequest) -> &mut http::HttpOutgoingRequest {
         self.http_requests
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing("outgoing-request"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-request"))
     }
 
     fn http_future_mut(&mut self, h: FutureIncomingResponse) -> &mut http::HttpFuture {
         self.http_futures
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing("future-incoming-response"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http future-incoming-response"))
     }
 
     fn http_in_request(&self, h: IncomingRequest) -> &http::HttpIncomingRequest {
         self.http_in_requests
             .get(idx(h.0))
-            .unwrap_or_else(|| http_missing("incoming-request"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http incoming-request"))
     }
 
     fn http_out_response(&self, h: OutgoingResponse) -> &http::HttpOutgoingResponse {
         self.http_out_responses
             .get(idx(h.0))
-            .unwrap_or_else(|| http_missing("outgoing-response"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-response"))
     }
 
     fn http_out_response_mut(&mut self, h: OutgoingResponse) -> &mut http::HttpOutgoingResponse {
         self.http_out_responses
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing("outgoing-response"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-response"))
     }
 
     fn http_response(&self, h: IncomingResponse) -> &http::HttpIncomingResponse {
         self.http_responses
             .get(idx(h.0))
-            .unwrap_or_else(|| http_missing("incoming-response"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http incoming-response"))
     }
 
     fn http_response_mut(&mut self, h: IncomingResponse) -> &mut http::HttpIncomingResponse {
         self.http_responses
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing("incoming-response"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http incoming-response"))
     }
 
     fn http_out_body_mut(&mut self, h: OutgoingBody) -> &mut http::HttpOutgoingBody {
         self.http_out_bodies
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing("outgoing-body"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-body"))
     }
 
     fn http_body_mut(&mut self, h: IncomingBody) -> &mut http::HttpIncomingBody {
         self.http_bodies
             .get_mut(idx(h.0))
-            .unwrap_or_else(|| http_missing("incoming-body"))
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http incoming-body"))
     }
 
     /// Whether `get` of the future in `http_futures` that `r` refers to has an answer (a dropped one
@@ -361,11 +358,11 @@ impl WasiHost {
         let mut request = self
             .http_requests
             .take(idx(handle.0))
-            .unwrap_or_else(|| http_missing("outgoing-request"));
+            .unwrap_or_else(|| invalid_handle(self.typed_traps, "http outgoing-request"));
         let options = options.map(|o| {
             self.http_options
                 .take(idx(o.0))
-                .unwrap_or_else(|| http_missing("request-options"))
+                .unwrap_or_else(|| invalid_handle(self.typed_traps, "http request-options"))
         });
         let authority = request
             .authority
@@ -400,6 +397,7 @@ impl WasiHost {
         };
         let future = http::HttpFuture::spawn(client, request, body);
         Ok(FutureIncomingResponse(to_handle(
+            self.typed_traps,
             self.http_futures.insert(future),
         )))
     }
@@ -409,6 +407,7 @@ impl WasiHost {
     /// consumed or dropped stays in the table.
     pub fn new_incoming_request(&mut self, parts: IncomingRequestParts) -> IncomingRequest {
         IncomingRequest(to_handle(
+            self.typed_traps,
             self.http_in_requests
                 .insert(http::HttpIncomingRequest::new(parts)),
         ))
@@ -485,8 +484,16 @@ impl WasiHost {
             http_outparams: HashMap::new(),
             next_outparam: 0,
             http_max_body: DEFAULT_MAX_REQUEST_BODY,
+            typed_traps: false,
             http_trailers: Slab::new(),
         }
+    }
+
+    /// Whether a trap is a [`WasiTrap`](crate::WasiTrap) payload instead of a message string
+    /// (off by default); see [`WasiHostBuilder::typed_traps`].
+    pub fn with_typed_traps(mut self, on: bool) -> Self {
+        self.typed_traps = on;
+        self
     }
 
     /// Gives the guest these command-line arguments (none by default).
@@ -546,7 +553,10 @@ impl WasiHost {
     /// at its end): the handle.
     fn open_output_stream(&mut self, descriptor: u32, pos: u64, append: bool) -> Result<u32, Fs> {
         let stream = FileStream::over(self.writable_descriptor_file(descriptor)?, pos, append)?;
-        Ok(file_stream_handle(self.outputs.insert(stream)))
+        Ok(file_stream_handle(
+            self.typed_traps,
+            self.outputs.insert(stream),
+        ))
     }
 
     /// Runs `op` on the open file behind a descriptor, or on the directory's own open handle.
@@ -678,14 +688,19 @@ impl WasiHost {
     fn random_source(&mut self) -> &mut dyn RandomSource {
         match self.random.as_deref_mut() {
             Some(random) => random,
-            None => trap("wasi:random: no random source (enable `os-random` or use the builder)"),
+            None => raise(self.typed_traps, WasiTrap::RandomSourceMissing),
         }
     }
 
     /// Fills `buf` with secure random bytes; a source that fails traps.
     fn fill_secure(&mut self, buf: &mut [u8]) {
         if let Err(e) = self.random_source().fill_random(buf) {
-            trap(format_args!("wasi:random: the random source failed: {e}"));
+            raise(
+                self.typed_traps,
+                WasiTrap::RandomSourceFailed {
+                    message: e.to_string(),
+                },
+            );
         }
     }
 
@@ -751,7 +766,7 @@ impl WasiHost {
     }
 
     fn subscribe_wait(&mut self, wait: Wait) -> Pollable {
-        Pollable(to_handle(self.pollables.insert(wait)))
+        Pollable(to_handle(self.typed_traps, self.pollables.insert(wait)))
     }
 
     /// What a pollable waits for; an unknown one is ready.
@@ -780,7 +795,7 @@ impl WasiHost {
                 .iter()
                 .enumerate()
                 .filter(|(_, w)| w.is_ready(now, &buf, self))
-                .map(|(i, _)| to_handle(i))
+                .map(|(i, _)| to_handle(self.typed_traps, i))
                 .collect();
             if !ready.is_empty() {
                 return ready;
