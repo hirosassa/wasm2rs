@@ -37,6 +37,8 @@ const FIXED: &[&str] = &[
     "_emscripten_thread_init",
     "_emscripten_tls_init",
     "_emscripten_thread_exit",
+    "emscripten_stack_set_limits",
+    "_emscripten_stack_restore",
 ];
 
 /// `name` as a snake_case Rust identifier: camelCase words are split, anything
