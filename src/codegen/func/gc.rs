@@ -283,8 +283,8 @@ impl super::FuncGen<'_> {
         let shape = self.struct_field_shape(type_index, field_index)?;
         let r = self.pop()?;
         let (read, ty) = shape.read(&format!("&__b[{field_index}]"))?;
-        let bind = bind_obj("__g", "__o", &r.code);
-        let inner = format!("{{ {bind} let __b = __o.borrow(); {read} }}");
+        let (bind_r, obj) = bind_obj(&r.code);
+        let inner = format!("{{ {bind_r} {obj} let __b = __o.borrow(); {read} }}");
         let (code, ty) = extend_packed(&shape, inner, ty, ext);
         // The read dereferences a managed object; bind it to a stable temp.
         self.materialize(code, ty)
@@ -301,15 +301,16 @@ impl super::FuncGen<'_> {
         let value = self.pop()?;
         let r = self.pop()?;
         let slot = shape.wrap(&value.code)?;
-        let bind = bind_obj("__g", "__o", &r.code);
+        // The value is evaluated before the null check of the ref.
+        let (bind_r, obj) = bind_obj(&r.code);
         self.line(format!(
-            "{{ {bind} __o.borrow_mut()[{field_index}] = {slot}; }}"
+            "{{ {bind_r} let __v = {slot}; {obj} __o.borrow_mut()[{field_index}] = __v; }}"
         ));
         Ok(())
     }
 
     /// `array.new $t`: pop `size` (top) then the init value and allocate an array
-    /// of `size` copies of the init value.
+    /// of `size` copies of the init value. `init` is evaluated before `size`.
     pub(super) fn array_new(&mut self, type_index: u32) -> Result<(), TranspileError> {
         let shape = self.array_element_shape(type_index)?;
         self.freeze_survivors(2)?;
@@ -317,9 +318,9 @@ impl super::FuncGen<'_> {
         let init = self.pop()?;
         let slot = shape.wrap(&init.code)?;
         let code = format!(
-            "{{ let __n = ({}) as u32 as usize; \
+            "{{ let __v = {slot}; let __n = ({}) as u32 as usize; \
              GcRef::Obj {{ ty: {type_index}u32, \
-             slots: std::rc::Rc::new(std::cell::RefCell::new(vec![{slot}; __n])) }} }}",
+             slots: std::rc::Rc::new(std::cell::RefCell::new(vec![__v; __n])) }} }}",
             size.code
         );
         self.materialize(code, Self::concrete_ref_ty(type_index)?)
@@ -341,9 +342,9 @@ impl super::FuncGen<'_> {
             None => "&__b[(__i) as usize]".to_string(),
         };
         let (read, ty) = shape.read(&slot)?;
-        let bind = bind_obj("__g", "__o", &r.code);
+        let (bind_r, obj) = bind_obj(&r.code);
         let inner = format!(
-            "{{ {bind} let __i = {}; let __b = __o.borrow(); {read} }}",
+            "{{ {bind_r} let __i = {}; {obj} let __b = __o.borrow(); {read} }}",
             index.code
         );
         let (code, ty) = extend_packed(&shape, inner, ty, ext);
@@ -358,15 +359,15 @@ impl super::FuncGen<'_> {
         let index = self.pop()?;
         let r = self.pop()?;
         let slot = shape.wrap(&value.code)?;
-        let bind = bind_obj("__g", "__o", &r.code);
+        let (bind_r, obj) = bind_obj(&r.code);
         // The operands are bound before `borrow_mut()` since they may read the
-        // same array (as in `array.get`).
+        // same array (as in `array.get`), and before the null check of the ref.
         let place = match self.typed_trap(Rt::TrapArrayOob) {
             Some(trap) => format!("*__o.borrow_mut().get_mut(__i).unwrap_or_else(|| {trap}())"),
             None => "__o.borrow_mut()[__i]".to_string(),
         };
         self.line(format!(
-            "{{ {bind} let __i = ({}) as usize; let __v = {slot}; {place} = __v; }}",
+            "{{ {bind_r} let __i = ({}) as usize; let __v = {slot}; {obj} {place} = __v; }}",
             index.code
         ));
         Ok(())
@@ -447,12 +448,12 @@ impl super::FuncGen<'_> {
         let offset = self.pop()?;
         let r = self.pop()?;
         let slot = shape.wrap(&value.code)?;
-        let bind = bind_obj("__g", "__o", &r.code);
+        let (bind_r, obj) = bind_obj(&r.code);
         let arr = self.typed_trap(Rt::TrapArrayOob);
         self.line(format!(
-            "{{ {bind} \
-             let __off = ({}) as u32 as usize; let __n = ({}) as u32 as usize; let __v = {slot}; \
-             let mut __b = __o.borrow_mut(); \
+            "{{ {bind_r} \
+             let __off = ({}) as u32 as usize; let __v = {slot}; let __n = ({}) as u32 as usize; \
+             {obj} let mut __b = __o.borrow_mut(); \
              let __end = {}; \
              for __e in &mut __b[__off..__end] {{ *__e = __v.clone(); }} }}",
             offset.code,
@@ -551,15 +552,15 @@ impl super::FuncGen<'_> {
         let src = self.pop()?;
         let dest = self.pop()?;
         let r = self.pop()?;
-        let bind = bind_obj("__g", "__o", &r.code);
+        let (bind_r, obj) = bind_obj(&r.code);
         let arr = self.typed_trap(Rt::TrapArrayOob);
         let seg = self.typed_trap(Rt::TrapMemoryOob);
         self.line(format!(
-            "{{ {bind} \
+            "{{ {bind_r} \
              let __seg = self.data{data_index}; \
              let __d = ({}) as u32 as usize; let __s = ({}) as u32 as usize; \
              let __n = ({}) as u32 as usize; \
-             let mut __b = __o.borrow_mut(); \
+             {obj} let mut __b = __o.borrow_mut(); \
              let __bytes = __n.checked_mul({esize}).unwrap_or(usize::MAX); \
              {} {} \
              for __k in 0..__n {{ let __base = __s + __k * {esize}; __b[__d + __k] = {slot}; }} }}",
@@ -618,15 +619,15 @@ impl super::FuncGen<'_> {
         let src = self.pop()?;
         let dest = self.pop()?;
         let r = self.pop()?;
-        let bind = bind_obj("__g", "__o", &r.code);
+        let (bind_r, obj) = bind_obj(&r.code);
         let arr = self.typed_trap(Rt::TrapArrayOob);
         let seg = self.typed_trap(Rt::TrapTableOob);
         self.line(format!(
-            "{{ {bind} \
+            "{{ {bind_r} \
              let __seg = self.elem{elem_index}; \
              let __d = ({}) as u32 as usize; let __s = ({}) as u32 as usize; \
              let __n = ({}) as u32 as usize; \
-             let mut __b = __o.borrow_mut(); \
+             {obj} let mut __b = __o.borrow_mut(); \
              {} {} \
              for __k in 0..__n {{ __b[__d + __k] = GcSlot::Func(__seg[__s + __k]); }} }}",
             dest.code,
@@ -1143,11 +1144,15 @@ fn range_check(off: &str, n: &str, len: &str, trap: Option<&str>) -> String {
     format!("let _ = {};", range_end(off, n, len, trap))
 }
 
-/// Generated-code statements: bind `obj` to the `&RefCell` slots of the managed
-/// object `r` (trapping on null via `GcRef::obj()`). `r` is first bound by
-/// reference to `guard` because `obj()` borrows from it: a temporary `r` (e.g. a
-/// call result) would otherwise be dropped at the end of the `let` and the
-/// borrow would not compile.
-fn bind_obj(guard: &str, obj: &str, r: &str) -> String {
-    format!("let {guard} = &({r}); let {obj} = {guard}.obj();")
+/// Generated-code statements: bind `__o` to the `&RefCell` slots of the managed
+/// object `r`, split in two so the operands above `r` can be evaluated between
+/// them, before the null check traps. The first binds `r` by reference to `__g`
+/// because `obj()` borrows from it: a temporary `r` (e.g. a call result) would
+/// otherwise be dropped at the end of the `let` and the borrow would not compile.
+/// The second traps on null via `GcRef::obj()`.
+fn bind_obj(r: &str) -> (String, String) {
+    (
+        format!("let __g = &({r});"),
+        "let __o = __g.obj();".to_string(),
+    )
 }

@@ -1412,3 +1412,103 @@ fn a_trapping_argument_of_a_null_return_call_ref_traps_first() {
         ),
     );
 }
+
+/// #419 / #420: GC ops evaluate every operand in wasm push order before the null
+/// check of the ref, so an inline operand that traps on its own wins over a null
+/// ref, and `array.new` / `array.fill` evaluate `init` / `value` before `size`.
+/// `oob` and `null_i31` are inline trapping expressions of different kinds.
+const GC_OPERAND_ORDER: &str = r#"(module
+    (type $a (array (mut i32)))
+    (type $f (array (mut funcref)))
+    (type $s (struct (field (mut i32))))
+    (elem $seg func $fn)
+    (data $d "\01\02\03\04")
+    (memory 1)
+    (func $fn)
+    (func (export "mk") (result (ref $a)) (array.new_default $a (i32.const 4)))
+    (func (export "get_idx") (param (ref null $a)) (result i32)
+      (array.get $a (local.get 0) (i32.load (i32.const 65536))))
+    (func (export "set_idx") (param (ref null $a))
+      (array.set $a (local.get 0) (i32.load (i32.const 65536)) (i32.const 1)))
+    (func (export "set_val") (param (ref null $a))
+      (array.set $a (local.get 0) (i32.const 0) (i32.load (i32.const 65536))))
+    (func (export "fill_off") (param (ref null $a))
+      (array.fill $a (local.get 0) (i32.load (i32.const 65536)) (i32.const 1) (i32.const 1)))
+    (func (export "fill_val") (param (ref null $a))
+      (array.fill $a (local.get 0) (i32.const 0) (i32.load (i32.const 65536)) (i32.const 1)))
+    (func (export "fill_size") (param (ref null $a))
+      (array.fill $a (local.get 0) (i32.const 0) (i32.const 1) (i32.load (i32.const 65536))))
+    (func (export "init_data_dest") (param (ref null $a))
+      (array.init_data $a $d (local.get 0) (i32.load (i32.const 65536))
+        (i32.const 0) (i32.const 1)))
+    (func (export "init_data_size") (param (ref null $a))
+      (array.init_data $a $d (local.get 0) (i32.const 0) (i32.const 0)
+        (i32.load (i32.const 65536))))
+    (func (export "init_elem_dest") (param (ref null $f))
+      (array.init_elem $f $seg (local.get 0) (i32.load (i32.const 65536))
+        (i32.const 0) (i32.const 1)))
+    (func (export "struct_set_val") (param (ref null $s))
+      (struct.set $s 0 (local.get 0) (i32.load (i32.const 65536))))
+    (func (export "new_order") (param i31ref) (result (ref $a))
+      (array.new $a (i31.get_u (local.get 0)) (i32.load (i32.const 65536))))
+    (func (export "fill_order") (param (ref $a) i31ref)
+      (array.fill $a (local.get 0) (i32.const 0) (i31.get_u (local.get 1))
+        (i32.load (i32.const 65536)))))"#;
+
+/// Each call with its null ref; the operand `i32.load (i32.const 65536)` traps.
+const OPERAND_TRAP_CALLS: &str = "[
+    |i: &mut Instance| { i.get_idx(GcRef::Null); },
+    |i: &mut Instance| i.set_idx(GcRef::Null),
+    |i: &mut Instance| i.set_val(GcRef::Null),
+    |i: &mut Instance| i.fill_off(GcRef::Null),
+    |i: &mut Instance| i.fill_val(GcRef::Null),
+    |i: &mut Instance| i.fill_size(GcRef::Null),
+    |i: &mut Instance| i.init_data_dest(GcRef::Null),
+    |i: &mut Instance| i.init_data_size(GcRef::Null),
+    |i: &mut Instance| i.init_elem_dest(GcRef::Null),
+    |i: &mut Instance| i.struct_set_val(GcRef::Null),
+]";
+
+#[test]
+fn gc_ops_evaluate_operands_before_the_null_check_of_the_ref() {
+    compile_run_with(
+        "gc_operand_order_on",
+        GC_OPERAND_ORDER,
+        typed_named(),
+        &format!(
+            r#"{CATCH}
+            let mut inst = Instance::new();
+            for call in {OPERAND_TRAP_CALLS} {{
+                assert!(matches!(
+                    trap_of(|| call(&mut inst)),
+                    Wasm2RsTrap::OutOfBoundsMemoryAccess
+                ));
+            }}
+            // `init` / `value` come before `size`: the null `i31.get_u` wins.
+            assert!(matches!(
+                trap_of(|| inst.new_order(GcRef::Null)),
+                Wasm2RsTrap::NullReference
+            ));
+            let arr = inst.mk();
+            assert!(matches!(
+                trap_of(|| inst.fill_order(arr.clone(), GcRef::Null)),
+                Wasm2RsTrap::NullReference
+            ));"#
+        ),
+    );
+    compile_run_with(
+        "gc_operand_order_off",
+        GC_OPERAND_ORDER,
+        typed_named().with_typed_traps(false),
+        &format!(
+            r#"{MSG_OF}
+            let mut inst = Instance::new();
+            for call in {OPERAND_TRAP_CALLS} {{
+                assert_ne!(msg_of(|| call(&mut inst)), "null reference");
+            }}
+            assert_eq!(msg_of(|| inst.new_order(GcRef::Null)), "i31.get on null");
+            let arr = inst.mk();
+            assert_eq!(msg_of(|| inst.fill_order(arr.clone(), GcRef::Null)), "i31.get on null");"#
+        ),
+    );
+}
