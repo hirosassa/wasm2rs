@@ -7,7 +7,9 @@
 //! out, so the code the option adds is not drowned).
 //!
 //! Usage: `cargo run --release --example bench_memory [runs]` (default 7 runs,
-//! the median is reported). Prints Markdown tables.
+//! the median is reported). Prints Markdown tables. With `BENCH_KEEP_DIR=<dir>` the
+//! timing binaries are built into `<dir>` (as `<workload>_<mode>`) and kept, so
+//! binaries from two commits can be timed against each other.
 
 use std::path::Path;
 use std::process::Command;
@@ -17,7 +19,7 @@ use wasm2rs::{TranspileOptions, transpile_with_options};
 
 /// (name, wat, `run` argument sized for roughly a second of work). `i32`, like the
 /// generated `run` parameter, so an oversized count fails here rather than in rustc.
-const WORKLOADS: [(&str, &str, i32); 4] = [
+const WORKLOADS: [(&str, &str, i32); 6] = [
     ("hash", include_str!("../benches/memory/hash.wat"), 15_000),
     (
         "matmul",
@@ -33,6 +35,16 @@ const WORKLOADS: [(&str, &str, i32); 4] = [
         "divrem",
         include_str!("../benches/memory/divrem.wat"),
         150_000_000,
+    ),
+    (
+        "atomics",
+        include_str!("../benches/memory/atomics.wat"),
+        900_000_000,
+    ),
+    (
+        "atomics_shared",
+        include_str!("../benches/memory/atomics_shared.wat"),
+        300_000_000,
     ),
 ];
 
@@ -134,7 +146,11 @@ fn main() {
     let runs: usize = std::env::args()
         .nth(1)
         .map_or(7, |a| a.parse().expect("runs"));
-    let dir = std::env::temp_dir().join(format!("wasm2rs-bench-memory-{}", std::process::id()));
+    let keep = std::env::var_os("BENCH_KEEP_DIR");
+    let dir = keep.as_ref().map_or_else(
+        || std::env::temp_dir().join(format!("wasm2rs-bench-memory-{}", std::process::id())),
+        std::path::PathBuf::from,
+    );
     std::fs::create_dir_all(&dir).expect("create dir");
 
     println!("| workload | safe (ms) | typed (ms) | unsafe (ms) | typed / safe | unsafe / safe |");
@@ -180,5 +196,7 @@ fn main() {
             typed as f64 / safe as f64
         );
     }
-    std::fs::remove_dir_all(&dir).ok();
+    if keep.is_none() {
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
