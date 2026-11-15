@@ -7,8 +7,9 @@ linked from each section.
 ## Where it stands
 
 - The `wasm2rs-wasi` crate's `WasiHost` implements **all 199 methods of the official WASI 0.2.0
-  WIT** (`cli`, `clocks`, `filesystem`, `http`, `io`, `random`, `sockets`). `wasm2rs-wasi/src/generated.rs` is
+  WIT** (`cli`, `clocks`, `filesystem`, `http`, `io`, `random`, `sockets`), plus `wasi:cli/exit`'s `exit-with-code` from the 0.2.12 overlay (200 in all). `wasm2rs-wasi/src/generated.rs` is
   generated from the official WIT in `tests/wasi_p2_wit/` and a test fails on any difference.
+- Traps: the generated code raises typed traps by default (`Wasm2RsTrap`; the glue's `Wasm2RsGlueTrap`; `--no-typed-traps` restores string panics). The host's own traps are string panics unless `WasiHostBuilder::typed_traps(true)` makes them a `wasm2rs_wasi::WasiTrap`; see [typed-host-design.md](typed-host-design.md).
 - A `wasm32-wasip2` **component** can be turned into Rust source from the CLI
   (`wasm2rs --component`), from the library (`transpile_component`,
   `transpile_component_with_exports`), from `build.rs` (`transpile_component_to_out_dir`) and from
@@ -82,7 +83,7 @@ Transpilation of a component (errors that say why):
 - Components whose core modules are wired to each other (a preview1 adapter with `wit-component`'s
   shim and fixup, exports lifted from several core modules, dylink-style libraries) are linked
   into one `Instance` instead of being refused; every other component keeps the single-module
-  path, byte-identical. See [core-module-linking-design.md](core-module-linking-design.md) and
+  path, with unchanged output apart from typed traps now being the default (see `--no-typed-traps`). See [core-module-linking-design.md](core-module-linking-design.md) and
   [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md). Which real toolchains work
   (Rust, Rust + preview1 adapter, Go, `jco`, `componentize-py`, `wasi:http` handlers) is in
   [component-toolchain-survey.md](component-toolchain-survey.md); JS guests need

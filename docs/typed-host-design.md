@@ -37,6 +37,12 @@ README. Each section names the code or test that backs it.
   to the guest as `/`), `with_writable_preopen` and `with_external_network` (lifts the loopback-only
   rule). `wasip2_run` uses `new` and maps `$WASIP2_PREOPEN` and `$WASIP2_PREOPEN_WRITABLE=1`
   to the preopen methods; it never calls `with_external_network`.
+- A trap of the host itself (a handle the guest never got or already dropped, a missing random
+  source) is a panic with a message by default. `WasiHostBuilder::typed_traps(true)` (or
+  `WasiHost::with_typed_traps`; off by default, unlike the generated code's) makes it a typed
+  `WasiTrap` payload (`wasm2rs-wasi/src/trap.rs`) that skips the panic hook. A guest contract violation (a
+  write over 4096 bytes, an empty poll list) stays a string panic. The generated glue/program of a
+  `--component` output prints a `WasiTrap` unwinding out of a spawned thread.
 - The host runs one guest call at a time and is single-threaded except for the stdin thread.
 
 ## Handles and tables

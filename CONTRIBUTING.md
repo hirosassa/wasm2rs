@@ -17,7 +17,7 @@ pull requests are all welcome.
 
 Requirements:
 
-- Rust (stable; CI also builds on beta and nightly), edition 2024
+- Rust 1.89 or newer (stable; CI also builds on beta and nightly), edition 2024
 - `rustfmt` and `clippy` components
 - Optional, for the end-to-end tests: the `wasm32-wasip1-threads` target, wasi-sdk,
   emsdk. See [docs/wasi-threads-e2e.md](docs/wasi-threads-e2e.md). Tests that need a

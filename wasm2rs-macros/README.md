@@ -45,6 +45,8 @@ wasm2rs_macros::include_wasm!("path.wasm" [, option]*);
 | `reentrant_imports` | Let the host call back into the guest while an import runs. |
 | `simd_intrinsics` | Emit the integer SIMD lane helpers with `core::arch` NEON / SSE2 bodies (the scalar loop stays as the `cfg` fallback). The generated code contains `unsafe`. |
 
+The options not listed (`call_depth_limit`, `split_dispatch`, `jobs`, `entry_exports`, `typed_traps`) keep their `TranspileOptions::default()` value, so a trap is a typed `Wasm2RsTrap` payload that prints nothing to stderr; use a build script with `TranspileOptions::with_typed_traps(false)` to keep string panics.
+
 See the [wasm2rs README](https://github.com/hirosassa/wasm2rs#readme) for details on each option, the generated API, WASI support and supported proposals.
 
 ## Components
