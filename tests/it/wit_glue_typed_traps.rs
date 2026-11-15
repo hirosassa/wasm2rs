@@ -197,6 +197,22 @@ fn a_return_pointer_out_of_bounds_is_typed() {
 }
 
 #[test]
+#[cfg(target_pointer_width = "64")]
+fn a_returned_list_over_the_guest_address_space_is_typed() {
+    // 2^32 bytes: one past what a guest `(ptr, len)` can describe. The zeroed Vec is
+    // allocated lazily, and the glue refuses it before it touches a byte.
+    traps(
+        "lowered_too_large",
+        r#"(export "blob" (func (param "n" u32) (result (list u8))))"#,
+        r#"(import "a:b/c" "blob" (func $blob (param i32 i32)))"#,
+        r#"(func (export "run") (call $blob (i32.const 0) (i32.const 64)))"#,
+        "struct H; impl Host for H { fn a_b_c_blob(&mut self, _n: u32) -> Vec<u8> { vec![0u8; 1usize << 32] } }",
+        "LoweredDataTooLarge",
+        "list too large",
+    );
+}
+
+#[test]
 fn the_option_is_on_by_default_and_changes_only_the_traps() {
     let wasm = component(SHOUT);
     let default = wit_host_glue_with_options(&wasm, &WitOptions::default()).unwrap();
