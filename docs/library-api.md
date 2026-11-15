@@ -40,7 +40,7 @@ mod foo {
 
 `transpile_to_out_dir` also prints `cargo:rerun-if-changed` for the wasm file. `transpile_to_out_dir_with_options` takes a `TranspileOptions` (e.g. `named_exports`), and `transpile_to_dir` / `transpile_to_dir_with_options` write to an explicit directory (without the Cargo output).
 
-A component (`wasm32-wasip2`) goes through `transpile_component_to_out_dir` (`transpile_component_to_dir` for an explicit directory), which writes `$OUT_DIR/{file stem}.rs` (the glue, the `Exports` trait and the program module, see `transpile_component`); `wasm2rs_macros::include_component!` includes it:
+A component (`wasm32-wasip2`) goes through `transpile_component_to_out_dir` (`transpile_component_to_dir` writes into an explicit directory instead), which writes `{file stem}.rs` into `$OUT_DIR` (the glue, the `Exports` trait and the program module, see `transpile_component`); `wasm2rs_macros::include_component!` includes it:
 
 ```rust
 // build.rs
