@@ -78,6 +78,9 @@ pub(super) struct Scope {
     instances: Vec<Option<Arc<Instance>>>,
     /// Resources declared so far; only the outermost scope's count is used.
     resources_declared: u32,
+    /// The resources the component itself defines (`(type (resource ..))`) with the core
+    /// function index of their destructor; only the outermost scope's map is used.
+    local_dtors: std::collections::BTreeMap<u32, Option<u32>>,
 }
 
 /// A new resource named `name`, with an id no other resource of the component has.
@@ -139,6 +142,16 @@ pub(super) fn def_at(scope: &Scope, index: u32) -> Soft<&Def> {
         .ok()
         .and_then(|i| scope.types.get(i))
         .ok_or_else(|| format!("type index {index} (out of range)").into())
+}
+
+/// The id and destructor (a core function index) of the resource at type index `index`, if
+/// the component defines it, rather than importing it.
+pub(super) fn local_resource(stack: &[Scope], index: u32) -> Option<(u32, Option<u32>)> {
+    let Ok(Def::Resource(r)) = def_at(stack.last()?, index) else {
+        return None;
+    };
+    let dtor = stack.first()?.local_dtors.get(&r.id)?;
+    Some((r.id, *dtor))
 }
 
 pub(super) fn resource_at(scope: &Scope, index: u32) -> Soft<Arc<WitResource>> {
@@ -256,9 +269,13 @@ pub(super) fn component_type(
     Ok(match ty {
         ComponentType::Defined(d) => Def::Val(defined(innermost(stack)?, d).map(Arc::new)),
         ComponentType::Func(f) => Def::Func(Arc::new(func_sig(innermost(stack)?, f))),
-        ComponentType::Resource { .. } => {
+        ComponentType::Resource { dtor, .. } => {
             let id = stack.first().map_or(0, |s| s.resources_declared);
-            Def::Resource(new_resource(stack, &format!("resource{id}"))?)
+            let resource = new_resource(stack, &format!("resource{id}"))?;
+            if let Some(outer) = stack.first_mut() {
+                outer.local_dtors.insert(resource.id, *dtor);
+            }
+            Def::Resource(resource)
         }
         ComponentType::Component(_) => Def::Other("component type"),
         ComponentType::Instance(decls) => Def::Instance(Arc::new(instance_type(stack, decls)?)),

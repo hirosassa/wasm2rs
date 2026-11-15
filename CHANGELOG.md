@@ -8,8 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-
 - `wasm2rs-wasi`: `Http1Client` (feature `http-client`), an `HttpClient` over `std::net` that sends and receives request and response trailers. Plain `http://` only (no TLS); `UreqClient` stays the client for `https` and cannot carry trailers.
+- A component that defines and exports a `resource` builds and runs: the glue serves the guest's `canon resource.new`, `resource.rep` and `resource.drop` (A4). The host holds such a resource as `ResourceN(rep)`, `Exports` gains `drop_<resource>`, and `Glue` of such a component has a handle table, so it is made with `Glue::new(host)`. See `docs/component-exports-design.md`.
 
 ## [0.6.0] - 2026-11-15
 

@@ -22,11 +22,12 @@
 //! says: an out-of-range or unaligned pointer, invalid UTF-8, a bad discriminant or `char` is a
 //! trap, which here is a panic.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::emit::{Records, case_idents, doc_text, flags_int, typed_signature, unique_idents};
 use super::read::unsupported;
-use super::{WitAsyncAbi, WitExport, WitFunc, WitStringEncoding, WitType};
+use super::{ResourceOp, WitAsyncAbi, WitExport, WitFunc, WitStringEncoding, WitType};
 use crate::TranspileError;
 use crate::codegen::assign_export_names;
 use crate::wit_abi::{
@@ -271,7 +272,7 @@ const INVALID_CALLBACK_CODE: GlueTrap = GlueTrap {
     message: "unknown callback code",
 };
 
-const GLUE_TRAPS: [GlueTrap; 8] = [
+const GLUE_TRAPS: [GlueTrap; 9] = [
     GlueTrap {
         variant: "ComponentPointerOutOfBounds",
         message: "pointer out of bounds",
@@ -303,6 +304,10 @@ const GLUE_TRAPS: [GlueTrap; 8] = [
     GlueTrap {
         variant: "LoweredDataTooLarge",
         message: "list too large",
+    },
+    GlueTrap {
+        variant: "InvalidResourceHandle",
+        message: "invalid resource handle",
     },
 ];
 
@@ -554,11 +559,36 @@ struct Gen<'a> {
     alloc: String,
     /// Strings are UTF-16 (the lift or lowering being generated says `string-encoding=utf16`).
     utf16: bool,
+    /// The ids of the resources the component defines (`Locals::resources`).
+    locals: &'a BTreeSet<u32>,
+    /// The code being generated is an export's: its `own` handles of a local resource are
+    /// made or taken in the table `rt` (see `ResourceTable`).
+    exporting: bool,
+    /// Some handle of a local resource goes through `rt`.
+    rt_used: bool,
 }
 
 impl Gen<'_> {
     fn flat_len(&mut self, ty: &WitType) -> Result<usize, TranspileError> {
         Ok(flatten(ty, &mut self.budget)?.len())
+    }
+
+    /// Whether `ty` is a handle of a resource the component defines, which needs the table
+    /// `rt` (only an export has one).
+    fn local_handle(&mut self, ty: &WitType) -> Result<bool, TranspileError> {
+        let (WitType::Own(r) | WitType::Borrow(r)) = ty else {
+            return Ok(false);
+        };
+        if !self.locals.contains(&r.id) {
+            return Ok(false);
+        }
+        if !self.exporting {
+            return Err(unsupported(format!(
+                "an imported function takes or returns `{}`, a resource this component defines",
+                r.name
+            )));
+        }
+        Ok(true)
     }
 
     fn fresh(&mut self) -> usize {
@@ -655,6 +685,15 @@ impl Gen<'_> {
             WitType::F64 => format!("f64::from_bits({s})"),
             WitType::Bool => format!("glue_abi::bool_({s})"),
             WitType::Char => format!("glue_abi::char_({s})"),
+            WitType::Own(r) if self.local_handle(ty)? => {
+                // The host holds the representation; the handle leaves the guest's table.
+                self.rt_used = true;
+                format!(
+                    "{}(rt.remove({}, {s} as u32))",
+                    self.records.rust(ty)?,
+                    r.id
+                )
+            }
             WitType::Own(_) | WitType::Borrow(_) => {
                 format!("{}({s} as u32)", self.records.rust(ty)?)
             }
@@ -800,6 +839,17 @@ impl Gen<'_> {
             WitType::F64 => format!("out[{base}] = ({value}).to_bits();"),
             WitType::Bool => format!("out[{base}] = u64::from({value});"),
             WitType::Char => format!("out[{base}] = u64::from(u32::from({value}));"),
+            WitType::Own(r) if self.local_handle(ty)? => {
+                self.rt_used = true;
+                format!(
+                    "out[{base}] = u64::from(rt.new_handle({}, ({value}).0));",
+                    r.id
+                )
+            }
+            WitType::Borrow(_) if self.local_handle(ty)? => {
+                // A callee that defines the resource gets the representation itself.
+                format!("out[{base}] = u64::from(({value}).0);")
+            }
             WitType::Own(_) | WitType::Borrow(_) | WitType::Future(_) | WitType::Stream(_) => {
                 format!("out[{base}] = u64::from(({value}).0);")
             }
@@ -914,6 +964,14 @@ impl Gen<'_> {
             | WitType::F32
             | WitType::F64 => put(format!("({value}).to_le_bytes()")),
             WitType::Char => put(format!("u32::from({value}).to_le_bytes()")),
+            WitType::Own(r) if self.local_handle(ty)? => {
+                self.rt_used = true;
+                let handle = put("h.to_le_bytes()".to_string());
+                format!(
+                    "{{ let h = rt.new_handle({}, ({value}).0); {handle} }}",
+                    r.id
+                )
+            }
             WitType::Own(_) | WitType::Borrow(_) | WitType::Future(_) | WitType::Stream(_) => {
                 put(format!("({value}).0.to_le_bytes()"))
             }
@@ -997,6 +1055,86 @@ fn offset_expr(at: &str, offset: u64) -> String {
     }
 }
 
+/// The handle table of the resources the component defines. `resource.new` of the guest makes
+/// a handle for a representation, `resource.rep` reads it back and `resource.drop` ends it; a
+/// handle of an owned result or argument that crosses the host boundary is the representation
+/// itself, so the host never holds a guest handle.
+const RESOURCE_TABLE: &str = r#"
+/// The handles of the resources the component defines, in the order `resource.new` made
+/// them (a handle is a slot's position plus one: 0 is never valid).
+#[derive(Default)]
+pub struct ResourceTable {
+    slots: Vec<Option<(u32, u32)>>,
+    free: Vec<u32>,
+    dropped: Vec<(u32, u32)>,
+}
+
+impl ResourceTable {
+    fn new_handle(&mut self, resource: u32, rep: u32) -> u32 {
+        if let Some(at) = self.free.pop() {
+            if let Some(slot) = self.slots.get_mut(at as usize) {
+                *slot = Some((resource, rep));
+            }
+            return at + 1;
+        }
+        self.slots.push(Some((resource, rep)));
+        self.slots.len() as u32
+    }
+
+    fn rep(&self, resource: u32, handle: u32) -> u32 {
+        handle
+            .checked_sub(1)
+            .and_then(|at| self.slots.get(at as usize))
+            .copied()
+            .flatten()
+            .filter(|(r, _)| *r == resource)
+            .map(|(_, rep)| rep)
+            .unwrap_or_else(|| glue_abi::trap("invalid resource handle"))
+    }
+
+    fn remove(&mut self, resource: u32, handle: u32) -> u32 {
+        let rep = self.rep(resource, handle);
+        let at = handle - 1;
+        if let Some(slot) = self.slots.get_mut(at as usize) {
+            *slot = None;
+        }
+        self.free.push(at);
+        rep
+    }
+
+    /// `resource.drop` of the guest: the destructor runs once the guest call that dropped it
+    /// returns (the host is lent out while an import runs, so it cannot be called now).
+    fn drop_handle(&mut self, resource: u32, handle: u32) {
+        let rep = self.remove(resource, handle);
+        self.dropped.push((resource, rep));
+    }
+}
+
+fn glue_take_resources<H: Host>(g: &mut Instance<Glue<H>>) -> ResourceTable {
+    g.with_host(|h, _| std::mem::take(&mut h.1))
+}
+
+fn glue_put_resources<H: Host>(g: &mut Instance<Glue<H>>, table: ResourceTable) {
+    g.with_host(|h, _| h.1 = table)
+}
+"#;
+
+/// A resource built-in the guest imports from the glue.
+pub(super) struct LocalMethod<'a> {
+    /// The method of the `Imports` trait.
+    pub name: &'a str,
+    pub op: ResourceOp,
+    pub resource: u32,
+}
+
+/// The resources the component defines and exports.
+#[derive(Default)]
+pub(super) struct Locals<'a> {
+    pub methods: Vec<LocalMethod<'a>>,
+    /// Every such resource, with the `Instance` method of its destructor if it has one.
+    pub resources: BTreeMap<u32, Option<String>>,
+}
+
 /// A method of the glue's `Imports` impl: `name` is the core module's, which lowers the WIT
 /// function `func` by calling the `Host` method `host`.
 pub(super) struct Method<'a> {
@@ -1022,6 +1160,7 @@ pub(super) struct Method<'a> {
 pub(super) fn write(
     out: &mut String,
     methods: &[Method<'_>],
+    locals: &Locals<'_>,
     records: &Records,
     exports: Option<(&[WitExport], &[String])>,
     generic: bool,
@@ -1034,6 +1173,13 @@ pub(super) fn write(
     }
     let start = out.len();
     let mut sig_budget = Budget::new();
+    let local_ids: BTreeSet<u32> = locals.resources.keys().copied().collect();
+    let defines = !local_ids.is_empty();
+    if defines && !generic {
+        return Err(TranspileError::Internal(
+            "a resource the component defines in a module without an `Imports` trait".into(),
+        ));
+    }
     let mut gen_ = Gen {
         records,
         budget: Budget::new(),
@@ -1042,6 +1188,9 @@ pub(super) fn write(
         allocates: false,
         alloc: ALLOC_MODULE.to_string(),
         utf16: false,
+        locals: &local_ids,
+        exporting: false,
+        rt_used: false,
     };
     // The distinct import `realloc`s in first-use order, and whether an import allocates
     // through each (the last entry: through the lifts' `cabi_realloc`).
@@ -1049,11 +1198,24 @@ pub(super) fn write(
     let mut default_allocates = false;
     out.push_str(HELPERS);
     if generic {
+        if defines {
+            out.push_str(RESOURCE_TABLE);
+        }
         out.push_str(
             "\n/// Lowers a typed `Host` to the flat `Imports` of the core module (transpiled with\n\
-             /// `named_imports`, `reentrant_imports` and `named_exports`): `Instance<Glue<H>>`.\n\
-             pub struct Glue<H: Host>(pub H);\n\n\
-             #[allow(unused_variables, unused_parens)]\n\
+             /// `named_imports`, `reentrant_imports` and `named_exports`): `Instance<Glue<H>>`.\n",
+        );
+        if defines {
+            out.push_str(
+                "\npub struct Glue<H: Host>(pub H, pub ResourceTable);\n\n\
+                 impl<H: Host> Glue<H> {\n    pub fn new(host: H) -> Self {\n        \
+                 Glue(host, ResourceTable::default())\n    }\n}\n",
+            );
+        } else {
+            out.push_str("pub struct Glue<H: Host>(pub H);\n");
+        }
+        out.push_str(
+            "\n#[allow(unused_variables, unused_parens)]\n\
              impl<H: Host> Imports for Glue<H> {\n",
         );
     }
@@ -1169,13 +1331,20 @@ pub(super) fn write(
             None => default_allocates |= allocated,
         }
     }
+    for m in &locals.methods {
+        write_local_method(out, m);
+    }
     if generic {
         out.push_str("}\n");
     }
     // The lifts' own results go through `cabi_realloc`.
     gen_.alloc = ALLOC_MODULE.to_string();
+    gen_.exporting = true;
+    if defines {
+        write_run_dtors(out, &locals.resources);
+    }
     if let Some((exports, export_names)) = exports {
-        write_exports(out, &mut gen_, exports, export_names)?;
+        write_exports(out, &mut gen_, exports, export_names, &locals.resources)?;
     }
     if gen_.writes_memory {
         out.push_str(MEM_HELPERS);
@@ -1218,7 +1387,7 @@ fn display_name(f: &WitFunc) -> String {
 const REALLOC: &str = "cabi_realloc";
 
 /// The `named_exports` method of `Instance` calling the core export `core_export`.
-fn export_method(core_export: &str) -> Option<String> {
+pub(super) fn export_method(core_export: &str) -> Option<String> {
     assign_export_names([(core_export, 0)]).into_iter().next()
 }
 
@@ -1237,6 +1406,7 @@ fn write_exports(
     gen_: &mut Gen<'_>,
     exports: &[WitExport],
     export_names: &[String],
+    resources: &BTreeMap<u32, Option<String>>,
 ) -> Result<(), TranspileError> {
     if exports.iter().any(|e| e.async_abi.is_some()) {
         out.push_str(CALLBACK_CODE);
@@ -1260,13 +1430,32 @@ fn write_exports(
         let sig = typed_signature(gen_.records, name, f, &idents)?;
         let _ = writeln!(out, "{sig};");
     }
+    let drops = resource_drops(gen_.records, resources);
+    for (method, ty, _) in &drops {
+        let _ = writeln!(
+            out,
+            "    /// Drops an owned handle of a resource the component defines, which an export\n    \
+             /// returned (or the host made): runs the resource's destructor.\n    \
+             fn {method}(&mut self, handle: {ty});"
+        );
+    }
     out.push_str(
         "}\n\n#[allow(unused_variables, unused_parens, unused_mut)]\n\
          impl<H: Host> Exports for Instance<Glue<H>> {\n",
     );
     let mut forwarders = String::new();
     for (e, name) in exports.iter().zip(export_names) {
-        write_export(out, &mut forwarders, gen_, e, name)?;
+        write_export(out, &mut forwarders, gen_, e, name, !resources.is_empty())?;
+    }
+    for (method, ty, resource) in &drops {
+        let call = match resources.get(resource) {
+            Some(Some(dtor)) => format!("        self.{dtor}(handle.0 as i32);\n"),
+            _ => String::new(),
+        };
+        let _ = writeln!(
+            out,
+            "    fn {method}(&mut self, handle: {ty}) {{\n{call}        glue_run_dtors(self);\n    }}"
+        );
     }
     out.push_str("}\n");
     // `Exports` is not in scope here, so a core export the transpiled `Instance` lacks under
@@ -1276,6 +1465,64 @@ fn write_exports(
         "\nmod glue_core {{\n    use super::{{Glue, Host, Instance}};\n{forwarders}}}\n"
     );
     Ok(())
+}
+
+/// The `Imports` method of a resource built-in: the guest's own handle table.
+fn write_local_method(out: &mut String, m: &LocalMethod<'_>) {
+    let LocalMethod { name, op, resource } = m;
+    let _ = match op {
+        ResourceOp::New => writeln!(
+            out,
+            "    fn {name}(&mut self, g: &mut Instance<Self>, p0: i32) -> i32 {{\n        \
+             self.1.new_handle({resource}, p0 as u32) as i32\n    }}"
+        ),
+        ResourceOp::Rep => writeln!(
+            out,
+            "    fn {name}(&mut self, g: &mut Instance<Self>, p0: i32) -> i32 {{\n        \
+             self.1.rep({resource}, p0 as u32) as i32\n    }}"
+        ),
+        ResourceOp::Drop => writeln!(
+            out,
+            "    fn {name}(&mut self, g: &mut Instance<Self>, p0: i32) {{\n        \
+             self.1.drop_handle({resource}, p0 as u32);\n    }}"
+        ),
+    };
+}
+
+/// `glue_run_dtors`: calls the destructors of the handles the guest dropped, once the guest
+/// call that dropped them has returned (a destructor may drop more handles).
+fn write_run_dtors(out: &mut String, resources: &BTreeMap<u32, Option<String>>) {
+    out.push_str(
+        "\nfn glue_run_dtors<H: Host>(g: &mut Instance<Glue<H>>) {\n    \
+         while let Some((resource, rep)) = g.with_host(|h, _| h.1.dropped.pop()) {\n        \
+         match resource {\n",
+    );
+    for (id, dtor) in resources {
+        if let Some(dtor) = dtor {
+            let _ = writeln!(out, "            {id} => g.{dtor}(rep as i32),");
+        }
+    }
+    out.push_str("            _ => {}\n        }\n    }\n}\n");
+}
+
+/// The host's way to drop an owned handle of each resource the component defines that the
+/// exported functions mention: the method name, the Rust type and the resource's id.
+fn resource_drops(
+    records: &Records,
+    resources: &BTreeMap<u32, Option<String>>,
+) -> Vec<(String, String, u32)> {
+    resources
+        .keys()
+        .filter_map(|&id| {
+            let ty = records.resource_path(id)?;
+            let name = ty.rsplit("::").next().unwrap_or(&ty);
+            Some((
+                format!("drop_{}", crate::codegen::interface_ident(name)),
+                ty,
+                id,
+            ))
+        })
+        .collect()
 }
 
 /// What an async task asks for next, as `Exports` of an async function reports it: the callback
@@ -1341,6 +1588,18 @@ fn async_heads(
     })
 }
 
+/// Appends `body` to `out`, with the handle table `rt` moved out of the glue around it when
+/// `uses_rt` (the guest must find the table in the glue while its code runs).
+fn wrap_rt(out: &mut String, body: &str, uses_rt: bool) {
+    if uses_rt {
+        out.push_str("        let mut rt = glue_take_resources(g);\n");
+    }
+    out.push_str(body);
+    if uses_rt {
+        out.push_str("        glue_put_resources(g, rt);\n");
+    }
+}
+
 /// One method of the `Exports` impl, and its forwarder to the core export of the same name
 /// (the `named_exports` method of `Instance`) in `forwarders`.
 fn write_export(
@@ -1349,9 +1608,11 @@ fn write_export(
     gen_: &mut Gen<'_>,
     e: &WitExport,
     name: &str,
+    defines_resources: bool,
 ) -> Result<(), TranspileError> {
     let f = &e.func;
     gen_.utf16 = e.encoding == WitStringEncoding::Utf16;
+    gen_.rt_used = false;
     let mut sig_budget = Budget::new();
     let sig = core_signature(f, &mut sig_budget, false)?;
     // Lifting differs from lowering for the result: it is the pointer the core function
@@ -1400,6 +1661,7 @@ fn write_export(
     let _ = writeln!(out, "        let g = self;");
 
     let allocated_before = std::mem::replace(&mut gen_.allocates, false);
+    let mut pre = String::new();
     let args = if sig.params_in_memory {
         let mut fields = Vec::new();
         for t in &tys {
@@ -1409,13 +1671,13 @@ fn write_export(
         gen_.allocates = true;
         gen_.writes_memory = true;
         let _ = writeln!(
-            out,
+            pre,
             "        let at = glue_alloc::alloc(g, {align}, 1, {size});"
         );
         let offsets = field_offsets(&tys, &mut gen_.budget)?;
         for ((ty, ident), off) in tys.iter().zip(&idents).zip(offsets) {
             let _ = writeln!(
-                out,
+                pre,
                 "        {}",
                 gen_.store(ty, ident, &offset_expr("at", off))?
             );
@@ -1423,11 +1685,11 @@ fn write_export(
         vec!["at as u32 as i32".to_string()]
     } else {
         if !core_params.is_empty() {
-            let _ = writeln!(out, "        let mut out = [0u64; {}];", core_params.len());
+            let _ = writeln!(pre, "        let mut out = [0u64; {}];", core_params.len());
         }
         let mut base = 0usize;
         for (ty, ident) in tys.iter().zip(&idents) {
-            let _ = writeln!(out, "        {}", gen_.lower(ty, ident, base)?);
+            let _ = writeln!(pre, "        {}", gen_.lower(ty, ident, base)?);
             base = base.saturating_add(gen_.flat_len(ty)?);
         }
         core_params
@@ -1436,6 +1698,7 @@ fn write_export(
             .map(|(i, flat)| from_slot(*flat, &format!("out[{i}]")))
             .collect()
     };
+    wrap_rt(out, &pre, std::mem::take(&mut gen_.rt_used));
     let allocates = std::mem::replace(&mut gen_.allocates, allocated_before);
     gen_.allocates |= allocates;
     let realloc = e.realloc.as_deref().and_then(export_method);
@@ -1532,38 +1795,51 @@ fn write_export(
         out.push_str("    }\n");
         return Ok(());
     }
+    // The destructors of the handles the guest dropped run after its call has returned.
+    let drain = if defines_resources {
+        "        glue_run_dtors(g);\n"
+    } else {
+        ""
+    };
     match (&f.result, result_flat) {
         (None, _) => {
             let _ = writeln!(out, "        {call};");
             out.push_str(&post_call(""));
+            out.push_str(drain);
         }
         (Some(ty), Some(flat)) => {
             let _ = writeln!(out, "        let r = {call};");
+            let mut lift = String::new();
             if sig.result_in_memory {
                 let (size, align) = gen_.layout(ty)?;
-                let _ = writeln!(out, "        let at = u64::from(r as u32);");
-                let _ = writeln!(out, "        let m: &[u8] = g.memory();");
+                let _ = writeln!(lift, "        let at = u64::from(r as u32);");
+                let _ = writeln!(lift, "        let m: &[u8] = g.memory();");
                 let _ = writeln!(
-                    out,
+                    lift,
                     "        glue_abi::check(m.len(), at, {size}, {align});"
                 );
-                let _ = writeln!(out, "        let lb = glue_abi::Budget::new(m.len());");
+                let _ = writeln!(lift, "        let lb = glue_abi::Budget::new(m.len());");
                 let lifted = gen_.lift(ty, &Src::Mem("at".to_string()))?;
-                let _ = writeln!(out, "        let v = {lifted};");
+                let _ = writeln!(lift, "        let v = {lifted};");
             } else {
-                let _ = writeln!(out, "        let s = [{}];", to_slot(flat, "r"));
+                let _ = writeln!(lift, "        let s = [{}];", to_slot(flat, "r"));
                 let lifted = gen_.lift(ty, &Src::Flat(0))?;
-                let _ = writeln!(out, "        let v = {lifted};");
+                let _ = writeln!(lift, "        let v = {lifted};");
             }
+            wrap_rt(out, &lift, std::mem::take(&mut gen_.rt_used));
             out.push_str(&post_call("r"));
+            out.push_str(drain);
             out.push_str("        v\n");
         }
         // A result with no core value (an empty record or flags): nothing to read.
         (Some(ty), None) => {
             let _ = writeln!(out, "        {call};");
             let lifted = gen_.lift(ty, &Src::Flat(0))?;
-            let _ = writeln!(out, "        let v = {lifted};");
+            let mut lift = String::new();
+            let _ = writeln!(lift, "        let v = {lifted};");
+            wrap_rt(out, &lift, std::mem::take(&mut gen_.rt_used));
             out.push_str(&post_call(""));
+            out.push_str(drain);
             out.push_str("        v\n");
         }
     }

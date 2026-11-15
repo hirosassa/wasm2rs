@@ -32,6 +32,9 @@ pub(crate) enum Supplier {
     Host(HostFunc),
     /// A core function made by a canonical built-in (`task.return`, `stream.read`, ...).
     Builtin(Builtin),
+    /// A `canon resource.new`, `resource.rep` or `resource.drop` of a resource this component
+    /// defines (and exports): the glue keeps the handle table.
+    LocalResource(LocalResourceOp),
     /// Anything else (an item this reader does not trace).
     Other,
 }
@@ -43,6 +46,24 @@ impl Supplier {
             name: name.to_string(),
         }
     }
+}
+
+/// Which of the resource built-ins a core function is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResourceOp {
+    New,
+    Rep,
+    Drop,
+}
+
+/// A resource built-in of a resource the component defines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalResourceOp {
+    pub op: ResourceOp,
+    /// The resource's id (`WitResource::id`).
+    pub resource: u32,
+    /// The resource has a destructor.
+    pub has_dtor: bool,
 }
 
 /// A core instance of the component.

@@ -12,8 +12,10 @@ use wasmparser::{
 
 use super::WitFunc;
 use super::builtin::Builtin;
-use super::read::{Def, Scope, Sig, Soft, def_at, innermost, read_component, unsupported};
-use super::wiring::{CoreWiring, HostFunc, Supplier, WiredInstance};
+use super::read::{
+    Def, Scope, Sig, Soft, def_at, innermost, local_resource, read_component, unsupported,
+};
+use super::wiring::{CoreWiring, HostFunc, LocalResourceOp, ResourceOp, Supplier, WiredInstance};
 use crate::TranspileError;
 
 /// A function the component exports, and the core module export it is lifted from.
@@ -108,6 +110,63 @@ pub(crate) fn core_wiring(component: &[u8]) -> Result<CoreWiring, TranspileError
     Ok(reader.wiring())
 }
 
+/// A core import of the program that is a `resource.new`, `resource.rep` or `resource.drop`
+/// of a resource the component defines (and exports), as the instantiation wires it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalResourceImport {
+    /// The core import's module (`[export]t:p/i`) and field (`[resource-new]counter`).
+    pub module: String,
+    pub field: String,
+    pub op: ResourceOp,
+    /// The resource's id (`WitResource::id`).
+    pub resource: u32,
+    /// The core export of the resource's destructor, if it has one. The component reaches the
+    /// destructor through a `wit-component` shim table, so the export is named by the
+    /// convention of `wit-component` and `wit-bindgen`: `<interface>#[dtor]<resource>`.
+    pub dtor: Option<String>,
+}
+
+/// The [`LocalResourceImport`]s the core modules of `component` are instantiated with.
+pub(crate) fn local_resource_imports(
+    component: &[u8],
+) -> Result<Vec<LocalResourceImport>, TranspileError> {
+    let wiring = core_wiring(component)?;
+    let mut found = Vec::new();
+    for instance in &wiring.instances {
+        let WiredInstance::Module { args, .. } = instance else {
+            continue;
+        };
+        for (module, given) in args {
+            let Some(WiredInstance::Exports(members)) = usize::try_from(*given)
+                .ok()
+                .and_then(|i| wiring.instances.get(i))
+            else {
+                continue;
+            };
+            for (field, supplier) in members {
+                if let Supplier::LocalResource(op) = supplier {
+                    found.push(LocalResourceImport {
+                        module: module.clone(),
+                        field: field.clone(),
+                        op: op.op,
+                        resource: op.resource,
+                        dtor: op.has_dtor.then(|| dtor_export(module, field)).flatten(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The core export of the destructor of the resource that the core import `module` `field`
+/// (`[export]t:p/i` `[resource-new]counter`) belongs to.
+fn dtor_export(module: &str, field: &str) -> Option<String> {
+    let interface = module.strip_prefix("[export]")?;
+    let (_, resource) = field.strip_prefix('[')?.split_once(']')?;
+    Some(format!("{interface}#[dtor]{resource}"))
+}
+
 /// A function of the component's function index space.
 #[derive(Clone)]
 enum Func {
@@ -143,6 +202,13 @@ enum CoreFunc {
     Lowered { func: u32, realloc: Option<u32> },
     /// Another canonical built-in.
     Builtin(Builtin),
+    /// `resource.new`, `resource.rep` or `resource.drop` of a resource the component defines,
+    /// with the core function of its destructor.
+    LocalResource {
+        op: ResourceOp,
+        resource: u32,
+        dtor: Option<u32>,
+    },
 }
 
 #[derive(Clone)]
@@ -502,6 +568,23 @@ impl Reader {
                     }),
                 });
             }
+            CanonicalFunction::ResourceNew { resource }
+            | CanonicalFunction::ResourceRep { resource }
+            | CanonicalFunction::ResourceDrop { resource }
+                if local_resource(stack, resource).is_some() =>
+            {
+                let op = match func {
+                    CanonicalFunction::ResourceNew { .. } => ResourceOp::New,
+                    CanonicalFunction::ResourceRep { .. } => ResourceOp::Rep,
+                    _ => ResourceOp::Drop,
+                };
+                let (id, dtor) = local_resource(stack, resource).unwrap_or_default();
+                self.core_funcs.push(CoreFunc::LocalResource {
+                    op,
+                    resource: id,
+                    dtor,
+                });
+            }
             other => {
                 // A skipped push would shift every later core function index.
                 let builtin = Builtin::of(&other).ok_or_else(|| {
@@ -660,6 +743,13 @@ impl Reader {
                     }
                 }
                 Some(CoreFunc::Builtin(builtin)) => Some(Supplier::Builtin(*builtin)),
+                Some(CoreFunc::LocalResource { op, resource, dtor }) => {
+                    Some(Supplier::LocalResource(LocalResourceOp {
+                        op: *op,
+                        resource: *resource,
+                        has_dtor: dtor.is_some(),
+                    }))
+                }
                 _ => None,
             },
             ExternalKind::Memory => space(&self.core_memories),

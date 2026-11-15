@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use super::exports::LocalResourceImport;
 use super::read::{unsupported, wit_functions};
 use super::*;
 use crate::TranspileError;
@@ -372,6 +373,13 @@ impl Records {
     /// The type as the trait and the glue spell it.
     pub(super) fn rust(&self, ty: &WitType) -> Result<String, TranspileError> {
         self.rust_in(ty, "")
+    }
+
+    /// The Rust path of the resource `id`, if some registered function uses it.
+    pub(super) fn resource_path(&self, id: u32) -> Option<String> {
+        self.resource_names
+            .get(&id)
+            .map(|placed| self.path(placed, ""))
     }
 
     /// How a top-level item is reached from `prefix`: only qualified output has modules.
@@ -1100,15 +1108,73 @@ fn glue_text(
             })
             .collect(),
     };
+    let local_imports = super::exports::local_resource_imports(component)?;
+    let local_names = local_method_names(&funcs, &local_imports, core_imports);
+    let locals = glue::Locals {
+        methods: local_imports
+            .iter()
+            .zip(&local_names)
+            .filter_map(|(import, name)| {
+                Some(glue::LocalMethod {
+                    name: name.as_deref()?,
+                    op: import.op,
+                    resource: import.resource,
+                })
+            })
+            .collect(),
+        resources: local_imports
+            .iter()
+            .map(|import| {
+                (
+                    import.resource,
+                    import.dtor.as_deref().and_then(glue::export_method),
+                )
+            })
+            .collect(),
+    };
     glue::write(
         &mut out,
         &methods,
+        &locals,
         &records,
         exported,
         imports_trait,
         options.typed_traps,
     )?;
     Ok(out)
+}
+
+/// The `Imports` method of each of `locals` (a resource built-in of a resource the component
+/// defines): the one the program module declares for that core import, or, without a module,
+/// the name `named_imports` gives it beside the WIT functions. `None` when the module does not
+/// import it.
+fn local_method_names(
+    funcs: &[WitFunc],
+    locals: &[LocalResourceImport],
+    core: Option<&[CoreImport]>,
+) -> Vec<Option<String>> {
+    match core {
+        Some(core) => locals
+            .iter()
+            .map(|l| {
+                core.iter()
+                    .find(|c| c.module == l.module && c.field == l.field)
+                    .map(|c| c.ident.clone())
+            })
+            .collect(),
+        None => {
+            let wit = funcs
+                .iter()
+                .map(|f| (f.interface.as_str(), f.name.as_str()));
+            let own = locals.iter().map(|l| (l.module.as_str(), l.field.as_str()));
+            let indexed = wit.chain(own).zip(0u32..).map(|((m, f), i)| (m, f, i));
+            assign_import_names(indexed)
+                .into_iter()
+                .skip(funcs.len())
+                .map(Some)
+                .collect()
+        }
+    }
 }
 
 /// For each of `funcs`, whether the component lowers it with `string-encoding=utf16` (the glue
