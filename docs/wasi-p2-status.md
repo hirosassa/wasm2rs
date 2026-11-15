@@ -53,8 +53,10 @@ Host behavior:
 
 - A reader given as stdin is read on a thread that starts at the guest's first use of stdin. The
   thread stays until the reader returns, so a reader that blocks keeps it alive.
-- `UreqClient` cannot send or receive trailers: a request with non-empty trailers is refused with
-  an explicit error, and a response never has a trailers reader. A custom `HttpClient` can.
+- `UreqClient` cannot send or receive trailers (`ureq` drops them): a request with non-empty
+  trailers is refused with an explicit error, and a response never has a trailers reader.
+  `Http1Client` sends and receives them, over plain `http://` only: no TLS (`https` is refused),
+  no proxy, no connection reuse.
 - If the guest finishes an incoming body before it has been read to its end, `future-trailers.get`
   answers `none`. wasmtime drains the body and delivers the trailers.
 - A trailers reader that never returns holds back the end of the response body for the guest: the
@@ -128,8 +130,7 @@ routing) and M3/M4 are a proposal, not a commitment.
 
 - Escape attempts through symlinks and junctions on Windows (everything else of #205 is done, see [windows.md](windows.md)).
 - A4: `resource.new` / `resource.rep` for resources a component defines and exports.
-- An `HttpClient` that really sends and receives trailers (the trait supports it; `UreqClient`
-  does not).
+- Trailers over `https` (`Http1Client` has no TLS and `UreqClient` has no trailers).
 - Lifts that allocate through different `realloc` functions of several linked core modules (#314).
 - `rustc` at `-C opt-level=1` does not finish on the 125 MB source of a `jco` JS component (#331);
   `-C opt-level=0` works.

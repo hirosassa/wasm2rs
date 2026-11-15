@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `wasm2rs-wasi`: `Http1Client` (feature `http-client`), an `HttpClient` over `std::net` that sends and receives request and response trailers. Plain `http://` only (no TLS); `UreqClient` stays the client for `https` and cannot carry trailers.
+
 ## [0.6.0] - 2026-11-15
 
 `wasm2rs` and `wasm2rs-macros` 0.6.0, `wasm2rs-wasi` 0.2.0. `wasm2rs-macros` has no API or code change; its version follows `wasm2rs`, and the code its macro expands to changes with `wasm2rs` (typed traps are now the default). `wasm2rs-wasi` 0.2.0 adds the typed `WasiTrap`, `WasiHostBuilder::typed_traps` (off by default) and `HttpClientErrorKind`; `cargo-semver-checks` finds no incompatible change against 0.1.1, so the minor bump (a breaking one for a 0.x crate) is a deliberate choice: the output of `wasm2rs` 0.6.0 downcasts `wasm2rs_wasi::WasiTrap` by default, so it needs this version or later.

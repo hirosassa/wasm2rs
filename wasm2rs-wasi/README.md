@@ -75,6 +75,10 @@ that ends a spawned thread.
 let host = WasiHost::builder().http_client(UreqClient::new()).build()?;
 ```
 
+- `Http1Client` (same feature, no extra dependency) is the client for trailers: it sends a
+  request's trailers after a chunked body and hands over a chunked response's trailers. It
+  speaks plain `http://` only: no TLS (`https` is refused, use `UreqClient`), no proxy and no
+  connection reuse. `UreqClient` cannot send or receive trailers.
 - Redirects are not followed: a 3xx reaches the guest. 4xx and 5xx are responses, not errors;
   only a request without a response (connection, lookup, timeout) is an `HttpClientError`,
   whose `kind()` (`HttpClientErrorKind`: DNS failure, connection refused/timeout/terminated, TLS
