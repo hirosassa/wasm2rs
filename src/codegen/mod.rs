@@ -197,6 +197,9 @@ pub(crate) enum Rt {
     TrapCastFailure,
     /// The out-of-line `out of bounds array access` trap (typed traps only).
     TrapArrayOob,
+    /// The out-of-line `invalid externref` trap of `any.convert_extern` (typed traps
+    /// only).
+    TrapInvalidExternRef,
     /// Explicit-check integer division/remainder (typed traps only): they replace
     /// Rust's `/` and `%`, whose built-in panics cannot carry a typed payload.
     I32DivS,

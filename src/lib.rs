@@ -273,10 +273,11 @@ pub struct TranspileOptions {
     /// (`UnalignedAtomicAccess`) or an out-of-bounds atomic or plain access
     /// (`OutOfBoundsMemoryAccess`, the same trap as on an unshared memory), and the
     /// GC traps: a null reference (`NullReference`: `struct`/`array`/`i31`
-    /// dereference, `ref.as_non_null`, `throw_ref`), a failed `ref.cast`
+    /// dereference, `ref.as_non_null`, `throw_ref`, `call_ref`), a failed `ref.cast`
     /// (`CastFailure`) and an out-of-range array access (`OutOfBoundsArrayAccess`;
     /// an overrun of a data/element segment by `array.new_data` and friends is the
-    /// memory/table trap). The
+    /// memory/table trap), and an `InvalidExternRef` (`any.convert_extern` of a
+    /// host-supplied externref that is not a handle the module produced). The
     /// generated source then defines `Wasm2RsTrap` (only the variants it uses), a
     /// `Send + 'static` enum implementing `Display` (with the message the string
     /// panic carried) and `std::error::Error`, and each of these traps is a

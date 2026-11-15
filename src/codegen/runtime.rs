@@ -41,6 +41,7 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::TrapNullReference => "trap_null_reference",
         Rt::TrapCastFailure => "trap_cast_failure",
         Rt::TrapArrayOob => "trap_array_oob",
+        Rt::TrapInvalidExternRef => "trap_invalid_extern_ref",
         Rt::I32DivS => "i32_div_s",
         Rt::I32DivU => "i32_div_u",
         Rt::I32RemS => "i32_rem_s",
@@ -59,7 +60,7 @@ pub(super) fn is_rt_name(name: &str) -> bool {
 
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
-const RT_ORDER: [Rt; 44] = [
+const RT_ORDER: [Rt; 45] = [
     Rt::TrapType,
     Rt::DelegateExc,
     Rt::CallDepth,
@@ -76,6 +77,7 @@ const RT_ORDER: [Rt; 44] = [
     Rt::TrapNullReference,
     Rt::TrapCastFailure,
     Rt::TrapArrayOob,
+    Rt::TrapInvalidExternRef,
     Rt::I32DivS,
     Rt::I32DivU,
     Rt::I32RemS,
@@ -180,6 +182,7 @@ fn typed_trap_variants(used: &HashSet<Rt>, typed: bool) -> Vec<TrapVariant> {
         (Rt::TrapNullReference, TrapVariant::NullReference),
         (Rt::TrapCastFailure, TrapVariant::CastFailure),
         (Rt::TrapArrayOob, TrapVariant::OutOfBoundsArrayAccess),
+        (Rt::TrapInvalidExternRef, TrapVariant::InvalidExternRef),
     ]
     .into_iter()
     .filter(|(rt, _)| used.contains(rt))
@@ -226,6 +229,7 @@ enum TrapVariant {
     NullReference,
     CastFailure,
     OutOfBoundsArrayAccess,
+    InvalidExternRef,
 }
 
 impl TrapVariant {
@@ -243,6 +247,7 @@ impl TrapVariant {
             TrapVariant::NullReference => "NullReference",
             TrapVariant::CastFailure => "CastFailure",
             TrapVariant::OutOfBoundsArrayAccess => "OutOfBoundsArrayAccess",
+            TrapVariant::InvalidExternRef => "InvalidExternRef",
         }
     }
 
@@ -261,6 +266,7 @@ impl TrapVariant {
             TrapVariant::NullReference => "null reference",
             TrapVariant::CastFailure => "cast failure",
             TrapVariant::OutOfBoundsArrayAccess => "out of bounds array access",
+            TrapVariant::InvalidExternRef => "invalid externref",
         }
     }
 }
@@ -363,6 +369,11 @@ fn rt_lines(rt: Rt, typed: bool, variants: &[TrapVariant]) -> Vec<String> {
         Rt::TrapArrayOob => {
             trap_fn_lines("trap_array_oob", TrapVariant::OutOfBoundsArrayAccess, typed)
         }
+        Rt::TrapInvalidExternRef => trap_fn_lines(
+            "trap_invalid_extern_ref",
+            TrapVariant::InvalidExternRef,
+            typed,
+        ),
         Rt::I32DivS => div_rem_lines("i32_div_s", "i32", DivRem::DivS),
         Rt::I32DivU => div_rem_lines("i32_div_u", "i32", DivRem::DivU),
         Rt::I32RemS => div_rem_lines("i32_rem_s", "i32", DivRem::RemS),
