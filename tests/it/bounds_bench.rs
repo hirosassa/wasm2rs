@@ -11,6 +11,8 @@ use wasm2rs::{TranspileOptions, transpile_with_options};
 const HASH: &str = include_str!("../../benches/memory/hash.wat");
 const MATMUL: &str = include_str!("../../benches/memory/matmul.wat");
 const RANDOM: &str = include_str!("../../benches/memory/random.wat");
+const ATOMICS: &str = include_str!("../../benches/memory/atomics.wat");
+const ATOMICS_SHARED: &str = include_str!("../../benches/memory/atomics_shared.wat");
 
 /// Build `wat` with the given memory mode and return what `run(n)` prints.
 fn run_checksum(name: &str, wat: &str, unsafe_memory: bool, n: u32) -> (String, String) {
@@ -86,4 +88,59 @@ fn random_workload_matches_reference() {
         acc ^= v;
     }
     check("bench_random", RANDOM, 100_000, acc.cast_signed());
+}
+
+/// Plain-Rust model of `atomics.wat`.
+fn atomics_reference(n: u32) -> i32 {
+    let mut mem = vec![0u32; 16384];
+    let mut acc = 0u32;
+    for i in 0..n {
+        let a = (i.wrapping_shl(2) & 65532) as usize / 4;
+        mem[a] = i.wrapping_mul(2_654_435_761) ^ acc;
+        acc = acc.wrapping_mul(31).wrapping_add(mem[a]);
+        let old = mem[a];
+        mem[a] = old.wrapping_add(acc);
+        acc ^= old.wrapping_add(i);
+        // cmpxchg: the expected value is the current one, so it always swaps.
+        let prev = mem[a];
+        mem[a] = acc;
+        acc = acc.wrapping_add(prev);
+    }
+    acc.cast_signed()
+}
+
+#[test]
+fn atomics_workload_matches_reference() {
+    // 20_000 steps wrap the 16384-word memory, so the loop revisits addresses.
+    let expected = atomics_reference(20_000);
+    assert_ne!(
+        expected, 0,
+        "a degenerate checksum would hide a broken loop"
+    );
+    check("bench_atomics", ATOMICS, 20_000, expected);
+}
+
+#[test]
+fn shared_atomics_workload_matches_reference() {
+    // On a shared memory every atomic goes through `SharedMemory`, so `unsafe_memory`
+    // has nothing to remove; only the checksum is compared.
+    let expected = atomics_reference(20_000).to_string();
+    let (safe, _) = run_checksum("bench_atomics_shared_safe", ATOMICS_SHARED, false, 20_000);
+    let (fast, _) = run_checksum("bench_atomics_shared_unsafe", ATOMICS_SHARED, true, 20_000);
+    assert_eq!(safe, expected, "shared safe");
+    assert_eq!(fast, expected, "shared unsafe");
+}
+
+#[test]
+fn shared_atomics_workload_differs_from_unshared_only_in_memory() {
+    let body = |wat: &str| -> String {
+        wat.lines()
+            .skip_while(|l| *l != "(module")
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        body(ATOMICS_SHARED),
+        body(ATOMICS).replace("(memory 1)", "(memory 1 1 shared)")
+    );
 }

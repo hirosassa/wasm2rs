@@ -19,6 +19,7 @@ cargo run --release --example bench_memory [runs]
 | `matmul` | two i32 loads per inner step (64x64 product) |
 | `random` | one load + one store at an LCG-chosen address |
 | `divrem` | `div_u`/`rem_u`/`div_s`/`rem_s` by a data-dependent divisor |
+| `atomics`, `atomics_shared` | atomic store/load/rmw/cmpxchg, on an unshared and on a shared memory (see the last section) |
 
 ## Pitfall: keep the memory length opaque
 
@@ -169,4 +170,58 @@ Object size of the generated module compiled alone (`--crate-type=lib --emit=obj
   `trap_memory_oob` is emitted), while division and table accesses are still typed,
   since `unsafe_memory` never covered them.
 - Not covered yet: a shared memory's accesses (they go through `SharedMemory::bytes`
-  and still panic on the slice index).
+  and still panic on the slice index); covered by #407, see the last section.
+
+## Atomics: alignment check (#408) and typed shared memory (#407)
+
+Two workloads, `atomics` (unshared) and `atomics_shared` (`(memory 1 1 shared)`), run
+the same loop: per step an `i32.atomic.store`, `load`, `rmw.add` and `rmw.cmpxchg`
+(always succeeding) on one word, the address walking a 64 KiB memory in 4-byte
+strides. A mutable global that is always 0 is added to the address, so the access is
+aligned at run time but LLVM cannot prove it. (An earlier version without it measured
+no object-size change from #408 at all: the masked address was provably aligned, so the
+check folded away.) `tests/it/bounds_bench.rs` checks each checksum against a
+plain-Rust model (and that it is not a degenerate 0). The shared one is
+single-threaded: it measures the code path (`SharedMemory`), not contention.
+
+To measure what #408 and #407 cost, the same example was built at the commit before
+each (`6e565d2`, the parent of #407, and `6d1bca7`, the parent of #408) and at
+`93499ff`, with `BENCH_KEEP_DIR` keeping the binaries. All three print the same
+checksum. 9 runs, interleaved across the three binaries, median (Apple M4 Max, rustc
+1.99.1; shared machine, so about 1% is noise):
+
+| workload | mode | before #407 (ms) | before #408 (ms) | now (ms) | now / before #408 |
+|---|---|---|---|---|---|
+| atomics | safe | 1140.6 | 1135.3 | 1145.9 | 1.009 |
+| atomics | typed | 1128.9 | 1123.9 | 1129.1 | 1.005 |
+| atomics | unsafe | 1093.1 | 1097.3 | 1104.9 | 1.007 |
+| atomics_shared | safe | 1235.1 | 1236.7 | 1234.3 | 0.998 |
+| atomics_shared | typed | 1225.0 | 1227.7 | 1224.7 | 0.998 |
+| atomics_shared | unsafe | 1219.0 | 1216.7 | 1216.2 | 1.000 |
+
+Object size of the generated module alone (bytes), before #407 / before #408 / now:
+
+| workload | safe | typed | unsafe |
+|---|---|---|---|
+| atomics | 2416 / 2416 / 2920 | 3040 / 3040 / 3784 | 1520 / 1520 / 2640 |
+| atomics_shared | 9968 / 9968 / 9968 | 9984 / 10400 / 10400 | 9992 / 9992 / 9992 |
+
+- #408 (alignment trap on unshared atomics): within noise in every mode (+0.5% to +0.9%,
+  under the ~1% noise floor). The check is one mask test per access, hidden behind the
+  loop's multiply/add chain. It costs size, not time: +21% (safe), +24% (typed) and
+  +74% (unsafe) object bytes on this four-access loop. `unsafe_memory` drops bounds
+  checks but not this alignment trap, so its object grows most.
+- #407 (typed shared-memory accesses): shared typed 1225.0 ms before and 1227.7 ms after (+0.2%), no
+  measurable cost, for +4.2% object size (9984 to 10400 bytes), the cold trap
+  functions. The safe and unsafe shared builds are untouched.
+- `unsafe_memory` does nothing for a shared memory: every atomic goes through
+  `SharedMemory`, so `atomics_shared` shows no consistent difference between the three
+  modes (within about 1.5%).
+- Shared atomics are slower than unshared ones (safe: 300M steps in 1.23 s against 900M
+  in 1.15 s, about 4.1 ns against 1.27 ns per step, 3.2x). Not separated by this
+  benchmark: the unshared side uses plain loads and stores, while the shared side does
+  real SeqCst atomics (rmw as a compare-exchange loop) plus `SharedMemory`'s own
+  per-access length, alignment and bounds checks.
+- "now" is `93499ff`, which also contains #409, #411 and #417; none of them is expected
+  to touch these modules' atomic paths, and the "now / before #408" column is read as
+  the effect of #408.
