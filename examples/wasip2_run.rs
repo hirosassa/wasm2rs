@@ -19,7 +19,8 @@
 //! `0.2.0` or a later `0.2.x` patch (no such export, or a shape `wasm2rs::transpile_component` does not read: the
 //! message says which), 134 when a panic occurs during the `run` call (a guest trap, or a
 //! panic inside a host import it calls: the trap or panic message is printed, then `wasip2_run: the
-//! program trapped`); panics outside the call (host setup) stay 101. The build goes in
+//! program trapped`), and likewise for a trap of the start function in `Instance::new`; panics
+//! outside these calls (host setup) stay 101. The build goes in
 //! `$WASIP2_WORK_DIR` (default: a temporary directory). The program sees the
 //! directory `$WASIP2_PREOPEN`, if set, as its `/`: read-only, or also writable if
 //! `$WASIP2_PREOPEN_WRITABLE=1`. `wasi:http` is implemented, but no
@@ -79,17 +80,17 @@ fn main() {
          if let Some(dir) = std::env::var_os(\"WASIP2_PREOPEN\") {{\n        \
          let writable = std::env::var_os(\"WASIP2_PREOPEN_WRITABLE\").is_some_and(|v| v == \"1\");\n        \
          host = if writable {{ host.with_writable_preopen(dir.into()) }} else {{ host.with_preopen(dir.into()) }};\n    }}\n    \
-         let mut inst = Instance::new(Glue(host));\n    \
          // The guest is transpiled with `typed_traps`: its `unreachable`, indirect-call, stack and\n    \
          // conversion traps (and the glue's canonical-ABI ones) are typed payloads, which skip the panic hook, so they are reported\n    \
          // here. Any other panic (another trap, or one in a host import) is a string payload whose\n    \
-         // message the hook has printed already. Either way it becomes the trap exit code.\n    \
-         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Exports::{run_method}(&mut inst))) {{\n        \
-         Ok(result) => result,\n        \
-         Err(payload) => {{\n            \
-         {report_trap}\n            \
-         eprintln!(\"wasip2_run: the program trapped\");\n            \
-         std::process::exit(134)\n        }}\n    }};\n    \
+         // message the hook has printed already. Either way it becomes the trap exit code. The start\n    \
+         // function runs in `Instance::new`, so that is guarded too.\n    \
+         fn trapped(payload: Box<dyn std::any::Any + Send>) -> ! {{\n        \
+         {report_trap}\n        \
+         eprintln!(\"wasip2_run: the program trapped\");\n        \
+         std::process::exit(134)\n    }}\n    \
+         let mut inst = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Instance::new(Glue(host)))).unwrap_or_else(|payload| trapped(payload));\n    \
+         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Exports::{run_method}(&mut inst))).unwrap_or_else(|payload| trapped(payload));\n    \
          drop(inst); // flushes the connections' send queues\n    \
          std::process::exit(if result.is_ok() {{ 0 }} else {{ 1 }});\n    \
          }}"

@@ -49,6 +49,19 @@ fn work_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// The command that serves the component file `wasm`, building in `dir`.
+fn serve_command(wasm: &Path, dir: &Path, extra: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["run", "--quiet", "--example", "wasip2_serve", "--"])
+        .arg(wasm)
+        .args(["--listen", "127.0.0.1:0"])
+        .args(extra)
+        .env("WASIP2_WORK_DIR", dir.join("work"));
+    crate::common::share_example_build(&mut cmd);
+    cmd
+}
+
 /// Serves the component file `wasm`, building in `dir`.
 #[allow(
     clippy::panic,
@@ -57,16 +70,9 @@ fn work_dir(tag: &str) -> PathBuf {
 fn serve_component(wasm: &Path, dir: &Path, extra: &[&str]) -> Server {
     // `cargo run` and the example both `exec` the next program on unix: the child is the server
     let stderr = dir.join("stderr.log");
-    let mut cmd = Command::new(env!("CARGO"));
-    cmd.current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args(["run", "--quiet", "--example", "wasip2_serve", "--"])
-        .arg(wasm)
-        .args(["--listen", "127.0.0.1:0"])
-        .args(extra)
-        .env("WASIP2_WORK_DIR", dir.join("work"))
-        .stdout(Stdio::piped())
+    let mut cmd = serve_command(wasm, dir, extra);
+    cmd.stdout(Stdio::piped())
         .stderr(std::fs::File::create(&stderr).unwrap());
-    crate::common::share_example_build(&mut cmd);
     let mut child = cmd.spawn().unwrap();
     let stdout = child.stdout.take().unwrap();
     let mut server = Server {
@@ -209,6 +215,29 @@ fn a_typed_guest_trap_prints_its_cause() {
         "{stderr}"
     );
     assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+#[test]
+fn a_start_function_that_traps_exits_134_with_its_cause() {
+    // `Instance::new` runs the start function: its typed trap payload skips the panic hook, so
+    // the server has to report it itself, and it has nothing to serve
+    let core = guest(&echo_handle(""));
+    let core = format!(
+        "{}\n  (func $start unreachable)\n  (start $start))",
+        core.strip_suffix(')').unwrap()
+    );
+    let dir = work_dir("start_trap");
+    let wasm = dir.join("component.wasm");
+    std::fs::write(&wasm, proxy_component(&core)).unwrap();
+    let out = serve_command(&wasm, &dir, &[]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(134), "{stderr}");
+    assert!(
+        stderr.contains("wasip2_serve: trap: unreachable"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("listening"));
 }
 
 #[test]

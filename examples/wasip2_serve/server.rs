@@ -21,8 +21,17 @@ const BODY_IDLE: Duration = Duration::from_secs(30);
 /// A rejected request: the status and the reason sent back.
 struct Reject(u16, &'static str);
 
+/// A fresh instance. `Instance::new` runs the guest's start function, which may trap: nothing
+/// can be served then, so the cause is reported (`report_typed_trap`, as for a call) and the
+/// process exits 134, like `wasip2_run`.
 fn new_instance() -> Instance<Glue<WasiHost>> {
-    Instance::new(Glue(WasiHost::new(Vec::new())))
+    std::panic::catch_unwind(|| Instance::new(Glue(WasiHost::new(Vec::new())))).unwrap_or_else(
+        |payload| {
+            report_typed_trap(payload);
+            eprintln!("wasip2_serve: the component trapped while starting");
+            std::process::exit(134)
+        },
+    )
 }
 
 /// One read that gives up (408) when `deadline` has passed, however slowly the bytes come.
@@ -449,12 +458,12 @@ fn main() {
         eprintln!("wasip2_serve: cannot listen on {listen}: {e}");
         std::process::exit(2);
     });
+    let mut inst = new_instance();
     // the port may have been chosen by the system (`:0`): the line tells where to connect
     println!(
         "listening on {}",
         listener.local_addr().expect("local address")
     );
-    let mut inst = new_instance();
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
