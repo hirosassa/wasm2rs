@@ -129,7 +129,6 @@ routing) and M3/M4 are a proposal, not a commitment.
 ## Not done yet
 
 - Escape attempts through symlinks and junctions on Windows (everything else of #205 is done, see [windows.md](windows.md)).
-- A4: `resource.new` / `resource.rep` for resources a component defines and exports.
 - Trailers over `https` (`Http1Client` has no TLS and `UreqClient` has no trailers).
 - Lifts that allocate through different `realloc` functions of several linked core modules (#314).
 - `rustc` at `-C opt-level=1` does not finish on the 125 MB source of a `jco` JS component (#331);

@@ -191,6 +191,7 @@ mod wit_exports;
 mod wit_glue;
 mod wit_glue_exports;
 mod wit_glue_memory;
+mod wit_glue_resource_exports;
 mod wit_glue_typed_traps;
 mod wit_glue_utf16_imports;
 mod wit_host;

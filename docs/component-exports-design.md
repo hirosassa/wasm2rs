@@ -1,6 +1,6 @@
 # Component exports (`canon lift`): typed calls into a guest
 
-Status: A2-1 (the decoder), A2-2 (the `Exports` trait), A2-3 (`wasip2_run` calls the typed `run`) and A2-4 (cleanup) are implemented. The `wasi:http` host this document defers is implemented too (see [wasi-http-design.md](wasi-http-design.md)).
+Status: A4 (resources the component exports) is below. A2-1 (the decoder), A2-2 (the `Exports` trait), A2-3 (`wasip2_run` calls the typed `run`) and A2-4 (cleanup) are implemented. The `wasi:http` host this document defers is implemented too (see [wasi-http-design.md](wasi-http-design.md)).
 Update: the single-instance limits below were lifted by core module linking. Exports lifted from
 several core modules, a lift whose `memory` option is a memory the module imports from the program,
 and lifts from a preview1 adapter module (a direct export of the instantiated adapter) are supported for `transpile_component` (the
@@ -139,6 +139,85 @@ a broken sentence in the README's `--glue` row and the stale "example" wording b
 Each phase is its own PR, in this order. Tests extend `tests/it/wasip2_run_example.rs` (typed run:
 ok, error result, trap), `named_exports.rs` (the mangled name) and the wit/glue round trips; new
 decoder tests build components with `wit-component`.
+
+## Resources a component defines and exports (A4)
+
+Status: implemented (`tests/it/wit_glue_resource_exports.rs`). Before it, a component that exports
+a `resource` transpiled and produced a typed `Exports` trait, but the program did not build: the core
+module imports `[export]<interface>` `[resource-new]<r>`, `[resource-rep]<r>` and
+`[resource-drop]<r>` (what `wit-component` makes of `canon resource.new`, `resource.rep` and
+`resource.drop`), and the glue had no `Imports` method for them.
+
+### Decisions
+
+1. **Where the table lives.** The handle table of the guest's own resources is state of the guest
+   instance, so it is the glue's: `Glue<H>` becomes `Glue<H>(pub H, pub ResourceTable)` for a
+   component that defines a resource (every other component keeps `Glue<H>(pub H)`), and the
+   glue adds `Glue::new(host)`. `resource.new(rep)` makes a handle (a slot's position plus one, so
+   0 is never valid; freed slots are reused), `resource.rep(handle)` reads the representation back,
+   and `resource.drop(handle)` ends it. A handle of another resource or a handle that is not live
+   traps (`Wasm2RsGlueTrap::InvalidResourceHandle`).
+2. **What the host holds.** The host holds a resource as its **representation**: `ResourceN(rep)`.
+   This is what the canonical ABI gives a caller that is not the defining component: an `own<r>`
+   result leaves the guest's table (the lift takes the handle out and keeps the `rep`), and a
+   `borrow<r>` argument reaches a callee that defines `r` as the representation itself, with no
+   table at all. An `own<r>` argument is the only direction that makes a handle: the glue calls
+   `resource.new`'s equivalent (`rt.new_handle`) for it and passes the handle.
+   A `rep` the host invents is a value the guest dereferences, as in any component-model host; it
+   is memory safe (the generated code is safe Rust) but not checked.
+3. **`own` and `borrow` in the typed signatures.** Both are the same `ResourceN` type, as for
+   imported resources (see `typed-host-design.md`). `[constructor]r`, `[method]r.f` (the `self`
+   parameter is `self_`) and `[static]r.f` are ordinary `Exports` methods named like their core
+   exports (`t_p_i_constructor_counter`, `t_p_i_method_counter_get`, ...). Handles that sit in a
+   result read from memory (`result<r, string>`, a record) are taken out of the table too: the glue
+   moves the table out of `Glue` around the lift (`glue_take_resources` / `glue_put_resources`),
+   because the lift holds a borrow of guest memory.
+4. **Destructors.** The guest's `resource.drop` ends a handle, and the destructor runs after the
+   guest call that dropped it has returned, not inside the import: the host is lent out while an
+   import runs, so a destructor that dropped another handle (a field of `r` that is a resource)
+   would panic with "re-entrant import call". The host drops an owned value it holds with the new
+   `Exports::drop_<resource>(&mut self, handle)`, which calls the destructor with the
+   representation (and nothing else, if the resource has none). The destructor is the core
+   export `<interface>#[dtor]<resource>`: `wit-component` reaches it through its shim table, so the
+   export is named by the convention of `wit-component` and `wit-bindgen`, and only for a resource
+   whose `canon` type definition has a `dtor`.
+5. **What is not covered.** An imported function that takes or returns a resource the component
+   defines itself is `Unsupported` (the guest would hand its own handle to the host). The linked path
+   (`Program::Linked`, several core modules) is not tested with an exported resource. Resource
+   exports with `async` lifts are not covered (WASI 0.3).
+
+### How it is read
+
+`Reader` (`src/wit/exports.rs`) records `canon resource.new/rep/drop` of a resource that the
+component defines (`(type (resource (rep i32) (dtor ..)))`, tracked by `read.rs` as
+`Scope::local_dtors`) as `Supplier::LocalResource`, and `local_resource_imports` lists, from the
+core instance wiring, the core imports that these are (`[export]t:p/i` `[resource-new]counter`).
+Imported resources keep their existing `[resource-drop]` handling (a `Host` method).
+
+### Reproduction of the real guest
+
+The ignored test `a_real_wit_bindgen_guest_exporting_a_resource_is_driven_through_the_typed_exports`
+(`WASM2RS_RESOURCE_GUEST`) drives a `wit-bindgen` 0.63 Rust guest built for `wasm32-wasip2`:
+
+```wit
+package test:counter;
+interface counters {
+  resource counter {
+    constructor(start: u32);
+    get: func() -> u32;
+    add: func(n: u32);
+    make: static func(n: u32) -> counter;
+    sum: static func(a: borrow<counter>, b: borrow<counter>) -> u32;
+    consume: static func(c: counter) -> u32;
+  }
+}
+world w { export counters; }
+```
+
+A `cdylib` crate with `wit-bindgen = "0.63.0"`, `wit_bindgen::generate!({ world: "w", path: "wit" })`,
+`struct MyCounter(Cell<u32>)` implementing `GuestCounter` (`new`, `get`, `add`, `make`, `sum` and
+`consume` over the `Cell`), then `cargo build --release --target wasm32-wasip2`. The program
+prints `42`, `47` and `5` and survives 1000 construct/drop cycles (checked 2026-11-16).
 
 ## What `wasi:http` needs on top (separate design)
 
