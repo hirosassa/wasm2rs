@@ -69,8 +69,20 @@ fn build_and_run_as(
     core: &str,
     body: &str,
 ) -> std::process::Output {
+    build_and_run_with(name, encoding, wit, core, body, &exports_on())
+}
+
+/// [`build_and_run_as`] with the glue options `options`.
+fn build_and_run_with(
+    name: &str,
+    encoding: StringEncoding,
+    wit: &str,
+    core: &str,
+    body: &str,
+    options: &WitOptions,
+) -> std::process::Output {
     let component = encoded_as(wit, core, encoding);
-    let glue = wit_host_glue_with_options(&component, &exports_on()).unwrap();
+    let glue = wit_host_glue_with_options(&component, options).unwrap();
     let opts = TranspileOptions::default()
         .with_named_imports(true)
         .with_reentrant_imports(true)
@@ -599,6 +611,57 @@ fn an_async_export_without_an_event_source_says_the_runtime_is_missing() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("async runtime not implemented"), "{stderr}");
+}
+
+#[test]
+fn typed_traps_type_an_unknown_callback_code_but_not_the_missing_runtime() {
+    let component = encoded(ASYNC_WIT, ASYNC_CORE);
+    let glue = wit_host_glue_with_options(
+        &component,
+        &WitOptions {
+            typed_traps: true,
+            ..exports_on()
+        },
+    )
+    .unwrap();
+    assert!(
+        glue.contains("Wasm2RsGlueTrap::InvalidCallbackCode"),
+        "{glue}"
+    );
+    assert!(!glue.contains("unknown callback code {raw"), "{glue}");
+    // The scheduler is not part of the glue yet: a scaffolding gap, not a guest fault.
+    assert!(glue.contains("async runtime not implemented"), "{glue}");
+    let untyped = wit_host_glue_with_options(&component, &exports_on()).unwrap();
+    assert!(untyped.contains("unknown callback code {raw"), "{untyped}");
+    assert!(!untyped.contains("Wasm2RsGlueTrap"), "{untyped}");
+}
+
+#[test]
+fn an_unknown_callback_code_unwinds_with_a_typed_trap() {
+    // The callback returns code 7, which is neither exit, yield nor wait.
+    let core = ASYNC_CORE.replace(
+        "(i32.const 0))\n  (func (export \"last\")",
+        "(i32.const 7))\n  (func (export \"last\")",
+    );
+    let out = build_and_run_with(
+        "unknown_callback",
+        StringEncoding::UTF8,
+        ASYNC_WIT,
+        &core,
+        r#"let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+               Exports::slow(&mut inst, 3, &mut |_| Some([1, 2, 3]));
+           })).unwrap_err();
+           assert_eq!(*p.downcast::<Wasm2RsGlueTrap>().unwrap(), Wasm2RsGlueTrap::InvalidCallbackCode);"#,
+        &WitOptions {
+            typed_traps: true,
+            ..exports_on()
+        },
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]

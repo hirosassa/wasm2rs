@@ -258,6 +258,125 @@ fn import_alloc_helpers(realloc: &str, module: &str) -> String {
         .replace("`cabi_realloc`", &format!("`{realloc}`"))
 }
 
+/// A variant of the typed trap payload `Wasm2RsGlueTrap`, with the message of the string
+/// panic it replaces.
+struct GlueTrap {
+    variant: &'static str,
+    message: &'static str,
+}
+
+/// Raised by the callback loop of an async export rather than through `glue_abi::trap`.
+const INVALID_CALLBACK_CODE: GlueTrap = GlueTrap {
+    variant: "InvalidCallbackCode",
+    message: "unknown callback code",
+};
+
+const GLUE_TRAPS: [GlueTrap; 8] = [
+    GlueTrap {
+        variant: "ComponentPointerOutOfBounds",
+        message: "pointer out of bounds",
+    },
+    GlueTrap {
+        variant: "ComponentUnalignedPointer",
+        message: "unaligned pointer",
+    },
+    GlueTrap {
+        variant: "InvalidUtf8",
+        message: "invalid UTF-8 in a string",
+    },
+    GlueTrap {
+        variant: "InvalidUtf16",
+        message: "invalid UTF-16 in a string",
+    },
+    GlueTrap {
+        variant: "InvalidChar",
+        message: "invalid char",
+    },
+    GlueTrap {
+        variant: "InvalidDiscriminant",
+        message: "invalid discriminant",
+    },
+    GlueTrap {
+        variant: "LiftedDataTooLarge",
+        message: "lifted data too large",
+    },
+    GlueTrap {
+        variant: "LoweredDataTooLarge",
+        message: "list too large",
+    },
+];
+
+/// Rewrites the string traps of the glue text from `start` on into `Wasm2RsGlueTrap`
+/// payloads (`typed_traps`) and defines the type, with just the variants the text raises.
+///
+/// The unknown callback code is typed too; the async scaffolding's `panic!` (a missing
+/// scheduler, not a guest fault) and every internal invariant stay string panics.
+fn type_traps(out: &mut String, start: usize) {
+    let mut text = out
+        .split_off(start)
+        .replace(
+            "pub fn trap(msg: &str) -> ! {\n        panic!(\"wasm2rs wit glue: {msg}\")\n    }",
+            "pub use super::Wasm2RsGlueTrap;\n\n    pub fn trap(trap: Wasm2RsGlueTrap) -> ! {\n        ::std::panic::resume_unwind(Box::new(trap))\n    }",
+        )
+        .replace(
+            "panic!(\"wasm2rs wit glue: unknown callback code {raw:#x}\")",
+            "{ let _ = raw; ::std::panic::resume_unwind(Box::new(Wasm2RsGlueTrap::InvalidCallbackCode)) }",
+        );
+    let mut used = Vec::new();
+    for t in &GLUE_TRAPS {
+        let call = format!("trap(\"{}\")", t.message);
+        if text.contains(&call) {
+            // Outside `glue_abi` the type is reached through it.
+            text = text
+                .replace(
+                    &format!("glue_abi::{call}"),
+                    &format!("glue_abi::trap(glue_abi::Wasm2RsGlueTrap::{})", t.variant),
+                )
+                .replace(&call, &format!("trap(Wasm2RsGlueTrap::{})", t.variant));
+            used.push(t);
+        }
+    }
+    if text.contains("Wasm2RsGlueTrap::InvalidCallbackCode") {
+        used.push(&INVALID_CALLBACK_CODE);
+    }
+    out.push_str(&trap_type(&used));
+    out.push_str(&text);
+}
+
+/// The `Wasm2RsGlueTrap` definition with just the `variants`.
+fn trap_type(variants: &[&GlueTrap]) -> String {
+    let mut s = String::from(
+        "/// The payload of a canonical-ABI trap raised by the glue (`typed_traps`). It is raised\n\
+         /// with `resume_unwind`, so downcast the `catch_unwind` payload to recognise it.\n\
+         #[allow(dead_code)]\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
+         pub enum Wasm2RsGlueTrap {\n",
+    );
+    for t in variants {
+        let _ = writeln!(s, "    {},", t.variant);
+    }
+    s.push_str(
+        "}\n\
+         impl ::std::fmt::Display for Wasm2RsGlueTrap {\n\
+         \x20   fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {\n\
+         \x20       f.write_str(match self {\n",
+    );
+    for t in variants {
+        let _ = writeln!(
+            s,
+            "            Wasm2RsGlueTrap::{} => \"wasm2rs wit glue: {}\",",
+            t.variant, t.message
+        );
+    }
+    s.push_str(
+        "        })\n\
+         \x20   }\n\
+         }\n\
+         impl ::std::error::Error for Wasm2RsGlueTrap {}\n",
+    );
+    s
+}
+
 fn core_rust(flat: Flat) -> &'static str {
     match flat {
         Flat::I32 => "i32",
@@ -842,6 +961,7 @@ pub(super) fn write(
     records: &Records,
     exports: Option<(&[WitExport], &[String])>,
     generic: bool,
+    typed_traps: bool,
 ) -> Result<(), TranspileError> {
     if !generic && !methods.is_empty() {
         return Err(TranspileError::Internal(
@@ -1003,6 +1123,9 @@ pub(super) fn write(
     }
     if default_allocates || gen_.allocates {
         out.push_str(ALLOC_HELPERS);
+    }
+    if typed_traps {
+        type_traps(out, start);
     }
     if !generic {
         // A module with no host imports has no `Imports` trait: its `Instance` takes no host,

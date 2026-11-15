@@ -172,6 +172,7 @@ where
     let wit = WitOptions {
         external_types: options.external_types.clone(),
         exports: options.exports,
+        typed_traps: transpile.typed_traps,
         ..WitOptions::default()
     };
     match select_program(component, &layout, &exports)? {

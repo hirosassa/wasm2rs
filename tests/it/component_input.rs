@@ -139,6 +139,19 @@ fn the_options_the_glue_needs_are_forced_on() {
 }
 
 #[test]
+fn transpile_options_typed_traps_types_the_glue_traps_too() {
+    let typed = ComponentOptions {
+        transpile: TranspileOptions::default().with_typed_traps(true),
+        ..ComponentOptions::default()
+    };
+    let code = transpile_component(&component_of(WORLD, CORE), &typed).unwrap();
+    assert!(code.contains("pub enum Wasm2RsGlueTrap"), "{code}");
+    let plain =
+        transpile_component(&component_of(WORLD, CORE), &ComponentOptions::default()).unwrap();
+    assert!(!plain.contains("Wasm2RsGlueTrap"), "{plain}");
+}
+
+#[test]
 fn exports_can_be_turned_off() {
     let options = ComponentOptions {
         exports: false,
