@@ -40,15 +40,10 @@ pub fn transpile_exporting(
 /// `resume_unwind`, so the hook never saw it. `Wasm2RsTrap` and `Wasm2RsGlueTrap` are named only
 /// when `generated` defines them; `WasiTrap` is what a host built with `typed_traps` raises.
 pub fn report_typed_trap(generated: &str, prefix: &str) -> String {
-    let mut types = Vec::new();
-    for name in ["Wasm2RsTrap", "Wasm2RsGlueTrap"] {
-        if generated.contains(&format!("enum {name}")) {
-            types.push(name);
-        }
-    }
-    types.push("wasm2rs_wasi::WasiTrap");
-    types
-        .iter()
+    ["Wasm2RsTrap", "Wasm2RsGlueTrap"]
+        .into_iter()
+        .filter(|name| generated.contains(&format!("enum {name}")))
+        .chain(["wasm2rs_wasi::WasiTrap"])
         .map(|ty| {
             format!(
                 "if let Some(trap) = payload.downcast_ref::<{ty}>() {{ eprintln!(\"{prefix}: trap: {{trap}}\"); }}"

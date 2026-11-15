@@ -360,7 +360,7 @@ pub(crate) fn report_glue_trap_in_spawn(code: &mut String, glue: &str) {
     let mut out = String::with_capacity(code.len());
     let mut in_core_branch = false;
     for line in code.split_inclusive('\n') {
-        let indent = &line[..line.len() - line.trim_start().len()];
+        let indent = line.strip_suffix(line.trim_start()).unwrap_or_default();
         match line.trim() {
             CATCH_ANY => {
                 let _ = writeln!(
@@ -1557,15 +1557,14 @@ mod tests {
     use super::*;
     use crate::{TranspileOptions, transpile_with_options};
 
-    /// A module with a wasi-threads child running `child_body`, transpiled with `typed_traps`.
-    fn spawning(child_body: &str, typed: bool) -> String {
-        let wat = format!(
-            r#"(module
+    /// A module with a wasi-threads child that hits `unreachable`, transpiled with `typed_traps`
+    /// when `typed`.
+    fn spawning(typed: bool) -> String {
+        let wat = r#"(module
               (import "env" "memory" (memory 1 1 shared))
               (import "wasi" "thread-spawn" (func $spawn (param i32) (result i32)))
-              (func (export "wasi_thread_start") (param i32 i32) {child_body})
-              (func (export "run") (result i32) i32.const 0 call $spawn))"#
-        );
+              (func (export "wasi_thread_start") (param i32 i32) unreachable)
+              (func (export "run") (result i32) i32.const 0 call $spawn))"#;
         let wasm = wat::parse_str(wat).unwrap();
         transpile_with_options(&wasm, &TranspileOptions::default().with_typed_traps(typed)).unwrap()
     }
@@ -1576,7 +1575,7 @@ mod tests {
     #[test]
     fn a_spawn_wrapper_prints_the_glue_trap_after_the_core_trap() {
         // the child uses a typed helper, so the wrapper already downcasts `Wasm2RsTrap`
-        let mut code = spawning("unreachable", true);
+        let mut code = spawning(true);
         assert!(code.contains("downcast_ref::<Wasm2RsTrap>()"), "{code}");
         report_glue_trap_in_spawn(&mut code, GLUE);
         assert!(code.contains(GLUE_PRINT), "{code}");
@@ -1602,7 +1601,7 @@ mod tests {
     #[test]
     fn code_is_untouched_without_the_glue_trap_type() {
         for typed in [false, true] {
-            let before = spawning("unreachable", typed);
+            let before = spawning(typed);
             let mut code = before.clone();
             report_glue_trap_in_spawn(&mut code, "pub struct Glue;\n");
             assert_eq!(code, before);
