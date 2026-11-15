@@ -140,7 +140,7 @@ A typed trap skips the panic hook, so the spawn wrapper is what prints a child t
 cause before it exits 134: `Wasm2RsTrap`, the glue's `Wasm2RsGlueTrap` and, in a
 `--component` output whose external types library is `wasm2rs_wasi`, that crate's
 `WasiTrap`. The cases above are plain core modules without the glue, so only
-`Wasm2RsTrap` appears in them; the other two are covered by `src/wit/glue.rs` tests.
+`Wasm2RsTrap` appears in them; the other two are checked as generated text by `src/wit/glue.rs` tests (and were run once against the real `wasm2rs-wasi`).
 
 ## Timing
 
