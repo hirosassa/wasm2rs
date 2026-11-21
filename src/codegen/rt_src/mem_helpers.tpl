@@ -229,10 +229,12 @@ fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {
 //# load8x8_s
 fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {
     let a = @EA;
+    let mut src = [0u8; 8];
+    src.copy_from_slice(&@R[a..a + 8]);
     let mut r = [0u8; 16];
     let mut i = 0;
     while i < 8 {
-        let x = @R[a + i] as i8 as i16;
+        let x = src[i] as i8 as i16;
         r[i * 2..i * 2 + 2].copy_from_slice(&x.to_le_bytes());
         i += 1;
     }
@@ -255,11 +257,13 @@ fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {
 //# load16x4_s
 fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {
     let a = @EA;
+    let mut src = [0u8; 8];
+    src.copy_from_slice(&@R[a..a + 8]);
     let mut r = [0u8; 16];
     let mut i = 0;
     while i < 4 {
-        let s = a + i * 2;
-        let x = i16::from_le_bytes([@R[s], @R[s + 1]]) as i32;
+        let s = i * 2;
+        let x = i16::from_le_bytes([src[s], src[s + 1]]) as i32;
         r[i * 4..i * 4 + 4].copy_from_slice(&x.to_le_bytes());
         i += 1;
     }
@@ -285,11 +289,13 @@ fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {
 //# load32x2_s
 fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {
     let a = @EA;
+    let mut src = [0u8; 8];
+    src.copy_from_slice(&@R[a..a + 8]);
     let mut r = [0u8; 16];
     let mut i = 0;
     while i < 2 {
-        let s = a + i * 4;
-        let x = i32::from_le_bytes([@R[s], @R[s + 1], @R[s + 2], @R[s + 3]]) as i64;
+        let s = i * 4;
+        let x = i32::from_le_bytes([src[s], src[s + 1], src[s + 2], src[s + 3]]) as i64;
         r[i * 8..i * 8 + 8].copy_from_slice(&x.to_le_bytes());
         i += 1;
     }
