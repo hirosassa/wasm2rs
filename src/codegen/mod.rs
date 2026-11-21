@@ -190,6 +190,9 @@ pub(crate) enum Rt {
     /// The out-of-line `unaligned atomic access` trap (typed traps only: shared-memory
     /// atomics, and notify/wait on an unshared memory).
     TrapUnalignedAtomic,
+    /// The out-of-line `atomic wait on non-shared memory` trap of `memory.atomic.wait*`
+    /// on an unshared memory (typed traps only).
+    TrapAtomicWaitUnshared,
     /// The out-of-line `null reference` trap of a GC/`exnref` dereference (typed
     /// traps only).
     TrapNullReference,

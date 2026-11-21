@@ -271,8 +271,9 @@ pub struct TranspileOptions {
     /// `IntegerOverflow` of `div_s`), and linear-memory and table out-of-bounds
     /// accesses, and on a shared memory a misaligned atomic access
     /// (`UnalignedAtomicAccess`) or an out-of-bounds atomic or plain access
-    /// (`OutOfBoundsMemoryAccess`, the same trap as on an unshared memory), and the
-    /// GC traps: a null reference (`NullReference`: `struct`/`array`/`i31`
+    /// (`OutOfBoundsMemoryAccess`, the same trap as on an unshared memory), and a
+    /// `memory.atomic.wait*` on an unshared memory (`AtomicWaitOnUnsharedMemory`),
+    /// and the GC traps: a null reference (`NullReference`: `struct`/`array`/`i31`
     /// dereference, `ref.as_non_null`, `throw_ref`, `call_ref`), a failed `ref.cast`
     /// (`CastFailure`) and an out-of-range array access (`OutOfBoundsArrayAccess`;
     /// an overrun of a data/element segment by `array.new_data` and friends is the
