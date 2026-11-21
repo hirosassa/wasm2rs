@@ -154,6 +154,7 @@ mod unreachable;
 mod unsafe_memory;
 mod unsupported;
 mod wasi;
+mod wasi_errno_iovec;
 mod wasi_fs;
 mod wasi_generated;
 mod wasi_guest_pointer_wrap;

@@ -288,44 +288,12 @@ fn wasi_clock_res_get(&mut self, a0: i32, a1: i32) -> i32 {
 
 // `fd_pread(fd, iovs, iovs_len, offset, nread)` reads at an explicit
 // offset without moving the file position (`read_at`), scatters the
-// bytes across the iovecs, and stores the count at `nread`. Stdio is
-// not seekable (ESPIPE, 70).
+// bytes across the iovecs, and stores the count at `nread` (0 on an
+// error). Stdio is not seekable (ESPIPE, 70).
 //# FdPread files
 fn wasi_fd_pread(&mut self, a0: i32, a1: i32, a2: i32, a3: i64, a4: i32) -> i32 {
-    use std::os::unix::fs::FileExt;
-    let mut iovs: Vec<(u64, u64)> = Vec::new();
-    let mut cap = 0u64;
-    for i in 0..a2 as u32 {
-        let e = a1 as u32 as u64 + i as u64 * 8;
-        let rec = &@MEM@[Self::wasi_span(e, 8)];
-        let ptr = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]) as u64;
-        let len = u32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]) as u64;
-        iovs.push((ptr, len));
-        cap += len;
-    }
-    let mut tmp = vec![0u8; Self::wasi_usize(cap)];
-    let n = match a0 {
-        0 | 1 | 2 => return 70,
-        _ => {
-            let idx = a0 as u32 as usize;
-            match @FDS@.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {
-                Some(f) => match f.read_at(&mut tmp, a3 as u64) { Ok(n) => n, Err(_) => return 29 },
-                None => return 8,
-            }
-        }
-    };
-    let mut off = 0usize;
-    for (ptr, len) in iovs {
-        if off >= n {
-            break;
-        }
-        let take = len.min((n - off) as u64) as usize;
-        @MEM_MUT@[Self::wasi_span(ptr, take as u64)].copy_from_slice(&tmp[off..off + take]);
-        off += take;
-    }
-    let w = a4 as u32 as usize;
-    @MEM_MUT@[Self::wasi_span(w as u64, 4)].copy_from_slice(&(n as u32).to_le_bytes());
-    0
+    let r = self.wasi_read_iov(a0, a1, a2, Some(a3 as u64));
+    self.wasi_put_count(a4, r)
 }
 
 // Without a file table only the non-seekable stdio fds exist, so a
@@ -340,32 +308,12 @@ fn wasi_fd_pread(&mut self, a0: i32, a1: i32, a2: i32, a3: i64, a4: i32) -> i32 
 
 // `fd_pwrite(fd, iovs, iovs_len, offset, nwritten)` gathers the iovec
 // buffers and writes them at an explicit offset without moving the
-// file position (`write_at`), storing the count at `nwritten`. Stdio
-// is not seekable (ESPIPE, 70).
+// file position (`write_at`), storing the count at `nwritten` (0 on an
+// error). Stdio is not seekable (ESPIPE, 70).
 //# FdPwrite files
 fn wasi_fd_pwrite(&mut self, a0: i32, a1: i32, a2: i32, a3: i64, a4: i32) -> i32 {
-    use std::os::unix::fs::FileExt;
-    let mut buf: Vec<u8> = Vec::new();
-    for i in 0..a2 as u32 {
-        let e = a1 as u32 as u64 + i as u64 * 8;
-        let rec = &@MEM@[Self::wasi_span(e, 8)];
-        let ptr = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]) as u64;
-        let len = u32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]) as u64;
-        buf.extend_from_slice(&@MEM@[Self::wasi_span(ptr, len)]);
-    }
-    let n = match a0 {
-        0 | 1 | 2 => return 70,
-        _ => {
-            let idx = a0 as u32 as usize;
-            match @FDS@.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {
-                Some(f) => match f.write_at(&buf, a3 as u64) { Ok(n) => n, Err(_) => return 29 },
-                None => return 8,
-            }
-        }
-    };
-    let w = a4 as u32 as usize;
-    @MEM_MUT@[Self::wasi_span(w as u64, 4)].copy_from_slice(&(n as u32).to_le_bytes());
-    0
+    let r = self.wasi_write_iov(a0, a1, a2, Some(a3 as u64));
+    self.wasi_put_count(a4, r)
 }
 
 // Without a file table only the non-seekable stdio fds exist, so a
@@ -376,6 +324,26 @@ fn wasi_fd_pwrite(&mut self, a0: i32, a1: i32, a2: i32, a3: i64, a4: i32) -> i32
         0 | 1 | 2 => 70,
         _ => 8,
     }
+}
+
+// `fd_write(fd, iovs, iovs_len, nwritten)` writes the gathered iovec
+// buffers to stdout/stderr (or an opened file) and stores the byte
+// count at `nwritten` (0 on an error). Out-of-range pointers panic (a
+// wasm trap).
+//# FdWrite
+fn wasi_fd_write(&mut self, a0: i32, a1: i32, a2: i32, a3: i32) -> i32 {
+    let r = self.wasi_write_iov(a0, a1, a2, None);
+    self.wasi_put_count(a3, r)
+}
+
+// `fd_read(fd, iovs, iovs_len, nread)` performs one read into the
+// total iovec capacity, scatters it across the iovecs, and stores the
+// byte count at `nread` (0 on EOF or an error). Out-of-range pointers
+// panic (a trap).
+//# FdRead
+fn wasi_fd_read(&mut self, a0: i32, a1: i32, a2: i32, a3: i32) -> i32 {
+    let r = self.wasi_read_iov(a0, a1, a2, None);
+    self.wasi_put_count(a3, r)
 }
 
 // `fd_readdir(fd, buf, buf_len, cookie, bufused)` enumerates a
@@ -407,11 +375,7 @@ fn wasi_fd_readdir(&mut self, a0: i32, a1: i32, a2: i32, a3: i64, a4: i32) -> i3
     let mut entries: Vec<(u64, Vec<u8>, u8)> = vec![(0, b".".to_vec(), 3u8), (0, b"..".to_vec(), 3u8)];
     let rd = match std::fs::read_dir(&dir) {
         Ok(rd) => rd,
-        Err(e) => return match e.kind() {
-            std::io::ErrorKind::NotFound => 44,
-            std::io::ErrorKind::PermissionDenied => 2,
-            _ => 29,
-        },
+        Err(e) => return Self::wasi_errno(&e),
     };
     let mut reals: Vec<(u64, Vec<u8>, u8)> = Vec::new();
     for ent in rd {
@@ -453,4 +417,152 @@ fn wasi_fd_readdir(&mut self, a0: i32, a1: i32, a2: i32, a3: i64, a4: i32) -> i3
     let w = a4 as u32 as usize;
     @MEM_MUT@[Self::wasi_span(w as u64, 4)].copy_from_slice(&(used as u32).to_le_bytes());
     0
+}
+
+// The per-descriptor single read/write behind the iovec loops: the outer `Err`
+// is a fixed errno (ESPIPE for positioned stdio, EISDIR for the preopen root,
+// EBADF for an unknown fd), the inner result is the I/O call's.
+//# IovIo files
+fn wasi_iov_read_once(&mut self, fd: i32, off: Option<u64>, buf: &mut [u8]) -> Result<std::io::Result<usize>, i32> {
+    use std::io::Read;
+    use std::os::unix::fs::FileExt;
+    match (fd, off) {
+        (0, None) => Ok(std::io::stdin().read(buf)),
+        (0..=2, Some(_)) => Err(70),
+        (3, _) => Err(31),
+        _ => {
+            let idx = fd as u32 as usize;
+            match @FDS@.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {
+                Some(f) => Ok(match off {
+                    Some(o) => f.read_at(buf, o),
+                    None => f.read(buf),
+                }),
+                None => Err(8),
+            }
+        }
+    }
+}
+fn wasi_iov_write_once(&mut self, fd: i32, off: Option<u64>, chunk: &[u8]) -> Result<std::io::Result<usize>, i32> {
+    use std::io::Write;
+    use std::os::unix::fs::FileExt;
+    match (fd, off) {
+        (1, None) => Ok(std::io::stdout().write(chunk)),
+        (2, None) => Ok(std::io::stderr().write(chunk)),
+        (0..=2, Some(_)) => Err(70),
+        _ => {
+            let idx = fd as u32 as usize;
+            match @FDS@.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {
+                Some(f) => Ok(match off {
+                    Some(o) => f.write_at(chunk, o),
+                    None => f.write(chunk),
+                }),
+                None => Err(8),
+            }
+        }
+    }
+}
+
+//# IovIo
+fn wasi_iov_read_once(&mut self, fd: i32, off: Option<u64>, buf: &mut [u8]) -> Result<std::io::Result<usize>, i32> {
+    use std::io::Read;
+    match (fd, off) {
+        (0, None) => Ok(std::io::stdin().read(buf)),
+        (0..=2, Some(_)) => Err(70),
+        _ => Err(8),
+    }
+}
+fn wasi_iov_write_once(&mut self, fd: i32, off: Option<u64>, chunk: &[u8]) -> Result<std::io::Result<usize>, i32> {
+    use std::io::Write;
+    match (fd, off) {
+        (1, None) => Ok(std::io::stdout().write(chunk)),
+        (2, None) => Ok(std::io::stderr().write(chunk)),
+        (0..=2, Some(_)) => Err(70),
+        _ => Err(8),
+    }
+}
+
+// The transfer loops behind `fd_read`/`fd_pread` and `fd_write`/`fd_pwrite`
+// (`off` is the explicit offset of the positioned forms). Every iovec is
+// validated before any I/O, and a count above 2^20 is EFAULT. A read is one
+// syscall (EOF is a successful 0); a write loops, and any error after a partial
+// transfer is reported as the short count. Totals are clamped to the memory
+// size (and to u32::MAX, the width of the count), since a short transfer is always legal.
+//# IovLoops
+fn wasi_iovecs(&self, iovs: i32, n: i32) -> Result<Vec<(u64, u64)>, i32> {
+    let n = n as u32;
+    if n > 1 << 20 {
+        return Err(21);
+    }
+    let mut list: Vec<(u64, u64)> = Vec::new();
+    for i in 0..n {
+        let e = iovs as u32 as u64 + i as u64 * 8;
+        let rec = &@MEM@[Self::wasi_span(e, 8)];
+        let ptr = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]) as u64;
+        let len = u32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]) as u64;
+        let _ = &@MEM@[Self::wasi_span(ptr, len)];
+        list.push((ptr, len));
+    }
+    Ok(list)
+}
+fn wasi_put_count(&mut self, at: i32, r: Result<usize, i32>) -> i32 {
+    let (n, rc) = match r {
+        Ok(n) => (n, 0),
+        Err(e) => (0, e),
+    };
+    @MEM_MUT@[Self::wasi_span(at as u32 as u64, 4)].copy_from_slice(&u32::try_from(n).unwrap_or(u32::MAX).to_le_bytes());
+    rc
+}
+fn wasi_read_iov(&mut self, fd: i32, iovs: i32, n: i32, off: Option<u64>) -> Result<usize, i32> {
+    let list = self.wasi_iovecs(iovs, n)?;
+    let cap: u64 = list.iter().map(|&(_, len)| len).sum();
+    let mut tmp = vec![0u8; Self::wasi_usize(cap.min(@MEM@.len() as u64).min(u32::MAX as u64))];
+    let got = loop {
+        match self.wasi_iov_read_once(fd, off, &mut tmp)? {
+            Ok(k) => break k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(Self::wasi_errno(&e)),
+        }
+    };
+    let mut at = 0usize;
+    for (ptr, len) in list {
+        if at >= got {
+            break;
+        }
+        let take = len.min((got - at) as u64) as usize;
+        @MEM_MUT@[Self::wasi_span(ptr, take as u64)].copy_from_slice(&tmp[at..at + take]);
+        at += take;
+    }
+    Ok(got)
+}
+fn wasi_write_iov(&mut self, fd: i32, iovs: i32, n: i32, off: Option<u64>) -> Result<usize, i32> {
+    let list = self.wasi_iovecs(iovs, n)?;
+    let limit = @MEM@.len().min(u32::MAX as usize);
+    let mut buf: Vec<u8> = Vec::new();
+    for (ptr, len) in list {
+        if buf.len() < limit {
+            buf.extend_from_slice(&@MEM@[Self::wasi_span(ptr, len)]);
+        }
+    }
+    buf.truncate(limit);
+    let mut done = 0usize;
+    // Runs at least once, even for an empty buffer: the zero-length call is what
+    // reports EBADF for an unknown fd.
+    loop {
+        let chunk = &buf[done..];
+        let at = off.map(|o| o.wrapping_add(done as u64));
+        match self.wasi_iov_write_once(fd, at, chunk) {
+            Ok(Ok(0)) if chunk.is_empty() => break,
+            Ok(Ok(0)) if done > 0 => break,
+            Ok(Ok(0)) => return Err(29),
+            Ok(Ok(k)) => done += k,
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Ok(Err(_)) | Err(_) if done > 0 => break,
+            Ok(Err(e)) => return Err(Self::wasi_errno(&e)),
+            Err(rc) => return Err(rc),
+        }
+        if done >= buf.len() {
+            break;
+        }
+    }
+    Ok(done)
 }

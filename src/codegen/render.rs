@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::helpers::{HELPER_ORDER, helper_lines, shared_helper_lines, table_accessor};
 use super::render_cont::{continuation_method_lines, continuation_runtime_lines};
 use super::runtime::{defines_trap_type, render_rt_helpers};
-use super::wasi::{WasiAccess, confine_lines, guest_range_lines};
+use super::wasi::{WasiAccess, confine_lines, guest_range_lines, iov_loop_lines};
 use super::{
     ALLOW, DATA_FILE_MIN_BYTES, DataFiles, DataSegment, ElemSegment, ExportInfo, GlobalExportInfo,
     Helper, ImportInfo, ImportedGlobalInfo, ModuleCtx, ModuleParts, SegOffset, TableFill,
@@ -1298,6 +1298,10 @@ fn wasi_method_lines(
     typed_trap_type: bool,
 ) -> Vec<String> {
     let wasi_files = layout.wasi_files;
+    let access = WasiAccess {
+        shared_memory: shared,
+        locked_fds: layout.wasi_threads && wasi_files,
+    };
     let mut inner: Vec<String> = Vec::new();
     let mut wasi_emitted: Vec<WasiFn> = Vec::new();
     if imports
@@ -1308,6 +1312,13 @@ fn wasi_method_lines(
     }
     if imports.iter().any(|im| im.wasi.is_some()) {
         inner.extend(guest_range_lines());
+    }
+    if imports
+        .iter()
+        .any(|im| im.wasi.is_some_and(WasiFn::uses_iov_loops))
+    {
+        inner.push(String::new());
+        inner.extend(iov_loop_lines(wasi_files, access));
     }
     for im in imports {
         if let Some(w) = im.wasi
@@ -1321,13 +1332,7 @@ fn wasi_method_lines(
             } else if w == WasiFn::PthreadCreateJs {
                 pthread_create_js_lines(layout, typed_trap_type)
             } else {
-                w.lines(
-                    wasi_files,
-                    WasiAccess {
-                        shared_memory: shared,
-                        locked_fds: layout.wasi_threads && wasi_files,
-                    },
-                )
+                w.lines(wasi_files, access)
             };
             inner.extend(body);
         }
