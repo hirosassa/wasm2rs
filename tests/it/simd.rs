@@ -1591,3 +1591,43 @@ fn splat_and_extending_loads_trap_exactly_at_the_end_of_memory() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// The 8x8 widening loads and the sign-extending variants also use a single
+// 8-byte range check: 65528 is the last in-bounds start, 65529 traps.
+// func0..3 = load8x8_u, load8x8_s, load16x4_s, load32x2_s.
+#[test]
+fn signed_widening_loads_trap_exactly_at_the_end_of_memory() {
+    let wat = r#"
+        (module (memory 1)
+          (func (param i32) (result v128) (v128.load8x8_u (local.get 0)))
+          (func (param i32) (result v128) (v128.load8x8_s (local.get 0)))
+          (func (param i32) (result v128) (v128.load16x4_s (local.get 0)))
+          (func (param i32) (result v128) (v128.load32x2_s (local.get 0)))
+          (data (i32.const 65528) "\01\ff\03\04\05\06\07\80"))
+    "#;
+    let body = r#"
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let mut i = Instance::new();
+    let traps = |f: &mut dyn FnMut() -> u128| catch_unwind(AssertUnwindSafe(f)).is_err();
+    let lanes16 = |l: [u16; 8]| l.iter().enumerate().fold(0u128, |a, (k, v)| a | (*v as u128) << (k * 16));
+    assert_eq!(i.func0(65528), lanes16([1, 0xff, 3, 4, 5, 6, 7, 0x80]));
+    assert!(traps(&mut || i.func0(65529)));
+    // sign-extended bytes: 0xff -> 0xffff, 0x80 -> 0xff80
+    assert_eq!(i.func1(65528), lanes16([1, 0xffff, 3, 4, 5, 6, 7, 0xff80]));
+    assert!(traps(&mut || i.func1(65529)));
+    // i16 lanes 0xff01, 0x0403, 0x0605, 0x8007 sign-extended to 32 bits
+    let l16 = [0xffff_ff01u32, 0x0403, 0x0605, 0xffff_8007];
+    assert_eq!(i.func2(65528), l16.iter().enumerate().fold(0u128, |a, (k, v)| a | (*v as u128) << (k * 32)));
+    assert!(traps(&mut || i.func2(65529)));
+    // i32 lanes 0x0403ff01, 0x80070605 (negative) sign-extended to 64 bits
+    assert_eq!(i.func3(65528), 0x0403_ff01u128 | (0xffff_ffff_8007_0605u128 << 64));
+    assert!(traps(&mut || i.func3(65529)));
+"#;
+    let bin = compile("signed_loads_edge_trap", wat, body);
+    let out = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        out.status.success(),
+        "signed widening load edge assertions failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
