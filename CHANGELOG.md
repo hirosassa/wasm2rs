@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `wasm2rs-wasi`: `Http1Client` (feature `http-client`), an `HttpClient` over `std::net` that sends and receives request and response trailers. Plain `http://` only (no TLS); `UreqClient` stays the client for `https` and cannot carry trailers.
 - A component that defines and exports a `resource` builds and runs: the glue serves the guest's `canon resource.new`, `resource.rep` and `resource.drop` (A4). The host holds such a resource as `ResourceN(rep)`, `Exports` gains `drop_<resource>`, and `Glue` of such a component has a handle table, so it is made with `Glue::new(host)`. See `docs/component-exports-design.md`.
+- `fuzz-diff`: a `threads` profile (wasm-smith atomics and shared memories) and a table-driven differential test that runs every atomic access family (loads, stores, all rmw operations, cmpxchg, wait, notify, fence) on an unshared memory, 32-bit and memory64, against wasmtime, at the harness's wild addresses and at fixed aligned, misaligned and out-of-bounds cells; a second test checks that every family returns a value and traps. The harness now reads a shared memory on both sides and enables wasmtime's shared memory. 3300 seeds of the profile agree with wasmtime.
+
+### Changed
+- The `unsafe_memory` documentation and the header comment of its output now say that a `memory.copy` between two different memories stays checked; it never was unchecked.
 
 ### Fixed
 - `memory.atomic.wait32` / `wait64` on a memory that is not shared now always traps, as the threads proposal requires (wasmtime does the same). It used to return 1 ("not equal") when the expected value differed from the cell, and trapped only on a match. The address is still validated first, so a misaligned or out-of-bounds wait keeps its own trap. With typed traps the new trap is the variant `Wasm2RsTrap::AtomicWaitOnUnsharedMemory` (message `atomic wait on non-shared memory`); the code after such a wait is dead. A wait on a shared memory is unchanged. A module that relied on the old return value of 1 on an unshared memory now traps.
