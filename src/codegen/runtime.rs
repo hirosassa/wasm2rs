@@ -38,6 +38,7 @@ pub(super) fn rt_name(rt: Rt) -> &'static str {
         Rt::TrapMemoryOob => "trap_memory_oob",
         Rt::TrapTableOob => "trap_table_oob",
         Rt::TrapUnalignedAtomic => "trap_unaligned_atomic_access",
+        Rt::TrapAtomicWaitUnshared => "trap_atomic_wait_unshared",
         Rt::TrapNullReference => "trap_null_reference",
         Rt::TrapCastFailure => "trap_cast_failure",
         Rt::TrapArrayOob => "trap_array_oob",
@@ -63,7 +64,7 @@ pub(super) fn is_rt_name(name: &str) -> bool {
 
 /// All runtime helpers (free functions and support types), in a deterministic
 /// emission order.
-const RT_ORDER: [Rt; 48] = [
+const RT_ORDER: [Rt; 49] = [
     Rt::TrapType,
     Rt::DelegateExc,
     Rt::CallDepth,
@@ -77,6 +78,7 @@ const RT_ORDER: [Rt; 48] = [
     Rt::TrapMemoryOob,
     Rt::TrapTableOob,
     Rt::TrapUnalignedAtomic,
+    Rt::TrapAtomicWaitUnshared,
     Rt::TrapNullReference,
     Rt::TrapCastFailure,
     Rt::TrapArrayOob,
@@ -185,6 +187,10 @@ fn typed_trap_variants(used: &HashSet<Rt>, typed: bool) -> Vec<TrapVariant> {
         (Rt::TrapMemoryOob, TrapVariant::OutOfBoundsMemoryAccess),
         (Rt::TrapTableOob, TrapVariant::OutOfBoundsTableAccess),
         (Rt::TrapUnalignedAtomic, TrapVariant::UnalignedAtomicAccess),
+        (
+            Rt::TrapAtomicWaitUnshared,
+            TrapVariant::AtomicWaitOnUnsharedMemory,
+        ),
         (Rt::TrapNullReference, TrapVariant::NullReference),
         (Rt::TrapCastFailure, TrapVariant::CastFailure),
         (Rt::TrapArrayOob, TrapVariant::OutOfBoundsArrayAccess),
@@ -244,6 +250,7 @@ enum TrapVariant {
     OutOfBoundsMemoryAccess,
     OutOfBoundsTableAccess,
     UnalignedAtomicAccess,
+    AtomicWaitOnUnsharedMemory,
     NullReference,
     CastFailure,
     OutOfBoundsArrayAccess,
@@ -265,6 +272,7 @@ impl TrapVariant {
             TrapVariant::OutOfBoundsMemoryAccess => "OutOfBoundsMemoryAccess",
             TrapVariant::OutOfBoundsTableAccess => "OutOfBoundsTableAccess",
             TrapVariant::UnalignedAtomicAccess => "UnalignedAtomicAccess",
+            TrapVariant::AtomicWaitOnUnsharedMemory => "AtomicWaitOnUnsharedMemory",
             TrapVariant::NullReference => "NullReference",
             TrapVariant::CastFailure => "CastFailure",
             TrapVariant::OutOfBoundsArrayAccess => "OutOfBoundsArrayAccess",
@@ -287,6 +295,7 @@ impl TrapVariant {
             TrapVariant::OutOfBoundsMemoryAccess => "out of bounds memory access",
             TrapVariant::OutOfBoundsTableAccess => "out of bounds table access",
             TrapVariant::UnalignedAtomicAccess => "unaligned atomic access",
+            TrapVariant::AtomicWaitOnUnsharedMemory => "atomic wait on non-shared memory",
             TrapVariant::NullReference => "null reference",
             TrapVariant::CastFailure => "cast failure",
             TrapVariant::OutOfBoundsArrayAccess => "out of bounds array access",
@@ -387,6 +396,11 @@ fn rt_lines(rt: Rt, typed: bool, variants: &[TrapVariant]) -> Vec<String> {
         Rt::TrapUnalignedAtomic => trap_fn_lines(
             "trap_unaligned_atomic_access",
             TrapVariant::UnalignedAtomicAccess,
+            typed,
+        ),
+        Rt::TrapAtomicWaitUnshared => trap_fn_lines(
+            "trap_atomic_wait_unshared",
+            TrapVariant::AtomicWaitOnUnsharedMemory,
             typed,
         ),
         Rt::TrapNullReference => {

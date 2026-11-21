@@ -173,20 +173,22 @@ fn try_catch_all_does_not_catch_a_typed_trap() {
 }
 
 #[test]
-fn traps_outside_stage_two_keep_their_string_payload() {
+fn wait_on_an_unshared_memory_is_a_typed_trap() {
+    // A `wait` on a memory that is not shared always traps, with its own variant
+    // whether the expected value matches the cell (0) or not.
     compile_run_typed(
-        "typed_traps_other_panics",
-        // On an unshared memory a `wait` whose value matches would block forever, a
-        // still-untyped string panic.
+        "typed_traps_unshared_wait",
         r#"(module (memory 1)
-            (func (export "wait") (result i32)
-              (memory.atomic.wait32 (i32.const 0) (i32.const 0) (i64.const -1))))"#,
+            (func (export "wait") (param i32) (result i32)
+              (memory.atomic.wait32 (i32.const 0) (local.get 0) (i64.const -1))))"#,
         &format!(
             r#"{CATCH}
             let mut inst = Instance::new();
-            let p = payload_of(|| inst.func0());
-            assert!(p.downcast_ref::<Wasm2RsTrap>().is_none());
-            assert!(p.downcast_ref::<&str>().is_some() || p.downcast_ref::<String>().is_some());"#
+            for expected in [0, 5] {{
+                let t = trap_of(|| inst.func0(expected));
+                assert!(matches!(t, Wasm2RsTrap::AtomicWaitOnUnsharedMemory));
+                assert_eq!(t.to_string(), "atomic wait on non-shared memory");
+            }}"#
         ),
     );
 }

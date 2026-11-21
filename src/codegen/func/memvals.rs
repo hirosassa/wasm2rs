@@ -662,9 +662,9 @@ impl<'a> super::FuncGen<'a> {
     }
 
     /// Lower `memory.atomic.wait{32,64}`. It pops (addr, expected, timeout) and
-    /// pushes an i32 result. On a single instance nobody can ever notify, so a
-    /// matching wait would block forever and instead traps; a non-matching wait
-    /// returns 1 ("not equal") immediately, as the spec requires.
+    /// pushes an i32 result. On a shared memory it really parks; on an unshared
+    /// one the threads proposal makes it trap (after the alignment and bounds
+    /// checks) whether or not `expected` matches the cell.
     pub(super) fn atomic_wait(
         &mut self,
         load: Helper,
@@ -674,23 +674,23 @@ impl<'a> super::FuncGen<'a> {
         let mem = self.memarg_memory(memarg)?;
         let offset = self.shared_offset(memarg)?;
         let off_lit = self.offset_lit(memarg, mem)?;
+        // `wait32` compares a 4-byte cell, `wait64` an 8-byte one.
+        let width = if matches!(load, Helper::LoadI64) {
+            8
+        } else {
+            4
+        };
         if self.ctx.memory_shared {
             // A real blocking wait: park until notified or the timeout elapses.
-            // `wait32` compares a 4-byte cell, `wait64` an 8-byte one. Returns 0
-            // (woken), 1 (value mismatch — did not block), or 2 (timed out). The
-            // three operands are consumed, so freeze only survivors.
-            let byte = if matches!(load, Helper::LoadI64) {
-                8
-            } else {
-                4
-            };
+            // Returns 0 (woken), 1 (value mismatch — did not block), or 2 (timed
+            // out). The three operands are consumed, so freeze only survivors.
             self.spill_nonstable()?;
             let timeout = self.pop()?;
             let expected = self.pop()?;
             let addr = self.pop()?;
             let name = self.fresh_temp();
             self.line(format!(
-                "let {name}: i32 = self.memory.wait(({}) as u32 as u64 + {offset}u64, ({}) as u64, {byte}, ({}) as i64);",
+                "let {name}: i32 = self.memory.wait(({}) as u32 as u64 + {offset}u64, ({}) as u64, {width}, ({}) as i64);",
                 addr.code, expected.code, timeout.code
             ));
             self.push(Val {
@@ -705,28 +705,24 @@ impl<'a> super::FuncGen<'a> {
         // earlier pending operand that may trap.
         self.spill_nonstable()?;
         self.pop()?; // timeout
-        let expected = self.pop()?;
+        self.pop()?; // expected
         let addr = self.pop()?;
         self.used_helpers.insert((load, mem));
-        let width = if matches!(load, Helper::LoadI64) {
-            8
-        } else {
-            4
-        };
         let addr_tmp = self.bind_addr_checked_aligned(mem, &addr.code, &off_lit, width);
-        let name = self.fresh_temp();
+        // The load raises the bounds trap; the wait itself then always traps.
         self.line(format!(
-            "let {name}: i32 = if self.{}({addr_tmp}, {off_lit}) != ({}) {{ 1 }} \
-             else {{ panic!(\"atomic.wait on a single-threaded instance would block forever\") }};",
-            helper_method_name(load, mem),
-            expected.code
+            "let _ = self.{}({addr_tmp}, {off_lit});",
+            helper_method_name(load, mem)
         ));
-        self.push(Val {
-            code: name,
-            ty: ValType::I32,
-            stable: true,
-            may_trap: false,
-        });
+        let trap = self.trap_or_panic(
+            Rt::TrapAtomicWaitUnshared,
+            "atomic wait on non-shared memory",
+        );
+        // Like `unreachable`: the trap ends the block, so the code after the wait is
+        // dead and the wait's i32 result is never pushed.
+        self.term(format!("{trap};"));
+        self.reachable = false;
+        self.dead_nesting = 0;
         Ok(())
     }
 

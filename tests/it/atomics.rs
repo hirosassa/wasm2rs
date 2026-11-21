@@ -143,45 +143,90 @@ fn atomic_cmpxchg_swaps_only_on_match() {
 }
 
 #[test]
-fn atomic_fence_notify_and_wait_mismatch() {
+fn atomic_fence_and_notify_on_an_unshared_memory() {
     // `atomic.fence` is a no-op on a single instance; `memory.atomic.notify`
-    // wakes nobody (returns 0); `memory.atomic.wait32` returns 1 ("not equal")
-    // when the cell (0) differs from the expected value.
+    // wakes nobody (returns 0).
     compile_run(
-        "atomic_fence_notify_wait",
+        "atomic_fence_notify",
         r#"(module
             (memory 1)
             (func (export "n") (result i32)
               atomic.fence
               i32.const 0
               i32.const 1
-              memory.atomic.notify)
-            (func (export "w") (result i32)
-              i32.const 0
-              i32.const 5
-              i64.const -1
-              memory.atomic.wait32))"#,
-        "let mut inst = Instance::new(); \
-         assert_eq!(inst.func0(), 0); assert_eq!(inst.func1(), 1);",
+              memory.atomic.notify))"#,
+        "let mut inst = Instance::new(); assert_eq!(inst.func0(), 0);",
     );
 }
 
 #[test]
-fn atomic_wait_on_match_traps() {
-    // With no other thread able to wake it, a `wait` whose expected value equals
-    // the cell would block forever, so a single-threaded instance traps instead.
+fn atomic_wait_on_an_unshared_memory_always_traps() {
+    // The threads proposal makes `memory.atomic.wait*` trap on a memory that is not
+    // shared, whether or not the expected value matches the cell (wasmtime does the
+    // same; the cell here is 0, so 5 is a mismatch and 0 a match). The address is
+    // validated first, so misalignment and out-of-bounds keep their own traps (see
+    // `notify_on_unshared_memory_traps_when_misaligned_or_out_of_bounds`).
+    for (name, expected) in [("atomic_wait_mismatch", 5), ("atomic_wait_match", 0)] {
+        expect_trap_with(
+            name,
+            &format!(
+                r#"(module
+                    (memory 1)
+                    (func (export "t") (result i32)
+                      i32.const 0
+                      i32.const {expected}
+                      i64.const -1
+                      memory.atomic.wait32))"#
+            ),
+            "let mut inst = Instance::new(); inst.func0();",
+            "atomic wait on non-shared memory",
+        );
+    }
     expect_trap_with(
-        "atomic_wait_block",
+        "atomic_wait64_unshared",
         r#"(module
             (memory 1)
-            (func (export "t")
+            (func (export "t") (result i32)
               i32.const 0
-              i32.const 0
-              i64.const -1
-              memory.atomic.wait32
-              drop))"#,
+              i64.const 7
+              i64.const 0
+              memory.atomic.wait64))"#,
         "let mut inst = Instance::new(); inst.func0();",
-        "would block forever",
+        "atomic wait on non-shared memory",
+    );
+    // The code after the trapping wait is dead, in a block with a result as well.
+    expect_trap_with(
+        "atomic_wait_then_dead_code",
+        r#"(module
+            (memory 1)
+            (func (export "t") (result i32)
+              (block (result i32)
+                i32.const 0
+                i32.const 0
+                i64.const 0
+                memory.atomic.wait32
+                i32.const 1
+                i32.add)))"#,
+        "let mut inst = Instance::new(); inst.func0();",
+        "atomic wait on non-shared memory",
+    );
+}
+
+#[test]
+fn atomic_wait64_on_an_unshared_memory_checks_the_address_first() {
+    // A wait64 reads an 8-byte cell: address 4 is misaligned for it (though fine for
+    // a wait32), and the alignment trap comes before the always-trapping wait.
+    expect_trap_with(
+        "atomic_wait64_misaligned",
+        r#"(module
+            (memory 1)
+            (func (export "t") (result i32)
+              i32.const 4
+              i64.const 0
+              i64.const 0
+              memory.atomic.wait64))"#,
+        "let mut inst = Instance::new(); inst.func0();",
+        "unaligned atomic access",
     );
 }
 
