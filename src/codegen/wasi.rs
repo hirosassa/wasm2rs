@@ -466,6 +466,15 @@ impl WasiFn {
             .collect()
     }
 
+    /// Whether this method runs on the shared `wasi_read_iov` / `wasi_write_iov`
+    /// transfer loops.
+    pub(super) fn uses_iov_loops(self) -> bool {
+        matches!(
+            self,
+            WasiFn::FdRead | WasiFn::FdWrite | WasiFn::FdPread | WasiFn::FdPwrite
+        )
+    }
+
     /// [`Self::lines`] before the access placeholders are filled in.
     fn template(self, files: bool, access: WasiAccess) -> Vec<String> {
         if let Some(src) = wasi_fn_template(self, files) {
@@ -473,109 +482,6 @@ impl WasiFn {
         }
         let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
         match self {
-            // `fd_write(fd, iovs, iovs_len, nwritten)` gathers the iovec buffers
-            // from linear memory, writes them to stdout (fd 1) or stderr (fd 2),
-            // stores the byte count at `nwritten`, and returns 0 on success (an
-            // errno otherwise). Out-of-range pointers panic (a wasm trap).
-            WasiFn::FdWrite => {
-                let mut body = vec![
-                    "fn wasi_fd_write(&mut self, a0: i32, a1: i32, a2: i32, a3: i32) -> i32 {",
-                    "    use std::io::Write;",
-                    "    let mut buf: Vec<u8> = Vec::new();",
-                    "    for i in 0..a2 as u32 {",
-                    "        let e = a1 as u32 as u64 + i as u64 * 8;",
-                    "        let rec = &@MEM@[Self::wasi_span(e, 8)];",
-                    "        let ptr = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]) as u64;",
-                    "        let len = u32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]) as u64;",
-                    "        buf.extend_from_slice(&@MEM@[Self::wasi_span(ptr, len)]);",
-                    "    }",
-                    "    let ok = match a0 {",
-                    "        1 => std::io::stdout().write_all(&buf).is_ok(),",
-                    "        2 => std::io::stderr().write_all(&buf).is_ok(),",
-                ];
-                // fd 1/2 are stdout/stderr; with a file table, fd >= 4 writes to
-                // the opened `std::fs::File`. Any other fd is EBADF (8).
-                if files {
-                    body.extend([
-                        "        _ => {",
-                        "            let idx = a0 as u32 as usize;",
-                        "            match @FDS@.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {",
-                        "                Some(f) => f.write_all(&buf).is_ok(),",
-                        "                None => return 8,",
-                        "            }",
-                        "        }",
-                    ]);
-                } else {
-                    body.push("        _ => return 8,");
-                }
-                body.extend([
-                    "    };",
-                    "    if !ok {",
-                    "        return 29;",
-                    "    }",
-                    "    let n = (buf.len() as u32).to_le_bytes();",
-                    "    let w = a3 as u32 as usize;",
-                    "    @MEM_MUT@[Self::wasi_span(w as u64, 4)].copy_from_slice(&n);",
-                    "    0",
-                    "}",
-                ]);
-                owned(&body)
-            }
-            // `fd_read(fd, iovs, iovs_len, nread)` performs one read from stdin
-            // (fd 0) into the total iovec capacity, scatters the bytes across the
-            // iovec buffers, stores the byte count at `nread`, and returns 0 on
-            // success (an errno otherwise). Out-of-range pointers panic (a trap).
-            WasiFn::FdRead => {
-                let mut body = vec![
-                    "fn wasi_fd_read(&mut self, a0: i32, a1: i32, a2: i32, a3: i32) -> i32 {",
-                    "    use std::io::Read;",
-                    "    let mut iovs: Vec<(u64, u64)> = Vec::new();",
-                    "    let mut cap = 0u64;",
-                    "    for i in 0..a2 as u32 {",
-                    "        let e = a1 as u32 as u64 + i as u64 * 8;",
-                    "        let rec = &@MEM@[Self::wasi_span(e, 8)];",
-                    "        let ptr = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]) as u64;",
-                    "        let len = u32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]) as u64;",
-                    "        iovs.push((ptr, len));",
-                    "        cap += len;",
-                    "    }",
-                    "    let mut tmp = vec![0u8; Self::wasi_usize(cap)];",
-                    "    let n = match a0 {",
-                    "        0 => match std::io::stdin().read(&mut tmp) { Ok(n) => n, Err(_) => return 29 },",
-                ];
-                // fd 0 reads stdin; with a file table, fd >= 4 reads the opened
-                // `std::fs::File`. Any other fd is EBADF (8).
-                if files {
-                    body.extend([
-                        "        _ => {",
-                        "            let idx = a0 as u32 as usize;",
-                        "            match @FDS@.get_mut(idx.wrapping_sub(4)).and_then(|s| s.as_mut()).map(|t| &mut t.0) {",
-                        "                Some(f) => match f.read(&mut tmp) { Ok(n) => n, Err(_) => return 29 },",
-                        "                None => return 8,",
-                        "            }",
-                        "        }",
-                    ]);
-                } else {
-                    body.push("        _ => return 8,");
-                }
-                body.extend([
-                    "    };",
-                    "    let mut off = 0usize;",
-                    "    for (ptr, len) in iovs {",
-                    "        if off >= n {",
-                    "            break;",
-                    "        }",
-                    "        let take = len.min((n - off) as u64) as usize;",
-                    "        @MEM_MUT@[Self::wasi_span(ptr, take as u64)].copy_from_slice(&tmp[off..off + take]);",
-                    "        off += take;",
-                    "    }",
-                    "    let w = a3 as u32 as usize;",
-                    "    @MEM_MUT@[Self::wasi_span(w as u64, 4)].copy_from_slice(&(n as u32).to_le_bytes());",
-                    "    0",
-                    "}",
-                ]);
-                owned(&body)
-            }
             // `args_sizes_get(argc, argv_buf_size)` reports the argument count
             // and the total byte size of the argument strings (each NUL-
             // terminated), taken from the process's real argv.
@@ -628,12 +534,7 @@ impl WasiFn {
                     "    }",
                     "    let file = match opts.open(&full) {",
                     "        Ok(f) => f,",
-                    "        Err(e) => return match e.kind() {",
-                    "            std::io::ErrorKind::NotFound => 44,",
-                    "            std::io::ErrorKind::PermissionDenied => 2,",
-                    "            std::io::ErrorKind::AlreadyExists => 20,",
-                    "            _ => 29,",
-                    "        },",
+                    "        Err(e) => return Self::wasi_errno(&e),",
                     "    };",
                 ]));
                 // The slot search and insertion must run under one guard when the
@@ -768,11 +669,7 @@ impl WasiFn {
                     "        match std::fs::symlink_metadata(&p) {",
                     "            Ok(m) if m.file_type().is_symlink() => return 58,",
                     "            Ok(_) => {}",
-                    "            Err(e) => return match e.kind() {",
-                    "                std::io::ErrorKind::NotFound => 44,",
-                    "                std::io::ErrorKind::PermissionDenied => 2,",
-                    "                _ => 29,",
-                    "            },",
+                    "            Err(e) => return Self::wasi_errno(&e),",
                     "        }",
                     "    }",
                 ]));
@@ -798,12 +695,7 @@ impl WasiFn {
                 body.extend(owned(&[
                     "    let target = match std::fs::read_link(&p) {",
                     "        Ok(t) => t,",
-                    "        Err(e) => return match e.kind() {",
-                    "            std::io::ErrorKind::NotFound => 44,",
-                    "            std::io::ErrorKind::PermissionDenied => 2,",
-                    "            std::io::ErrorKind::InvalidInput => 28,",
-                    "            _ => 29,",
-                    "        },",
+                    "        Err(e) => return Self::wasi_errno(&e),",
                     "    };",
                     "    let bytes = target.as_os_str().as_bytes();",
                     "    let n = bytes.len().min(a4 as u32 as usize);",
@@ -963,11 +855,7 @@ impl WasiFn {
                 body.extend(owned(&[
                     "    let meta = match std::fs::metadata(&rel) {",
                     "        Ok(m) => m,",
-                    "        Err(e) => return match e.kind() {",
-                    "            std::io::ErrorKind::NotFound => 44,",
-                    "            std::io::ErrorKind::PermissionDenied => 2,",
-                    "            _ => 29,",
-                    "        },",
+                    "        Err(e) => return Self::wasi_errno(&e),",
                     "    };",
                     "    let filetype = if meta.is_dir() { 3u8 } else if meta.is_file() { 4u8 } else { 0u8 };",
                     "    let mut st = [0u8; 64];",
@@ -1074,11 +962,31 @@ impl WasiFn {
             | WasiFn::ClockResGet
             | WasiFn::FdPread
             | WasiFn::FdPwrite
+            | WasiFn::FdWrite
+            | WasiFn::FdRead
             | WasiFn::FdReaddir => {
                 unreachable!("{self:?} is rendered from wasi_fns.tpl")
             }
         }
     }
+}
+
+/// The `wasi_read_iov` / `wasi_write_iov` loops shared by `fd_read`/`fd_pread`
+/// and `fd_write`/`fd_pwrite`, with their per-descriptor dispatch, emitted once
+/// per module.
+pub(super) fn iov_loop_lines(files: bool, access: WasiAccess) -> Vec<String> {
+    let src = include_str!("rt_src/wasi_fns.tpl");
+    let io = if files { "IovIo files" } else { "IovIo" };
+    [io, "IovLoops"]
+        .into_iter()
+        .flat_map(|name| {
+            let Some(body) = tpl_section(src, &format!("//# {name}\n")) else {
+                unreachable!("wasi_fns.tpl has no `{name}` section")
+            };
+            source_lines(body)
+        })
+        .map(|l| access.fill(&l))
+        .collect()
 }
 
 /// `wasi_span` / `wasi_usize`: guest `ptr + len` and byte-count arithmetic
@@ -1091,6 +999,51 @@ pub(super) fn guest_range_lines() -> Vec<String> {
         "fn wasi_span(start: u64, len: u64) -> std::ops::Range<usize> {",
         "    let Some(end) = start.checked_add(len) else { panic!(\"out of bounds memory access\") };",
         "    Self::wasi_usize(start)..Self::wasi_usize(end)",
+        "}",
+        "",
+        "/// The WASI errno of an I/O error. The OS errno is preferred (the values below",
+        "/// are shared by Linux and macOS); the `ErrorKind` is the fallback.",
+        "fn wasi_errno(e: &std::io::Error) -> i32 {",
+        "    #[cfg(unix)]",
+        "    {",
+        "        match e.raw_os_error() {",
+        "            Some(1) => return 63,",
+        "            Some(2) => return 44,",
+        "            Some(3) => return 71,",
+        "            Some(4) => return 27,",
+        "            Some(5) => return 29,",
+        "            Some(6) => return 60,",
+        "            Some(9) => return 8,",
+        "            Some(12) => return 48,",
+        "            Some(13) => return 2,",
+        "            Some(16) => return 10,",
+        "            Some(17) => return 20,",
+        "            Some(18) => return 75,",
+        "            Some(19) => return 43,",
+        "            Some(20) => return 54,",
+        "            Some(21) => return 31,",
+        "            Some(22) => return 28,",
+        "            Some(23) => return 41,",
+        "            Some(24) => return 33,",
+        "            Some(25) => return 59,",
+        "            Some(26) => return 74,",
+        "            Some(27) => return 22,",
+        "            Some(28) => return 51,",
+        "            Some(29) => return 70,",
+        "            Some(30) => return 69,",
+        "            Some(31) => return 34,",
+        "            Some(32) => return 64,",
+        "            _ => {}",
+        "        }",
+        "    }",
+        "    match e.kind() {",
+        "        std::io::ErrorKind::NotFound => 44,",
+        "        std::io::ErrorKind::PermissionDenied => 2,",
+        "        std::io::ErrorKind::AlreadyExists => 20,",
+        "        std::io::ErrorKind::InvalidInput => 28,",
+        "        std::io::ErrorKind::BrokenPipe => 64,",
+        "        _ => 29,",
+        "    }",
         "}",
         "",
         "fn wasi_usize(n: u64) -> usize {",
@@ -1202,12 +1155,7 @@ fn fs_result_lines(call: &str) -> Vec<String> {
     vec![
         format!("    match {call} {{"),
         "        Ok(()) => 0,".to_string(),
-        "        Err(e) => match e.kind() {".to_string(),
-        "            std::io::ErrorKind::NotFound => 44,".to_string(),
-        "            std::io::ErrorKind::PermissionDenied => 2,".to_string(),
-        "            std::io::ErrorKind::AlreadyExists => 20,".to_string(),
-        "            _ => 29,".to_string(),
-        "        },".to_string(),
+        "        Err(e) => Self::wasi_errno(&e),".to_string(),
         "    }".to_string(),
     ]
 }
@@ -1249,9 +1197,7 @@ fn sock_lines(sig: &str, files: bool) -> Vec<String> {
 /// An `i32` expression that runs a `std::io::Result` expression and maps `Err`
 /// to the same errnos as `path_open`.
 fn errno_of(call: &str) -> String {
-    format!(
-        "match {call} {{ Ok(_) => 0, Err(e) => match e.kind() {{ std::io::ErrorKind::NotFound => 44, std::io::ErrorKind::PermissionDenied => 2, std::io::ErrorKind::AlreadyExists => 20, _ => 29 }} }}"
-    )
+    format!("match {call} {{ Ok(_) => 0, Err(e) => Self::wasi_errno(&e) }}")
 }
 
 /// The body of an `fd_*` method that dispatches on the descriptor kind (stdio,
@@ -1418,6 +1364,8 @@ mod tests {
                         let text = w.lines(files, access).join("\n");
                         assert!(!text.contains("@MEM") && !text.contains("@FDS"), "{text}");
                     }
+                    let text = iov_loop_lines(files, access).join("\n");
+                    assert!(!text.contains("@MEM") && !text.contains("@FDS"), "{text}");
                 }
             }
         }
