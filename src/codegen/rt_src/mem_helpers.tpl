@@ -244,10 +244,12 @@ fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {
 //# load8x8_u
 fn @NAME(&self, addr: @ADDR, offset: @OFF) -> u128 {
     let a = @EA;
+    let mut src = [0u8; 8];
+    src.copy_from_slice(&@R[a..a + 8]);
     let mut r = [0u8; 16];
     let mut i = 0;
     while i < 8 {
-        let x = @R[a + i] as u16;
+        let x = src[i] as u16;
         r[i * 2..i * 2 + 2].copy_from_slice(&x.to_le_bytes());
         i += 1;
     }
