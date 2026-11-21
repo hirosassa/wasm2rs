@@ -238,7 +238,8 @@ pub struct TranspileOptions {
     /// `get_unchecked`, gaining speed. **An out-of-bounds access then becomes
     /// undefined behaviour instead of a wasm trap**, so this is sound only for
     /// modules you trust to stay in bounds. Off by default. Not applied to a
-    /// `shared` memory.
+    /// `shared` memory, nor to a `memory.copy` between two different memories,
+    /// which stays checked.
     pub unsafe_memory: bool,
 
     /// Emit `core::arch` (NEON on aarch64, SSE2 on x86_64) bodies for the

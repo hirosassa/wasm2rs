@@ -154,10 +154,14 @@ pub(super) fn render_module_head(
                 .to_string(),
         );
         lines.push(
-            "// are UNCHECKED. An out-of-bounds access is undefined behaviour, not a wasm"
+            "// (except a `memory.copy` between two memories) are UNCHECKED. An out-of-bounds"
                 .to_string(),
         );
-        lines.push("// trap. Only sound for modules trusted to stay in bounds.".to_string());
+        lines.push(
+            "// access is undefined behaviour, not a wasm trap. Only sound for modules trusted"
+                .to_string(),
+        );
+        lines.push("// to stay in bounds.".to_string());
         lines.push(String::new());
     }
 

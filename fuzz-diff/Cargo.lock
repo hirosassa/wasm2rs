@@ -1316,9 +1316,10 @@ dependencies = [
 
 [[package]]
 name = "wasm2rs"
-version = "0.3.0"
+version = "0.6.0"
 dependencies = [
  "mimalloc",
+ "wasm-encoder 0.263.0",
  "wasmparser 0.263.0",
 ]
 

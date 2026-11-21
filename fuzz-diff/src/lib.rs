@@ -174,9 +174,12 @@ pub fn run_wasmtime(
     exports: &[Export],
     memory: Option<&str>,
 ) -> Result<String, String> {
-    use wasmtime::{Engine, Instance, Memory, Module, Store, Trap, Val};
+    use wasmtime::{Engine, Instance, Module, SharedMemory, Store, Trap, Val};
     let mut cfg = wasmtime::Config::new();
     cfg.consume_fuel(true);
+    // A module that defines a shared memory (the threads profile) cannot be
+    // instantiated with this off, which would read as an init trap.
+    cfg.shared_memory(true);
     let engine = Engine::new(&cfg).map_err(|e| e.to_string())?;
     let module = Module::new(&engine, wasm).map_err(|e| format!("wasmtime rejects: {e}"))?;
     let mut store = Store::new(&engine, ());
@@ -240,10 +243,24 @@ pub fn run_wasmtime(
         }
     }
     if let Some(name) = memory {
-        let mem: Memory = instance
-            .get_memory(&mut store, name)
-            .ok_or("memory 0 is not exported")?;
-        let _ = writeln!(out, "memory {}", fnv(mem.data(&store)));
+        let hash = match instance.get_memory(&mut store, name) {
+            Some(mem) => fnv(mem.data(&store)),
+            None => {
+                // A shared memory is a different export kind.
+                let shared: SharedMemory = instance
+                    .get_shared_memory(&mut store, name)
+                    .ok_or("memory 0 is not exported")?;
+                let bytes: Vec<u8> = shared
+                    .data()
+                    .iter()
+                    // SAFETY: the instance has finished running and nothing else
+                    // holds this memory, so the read cannot race.
+                    .map(|cell| unsafe { *cell.get() })
+                    .collect();
+                fnv(&bytes)
+            }
+        };
+        let _ = writeln!(out, "memory {hash}");
     }
     Ok(out)
 }
@@ -319,10 +336,20 @@ pub fn rust_program(generated: &str, exports: &[Export], has_memory: bool) -> St
     } else {
         ""
     };
-    let mem = if has_memory && stateful {
-        "    let mut h: u64 = 0xcbf29ce484222325;\n    let m = inst.memory();\n    for b in m.iter() { h = (h ^ u64::from(*b)).wrapping_mul(0x100000001b3); }\n    println!(\"memory {}:{:016x}\", m.len(), h);\n"
+    // A shared memory is a `memory` field read through `bytes()`; the `memory()`
+    // accessor exists only on an unshared module. `SharedBytes` indexes only by
+    // `Range`, hence the explicit range.
+    let read_memory = if generated.contains("    memory: SharedMemory,") {
+        "    let shared = inst.memory.bytes();\n    let m = &shared[0..shared.len()];\n"
     } else {
-        ""
+        "    let m = inst.memory();\n"
+    };
+    let mem = if has_memory && stateful {
+        format!(
+            "    let mut h: u64 = 0xcbf29ce484222325;\n{read_memory}    for b in m.iter() {{ h = (h ^ u64::from(*b)).wrapping_mul(0x100000001b3); }}\n    println!(\"memory {{}}:{{:016x}}\", m.len(), h);\n"
+        )
+    } else {
+        String::new()
     };
     format!(
         "{generated}\nfn run() {{\n{new}{body}{mem}}}\n\
@@ -431,10 +458,11 @@ pub enum Profile {
     TailCall,
     ExtendedConst,
     Exceptions,
+    Threads,
 }
 
 impl Profile {
-    pub const ALL: [Profile; 8] = [
+    pub const ALL: [Profile; 9] = [
         Profile::Base,
         Profile::Memory64,
         Profile::MultiMemory,
@@ -443,6 +471,7 @@ impl Profile {
         Profile::TailCall,
         Profile::ExtendedConst,
         Profile::Exceptions,
+        Profile::Threads,
     ];
 
     pub fn name(self) -> &'static str {
@@ -455,6 +484,7 @@ impl Profile {
             Profile::TailCall => "tail-call",
             Profile::ExtendedConst => "extended-const",
             Profile::Exceptions => "exceptions",
+            Profile::Threads => "threads",
         }
     }
 }
@@ -504,7 +534,7 @@ fn generate_inner(seed: u64, profile: Profile) -> Option<Vec<u8>> {
         table_max_size_required: true,
         simd_enabled: profile == Profile::Simd,
         relaxed_simd_enabled: false,
-        threads_enabled: false,
+        threads_enabled: profile == Profile::Threads,
         exceptions_enabled: profile == Profile::Exceptions,
         gc_enabled: false,
         memory64_enabled: profile == Profile::Memory64,
@@ -679,6 +709,15 @@ mod tests {
         assert!(any_seed(Profile::Exceptions, |w| uses_op(w, is_exception)));
     }
 
+    fn is_atomic(op: &wasmparser::Operator) -> bool {
+        format!("{op:?}").contains("Atomic")
+    }
+
+    #[test]
+    fn the_threads_profile_generates_atomic_operators() {
+        assert!(any_seed(Profile::Threads, |w| uses_op(w, is_atomic)));
+    }
+
     #[test]
     fn the_extended_const_profile_generates_constant_arithmetic() {
         assert!(any_seed(Profile::ExtendedConst, |w| uses_const_op(
@@ -693,6 +732,7 @@ mod tests {
             if let Some(w) = generate(seed) {
                 assert!(!uses_op(&w, is_simd) && !uses_op(&w, is_tail_call));
                 assert!(!uses_op(&w, is_exception) && !uses_const_op(&w, is_const_arith));
+                assert!(!uses_op(&w, is_atomic));
             }
         }
     }
@@ -708,6 +748,7 @@ mod tests {
             Profile::TailCall,
             Profile::ExtendedConst,
             Profile::Exceptions,
+            Profile::Threads,
         ] {
             assert_eq!(p.name().parse::<Profile>(), Ok(p));
         }
@@ -799,5 +840,188 @@ mod tests {
         let a = generate(1).unwrap();
         assert_eq!(a, generate(1).unwrap());
         assert!(wasmparser::validate(&a).is_ok());
+    }
+
+    /// The little-endian value of the data segment's first bytes (`01 02 03 ..`) at
+    /// the width of a `ty` access, `w` being its narrow width (`""` for the full one).
+    fn data_at_zero(ty: &str, w: &str) -> String {
+        let bits: u32 = match (ty, w) {
+            ("i32", "") => 32,
+            (_, "") => 64,
+            (_, w) => w.parse().unwrap(),
+        };
+        let value = (0..bits / 8).fold(0u64, |v, i| v | (u64::from(i) + 1) << (8 * i));
+        format!("0x{value:x}")
+    }
+
+    /// The (family, WAT) of every atomic access shape at the address expression `a`.
+    /// A family is the instruction name without offset or address, for example
+    /// `i64.atomic.rmw8.add_u`. `wide` picks the static offsets: the ones that reach
+    /// the end of the memory and overflow a `u32` for the harness's wild addresses,
+    /// or just two small ones for a fixed cell.
+    fn atomic_shapes(a: &str, wide: bool) -> Vec<(String, String)> {
+        let offsets: &[&str] = if wide {
+            &["", " offset=3", " offset=65532", " offset=4294967292"]
+        } else {
+            &["", " offset=2"]
+        };
+        let mut shapes: Vec<(String, String)> = Vec::new();
+        // Each value type's widths: the full width (bare op), then the narrow forms
+        // that zero-extend (`_u` on a load or rmw).
+        let widths: [(&str, &[&str]); 2] =
+            [("i32", &["", "8", "16"]), ("i64", &["", "8", "16", "32"])];
+        for (ty, ws) in widths {
+            for w in ws {
+                let u = if w.is_empty() { "" } else { "_u" };
+                let family = format!("{ty}.atomic.load{w}{u}");
+                for off in offsets {
+                    let body = format!("(result {ty}) ({family}{off} {a})");
+                    shapes.push((family.clone(), body));
+                }
+            }
+        }
+        let stores = [
+            ("i32", "store", "0x11223344"),
+            ("i32", "store8", "0x99"),
+            ("i32", "store16", "0x1234"),
+            ("i64", "store", "0x1122334455667788"),
+            ("i64", "store8", "0x99"),
+            ("i64", "store16", "0x1234"),
+            ("i64", "store32", "0x11223344"),
+        ];
+        for (ty, op, v) in stores {
+            let family = format!("{ty}.atomic.{op}");
+            for off in offsets {
+                shapes.push((
+                    family.clone(),
+                    format!("({family}{off} {a} ({ty}.const {v}))"),
+                ));
+            }
+        }
+        for (ty, ws) in widths {
+            for w in ws {
+                let u = if w.is_empty() { "" } else { "_u" };
+                for op in ["add", "sub", "and", "or", "xor", "xchg"] {
+                    let family = format!("{ty}.atomic.rmw{w}.{op}{u}");
+                    for off in offsets {
+                        let body = format!("(result {ty}) ({family}{off} {a} ({ty}.const 5))");
+                        shapes.push((family.clone(), body));
+                    }
+                }
+                // Expecting zero succeeds on the zeroed cells, expecting the data
+                // segment's value succeeds at address 0: the swap runs in both.
+                let family = format!("{ty}.atomic.rmw{w}.cmpxchg{u}");
+                for expected in ["0".to_string(), data_at_zero(ty, w)] {
+                    for off in offsets {
+                        let body = format!(
+                            "(result {ty}) ({family}{off} {a} ({ty}.const {expected}) ({ty}.const 7))"
+                        );
+                        shapes.push((family.clone(), body));
+                    }
+                }
+            }
+        }
+        for (op, ty) in [("wait32", "i32"), ("wait64", "i64")] {
+            let family = format!("memory.atomic.{op}");
+            for expected in [0, 5] {
+                for off in offsets {
+                    let body = format!(
+                        "(result i32) ({family}{off} {a} ({ty}.const {expected}) (i64.const 0))"
+                    );
+                    shapes.push((family.clone(), body));
+                }
+            }
+        }
+        for off in offsets {
+            let family = "memory.atomic.notify";
+            let body = format!("(result i32) ({family}{off} {a} (i32.const 1))");
+            shapes.push((family.to_string(), body));
+        }
+        shapes.push(("atomic.fence".to_string(), "(atomic.fence)".to_string()));
+        shapes
+    }
+
+    /// Every atomic access family on an unshared memory, one export per shape and
+    /// address, as the WAT of the module and the family of each export (export `fN`
+    /// has family `N`). Each shape is exported once taking the address as its
+    /// argument, where the harness's `INTS` hit wild addresses (-1, `i32::MAX`,
+    /// `i64::MAX`) but, for most shapes, no aligned in-bounds one; and once per fixed
+    /// cell: 0 (holds the data segment), 64 (zeroed), 2 (misaligned for any access
+    /// wider than 16 bits) and 65536 (out of bounds). `addr` is the address type:
+    /// `i32` for a 32-bit memory, `i64` for a memory64.
+    fn atomic_module(addr: &str) -> (String, Vec<String>) {
+        let memory = if addr == "i64" {
+            "(memory i64 1 1)"
+        } else {
+            "(memory 1 1)"
+        };
+        let data = format!(
+            r#"(data ({addr}.const 0) "\01\02\03\04\05\06\07\08\ff\fe\fd\fc\fb\fa\f9\f8")"#
+        );
+        // The exports run in order and the memory carries over between them.
+        let mut shapes: Vec<(String, String)> = Vec::new();
+        let mut funcs = String::new();
+        let mut add = |params: &str, shapes_at: Vec<(String, String)>| {
+            for (family, body) in shapes_at {
+                funcs.push_str(&format!(
+                    "(func (export \"f{}\") {params} {body})\n",
+                    shapes.len()
+                ));
+                shapes.push((family, body));
+            }
+        };
+        add(
+            &format!("(param {addr})"),
+            atomic_shapes("(local.get 0)", true),
+        );
+        for cell in [0, 64, 2, 65536] {
+            add("", atomic_shapes(&format!("({addr}.const {cell})"), false));
+        }
+        let families = shapes.into_iter().map(|(family, _)| family).collect();
+        (format!("(module {memory} {data}\n{funcs})"), families)
+    }
+
+    /// Every family reaches a value and a trap, and the waits only trap. Without this
+    /// an agreement could just mean both sides trapped (or skipped) every access of a
+    /// shape, which the harness's own arguments do for most of them.
+    #[test]
+    fn the_atomic_table_reaches_values_and_traps_per_family() {
+        for addr in ["i32", "i64"] {
+            let (wat, families) = atomic_module(addr);
+            let wasm = wat::parse_str(wat).unwrap();
+            let (exports, mem, _) = inspect(&wasm).unwrap();
+            assert_eq!(exports.len(), families.len(), "{addr}: every export is run");
+            let report = run_wasmtime(&wasm, &exports, mem.as_deref()).unwrap();
+            // The export index of each `<round>.<index> ok|trap` line.
+            let indices = |outcome: &str| -> std::collections::HashSet<usize> {
+                report
+                    .lines()
+                    .filter(|l| l.split_whitespace().nth(1) == Some(outcome))
+                    .filter_map(|l| l.split_whitespace().next()?.split('.').nth(1)?.parse().ok())
+                    .collect()
+            };
+            let (oks, traps) = (indices("ok"), indices("trap"));
+            for family in families.iter().collect::<std::collections::BTreeSet<_>>() {
+                let mine: Vec<usize> = (0..families.len())
+                    .filter(|i| &families[*i] == family)
+                    .collect();
+                let (any_ok, any_trap) = (
+                    mine.iter().any(|i| oks.contains(i)),
+                    mine.iter().any(|i| traps.contains(i)),
+                );
+                let wait = family.starts_with("memory.atomic.wait");
+                let fence = family == "atomic.fence";
+                assert_eq!(any_ok, !wait, "{addr} {family}: returns a value");
+                assert_eq!(any_trap, !fence, "{addr} {family}: traps");
+            }
+        }
+    }
+
+    #[test]
+    fn atomic_accesses_on_an_unshared_memory_agree_with_wasmtime() {
+        for addr in ["i32", "i64"] {
+            let v = check(&format!("atomics_{addr}"), &atomic_module(addr).0);
+            assert_eq!(v, Verdict::Match, "{addr} memory");
+        }
     }
 }
