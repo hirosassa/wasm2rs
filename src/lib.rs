@@ -16,6 +16,14 @@
     clippy::unwrap_in_result,
     clippy::cast_possible_truncation
 )]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::let_underscore_must_use
+    )
+)]
 
 pub mod build;
 mod codegen;
@@ -655,7 +663,7 @@ where
                 if file.name == "lib.rs"
                     && let FileContent::Text(code) = &mut file.content
                 {
-                    wit::report_typed_traps_in_spawn(code, &glue, external_types);
+                    wit::report_typed_traps_in_spawn(code, &glue, external_types)?;
                     code.push('\n');
                     code.push_str(&glue);
                 }

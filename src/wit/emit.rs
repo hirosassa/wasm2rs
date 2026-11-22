@@ -204,35 +204,35 @@ impl Records {
     pub(super) fn key(&self, decl: &Decl) -> Result<String, TranspileError> {
         let mut key = String::new();
         if self.qualified {
-            let _ = write!(key, "{:?}|", decl.interface());
+            write!(key, "{:?}|", decl.interface())?;
         }
         match decl {
             Decl::Record(r) => {
-                let _ = write!(key, "record|{}", r.name);
+                write!(key, "record|{}", r.name)?;
                 for (name, ty) in &r.fields {
-                    let _ = write!(key, "|{name}:{}", self.rust(ty)?);
+                    write!(key, "|{name}:{}", self.rust(ty)?)?;
                 }
             }
             Decl::Variant(v) => {
-                let _ = write!(key, "variant|{}", v.name);
+                write!(key, "variant|{}", v.name)?;
                 for (name, ty) in &v.cases {
                     let payload = match ty {
                         Some(t) => self.rust(t)?,
                         None => String::new(),
                     };
-                    let _ = write!(key, "|{name}:{payload}");
+                    write!(key, "|{name}:{payload}")?;
                 }
             }
             Decl::Enum(e) => {
-                let _ = write!(key, "enum|{}", e.name);
+                write!(key, "enum|{}", e.name)?;
                 for name in &e.cases {
-                    let _ = write!(key, "|{name}");
+                    write!(key, "|{name}")?;
                 }
             }
             Decl::Flags(f) => {
-                let _ = write!(key, "flags|{}", f.name);
+                write!(key, "flags|{}", f.name)?;
                 for name in &f.flags {
-                    let _ = write!(key, "|{name}");
+                    write!(key, "|{name}")?;
                 }
             }
         }
@@ -504,21 +504,26 @@ pub(super) fn flags_int(flags: &WitFlags) -> &'static str {
     }
 }
 
-pub(super) fn write_flags(out: &mut String, name: &str, flags: &WitFlags) {
+pub(super) fn write_flags(
+    out: &mut String,
+    name: &str,
+    flags: &WitFlags,
+) -> Result<(), TranspileError> {
     let int = flags_int(flags);
-    let _ = writeln!(
+    writeln!(
         out,
         "\n#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\npub struct {name}(pub {int});\n\nimpl {name} {{"
-    );
+    )?;
     for (i, ident) in flag_idents(flags.flags.iter().map(String::as_str))
         .iter()
         .enumerate()
     {
-        let _ = writeln!(out, "    pub const {ident}: Self = Self(1 << {i});");
+        writeln!(out, "    pub const {ident}: Self = Self(1 << {i});")?;
     }
     out.push_str(
         "    pub fn contains(self, other: Self) -> bool {\n        self.0 & other.0 == other.0\n    }\n\n    pub fn union(self, other: Self) -> Self {\n        Self(self.0 | other.0)\n    }\n}\n",
     );
+    Ok(())
 }
 
 /// Rust source for a `pub trait Host` with one method per function of every interface
@@ -718,7 +723,7 @@ pub(super) fn write_declarations(
     write_types(&mut out, records)?;
     out.push_str("\npub trait Host {\n");
     for (f, name) in funcs.iter().zip(names) {
-        let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
+        writeln!(out, "    /// {}", doc_text(&f.interface, &f.name))?;
         if f.is_async {
             out.push_str("    ///\n    /// An `async func` (WASI 0.3): the host completes it before returning.\n");
         }
@@ -730,12 +735,12 @@ pub(super) fn write_declarations(
             if !bound.is_empty() {
                 bound.push(',');
             }
-            let _ = writeln!(
+            writeln!(
                 out,
                 "{sig} {{\n        let _ = ({bound});\n        panic!(\"wasm2rs wit host: not implemented: {name}\")\n    }}"
-            );
+            )?;
         } else {
-            let _ = writeln!(out, "{sig};");
+            writeln!(out, "{sig};")?;
         }
     }
     out.push_str("}\n");
@@ -752,11 +757,11 @@ pub(super) fn typed_signature(
 ) -> Result<String, TranspileError> {
     let mut sig = format!("    fn {name}(&mut self");
     for (ident, (_, ty)) in idents.iter().zip(&f.params) {
-        let _ = write!(sig, ", {ident}: {}", records.rust(ty)?);
+        write!(sig, ", {ident}: {}", records.rust(ty)?)?;
     }
     sig.push(')');
     if let Some(ty) = &f.result {
-        let _ = write!(sig, " -> {}", records.rust(ty)?);
+        write!(sig, " -> {}", records.rust(ty)?)?;
     }
     Ok(sig)
 }
@@ -773,11 +778,11 @@ pub(super) fn doc_text(interface: &str, name: &str) -> String {
 /// ordered by module and name so that the text does not depend on the order of the functions.
 pub(super) fn write_types(out: &mut String, records: &Records) -> Result<(), TranspileError> {
     if records.uses_async_handles {
-        write_async_handles(out);
+        write_async_handles(out)?;
     }
     if !records.qualified {
         for placed in &records.resources {
-            write_resource(out, &placed.name);
+            write_resource(out, &placed.name)?;
         }
         for (decl, placed) in &records.list {
             write_decl(out, records, decl, &placed.name)?;
@@ -797,10 +802,10 @@ pub(super) fn write_types(out: &mut String, records: &Records) -> Result<(), Tra
         if resources.is_empty() && decls.is_empty() {
             continue;
         }
-        let _ = writeln!(out, "\npub mod {module} {{");
+        writeln!(out, "\npub mod {module} {{")?;
         let mut body = String::new();
         for placed in resources {
-            write_resource(&mut body, &placed.name);
+            write_resource(&mut body, &placed.name)?;
         }
         for (decl, placed) in decls {
             write_decl(&mut body, records, decl, &placed.name)?;
@@ -809,7 +814,7 @@ pub(super) fn write_types(out: &mut String, records: &Records) -> Result<(), Tra
             if line.is_empty() {
                 out.push('\n');
             } else {
-                let _ = writeln!(out, "    {line}");
+                writeln!(out, "    {line}")?;
             }
         }
         out.push_str("}\n");
@@ -820,9 +825,9 @@ pub(super) fn write_types(out: &mut String, records: &Records) -> Result<(), Tra
 /// The typed ends of `future<T>` and `stream<T>` (WASI 0.3): the handle in the component's
 /// table. Reading or writing through them needs the async runtime, which is not generated yet.
 /// The impls are written out so that they do not require `T: Clone`.
-fn write_async_handles(out: &mut String) {
+fn write_async_handles(out: &mut String) -> Result<(), TranspileError> {
     for (name, what) in [("WitFuture", "future"), ("WitStream", "stream")] {
-        let _ = write!(
+        write!(
             out,
             r#"
 /// The readable end of a `{what}<T>`.
@@ -856,15 +861,17 @@ impl<T> PartialEq for {name}<T> {{
 
 impl<T> Eq for {name}<T> {{}}
 "#
-        );
+        )?;
     }
+    Ok(())
 }
 
-pub(super) fn write_resource(out: &mut String, name: &str) {
-    let _ = writeln!(
+pub(super) fn write_resource(out: &mut String, name: &str) -> Result<(), TranspileError> {
+    writeln!(
         out,
         "\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct {name}(pub u32);"
-    );
+    )?;
+    Ok(())
 }
 
 /// One record, variant, enum or flags declaration named `name`, whose member types are spelled
@@ -880,28 +887,28 @@ pub(super) fn write_decl(
     match decl {
         Decl::Record(record) => {
             let idents = unique_idents(record.fields.iter().map(|(n, _)| n.as_str()));
-            let _ = writeln!(
+            writeln!(
                 out,
                 "\n#[derive(Debug, Clone, PartialEq)]\npub struct {name} {{"
-            );
+            )?;
             for (ident, (_, ty)) in idents.iter().zip(&record.fields) {
-                let _ = writeln!(out, "    pub {ident}: {},", rust(ty)?);
+                writeln!(out, "    pub {ident}: {},", rust(ty)?)?;
             }
             out.push_str("}\n");
         }
         Decl::Variant(variant) => {
             let idents = case_idents(variant.cases.iter().map(|(n, _)| n.as_str()));
-            let _ = writeln!(
+            writeln!(
                 out,
                 "\n#[derive(Debug, Clone, PartialEq)]\npub enum {name} {{"
-            );
+            )?;
             for (ident, (_, ty)) in idents.iter().zip(&variant.cases) {
                 match ty {
                     Some(t) => {
-                        let _ = writeln!(out, "    {ident}({}),", rust(t)?);
+                        writeln!(out, "    {ident}({}),", rust(t)?)?;
                     }
                     None => {
-                        let _ = writeln!(out, "    {ident},");
+                        writeln!(out, "    {ident},")?;
                     }
                 }
             }
@@ -909,16 +916,16 @@ pub(super) fn write_decl(
         }
         Decl::Enum(e) => {
             let idents = case_idents(e.cases.iter().map(String::as_str));
-            let _ = writeln!(
+            writeln!(
                 out,
                 "\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum {name} {{"
-            );
+            )?;
             for ident in &idents {
-                let _ = writeln!(out, "    {ident},");
+                writeln!(out, "    {ident},")?;
             }
             out.push_str("}\n");
         }
-        Decl::Flags(f) => write_flags(out, name, f),
+        Decl::Flags(f) => write_flags(out, name, f)?,
     }
     Ok(())
 }
@@ -1027,7 +1034,7 @@ fn glue_text(
             // The library declares the WASI types; the component's own are declared here.
             let mut out = String::from("// Generated by wasm2rs --wit-host.\n");
             if imports_trait {
-                let _ = writeln!(out, "use {path}::Host;");
+                writeln!(out, "use {path}::Host;")?;
             }
             write_types(&mut out, &records)?;
             out

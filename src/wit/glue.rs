@@ -316,7 +316,7 @@ const GLUE_TRAPS: [GlueTrap; 9] = [
 ///
 /// The unknown callback code is typed too; the async scaffolding's `panic!` (a missing
 /// scheduler, not a guest fault) and every internal invariant stay string panics.
-fn type_traps(out: &mut String, start: usize) {
+fn type_traps(out: &mut String, start: usize) -> Result<(), TranspileError> {
     let mut text = out
         .split_off(start)
         .replace(
@@ -344,8 +344,9 @@ fn type_traps(out: &mut String, start: usize) {
     if text.contains("Wasm2RsGlueTrap::InvalidCallbackCode") {
         used.push(&INVALID_CALLBACK_CODE);
     }
-    out.push_str(&trap_type(&used));
+    out.push_str(&trap_type(&used)?);
     out.push_str(&text);
+    Ok(())
 }
 
 /// Makes the thread-spawn wrappers of `code` (the core module, which does not know the glue
@@ -362,7 +363,7 @@ pub(crate) fn report_typed_traps_in_spawn(
     code: &mut String,
     glue: &str,
     external_types: Option<&str>,
-) {
+) -> Result<(), TranspileError> {
     const CORE_TRAP: &str = "if let Some(trap) = payload.downcast_ref::<Wasm2RsTrap>() {";
     const CATCH_ANY: &str = "if std::panic::catch_unwind(run).is_err() {";
     let mut payload_types = Vec::new();
@@ -373,7 +374,7 @@ pub(crate) fn report_typed_traps_in_spawn(
         payload_types.push("wasm2rs_wasi::WasiTrap");
     }
     if payload_types.is_empty() {
-        return;
+        return Ok(());
     }
     let branch = |ty: &str| format!("if let Some(trap) = payload.downcast_ref::<{ty}>() {{");
     let mut out = String::with_capacity(code.len());
@@ -382,16 +383,16 @@ pub(crate) fn report_typed_traps_in_spawn(
         let indent = line.strip_suffix(line.trim_start()).unwrap_or_default();
         match line.trim() {
             CATCH_ANY => {
-                let _ = writeln!(
+                writeln!(
                     out,
                     "{indent}if let Err(payload) = std::panic::catch_unwind(run) {{"
-                );
+                )?;
                 for (i, ty) in payload_types.iter().enumerate() {
                     let lead = if i == 0 { "" } else { "} else " };
-                    let _ = writeln!(out, "{indent}    {lead}{}", branch(ty));
-                    let _ = writeln!(out, "{indent}        eprintln!(\"{{trap}}\");");
+                    writeln!(out, "{indent}    {lead}{}", branch(ty))?;
+                    writeln!(out, "{indent}        eprintln!(\"{{trap}}\");")?;
                 }
-                let _ = writeln!(out, "{indent}    }}");
+                writeln!(out, "{indent}    }}")?;
             }
             CORE_TRAP => {
                 in_core_branch = true;
@@ -401,19 +402,20 @@ pub(crate) fn report_typed_traps_in_spawn(
             "}" if in_core_branch => {
                 in_core_branch = false;
                 for ty in &payload_types {
-                    let _ = writeln!(out, "{indent}}} else {}", branch(ty));
-                    let _ = writeln!(out, "{indent}    eprintln!(\"{{trap}}\");");
+                    writeln!(out, "{indent}}} else {}", branch(ty))?;
+                    writeln!(out, "{indent}    eprintln!(\"{{trap}}\");")?;
                 }
-                let _ = writeln!(out, "{indent}}}");
+                writeln!(out, "{indent}}}")?;
             }
             _ => out.push_str(line),
         }
     }
     *code = out;
+    Ok(())
 }
 
 /// The `Wasm2RsGlueTrap` definition with just the `variants`.
-fn trap_type(variants: &[&GlueTrap]) -> String {
+fn trap_type(variants: &[&GlueTrap]) -> Result<String, TranspileError> {
     let mut s = String::from(
         "/// The payload of a canonical-ABI trap raised by the glue (`typed_traps`). It is raised\n\
          /// with `resume_unwind`, so downcast the `catch_unwind` payload to recognise it.\n\
@@ -422,7 +424,7 @@ fn trap_type(variants: &[&GlueTrap]) -> String {
          pub enum Wasm2RsGlueTrap {\n",
     );
     for t in variants {
-        let _ = writeln!(s, "    {},", t.variant);
+        writeln!(s, "    {},", t.variant)?;
     }
     s.push_str(
         "}\n\
@@ -431,11 +433,11 @@ fn trap_type(variants: &[&GlueTrap]) -> String {
          \x20       f.write_str(match self {\n",
     );
     for t in variants {
-        let _ = writeln!(
+        writeln!(
             s,
             "            Wasm2RsGlueTrap::{} => \"wasm2rs wit glue: {}\",",
             t.variant, t.message
-        );
+        )?;
     }
     s.push_str(
         "        })\n\
@@ -443,7 +445,7 @@ fn trap_type(variants: &[&GlueTrap]) -> String {
          }\n\
          impl ::std::error::Error for Wasm2RsGlueTrap {}\n",
     );
-    s
+    Ok(s)
 }
 
 fn core_rust(flat: Flat) -> &'static str {
@@ -729,7 +731,7 @@ impl Gen<'_> {
                 let srcs = self.field_srcs(&tys, src)?;
                 let mut fields = String::new();
                 for ((ident, t), src) in idents.iter().zip(&tys).zip(&srcs) {
-                    let _ = write!(fields, "{ident}: {}, ", self.lift(t, src)?);
+                    write!(fields, "{ident}: {}, ", self.lift(t, src)?)?;
                 }
                 format!("{name} {{ {fields}}}")
             }
@@ -795,7 +797,7 @@ impl Gen<'_> {
                 Some(t) => Some(self.lift(t, &payload_src)?),
                 None => None,
             };
-            let _ = write!(arms, "{i} => {}, ", case.build(payload));
+            write!(arms, "{i} => {}, ", case.build(payload))?;
         }
         Ok(format!(
             "match glue_abi::disc({disc}, {}) {{ {arms}_ => glue_abi::trap(\"invalid discriminant\") }}",
@@ -818,11 +820,11 @@ impl Gen<'_> {
                     Some(t) => self.lower(t, "x", base.saturating_add(1))?,
                     None => String::new(),
                 };
-                let _ = write!(
+                write!(
                     arms,
                     "{} => {{ out[{base}] = {i}; {body} }} ",
                     case.pattern()
-                );
+                )?;
             }
             return Ok(format!("match {value} {{ {arms}}}"));
         }
@@ -865,7 +867,7 @@ impl Gen<'_> {
                 let mut offset = base;
                 let mut body = String::new();
                 for (i, t) in ts.iter().enumerate() {
-                    let _ = write!(body, "{} ", self.lower(t, &format!("v.{i}"), offset)?);
+                    write!(body, "{} ", self.lower(t, &format!("v.{i}"), offset)?)?;
                     offset = offset.saturating_add(self.flat_len(t)?);
                 }
                 format!("{{ let v = {value}; {body}}}")
@@ -875,7 +877,7 @@ impl Gen<'_> {
                 let mut offset = base;
                 let mut body = String::new();
                 for (ident, (_, t)) in idents.iter().zip(&r.fields) {
-                    let _ = write!(body, "{} ", self.lower(t, &format!("v.{ident}"), offset)?);
+                    write!(body, "{} ", self.lower(t, &format!("v.{ident}"), offset)?)?;
                     offset = offset.saturating_add(self.flat_len(t)?);
                 }
                 format!("{{ let v = {value}; {body}}}")
@@ -947,7 +949,7 @@ impl Gen<'_> {
                     None => String::new(),
                 };
                 let d = disc(format!("{i}u32"));
-                let _ = write!(arms, "{} => {{ {d} {body} }} ", case.pattern());
+                write!(arms, "{} => {{ {d} {body} }} ", case.pattern())?;
             }
             return Ok(format!("match {value} {{ {arms}}}"));
         }
@@ -1036,11 +1038,11 @@ impl Gen<'_> {
         let id = self.fresh();
         let mut body = String::new();
         for ((t, name), off) in tys.iter().zip(names).zip(offsets) {
-            let _ = write!(
+            write!(
                 body,
                 "{} ",
                 self.store(t, &format!("v{id}.{name}"), &offset_expr(at, off))?
-            );
+            )?;
         }
         Ok(format!("{{ let v{id} = {value}; {body}}}"))
     }
@@ -1239,16 +1241,16 @@ pub(super) fn write(
         });
         gen_.alloc = slot.map_or_else(|| ALLOC_MODULE.to_string(), import_alloc_module);
         let sig = core_signature(f, &mut sig_budget, async_lower)?;
-        let _ = writeln!(out, "    /// {:?} {:?}", f.interface, f.name);
+        writeln!(out, "    /// {:?} {:?}", f.interface, f.name)?;
         let mut head = format!("    fn {name}(&mut self, g: &mut Instance<Self>");
         for (i, flat) in sig.params.iter().enumerate() {
-            let _ = write!(head, ", p{i}: {}", core_rust(*flat));
+            write!(head, ", p{i}: {}", core_rust(*flat))?;
         }
         head.push(')');
         if let Some(flat) = sig.results.first() {
-            let _ = write!(head, " -> {}", core_rust(*flat));
+            write!(head, " -> {}", core_rust(*flat))?;
         }
-        let _ = writeln!(out, "{head} {{");
+        writeln!(out, "{head} {{")?;
 
         // The parameters: flat in `s`, or one pointer to a record of them.
         let mut reads_memory = sig.params_in_memory;
@@ -1263,11 +1265,11 @@ pub(super) fn write(
                 fields.push(gen_.layout(t)?);
             }
             let (size, align) = record_layout(&fields);
-            let _ = writeln!(prologue, "        let at = u64::from(p0 as u32);");
-            let _ = writeln!(
+            writeln!(prologue, "        let at = u64::from(p0 as u32);")?;
+            writeln!(
                 prologue,
                 "        glue_abi::check(m.len(), at, {size}, {align});"
-            );
+            )?;
             gen_.field_srcs(&tys, &Src::Mem("at".to_string()))?
         } else {
             if !sig.params.is_empty() {
@@ -1277,18 +1279,18 @@ pub(super) fn write(
                     .enumerate()
                     .map(|(i, flat)| to_slot(*flat, &format!("p{i}")))
                     .collect();
-                let _ = writeln!(out, "        let s = [{}];", slots.join(", "));
+                writeln!(out, "        let s = [{}];", slots.join(", "))?;
             }
             gen_.field_srcs(&tys, &Src::Flat(0))?
         };
         if reads_memory {
-            let _ = writeln!(out, "        let m: &[u8] = g.memory();");
-            let _ = writeln!(out, "        let lb = glue_abi::Budget::new(m.len());");
+            writeln!(out, "        let m: &[u8] = g.memory();")?;
+            writeln!(out, "        let lb = glue_abi::Budget::new(m.len());")?;
         }
         out.push_str(&prologue);
         let mut args = Vec::new();
         for (i, (ty, src)) in tys.iter().zip(&srcs).enumerate() {
-            let _ = writeln!(out, "        let a{i} = {};", gen_.lift(ty, src)?);
+            writeln!(out, "        let a{i} = {};", gen_.lift(ty, src)?)?;
             args.push(format!("a{i}"));
         }
 
@@ -1297,26 +1299,26 @@ pub(super) fn write(
             (Some(ty), _) if sig.result_in_memory => {
                 let (size, align) = gen_.layout(ty)?;
                 let retptr = format!("p{}", sig.params.len().saturating_sub(1));
-                let _ = writeln!(out, "        let r = {call};");
-                let _ = writeln!(out, "        let at = u64::from({retptr} as u32);");
-                let _ = writeln!(
+                writeln!(out, "        let r = {call};")?;
+                writeln!(out, "        let at = u64::from({retptr} as u32);")?;
+                writeln!(
                     out,
                     "        glue_abi::check(g.memory().len(), at, {size}, {align});"
-                );
-                let _ = writeln!(out, "        {}", gen_.store(ty, "r", "at")?);
+                )?;
+                writeln!(out, "        {}", gen_.store(ty, "r", "at")?)?;
             }
             (Some(ty), Some(flat)) => {
-                let _ = writeln!(out, "        let r = {call};");
-                let _ = writeln!(out, "        let mut out = [0u64; 1];");
-                let _ = writeln!(out, "        {}", gen_.lower(ty, "r", 0)?);
-                let _ = writeln!(out, "        {}", from_slot(*flat, "out[0]"));
+                writeln!(out, "        let r = {call};")?;
+                writeln!(out, "        let mut out = [0u64; 1];")?;
+                writeln!(out, "        {}", gen_.lower(ty, "r", 0)?)?;
+                writeln!(out, "        {}", from_slot(*flat, "out[0]"))?;
             }
             // A result with no core value (an empty record or flags): call and drop it.
             (Some(_), None) => {
-                let _ = writeln!(out, "        let _ = {call};");
+                writeln!(out, "        let _ = {call};")?;
             }
             (None, _) => {
-                let _ = writeln!(out, "        {call};");
+                writeln!(out, "        {call};")?;
             }
         }
         if async_lower {
@@ -1333,7 +1335,7 @@ pub(super) fn write(
         }
     }
     for m in &locals.methods {
-        write_local_method(out, m);
+        write_local_method(out, m)?;
     }
     if generic {
         out.push_str("}\n");
@@ -1342,7 +1344,7 @@ pub(super) fn write(
     gen_.alloc = ALLOC_MODULE.to_string();
     gen_.exporting = true;
     if defines {
-        write_run_dtors(out, &locals.resources);
+        write_run_dtors(out, &locals.resources)?;
     }
     if let Some((exports, export_names)) = exports {
         write_exports(out, &mut gen_, exports, export_names, &locals.resources)?;
@@ -1359,7 +1361,7 @@ pub(super) fn write(
         out.push_str(ALLOC_HELPERS);
     }
     if typed_traps {
-        type_traps(out, start);
+        type_traps(out, start)?;
     }
     if !generic {
         // A module with no host imports has no `Imports` trait: its `Instance` takes no host,
@@ -1420,25 +1422,25 @@ fn write_exports(
     for (e, name) in exports.iter().zip(export_names) {
         let f = &e.func;
         let idents = unique_idents(f.params.iter().map(|(n, _)| n.as_str()));
-        let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
+        writeln!(out, "    /// {}", doc_text(&f.interface, &f.name))?;
         if e.async_abi.is_some() {
             let heads = async_heads(gen_.records, name, f, &idents)?;
             for head in [heads.start, heads.callback, heads.run] {
-                let _ = writeln!(out, "{head};");
+                writeln!(out, "{head};")?;
             }
             continue;
         }
         let sig = typed_signature(gen_.records, name, f, &idents)?;
-        let _ = writeln!(out, "{sig};");
+        writeln!(out, "{sig};")?;
     }
     let drops = resource_drops(gen_.records, resources);
     for (method, ty, _) in &drops {
-        let _ = writeln!(
+        writeln!(
             out,
             "    /// Drops an owned handle of a resource the component defines, which an export\n    \
              /// returned (or the host made): runs the resource's destructor.\n    \
              fn {method}(&mut self, handle: {ty});"
-        );
+        )?;
     }
     out.push_str(
         "}\n\n#[allow(unused_variables, unused_parens, unused_mut)]\n\
@@ -1453,25 +1455,25 @@ fn write_exports(
             Some(Some(dtor)) => format!("        self.{dtor}(handle.0 as i32);\n"),
             _ => String::new(),
         };
-        let _ = writeln!(
+        writeln!(
             out,
             "    fn {method}(&mut self, handle: {ty}) {{\n{call}        glue_run_dtors(self);\n    }}"
-        );
+        )?;
     }
     out.push_str("}\n");
     // `Exports` is not in scope here, so a core export the transpiled `Instance` lacks under
     // this name is a compile error, not a call of the trait method itself.
-    let _ = write!(
+    write!(
         out,
         "\nmod glue_core {{\n    use super::{{Glue, Host, Instance}};\n{forwarders}}}\n"
-    );
+    )?;
     Ok(())
 }
 
 /// The `Imports` method of a resource built-in: the guest's own handle table.
-fn write_local_method(out: &mut String, m: &LocalMethod<'_>) {
+fn write_local_method(out: &mut String, m: &LocalMethod<'_>) -> Result<(), TranspileError> {
     let LocalMethod { name, op, resource } = m;
-    let _ = match op {
+    match op {
         ResourceOp::New => writeln!(
             out,
             "    fn {name}(&mut self, g: &mut Instance<Self>, p0: i32) -> i32 {{\n        \
@@ -1487,12 +1489,16 @@ fn write_local_method(out: &mut String, m: &LocalMethod<'_>) {
             "    fn {name}(&mut self, g: &mut Instance<Self>, p0: i32) {{\n        \
              self.1.drop_handle({resource}, p0 as u32);\n    }}"
         ),
-    };
+    }?;
+    Ok(())
 }
 
 /// `glue_run_dtors`: calls the destructors of the handles the guest dropped, once the guest
 /// call that dropped them has returned (a destructor may drop more handles).
-fn write_run_dtors(out: &mut String, resources: &BTreeMap<u32, Option<String>>) {
+fn write_run_dtors(
+    out: &mut String,
+    resources: &BTreeMap<u32, Option<String>>,
+) -> Result<(), TranspileError> {
     out.push_str(
         "\n#[allow(dead_code, unused_variables, clippy::match_single_binding)]\nfn glue_run_dtors<H: Host>(g: &mut Instance<Glue<H>>) {\n    \
          while let Some((resource, rep)) = g.with_host(|h, _| h.1.dropped.pop()) {\n        \
@@ -1500,10 +1506,11 @@ fn write_run_dtors(out: &mut String, resources: &BTreeMap<u32, Option<String>>) 
     );
     for (id, dtor) in resources {
         if let Some(dtor) = dtor {
-            let _ = writeln!(out, "            {id} => g.{dtor}(rep as i32),");
+            writeln!(out, "            {id} => g.{dtor}(rep as i32),")?;
         }
     }
     out.push_str("            _ => {}\n        }\n    }\n}\n");
+    Ok(())
 }
 
 /// The host's way to drop an owned handle of each resource the component defines that the
@@ -1578,7 +1585,7 @@ fn async_heads(
     run.pop();
     run.push_str(", events: &mut dyn FnMut(CallbackCode) -> Option<[u32; 3]>)");
     if let Some(ty) = &f.result {
-        let _ = write!(run, " -> {}", records.rust(ty)?);
+        write!(run, " -> {}", records.rust(ty)?)?;
     }
     Ok(AsyncHeads {
         start: format!("{start} -> CallbackCode"),
@@ -1656,9 +1663,9 @@ fn write_export(
     } else {
         result_flat
     };
-    let _ = writeln!(out, "    /// {}", doc_text(&f.interface, &f.name));
-    let _ = writeln!(out, "{head} {{");
-    let _ = writeln!(out, "        let g = self;");
+    writeln!(out, "    /// {}", doc_text(&f.interface, &f.name))?;
+    writeln!(out, "{head} {{")?;
+    writeln!(out, "        let g = self;")?;
 
     let allocated_before = std::mem::replace(&mut gen_.allocates, false);
     let mut pre = String::new();
@@ -1670,26 +1677,26 @@ fn write_export(
         let (size, align) = record_layout(&fields);
         gen_.allocates = true;
         gen_.writes_memory = true;
-        let _ = writeln!(
+        writeln!(
             pre,
             "        let at = glue_alloc::alloc(g, {align}, 1, {size});"
-        );
+        )?;
         let offsets = field_offsets(&tys, &mut gen_.budget)?;
         for ((ty, ident), off) in tys.iter().zip(&idents).zip(offsets) {
-            let _ = writeln!(
+            writeln!(
                 pre,
                 "        {}",
                 gen_.store(ty, ident, &offset_expr("at", off))?
-            );
+            )?;
         }
         vec!["at as u32 as i32".to_string()]
     } else {
         if !core_params.is_empty() {
-            let _ = writeln!(pre, "        let mut out = [0u64; {}];", core_params.len());
+            writeln!(pre, "        let mut out = [0u64; {}];", core_params.len())?;
         }
         let mut base = 0usize;
         for (ty, ident) in tys.iter().zip(&idents) {
-            let _ = writeln!(pre, "        {}", gen_.lower(ty, ident, base)?);
+            writeln!(pre, "        {}", gen_.lower(ty, ident, base)?)?;
             base = base.saturating_add(gen_.flat_len(ty)?);
         }
         core_params
@@ -1720,14 +1727,14 @@ fn write_export(
     let mut forwarder = format!("    pub fn {core_name}<H: Host>(g: &mut Instance<Glue<H>>");
     let mut forwarded = Vec::new();
     for (i, flat) in core_params.iter().enumerate() {
-        let _ = write!(forwarder, ", p{i}: {}", core_rust(*flat));
+        write!(forwarder, ", p{i}: {}", core_rust(*flat))?;
         forwarded.push(format!("p{i}"));
     }
     forwarder.push(')');
     if let Some(flat) = result_flat {
-        let _ = write!(forwarder, " -> {}", core_rust(flat));
+        write!(forwarder, " -> {}", core_rust(flat))?;
     }
-    let _ = writeln!(forwarder, " {{ g.{core_name}({}) }}", forwarded.join(", "));
+    writeln!(forwarder, " {{ g.{core_name}({}) }}", forwarded.join(", "))?;
     forwarders.push_str(&forwarder);
     let call = format!("glue_core::{core_name}(g, {})", args.join(", "));
     let post_call = |arg: &str| {
@@ -1746,21 +1753,21 @@ fn write_export(
         if !forwarders.contains(&cb_forwarder) {
             forwarders.push_str(&cb_forwarder);
         }
-        let _ = writeln!(out, "        CallbackCode::from_raw({call} as u32)");
+        writeln!(out, "        CallbackCode::from_raw({call} as u32)")?;
         out.push_str("    }\n");
-        let _ = writeln!(out, "{} {{", heads.callback);
-        let _ = writeln!(out, "        let g = self;");
-        let _ = writeln!(
+        writeln!(out, "{} {{", heads.callback)?;
+        writeln!(out, "        let g = self;")?;
+        writeln!(
             out,
             "        CallbackCode::from_raw(glue_core::{cb}(g, event as i32, p1 as i32, p2 as i32) as u32)"
-        );
+        )?;
         out.push_str("    }\n");
-        let _ = writeln!(out, "{} {{", heads.run);
+        writeln!(out, "{} {{", heads.run)?;
         let args = idents.join(", ");
-        let _ = writeln!(
+        writeln!(
             out,
             "        let mut code = Exports::{name}_start(self, {args});"
-        );
+        )?;
         let exit = if f.result.is_some() {
             "unimplemented!(\"wasm2rs wit glue: the result of an async export is delivered through task.return (WASI 0.3), which is not routed yet\")"
         } else {
@@ -1770,7 +1777,7 @@ fn write_export(
             "        loop {\n\
              \x20           match code {\n",
         );
-        let _ = writeln!(out, "                CallbackCode::Exit => {exit},");
+        writeln!(out, "                CallbackCode::Exit => {exit},")?;
         out.push_str(
             "\
              \x20               CallbackCode::Yield | CallbackCode::Wait(_) => {\n\
@@ -1780,10 +1787,10 @@ fn write_export(
              \x20                       panic!(\"wasm2rs wit glue: async runtime not implemented (WASI 0.3): no event for {code:?}\");\n\
              \x20                   };\n",
         );
-        let _ = writeln!(
+        writeln!(
             out,
             "                    code = Exports::{name}_callback(self, event, p1, p2);"
-        );
+        )?;
         out.push_str(
             "                }\n\
              \x20               CallbackCode::Unknown(raw) => {\n\
@@ -1803,28 +1810,28 @@ fn write_export(
     };
     match (&f.result, result_flat) {
         (None, _) => {
-            let _ = writeln!(out, "        {call};");
+            writeln!(out, "        {call};")?;
             out.push_str(&post_call(""));
             out.push_str(drain);
         }
         (Some(ty), Some(flat)) => {
-            let _ = writeln!(out, "        let r = {call};");
+            writeln!(out, "        let r = {call};")?;
             let mut lift = String::new();
             if sig.result_in_memory {
                 let (size, align) = gen_.layout(ty)?;
-                let _ = writeln!(lift, "        let at = u64::from(r as u32);");
-                let _ = writeln!(lift, "        let m: &[u8] = g.memory();");
-                let _ = writeln!(
+                writeln!(lift, "        let at = u64::from(r as u32);")?;
+                writeln!(lift, "        let m: &[u8] = g.memory();")?;
+                writeln!(
                     lift,
                     "        glue_abi::check(m.len(), at, {size}, {align});"
-                );
-                let _ = writeln!(lift, "        let lb = glue_abi::Budget::new(m.len());");
+                )?;
+                writeln!(lift, "        let lb = glue_abi::Budget::new(m.len());")?;
                 let lifted = gen_.lift(ty, &Src::Mem("at".to_string()))?;
-                let _ = writeln!(lift, "        let v = {lifted};");
+                writeln!(lift, "        let v = {lifted};")?;
             } else {
-                let _ = writeln!(lift, "        let s = [{}];", to_slot(flat, "r"));
+                writeln!(lift, "        let s = [{}];", to_slot(flat, "r"))?;
                 let lifted = gen_.lift(ty, &Src::Flat(0))?;
-                let _ = writeln!(lift, "        let v = {lifted};");
+                writeln!(lift, "        let v = {lifted};")?;
             }
             wrap_rt(out, &lift, std::mem::take(&mut gen_.rt_used));
             out.push_str(&post_call("r"));
@@ -1833,9 +1840,9 @@ fn write_export(
         }
         // A result with no core value (an empty record or flags): nothing to read.
         (Some(ty), None) => {
-            let _ = writeln!(out, "        {call};");
+            writeln!(out, "        {call};")?;
             let lifted = gen_.lift(ty, &Src::Flat(0))?;
-            let _ = writeln!(out, "        let v = {lifted};");
+            writeln!(out, "        let v = {lifted};")?;
             out.push_str(&post_call(""));
             out.push_str(drain);
             out.push_str("        v\n");
@@ -1870,7 +1877,7 @@ mod tests {
         // the child uses a typed helper, so the wrapper already downcasts `Wasm2RsTrap`
         let mut code = spawning(true);
         assert!(code.contains("downcast_ref::<Wasm2RsTrap>()"), "{code}");
-        report_typed_traps_in_spawn(&mut code, GLUE, None);
+        report_typed_traps_in_spawn(&mut code, GLUE, None).unwrap();
         assert!(code.contains(GLUE_PRINT), "{code}");
         assert!(
             code.contains("} else if let Some(trap) = payload.downcast_ref::<Wasm2RsGlueTrap>()"),
@@ -1882,7 +1889,7 @@ mod tests {
     fn a_wrapper_that_only_catches_gets_its_own_downcast() {
         // the shape `spawn_thread_lines` emits when the module defines no `Wasm2RsTrap`
         let mut code = "        if std::panic::catch_unwind(run).is_err() {\n            eprintln!(\"x\");\n        }\n".to_string();
-        report_typed_traps_in_spawn(&mut code, GLUE, None);
+        report_typed_traps_in_spawn(&mut code, GLUE, None).unwrap();
         assert!(
             code.starts_with("        if let Err(payload) = std::panic::catch_unwind(run) {\n"),
             "{code}"
@@ -1896,7 +1903,7 @@ mod tests {
         for typed in [false, true] {
             let before = spawning(typed);
             let mut code = before.clone();
-            report_typed_traps_in_spawn(&mut code, "pub struct Glue;\n", None);
+            report_typed_traps_in_spawn(&mut code, "pub struct Glue;\n", None).unwrap();
             assert_eq!(code, before);
         }
     }
@@ -1908,7 +1915,8 @@ mod tests {
         // both wrapper shapes: the module defines `Wasm2RsTrap` (typed) or it does not
         for typed in [false, true] {
             let mut code = spawning(typed);
-            report_typed_traps_in_spawn(&mut code, "pub struct Glue;\n", Some("wasm2rs_wasi"));
+            report_typed_traps_in_spawn(&mut code, "pub struct Glue;\n", Some("wasm2rs_wasi"))
+                .unwrap();
             assert!(code.contains(WASI_PRINT), "{code}");
             assert!(
                 code.contains("Err(payload) = std::panic::catch_unwind(run)"),
@@ -1920,7 +1928,7 @@ mod tests {
     #[test]
     fn the_wasi_trap_follows_the_glue_trap() {
         let mut code = spawning(true);
-        report_typed_traps_in_spawn(&mut code, GLUE, Some("wasm2rs_wasi"));
+        report_typed_traps_in_spawn(&mut code, GLUE, Some("wasm2rs_wasi")).unwrap();
         assert!(
             code.contains(GLUE_PRINT) && code.contains(WASI_PRINT),
             "{code}"
@@ -1932,7 +1940,8 @@ mod tests {
     fn a_library_other_than_wasm2rs_wasi_is_not_assumed_to_have_wasi_trap() {
         let before = spawning(true);
         let mut code = before.clone();
-        report_typed_traps_in_spawn(&mut code, "pub struct Glue;\n", Some("my_host::wasi"));
+        report_typed_traps_in_spawn(&mut code, "pub struct Glue;\n", Some("my_host::wasi"))
+            .unwrap();
         assert_eq!(code, before);
     }
 }

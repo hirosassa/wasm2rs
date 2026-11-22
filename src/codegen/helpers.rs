@@ -314,6 +314,10 @@ fn unchecked_helper_lines(helper: Helper, base: Vec<String>, memory64: bool) -> 
 /// Adapt a helper template for `typed_traps`: the slice accesses become checked
 /// `get`s (see [`AccessCtx::render`]), and the helpers that bypass `@R[..]`/`@W[..]`
 /// get an explicit range check. `memory.grow` touches no slice and is unchanged.
+#[expect(
+    clippy::expect_used,
+    reason = "the index shape is fixed by the embedded mem_helpers.tpl, which tests cover"
+)]
 fn typed_helper_lines(helper: Helper, base: Vec<String>) -> Vec<String> {
     match helper {
         Helper::MemoryCopy => typed_copy_within(base, "trap_memory_oob"),
@@ -414,6 +418,10 @@ fn widen_helper_lines(helper: Helper, max_pages: Option<u64>, base: Vec<String>)
 /// else `(*.. .unwrap_or_else(|| trap_memory_oob()))` (the `typed_traps` form,
 /// whose `get`/`get_mut` returns an `Option`). A helper-template index never
 /// contains `[`/`]`, so the matching `]` is simply the next one.
+#[expect(
+    clippy::expect_used,
+    reason = "a helper-template index is always closed on its line (see the doc above)"
+)]
 fn rewrite_index(
     line: &str,
     placeholder: &str,
@@ -529,6 +537,10 @@ pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
 /// The placeholder template lines of one memory helper method: `@NAME` is the
 /// method name, `@R` / `@W` the read / write accessors of the memory bytes, and
 /// `@ADDR` / `@OFF` / `@EA` the address operand types and effective address.
+#[expect(
+    clippy::expect_used,
+    reason = "every memory helper but `Grow` has a section in mem_helpers.tpl, which tests cover"
+)]
 fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
     match helper {
         // `delta` is an unsigned page count. Growth past the memory's own bound,

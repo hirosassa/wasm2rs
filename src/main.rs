@@ -37,6 +37,14 @@
     clippy::unwrap_in_result,
     clippy::cast_possible_truncation
 )]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::let_underscore_must_use
+    )
+)]
 
 use std::process::ExitCode;
 
@@ -72,13 +80,15 @@ fn usage() -> String {
 const WORKER_STACK: usize = 512 * 1024 * 1024;
 
 fn main() -> ExitCode {
-    let worker = std::thread::Builder::new()
+    let result = match std::thread::Builder::new()
         .stack_size(WORKER_STACK)
         .spawn(run)
-        .expect("spawn worker thread");
-    let result = match worker.join() {
-        Ok(result) => result,
-        Err(_) => Err("transpiler thread panicked".to_string()),
+    {
+        Ok(worker) => match worker.join() {
+            Ok(result) => result,
+            Err(_) => Err("transpiler thread panicked".to_string()),
+        },
+        Err(e) => Err(format!("cannot spawn the worker thread: {e}")),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
