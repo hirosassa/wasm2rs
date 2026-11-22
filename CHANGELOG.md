@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `fuzz-diff`: a `threads` profile (wasm-smith atomics and shared memories) and a table-driven differential test that runs every atomic access family (loads, stores, all rmw operations, cmpxchg, wait, notify, fence) on an unshared memory, 32-bit and memory64, against wasmtime, at the harness's wild addresses and at fixed aligned, misaligned and out-of-bounds cells; a second test checks that every family returns a value and traps. The harness now reads a shared memory on both sides and enables wasmtime's shared memory. 3300 seeds of the profile agree with wasmtime.
 
 ### Changed
+- The CLI's split output (`funcs_per_file` / `max_bytes_per_file`) now writes data segments of 4 KiB or more to `data_{n}.bin` side files by default, as `--data-files` did; `lib.rs` loads them with `include_bytes!`, so copy every file in the output directory. `--no-data-files` restores the inline output, `--data-files` is still accepted, and a single-file output is unchanged. The generated code's behavior is the same, and the library's `transpile_split*` functions are unchanged.
 - The `unsafe_memory` documentation and the header comment of its output now say that a `memory.copy` between two different memories stays checked; it never was unchecked.
 
 ### Fixed
