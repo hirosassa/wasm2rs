@@ -737,7 +737,7 @@ pub(crate) fn generate_module_pieces(
 }
 
 /// [`generate_module_pieces`] that, given `side`, moves large data segments out of the text
-/// into the files it collects (see [`render::segment_statics`]).
+/// into the files it collects (see [`render::statics::segment_statics`]).
 fn generate_module_pieces_with(
     parts: &ModuleParts<'_>,
     side: Option<&mut DataFiles>,

@@ -102,10 +102,10 @@ Non-goals (for this work)
 |---|---|---|
 | Entry points | `src/lib.rs` `transpile_impl` (L563), `transpile_with_host_imports` (L444) | one wasm -> one `ModuleIr` -> one `ModuleParts` |
 | IR / codegen context | `src/parse.rs` `ModuleIr` (L61); `src/codegen/driver.rs` `ModuleParts` (L277), `ModuleCtx` (L49) | func/global/memory/table/tag/type index spaces are module-local; `funcN`, `g{N}`, `DATA{d}` carry no module id |
-| Generated names | `render.rs` | fixed `Instance`, `Imports`, `SharedMemory`, `GcRef`, `Wasm2RsException`; `export_names.rs` `FIXED`/`is_reserved` |
-| State | `render.rs` `instance_field_lines` | memory/table/globals/data/elem are **fields of the one `Instance`** |
-| Memory sharing | `render.rs`, `parse.rs` | imported memory is memory 0 only, lent by the host via `Imports::memory()`; the only thing shareable between `Instance`s is `SharedMemory` (Arc); no way to share a non-shared `Vec<u8>` |
-| Imports | `render.rs` `import_trait_lines` | one `Imports` trait; `reentrant_imports` takes `&mut Instance<Self>` of the *caller* |
+| Generated names | `render/mod.rs` | fixed `Instance`, `Imports`, `SharedMemory`, `GcRef`, `Wasm2RsException`; `export_names.rs` `FIXED`/`is_reserved` |
+| State | `render/fields.rs` `instance_field_lines` | memory/table/globals/data/elem are **fields of the one `Instance`** |
+| Memory sharing | `render/`, `parse.rs` | imported memory is memory 0 only, lent by the host via `Imports::memory()`; the only thing shareable between `Instance`s is `SharedMemory` (Arc); no way to share a non-shared `Vec<u8>` |
+| Imports | `render/imports.rs` `import_trait_lines` | one `Imports` trait; `reentrant_imports` takes `&mut Instance<Self>` of the *caller* |
 | Names | `export_names.rs` | import/export identifiers are assigned over **the whole module's** export list (this is why `glue_text` rejects a lift whose name differs from the standalone name; #186) |
 | Component selection | `component.rs` `select_index` (L166), `Layout`/`scan` (L207/L218) | picks one module; `scan` keeps only a 1-bit "holds state" per core instance and **drops the instantiate argument graph** |
 | Lifts | `src/wit/exports.rs` `WitExport::core_module`; `emit.rs` `glue_text` (L880) | one core module; the check exists twice |
@@ -326,7 +326,7 @@ fallback.
     linked before L2b (L2 refused it with an error naming the import). Why it needs codegen work: the
     function index space is fixed as imports first, then defined functions
     (`ModuleCtx::imports`/`funcs`, `fidx - imports.len()` in `driver.rs`, `reach.rs`,
-    `render.rs`, `analysis.rs`), and the main module's bodies must not be renumbered, so a
+    `render/`, `analysis.rs`), and the main module's bodies must not be renumbered, so a
     host import of another module has nowhere to go: pushing it onto `imports` shifts every
     defined function of main. L2b adds host imports *after* the defined functions (a tail slot
     in the index space that `full_sig`, `call_expr`, the dispatch tables, `Imports` trait
