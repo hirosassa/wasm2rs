@@ -475,499 +475,12 @@ impl WasiFn {
         )
     }
 
-    /// [`Self::lines`] before the access placeholders are filled in.
+    /// [`Self::lines`] before the access placeholders are filled in. The imports
+    /// generated elsewhere (`ThreadSpawn`, `PthreadCreateJs`) have no template.
     fn template(self, files: bool, access: WasiAccess) -> Vec<String> {
-        if let Some(src) = wasi_fn_template(self, files) {
-            return source_lines(src);
-        }
-        let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
-        match self {
-            // `args_sizes_get(argc, argv_buf_size)` reports the argument count
-            // and the total byte size of the argument strings (each NUL-
-            // terminated), taken from the process's real argv.
-            WasiFn::ArgsSizesGet => sizes_lines("wasi_args_sizes_get", "std::env::args()"),
-            // `args_get(argv, argv_buf)` writes each argument's pointer into the
-            // `argv` array and its NUL-terminated bytes into `argv_buf`.
-            WasiFn::ArgsGet => get_lines("wasi_args_get", "std::env::args()"),
-            // environ mirrors argv, but each string is `KEY=VALUE`.
-            WasiFn::EnvironSizesGet => sizes_lines(
-                "wasi_environ_sizes_get",
-                "std::env::vars().map(|(k, v)| format!(\"{k}={v}\"))",
-            ),
-            WasiFn::EnvironGet => get_lines(
-                "wasi_environ_get",
-                "std::env::vars().map(|(k, v)| format!(\"{k}={v}\"))",
-            ),
-            // `path_open(dirfd, dirflags, path, path_len, oflags, rights_base,
-            // rights_inheriting, fdflags, opened_fd)` opens a file *within* the
-            // preopen (fd 3). Absolute paths and ".." escapes are refused with
-            // ENOTCAPABLE (76); the new descriptor is written at `opened_fd`.
-            // Containment is lexical (component-wise) plus `wasi_confine`, which
-            // canonicalizes the resolved path so a symlink pointing outside the
-            // preopen is refused too.
-            WasiFn::PathOpen => {
-                let mut body = owned(&[
-                    "fn wasi_path_open(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i64, a6: i64, a7: i32, a8: i32) -> i32 {",
-                    "    if a0 != 3 {",
-                    "        return 8;",
-                    "    }",
-                ]);
-                body.extend(contain_path("full", "a2", "a3", true));
-                body.extend(owned(&[
-                    "    let creat = a4 & 0x1 != 0;",
-                    "    let excl = a4 & 0x4 != 0;",
-                    "    let trunc = a4 & 0x8 != 0;",
-                    "    let want_write = (a5 as u64) & (1 << 6) != 0;",
-                    "    let mut opts = std::fs::OpenOptions::new();",
-                    "    opts.read(true);",
-                    "    if want_write || creat || trunc {",
-                    "        opts.write(true);",
-                    "    }",
-                    "    if creat {",
-                    "        opts.create(true);",
-                    "    }",
-                    "    if excl {",
-                    "        opts.create_new(true);",
-                    "    }",
-                    "    if trunc {",
-                    "        opts.truncate(true);",
-                    "    }",
-                    "    let file = match opts.open(&full) {",
-                    "        Ok(f) => f,",
-                    "        Err(e) => return Self::wasi_errno(&e),",
-                    "    };",
-                ]));
-                // The slot search and insertion must run under one guard when the
-                // table is locked: two threads could otherwise take the same slot,
-                // and a guard in a `match` scrutinee must not be locked again in
-                // its arms.
-                body.extend(owned(if access.locked_fds {
-                    &[
-                        "    let idx = {",
-                        "        let mut fds = @FDS@;",
-                        "        fds.alloc((file, full))",
-                        "    };",
-                    ]
-                } else {
-                    &["    let idx = @FDS@.alloc((file, full));"]
-                }));
-                body.extend(owned(&[
-                    "    let fd = idx as u32 + 4;",
-                    "    let w = a8 as u32 as usize;",
-                    "    @MEM_MUT@[Self::wasi_span(w as u64, 4)].copy_from_slice(&fd.to_le_bytes());",
-                    "    0",
-                    "}",
-                ]));
-                body
-            }
-            // `fd_sync(fd)` / `fd_datasync(fd)` flush an open file to disk; stdio
-            // and the preopen directory have nothing to flush.
-            WasiFn::FdSync => fd_op_lines(
-                "wasi_fd_sync",
-                "a0: i32",
-                &FdOp {
-                    stdio: "0",
-                    dir: "0",
-                    file: errno_of("f.sync_all()"),
-                    pre: Vec::new(),
-                },
-                files,
-            ),
-            WasiFn::FdDatasync => fd_op_lines(
-                "wasi_fd_datasync",
-                "a0: i32",
-                &FdOp {
-                    stdio: "0",
-                    dir: "0",
-                    file: errno_of("f.sync_data()"),
-                    pre: Vec::new(),
-                },
-                files,
-            ),
-            // `fd_advise(fd, offset, len, advice)` is a hint, so a valid descriptor
-            // just succeeds; an out-of-range advice value (> 5) is EINVAL.
-            WasiFn::FdAdvise => fd_op_lines(
-                "wasi_fd_advise",
-                "a0: i32, a1: i64, a2: i64, a3: i32",
-                &FdOp {
-                    stdio: "70",
-                    dir: "0",
-                    file: "0".to_string(),
-                    pre: [
-                        "    if !(0..=5).contains(&a3) {",
-                        "        return 28;",
-                        "    }",
-                    ]
-                    .map(String::from)
-                    .to_vec(),
-                },
-                files,
-            ),
-            // `fd_allocate(fd, offset, len)` guarantees `offset + len` bytes exist:
-            // the file is extended with zeros if shorter and never shrunk.
-            WasiFn::FdAllocate => fd_op_lines(
-                "wasi_fd_allocate",
-                "a0: i32, a1: i64, a2: i64",
-                &FdOp {
-                    stdio: "70",
-                    dir: "31",
-                    file: errno_of(
-                        "f.metadata().and_then(|m| { let end = (a1 as u64).saturating_add(a2 as u64); if m.len() < end { f.set_len(end) } else { Ok(()) } })",
-                    ),
-                    pre: ["    if a1 < 0 || a2 <= 0 {", "        return 28;", "    }"]
-                        .map(String::from)
-                        .to_vec(),
-                },
-                files,
-            ),
-            // `fd_filestat_set_size(fd, size)` truncates or zero-extends a file.
-            WasiFn::FdFilestatSetSize => fd_op_lines(
-                "wasi_fd_filestat_set_size",
-                "a0: i32, a1: i64",
-                &FdOp {
-                    stdio: "70",
-                    dir: "31",
-                    file: errno_of("f.set_len(a1 as u64)"),
-                    pre: Vec::new(),
-                },
-                files,
-            ),
-            // `fd_filestat_set_times(fd, atim, mtim, fst_flags)` sets a file's
-            // access/modification times. The preopen directory is opened to reach
-            // its times; stdio has none (ESPIPE).
-            WasiFn::FdFilestatSetTimes => {
-                let dir = errno_of(
-                    "std::fs::File::open(&self.wasi_preopen).and_then(|d| d.set_times(times))",
-                );
-                fd_op_lines(
-                    "wasi_fd_filestat_set_times",
-                    "a0: i32, a1: i64, a2: i64, a3: i32",
-                    &FdOp {
-                        stdio: "70",
-                        dir: &dir,
-                        file: errno_of("f.set_times(times)"),
-                        pre: times_lines("a1", "a2", "a3"),
-                    },
-                    files,
-                )
-            }
-            // `path_filestat_set_times(fd, flags, path, path_len, atim, mtim,
-            // fst_flags)` sets the times of a path within the preopen (fd 3).
-            // `std` cannot touch a symlink itself, so a lookup without
-            // SYMLINK_FOLLOW (flags bit 0) that lands on a symlink is ENOTSUP.
-            WasiFn::PathFilestatSetTimes => {
-                let mut body = owned(&[
-                    "fn wasi_path_filestat_set_times(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i64, a5: i64, a6: i32) -> i32 {",
-                    "    if a0 != 3 {",
-                    "        return 8;",
-                    "    }",
-                ]);
-                body.extend(times_lines("a4", "a5", "a6"));
-                body.extend(contain_path("p", "a2", "a3", true));
-                body.extend(owned(&[
-                    "    if a1 & 1 == 0 {",
-                    "        match std::fs::symlink_metadata(&p) {",
-                    "            Ok(m) if m.file_type().is_symlink() => return 58,",
-                    "            Ok(_) => {}",
-                    "            Err(e) => return Self::wasi_errno(&e),",
-                    "        }",
-                    "    }",
-                ]));
-                body.push(format!(
-                    "    {}",
-                    errno_of("std::fs::File::open(&p).and_then(|f| f.set_times(times))")
-                ));
-                body.push("}".to_string());
-                body
-            }
-            // `path_readlink(fd, path, path_len, buf, buf_len, bufused)` copies a
-            // symlink's target (truncated to `buf_len`) into `buf` and stores the
-            // byte count at `bufused`. A path that is not a symlink is EINVAL.
-            WasiFn::PathReadlink => {
-                let mut body = owned(&[
-                    "fn wasi_path_readlink(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32) -> i32 {",
-                    "    use std::os::unix::ffi::OsStrExt;",
-                    "    if a0 != 3 {",
-                    "        return 8;",
-                    "    }",
-                ]);
-                body.extend(contain_path("p", "a1", "a2", false));
-                body.extend(owned(&[
-                    "    let target = match std::fs::read_link(&p) {",
-                    "        Ok(t) => t,",
-                    "        Err(e) => return Self::wasi_errno(&e),",
-                    "    };",
-                    "    let bytes = target.as_os_str().as_bytes();",
-                    "    let n = bytes.len().min(a4 as u32 as usize);",
-                    "    let b = a3 as u32 as usize;",
-                    "    @MEM_MUT@[Self::wasi_span(b as u64, n as u64)].copy_from_slice(&bytes[..n]);",
-                    "    let w = a5 as u32 as usize;",
-                    "    @MEM_MUT@[Self::wasi_span(w as u64, 4)].copy_from_slice(&(n as u32).to_le_bytes());",
-                    "    0",
-                    "}",
-                ]));
-                body
-            }
-            // `fd_fdstat_set_flags(fd, flags)`: `std` cannot change APPEND/NONBLOCK
-            // etc. on an open descriptor, so clearing every flag succeeds and any
-            // other request is ENOTSUP rather than being silently ignored.
-            WasiFn::FdFdstatSetFlags => fd_op_lines(
-                "wasi_fd_fdstat_set_flags",
-                "a0: i32, a1: i32",
-                &FdOp {
-                    stdio: "if a1 == 0 { 0 } else { 58 }",
-                    dir: "if a1 == 0 { 0 } else { 58 }",
-                    file: "if a1 == 0 { 0 } else { 58 }".to_string(),
-                    pre: Vec::new(),
-                },
-                files,
-            ),
-            // `fd_fdstat_set_rights(fd, base, inheriting)` is deprecated and rights
-            // are not tracked, so a valid descriptor accepts any narrowing.
-            WasiFn::FdFdstatSetRights => fd_op_lines(
-                "wasi_fd_fdstat_set_rights",
-                "a0: i32, a1: i64, a2: i64",
-                &FdOp {
-                    stdio: "0",
-                    dir: "0",
-                    file: "0".to_string(),
-                    pre: Vec::new(),
-                },
-                files,
-            ),
-            // `poll_oneoff(in, out, nsubscriptions, nevents)` waits on clock and
-            // fd subscriptions. Stdio and open files are always ready, an unopened
-            // fd is an EBADF event. If any fd is ready the call returns at once
-            // (with every clock that has already expired); otherwise it sleeps
-            // until the earliest clock. The subscriptions are copied out first, so
-            // no memory or fd-table lock is held while sleeping.
-            WasiFn::PollOneoff => {
-                let mut body = owned(&[
-                    "fn wasi_poll_oneoff(&mut self, a0: i32, a1: i32, a2: i32, a3: i32) -> i32 {",
-                    "    let n = a2 as u32 as usize;",
-                    "    if n == 0 {",
-                    "        return 28;",
-                    "    }",
-                    "    let inp = a0 as u32 as usize;",
-                    "    let subs = @MEM@[Self::wasi_span(inp as u64, n as u64 * 48)].to_vec();",
-                    "    let now = std::time::SystemTime::now()",
-                    "        .duration_since(std::time::UNIX_EPOCH)",
-                    "        .map(|d| d.as_nanos() as u64)",
-                    "        .unwrap_or(0);",
-                    "    let mut events: Vec<(u64, u8, u16)> = Vec::new();",
-                    "    let mut clocks: Vec<(u64, std::time::Duration)> = Vec::new();",
-                    "    for sub in subs.chunks_exact(48) {",
-                    "        let userdata = u64::from_le_bytes(sub[0..8].try_into().unwrap());",
-                    "        let tag = sub[8];",
-                    "        match tag {",
-                    "            0 => {",
-                    "                let id = u32::from_le_bytes(sub[16..20].try_into().unwrap());",
-                    "                let timeout = u64::from_le_bytes(sub[24..32].try_into().unwrap());",
-                    "                let flags = u16::from_le_bytes(sub[40..42].try_into().unwrap());",
-                    "                if id > 3 {",
-                    "                    events.push((userdata, 0, 28));",
-                    "                    continue;",
-                    "                }",
-                    "                let wait = if flags & 1 != 0 { timeout.saturating_sub(now) } else { timeout };",
-                    "                clocks.push((userdata, std::time::Duration::from_nanos(wait)));",
-                    "            }",
-                    "            1 | 2 => {",
-                    "                let fd = u32::from_le_bytes(sub[16..20].try_into().unwrap()) as i32;",
-                ]);
-                body.push(format!(
-                    "                let open = {};",
-                    fd_open_expr("fd", files)
-                ));
-                body.extend(owned(&[
-                    "                events.push((userdata, tag, if open { 0 } else { 8 }));",
-                    "            }",
-                    "            _ => events.push((userdata, tag, 28)),",
-                    "        }",
-                    "    }",
-                    "    let wait = if events.is_empty() {",
-                    "        clocks.iter().map(|c| c.1).min().unwrap_or_default()",
-                    "    } else {",
-                    "        std::time::Duration::ZERO",
-                    "    };",
-                    "    if !wait.is_zero() {",
-                    "        std::thread::sleep(wait);",
-                    "    }",
-                    "    for (userdata, due) in clocks {",
-                    "        if due <= wait {",
-                    "            events.push((userdata, 0, 0));",
-                    "        }",
-                    "    }",
-                    "    let mut out = vec![0u8; events.len() * 32];",
-                    "    for (ev, (userdata, kind, error)) in out.chunks_exact_mut(32).zip(&events) {",
-                    "        ev[0..8].copy_from_slice(&userdata.to_le_bytes());",
-                    "        ev[8..10].copy_from_slice(&error.to_le_bytes());",
-                    "        ev[10] = *kind;",
-                    "    }",
-                    "    let o = a1 as u32 as usize;",
-                    "    @MEM_MUT@[Self::wasi_span(o as u64, (out.len()) as u64)].copy_from_slice(&out);",
-                    "    let p = a3 as u32 as usize;",
-                    "    @MEM_MUT@[Self::wasi_span(p as u64, 4)].copy_from_slice(&(events.len() as u32).to_le_bytes());",
-                    "    0",
-                    "}",
-                ]));
-                body
-            }
-            // No socket descriptors exist in the table, so every `sock_*` call is
-            // EBADF (8) on an unopened fd and ENOTSOCK (57) on an open one.
-            WasiFn::SockAccept => sock_lines(
-                "fn wasi_sock_accept(&mut self, a0: i32, a1: i32, a2: i32) -> i32 {",
-                files,
-            ),
-            WasiFn::SockRecv => sock_lines(
-                "fn wasi_sock_recv(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32) -> i32 {",
-                files,
-            ),
-            WasiFn::SockSend => sock_lines(
-                "fn wasi_sock_send(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32) -> i32 {",
-                files,
-            ),
-            WasiFn::SockShutdown => sock_lines(
-                "fn wasi_sock_shutdown(&mut self, a0: i32, a1: i32) -> i32 {",
-                files,
-            ),
-            // Generated by `render::thread_spawn_lines`, which knows the layout.
-            WasiFn::ThreadSpawn | WasiFn::PthreadCreateJs => Vec::new(),
-            WasiFn::EmscriptenResizeHeap => {
-                owned(&["fn emscripten_resize_heap(&mut self, a0: i32) -> i32 { 0 }"])
-            }
-            WasiFn::EmscriptenNoop2 => {
-                owned(&["fn emscripten_noop2(&mut self, a0: i32, a1: i32) {}"])
-            }
-            // `path_filestat_get(dirfd, flags, path, path_len, buf)` stats a path
-            // within the preopen (fd 3) *without opening it*, writing a 64-byte
-            // `filestat` (filetype @16, nlink=1 @24, size @32). Path containment
-            // is as in `path_open`: absolute paths, ".." escapes, and symlink
-            // escapes are refused with ENOTCAPABLE (76). `flags` (symlink follow) is ignored;
-            // `std::fs::metadata` follows symlinks.
-            WasiFn::PathFilestatGet => {
-                let mut body = owned(&[
-                    "fn wasi_path_filestat_get(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32) -> i32 {",
-                    "    if a0 != 3 {",
-                    "        return 8;",
-                    "    }",
-                ]);
-                body.extend(contain_path("rel", "a2", "a3", true));
-                body.extend(owned(&[
-                    "    let meta = match std::fs::metadata(&rel) {",
-                    "        Ok(m) => m,",
-                    "        Err(e) => return Self::wasi_errno(&e),",
-                    "    };",
-                    "    let filetype = if meta.is_dir() { 3u8 } else if meta.is_file() { 4u8 } else { 0u8 };",
-                    "    let mut st = [0u8; 64];",
-                    "    st[16] = filetype;",
-                    "    st[24..32].copy_from_slice(&1u64.to_le_bytes());",
-                    "    st[32..40].copy_from_slice(&meta.len().to_le_bytes());",
-                    "    let b = a4 as u32 as usize;",
-                    "    @MEM_MUT@[Self::wasi_span(b as u64, 64)].copy_from_slice(&st);",
-                    "    0",
-                    "}",
-                ]));
-                body
-            }
-            // `path_create_directory(fd, path)`, `path_remove_directory(fd,
-            // path)`, and `path_unlink_file(fd, path)` mutate a single path
-            // within the preopen (fd 3). Path containment is as in `path_open`
-            // (absolute paths, ".." escapes, and symlink escapes are
-            // ENOTCAPABLE, 76).
-            WasiFn::PathCreateDirectory => {
-                path_mutate_lines("wasi_path_create_directory", "std::fs::create_dir")
-            }
-            WasiFn::PathRemoveDirectory => {
-                path_mutate_lines("wasi_path_remove_directory", "std::fs::remove_dir")
-            }
-            WasiFn::PathUnlinkFile => {
-                path_mutate_lines("wasi_path_unlink_file", "std::fs::remove_file")
-            }
-            // `path_rename(fd, old_path, new_fd, new_path)` renames within the
-            // preopen; both dirfds must be fd 3 and both paths are contained.
-            WasiFn::PathRename => {
-                let mut body = owned(&[
-                    "fn wasi_path_rename(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32) -> i32 {",
-                    "    if a0 != 3 || a3 != 3 {",
-                    "        return 8;",
-                    "    }",
-                ]);
-                body.extend(contain_path("old", "a1", "a2", false));
-                body.extend(contain_path("new", "a4", "a5", false));
-                body.extend(fs_result_lines("std::fs::rename(&old, &new)"));
-                body.extend(owned(&["}"]));
-                body
-            }
-            // `path_symlink(old_path, fd, new_path)` creates a symlink at
-            // `new_path` (contained in the preopen, fd 3). `old_path` is the
-            // link's *contents*, stored verbatim; an absolute target is refused
-            // (ENOTCAPABLE) and a relative one that climbs out of the preopen
-            // is caught when a later path resolves through it (`wasi_confine`).
-            WasiFn::PathSymlink => {
-                let mut body = owned(&[
-                    "fn wasi_path_symlink(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32) -> i32 {",
-                    "    if a2 != 3 {",
-                    "        return 8;",
-                    "    }",
-                    "    let tp = a0 as u32 as usize;",
-                    "    let tlen = a1 as u32 as usize;",
-                    "    let traw = @MEM@[Self::wasi_span(tp as u64, tlen as u64)].to_vec();",
-                    "    let target = match std::str::from_utf8(&traw) { Ok(s) => s.to_owned(), Err(_) => return 28 };",
-                    "    if std::path::Path::new(&target).is_absolute() {",
-                    "        return 76;",
-                    "    }",
-                ]);
-                body.extend(contain_path("link", "a3", "a4", false));
-                body.extend(fs_result_lines(
-                    "std::os::unix::fs::symlink(&target, &link)",
-                ));
-                body.extend(owned(&["}"]));
-                body
-            }
-            // `path_link(old_fd, old_flags, old_path, new_fd, new_path)` creates
-            // a hard link at `new_path` to `old_path`; both dirfds must be fd 3
-            // and both paths are contained. `old_flags` (symlink follow) is
-            // ignored (`std::fs::hard_link` does not follow the final symlink).
-            WasiFn::PathLink => {
-                let mut body = owned(&[
-                    "fn wasi_path_link(&mut self, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32, a6: i32) -> i32 {",
-                    "    if a0 != 3 || a4 != 3 {",
-                    "        return 8;",
-                    "    }",
-                ]);
-                body.extend(contain_path("old", "a2", "a3", true));
-                body.extend(contain_path("new", "a5", "a6", false));
-                body.extend(fs_result_lines("std::fs::hard_link(&old, &new)"));
-                body.extend(owned(&["}"]));
-                body
-            }
-            // Rendered from wasi_fns.tpl by `wasi_fn_template` before this match.
-            WasiFn::ProcExit
-            | WasiFn::FdClose
-            | WasiFn::FdSeek
-            | WasiFn::FdFdstatGet
-            | WasiFn::ClockTimeGet
-            | WasiFn::RandomGet
-            | WasiFn::FdPrestatGet
-            | WasiFn::FdPrestatDirName
-            | WasiFn::FdFilestatGet
-            | WasiFn::FdTell
-            | WasiFn::FdRenumber
-            | WasiFn::ProcRaise
-            | WasiFn::EmscriptenInitMainThread
-            | WasiFn::EmscriptenGetNow
-            | WasiFn::EmscriptenNoop0
-            | WasiFn::EmscriptenNoop1
-            | WasiFn::SchedYield
-            | WasiFn::ClockResGet
-            | WasiFn::FdPread
-            | WasiFn::FdPwrite
-            | WasiFn::FdWrite
-            | WasiFn::FdRead
-            | WasiFn::FdReaddir => {
-                unreachable!("{self:?} is rendered from wasi_fns.tpl")
-            }
-        }
+        wasi_fn_template(self, files)
+            .map(|src| expand_parts(src, files, access))
+            .unwrap_or_default()
     }
 }
 
@@ -994,68 +507,9 @@ pub(super) fn iov_loop_lines(files: bool, access: WasiAccess) -> Vec<String> {
 /// memory on a 32-bit `usize` host. A range past `usize::MAX` traps (panics),
 /// like any other out-of-range guest access.
 pub(super) fn guest_range_lines() -> Vec<String> {
-    [
-        "",
-        "fn wasi_span(start: u64, len: u64) -> std::ops::Range<usize> {",
-        "    let Some(end) = start.checked_add(len) else { panic!(\"out of bounds memory access\") };",
-        "    Self::wasi_usize(start)..Self::wasi_usize(end)",
-        "}",
-        "",
-        "/// The WASI errno of an I/O error. The OS errno is preferred (the values below",
-        "/// are shared by Linux and macOS); the `ErrorKind` is the fallback.",
-        "fn wasi_errno(e: &std::io::Error) -> i32 {",
-        "    #[cfg(unix)]",
-        "    {",
-        "        match e.raw_os_error() {",
-        "            Some(1) => return 63,",
-        "            Some(2) => return 44,",
-        "            Some(3) => return 71,",
-        "            Some(4) => return 27,",
-        "            Some(5) => return 29,",
-        "            Some(6) => return 60,",
-        "            Some(9) => return 8,",
-        "            Some(12) => return 48,",
-        "            Some(13) => return 2,",
-        "            Some(16) => return 10,",
-        "            Some(17) => return 20,",
-        "            Some(18) => return 75,",
-        "            Some(19) => return 43,",
-        "            Some(20) => return 54,",
-        "            Some(21) => return 31,",
-        "            Some(22) => return 28,",
-        "            Some(23) => return 41,",
-        "            Some(24) => return 33,",
-        "            Some(25) => return 59,",
-        "            Some(26) => return 74,",
-        "            Some(27) => return 22,",
-        "            Some(28) => return 51,",
-        "            Some(29) => return 70,",
-        "            Some(30) => return 69,",
-        "            Some(31) => return 34,",
-        "            Some(32) => return 64,",
-        "            _ => {}",
-        "        }",
-        "    }",
-        "    match e.kind() {",
-        "        std::io::ErrorKind::NotFound => 44,",
-        "        std::io::ErrorKind::PermissionDenied => 2,",
-        "        std::io::ErrorKind::AlreadyExists => 20,",
-        "        std::io::ErrorKind::InvalidInput => 28,",
-        "        std::io::ErrorKind::BrokenPipe => 64,",
-        "        _ => 29,",
-        "    }",
-        "}",
-        "",
-        "fn wasi_usize(n: u64) -> usize {",
-        "    match usize::try_from(n) {",
-        "        Ok(n) => n,",
-        "        Err(_) => panic!(\"out of bounds memory access\"),",
-        "    }",
-        "}",
-    ]
-    .iter()
-    .map(|l| (*l).to_string())
-    .collect()
+    let mut lines = vec![String::new()];
+    lines.extend(source_lines(include_str!("rt_src/wasi_guest.tpl")));
+    lines
 }
 
 /// `wasi_confine(path, follow)`: whether `path` (already joined onto the
@@ -1073,239 +527,72 @@ pub(super) fn guest_range_lines() -> Vec<String> {
 /// known limitation (#225, see `docs/cli-reference.md`); it affects only this
 /// preview1 shim, not the `cap-std` based `wasm2rs-wasi` host of WASI 0.2.
 pub(super) fn confine_lines() -> Vec<String> {
-    [
-        "fn wasi_confine(&self, full: &std::path::Path, follow: bool) -> bool {",
-        "    let root = match self.wasi_preopen.canonicalize() { Ok(r) => r, Err(_) => return false };",
-        "    let mut cur = if follow { Some(full) } else { full.parent() };",
-        "    while let Some(c) = cur {",
-        "        match c.canonicalize() {",
-        "            Ok(r) => return r.starts_with(&root),",
-        "            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {",
-        "                if std::fs::symlink_metadata(c).is_ok() {",
-        "                    // Another thread may have created `c` since the miss above, so",
-        "                    // only a path that still does not resolve is a dangling symlink.",
-        "                    return match c.canonicalize() { Ok(r) => r.starts_with(&root), Err(_) => false };",
-        "                }",
-        "                cur = c.parent();",
-        "            }",
-        "            Err(_) => return false,",
-        "        }",
-        "    }",
-        "    false",
-        "}",
-    ]
-    .iter()
-    .map(|l| (*l).to_string())
-    .collect()
+    source_lines(include_str!("rt_src/wasi_confine.tpl"))
 }
 
-/// The body of a single-path WASI mutator (`path_create_directory`,
-/// `path_remove_directory`, `path_unlink_file`): refuse a dirfd other than the
-/// preopen (fd 3), contain the path (`contain_path`), then apply `op` to it.
-fn path_mutate_lines(method: &str, op: &str) -> Vec<String> {
-    let mut body = vec![
-        format!("fn {method}(&mut self, a0: i32, a1: i32, a2: i32) -> i32 {{"),
-        "    if a0 != 3 {".to_string(),
-        "        return 8;".to_string(),
-        "    }".to_string(),
-    ];
-    body.extend(contain_path("rel", "a1", "a2", false));
-    body.extend(fs_result_lines(&format!("{op}(&rel)")));
-    body.push("}".to_string());
-    body
-}
-
-/// Emit the lines that read a UTF-8 path from linear memory at (`ptr_arg`,
-/// `len_arg`), lexically contain it, and bind the result — resolved against the
-/// instance's preopen root — to a local named `out`. An absolute path, a `..`
-/// escape, or a symlink resolving outside the preopen (`wasi_confine`, with
-/// `follow` deciding whether the final component is resolved) returns
-/// ENOTCAPABLE (76); invalid UTF-8 returns EINVAL (28). The
-/// scratch locals are derived from `out`, so two calls in one body (e.g.
-/// `path_rename`) do not collide.
-fn contain_path(out: &str, ptr_arg: &str, len_arg: &str, follow: bool) -> Vec<String> {
-    vec![
-        format!("    let {out}_p = {ptr_arg} as u32 as usize;"),
-        format!("    let {out}_len = {len_arg} as u32 as usize;"),
-        format!(
-            "    let {out}_raw = @MEM@[Self::wasi_span({out}_p as u64, {out}_len as u64)].to_vec();"
-        ),
-        format!(
-            "    let {out}_s = match std::str::from_utf8(&{out}_raw) {{ Ok(s) => s.to_owned(), Err(_) => return 28 }};"
-        ),
-        format!("    let mut {out}_rel = std::path::PathBuf::new();"),
-        format!("    for comp in std::path::Path::new(&{out}_s).components() {{"),
-        "        match comp {".to_string(),
-        format!("            std::path::Component::Normal(c) => {out}_rel.push(c),"),
-        "            std::path::Component::CurDir => {}".to_string(),
-        "            _ => return 76,".to_string(),
-        "        }".to_string(),
-        "    }".to_string(),
-        format!("    let {out} = self.wasi_preopen.join(&{out}_rel);"),
-        format!("    if !self.wasi_confine(&{out}, {follow}) {{"),
-        "        return 76;".to_string(),
-        "    }".to_string(),
-    ]
-}
-
-/// The trailing `match <call> { Ok(()) => 0, Err(e) => <errno by kind> }` shared
-/// by the path-mutating WASI methods that return only an errno. Error kinds map
-/// to the same errnos as `path_open`; anything else collapses to EIO (29).
-fn fs_result_lines(call: &str) -> Vec<String> {
-    vec![
-        format!("    match {call} {{"),
-        "        Ok(()) => 0,".to_string(),
-        "        Err(e) => Self::wasi_errno(&e),".to_string(),
-        "    }".to_string(),
-    ]
-}
-
-/// The per-descriptor-kind outcomes of an errno-only `fd_*` method.
-struct FdOp<'a> {
-    /// An `i32` expression for stdio (fd 0-2).
-    stdio: &'a str,
-    /// An `i32` expression for the preopen directory (fd 3).
-    dir: &'a str,
-    /// An `i32` expression for an open file, with the `&File` bound as `f`.
-    file: String,
-    /// Statements run first, so they can reject a bad argument before the
-    /// descriptor is looked up.
-    pre: Vec<String>,
-}
-
-/// A Rust `bool` expression: whether descriptor `var` (an `i32`) is open. Stdio
-/// is always open; with a file table so are the preopen (3) and the live slots.
-fn fd_open_expr(var: &str, files: bool) -> String {
-    if files {
-        format!(
-            "(0..=3).contains(&{var}) || @FDS@.get(({var} as u32 as usize).wrapping_sub(4)).is_some_and(|s| s.is_some())"
-        )
-    } else {
-        format!("(0..=2).contains(&{var})")
-    }
-}
-
-/// A `sock_*` body: EBADF for an unopened `a0`, otherwise ENOTSOCK.
-fn sock_lines(sig: &str, files: bool) -> Vec<String> {
-    vec![
-        sig.to_string(),
-        format!("    if {} {{ 57 }} else {{ 8 }}", fd_open_expr("a0", files)),
-        "}".to_string(),
-    ]
-}
-
-/// An `i32` expression that runs a `std::io::Result` expression and maps `Err`
-/// to the same errnos as `path_open`.
-fn errno_of(call: &str) -> String {
-    format!("match {call} {{ Ok(_) => 0, Err(e) => Self::wasi_errno(&e) }}")
-}
-
-/// The body of an `fd_*` method that dispatches on the descriptor kind (stdio,
-/// preopen directory, open file) and returns only an errno. Without a file table
-/// only stdio exists and everything else is EBADF (8).
-fn fd_op_lines(method: &str, sig: &str, op: &FdOp<'_>, files: bool) -> Vec<String> {
-    let mut lines = vec![format!("fn {method}(&mut self, {sig}) -> i32 {{")];
-    lines.extend(op.pre.iter().cloned());
-    lines.push("    if (0..=2).contains(&a0) {".to_string());
-    lines.push(format!("        return {};", op.stdio));
-    lines.push("    }".to_string());
-    if files {
-        lines.push("    if a0 == 3 {".to_string());
-        lines.push(format!("        return {};", op.dir));
-        lines.push("    }".to_string());
-        lines.push("    let idx = a0 as u32 as usize;".to_string());
-        lines.push(
-            "    match @FDS@.get(idx.wrapping_sub(4)).and_then(|s| s.as_ref()).map(|t| &t.0) {"
-                .to_string(),
-        );
-        lines.push(format!("        Some(f) => {},", op.file));
-        lines.push("        None => 8,".to_string());
-        lines.push("    }".to_string());
-    } else {
-        lines.push("    8".to_string());
-    }
-    lines.push("}".to_string());
-    lines
-}
-
-/// Statements that validate the `fst_flags` (bit 0 ATIM, 1 ATIM_NOW, 2 MTIM,
-/// 3 MTIM_NOW; a set and its `_NOW` twin conflict) and build `times` from the
-/// nanosecond timestamps in `atim` / `mtim`. An unset side is left unchanged.
-fn times_lines(atim: &str, mtim: &str, flags: &str) -> Vec<String> {
-    [
-        format!("    let fl = {flags} as u32;"),
-        "    if fl > 15 || (fl & 1 != 0 && fl & 2 != 0) || (fl & 4 != 0 && fl & 8 != 0) {".to_string(),
-        "        return 28;".to_string(),
-        "    }".to_string(),
-        "    let now = std::time::SystemTime::now();".to_string(),
-        "    let mut times = std::fs::FileTimes::new();".to_string(),
-        "    if fl & 1 != 0 {".to_string(),
-        format!(
-            "        times = times.set_accessed(std::time::UNIX_EPOCH + std::time::Duration::from_nanos({atim} as u64));"
-        ),
-        "    } else if fl & 2 != 0 {".to_string(),
-        "        times = times.set_accessed(now);".to_string(),
-        "    }".to_string(),
-        "    if fl & 4 != 0 {".to_string(),
-        format!(
-            "        times = times.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_nanos({mtim} as u64));"
-        ),
-        "    } else if fl & 8 != 0 {".to_string(),
-        "        times = times.set_modified(now);".to_string(),
-        "    }".to_string(),
-    ]
-    .into()
-}
-
-/// The body of a WASI `*_sizes_get` method: count the strings yielded by
-/// `source` and their total NUL-terminated byte size, writing both as `u32`.
-fn sizes_lines(method: &str, source: &str) -> Vec<String> {
-    let mut lines = vec![
-        format!("fn {method}(&mut self, a0: i32, a1: i32) -> i32 {{"),
-        format!("    let items: Vec<String> = {source}.collect();"),
-    ];
-    lines.extend(
-        [
-            "    let count = items.len() as u32;",
-            "    let size: u32 = items.iter().map(|s| s.len() as u32 + 1).sum();",
-            "    let c = a0 as u32 as usize;",
-            "    @MEM_MUT@[Self::wasi_span(c as u64, 4)].copy_from_slice(&count.to_le_bytes());",
-            "    let b = a1 as u32 as usize;",
-            "    @MEM_MUT@[Self::wasi_span(b as u64, 4)].copy_from_slice(&size.to_le_bytes());",
-            "    0",
-            "}",
+/// `body` with every `@name(arg, ...)@` directive replaced by the matching
+/// fragment of `wasi_parts.tpl` (see there): the `locked` form when `access`
+/// locks the descriptor table, else the `files` form when the module has one,
+/// else the plain one. The access placeholders inside are left for
+/// [`WasiAccess::fill`].
+fn expand_parts(body: &str, files: bool, access: WasiAccess) -> Vec<String> {
+    let parts = include_str!("rt_src/wasi_parts.tpl");
+    let fragment = |name: &str, args: &[&str]| {
+        let found = [
+            access.locked_fds.then(|| format!("//# {name} locked\n")),
+            files.then(|| format!("//# {name} files\n")),
+            Some(format!("//# {name}\n")),
         ]
-        .map(str::to_string),
-    );
+        .into_iter()
+        .flatten()
+        .find_map(|header| tpl_section(parts, &header));
+        let Some(text) = found else {
+            unreachable!("wasi_parts.tpl has no `{name}` fragment")
+        };
+        let mut text = text.trim_end().to_string();
+        for (i, arg) in args.iter().enumerate() {
+            text = text.replace(&format!("@{}@", i + 1), arg);
+        }
+        text
+    };
+    let mut lines = Vec::new();
+    'lines: for line in body.lines() {
+        let mut line = line.to_string();
+        // Fragments hold no directives, and a multi-line one must be on a line of
+        // its own (it is flattened into a single line otherwise).
+        while let Some((start, end, name, args)) = find_directive(&line) {
+            let text = fragment(name, &args);
+            if line.trim() == &line[start..end] {
+                lines.extend(text.lines().map(str::to_string));
+                continue 'lines;
+            }
+            line.replace_range(start..end, &text);
+        }
+        lines.push(line);
+    }
     lines
 }
 
-/// The body of a WASI `*_get` method: write each string yielded by `source`
-/// into the `a1` buffer (NUL-terminated) and its pointer into the `a0` array.
-fn get_lines(method: &str, source: &str) -> Vec<String> {
-    let mut lines = vec![
-        format!("fn {method}(&mut self, a0: i32, a1: i32) -> i32 {{"),
-        format!("    let items: Vec<String> = {source}.collect();"),
-    ];
-    lines.extend(
-        [
-            "    let mut pv = a0 as u32 as u64;",
-            "    let mut pb = a1 as u32 as u64;",
-            "    for item in &items {",
-            "        let bytes = item.as_bytes();",
-            "        @MEM_MUT@[Self::wasi_span(pv, 4)].copy_from_slice(&(pb as u32).to_le_bytes());",
-            "        pv += 4;",
-            "        @MEM_MUT@[Self::wasi_span(pb, bytes.len() as u64)].copy_from_slice(bytes);",
-            "        pb += bytes.len() as u64;",
-            "        @MEM_MUT@[Self::wasi_span(pb, 1)][0] = 0;",
-            "        pb += 1;",
-            "    }",
-            "    0",
-            "}",
-        ]
-        .map(str::to_string),
-    );
-    lines
+/// The first `@name(arg, ...)@` directive of `line` as `(start, end, name, args)`.
+/// Access placeholders (`@MEM@`, `@FDS@`) have no `(`, so they never match.
+fn find_directive(line: &str) -> Option<(usize, usize, &str, Vec<&str>)> {
+    let mut from = 0;
+    while let Some(at) = line[from..].find('@') {
+        let start = from + at;
+        let rest = &line[start + 1..];
+        let name_len = rest
+            .find(|c: char| !c.is_ascii_lowercase() && c != '_')
+            .unwrap_or(rest.len());
+        if name_len > 0
+            && rest[name_len..].starts_with('(')
+            && let Some(close) = rest.find(")@")
+        {
+            let args = rest[name_len + 1..close].split(", ").collect();
+            return Some((start, start + 1 + close + 2, &rest[..name_len], args));
+        }
+        from = start + 1;
+    }
+    None
 }
 
 /// How a native WASI body reaches guest memory and the descriptor table. Bodies
@@ -1427,5 +714,53 @@ mod tests {
             .join("\n");
         assert!(plain.contains("self.wasi_fds.alloc("));
         assert!(!plain.contains("lock()"));
+    }
+
+    #[test]
+    fn directives_expand_in_line_and_inline() {
+        let access = WasiAccess::default();
+        let body = "    @contain(p, a1, a2, false)@\nlet open = @open(fd)@;";
+        let plain = expand_parts(body, false, access).join("\n");
+        assert!(plain.contains("let p_p = a1 as u32 as usize;"), "{plain}");
+        assert!(plain.contains("self.wasi_confine(&p, false)"), "{plain}");
+        assert!(
+            plain.ends_with("let open = (0..=2).contains(&fd);"),
+            "{plain}"
+        );
+        assert!(!plain.contains("@1@"), "{plain}");
+        let files = expand_parts(body, true, access).join("\n");
+        assert!(
+            files.contains("(0..=3).contains(&fd) || @FDS@.get("),
+            "{files}"
+        );
+        // Placeholders that are not directives pass through for `WasiAccess::fill`.
+        assert_eq!(
+            expand_parts("@MEM@[x] @FDS@", true, access),
+            ["@MEM@[x] @FDS@"]
+        );
+    }
+
+    #[test]
+    fn every_directive_names_a_fragment() {
+        let src = include_str!("rt_src/wasi_fns.tpl");
+        // `expand_parts` panics on an unknown fragment name.
+        for header in src.lines().filter(|l| l.starts_with("//# ")) {
+            let body = tpl_section(src, &format!("{header}\n")).unwrap();
+            for files in [false, true] {
+                for locked_fds in [false, true] {
+                    let access = WasiAccess {
+                        locked_fds,
+                        ..WasiAccess::default()
+                    };
+                    let text = expand_parts(body, files, access).join("\n");
+                    // A wrong argument count or an unparsable directive would
+                    // otherwise survive as text and only fail in rustc.
+                    for n in 1..=4 {
+                        assert!(!text.contains(&format!("@{n}@")), "{header}: {text}");
+                    }
+                    assert!(find_directive(&text).is_none(), "{header}: {text}");
+                }
+            }
+        }
     }
 }
