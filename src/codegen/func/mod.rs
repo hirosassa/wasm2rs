@@ -337,7 +337,7 @@ impl<'a> FuncGen<'a> {
     /// on and the access is checked (`None` otherwise: the untyped code keeps Rust's
     /// slice panic, and `unsafe_memory` / a shared memory do no per-access check).
     pub(super) fn typed_memory_trap(&mut self) -> Option<&'static str> {
-        let on = self.ctx.typed_traps && !self.ctx.unsafe_memory && !self.ctx.memory_shared;
+        let on = self.ctx.typed_traps && !self.ctx.unsafe_memory && !self.ctx.memory.shared;
         on.then(|| {
             self.used_rt.insert(Rt::TrapMemoryOob);
             "trap_memory_oob"
@@ -386,7 +386,7 @@ impl<'a> FuncGen<'a> {
                     Helper::TableCopy | Helper::TableFill => {
                         rt.insert(Rt::TrapTableOob);
                     }
-                    _ if ctx.unsafe_memory || ctx.memory_shared => {}
+                    _ if ctx.unsafe_memory || ctx.memory.shared => {}
                     _ => {
                         rt.insert(Rt::TrapMemoryOob);
                     }

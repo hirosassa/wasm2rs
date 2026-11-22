@@ -158,7 +158,7 @@ impl<'a> super::FuncGen<'a> {
     // ----- linear memory ---------------------------------------------------
 
     pub(super) fn require_memory(&self) -> Result<(), TranspileError> {
-        if self.ctx.has_memory {
+        if self.ctx.memory.declared {
             Ok(())
         } else {
             Err(TranspileError::Unsupported(
@@ -168,7 +168,7 @@ impl<'a> super::FuncGen<'a> {
     }
 
     pub(super) fn require_table(&self) -> Result<(), TranspileError> {
-        if self.ctx.has_table {
+        if self.ctx.table.declared {
             Ok(())
         } else {
             Err(TranspileError::Unsupported(
@@ -181,7 +181,7 @@ impl<'a> super::FuncGen<'a> {
     /// select the table-specific accessor.
     pub(super) fn require_table_index(&self, table: u32) -> Result<u32, TranspileError> {
         self.require_table()?;
-        if (table as usize) < self.ctx.table_elements.len() {
+        if (table as usize) < self.ctx.table.elements.len() {
             Ok(table)
         } else {
             Err(TranspileError::Unsupported(
@@ -194,7 +194,7 @@ impl<'a> super::FuncGen<'a> {
     /// caller can select the memory-specific accessor/helper. Rejects an
     /// out-of-range index (a validation failure the emitted code cannot express).
     pub(super) fn require_memory_index(&self, mem: u32) -> Result<u32, TranspileError> {
-        if (mem as usize) < self.ctx.n_memories {
+        if (mem as usize) < self.ctx.memory.count {
             Ok(mem)
         } else {
             Err(TranspileError::Unsupported(
@@ -217,7 +217,8 @@ impl<'a> super::FuncGen<'a> {
     /// Whether linear memory `mem` is 64-bit (memory64 proposal).
     pub(super) fn is_memory64(&self, mem: u32) -> bool {
         self.ctx
-            .memory64
+            .memory
+            .is64
             .get(mem as usize)
             .copied()
             .unwrap_or(false)
@@ -244,7 +245,7 @@ impl<'a> super::FuncGen<'a> {
     /// offset, so it must not be forced through `u32` here (the value is `0` and
     /// unused on that path).
     pub(super) fn shared_offset(&self, memarg: MemArg) -> Result<u32, TranspileError> {
-        if self.ctx.memory_shared {
+        if self.ctx.memory.shared {
             memarg_offset(memarg)
         } else {
             Ok(0)
@@ -362,7 +363,7 @@ impl<'a> super::FuncGen<'a> {
         ty: ValType,
         memarg: MemArg,
     ) -> Result<(), TranspileError> {
-        if !self.ctx.memory_shared {
+        if !self.ctx.memory.shared {
             self.check_unshared_atomic_align(helper, memarg, 0)?;
             return self.load(helper, ty, memarg);
         }
@@ -396,7 +397,7 @@ impl<'a> super::FuncGen<'a> {
         helper: Helper,
         memarg: MemArg,
     ) -> Result<(), TranspileError> {
-        if !self.ctx.memory_shared {
+        if !self.ctx.memory.shared {
             self.check_unshared_atomic_align(helper, memarg, 1)?;
             return self.store(helper, memarg);
         }
@@ -418,7 +419,7 @@ impl<'a> super::FuncGen<'a> {
     /// `atomic.fence`: a sequentially consistent fence on a shared memory; a
     /// no-op when the instance owns its memory.
     pub(super) fn atomic_fence(&mut self) -> Result<(), TranspileError> {
-        if self.ctx.memory_shared {
+        if self.ctx.memory.shared {
             // Operands still pending on the stack came before the fence.
             self.spill_nonstable()?;
             self.line("std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);".to_string());
@@ -499,7 +500,7 @@ impl<'a> super::FuncGen<'a> {
         self.spill_nonstable()?;
         let value = self.pop()?;
         let addr = self.pop()?;
-        if self.ctx.memory_shared {
+        if self.ctx.memory.shared {
             // A shared memory does the whole read-modify-write as one atomic
             // compare-exchange loop (`SharedMemory::atomic_rmw`), so it is atomic
             // across threads; the runtime masks the operand and zero-extends the
@@ -565,7 +566,7 @@ impl<'a> super::FuncGen<'a> {
         let replacement = self.pop()?;
         let expected = self.pop()?;
         let addr = self.pop()?;
-        if self.ctx.memory_shared {
+        if self.ctx.memory.shared {
             // One atomic compare-exchange compares at the access width (the runtime
             // masks `expected`) and stores `replacement` only on a match,
             // returning the zero-extended old value either way.
@@ -618,7 +619,7 @@ impl<'a> super::FuncGen<'a> {
         self.require_memory()?;
         self.memarg_memory(memarg)?;
         let offset = self.shared_offset(memarg)?;
-        if self.ctx.memory_shared {
+        if self.ctx.memory.shared {
             // Wake up to `count` waiters parked on the effective byte address
             // (base + static memarg offset), matching the address a waiter
             // registers under. The count/addr are consumed, so freeze only
@@ -680,7 +681,7 @@ impl<'a> super::FuncGen<'a> {
         } else {
             4
         };
-        if self.ctx.memory_shared {
+        if self.ctx.memory.shared {
             // A real blocking wait: park until notified or the timeout elapses.
             // Returns 0 (woken), 1 (value mismatch — did not block), or 2 (timed
             // out). The three operands are consumed, so freeze only survivors.
@@ -768,7 +769,7 @@ impl<'a> super::FuncGen<'a> {
         // through the host).
         let name = self.fresh_temp();
         let addr_ty = self.addr_rust_ty(mem);
-        if self.ctx.memory_shared {
+        if self.ctx.memory.shared {
             // A shared memory has no `mem()` accessor; measure the locked bytes.
             self.line(format!(
                 "let {name}: {addr_ty} = (self.memory.bytes().len() / {WASM_PAGE_SIZE}) as {addr_ty};"

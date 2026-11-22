@@ -45,6 +45,39 @@ pub(crate) struct TagTypes {
     pub(crate) results: Vec<Vec<ValType>>,
 }
 
+/// The linear-memory facts the lowering consults, grouped so `ctx.memory.*`
+/// reads as one concern. `is64` is indexed like the memory operands (imported
+/// memories first, then defined).
+pub(crate) struct MemoryShape {
+    /// Whether the module declares linear memory (so `self.mem()` exists).
+    pub(crate) declared: bool,
+    /// The number of linear memories. Memory operations carry a static index
+    /// that must be below this.
+    pub(crate) count: usize,
+    /// Per memory, whether it is 64-bit (memory64 proposal), so its addresses
+    /// and sizes are `i64`.
+    pub(crate) is64: Vec<bool>,
+    /// True iff the module has exactly one memory and it is `shared`. When set,
+    /// linear memory is backed by a thread-shareable, lock-free `SharedMemory`
+    /// and the atomic load/store/RMW/cmpxchg/wait/notify ops lower to genuine
+    /// atomics.
+    pub(crate) shared: bool,
+}
+
+/// The table facts the lowering consults. The per-table vectors are in
+/// table-index order (the first table, then the extra tables).
+pub(crate) struct TableShape {
+    /// Whether the module declares a table (so `self.table()` exists).
+    pub(crate) declared: bool,
+    /// Per table: whether it is declared `i64`.
+    pub(crate) is64: Vec<bool>,
+    /// Per table: its declared maximum number of entries, if any.
+    pub(crate) max: Vec<Option<u32>>,
+    /// Per table: its element type (`funcref` or `externref`); `table.get`
+    /// pushes an operand of this type.
+    pub(crate) elements: Vec<ValType>,
+}
+
 /// Module-wide context shared by every function's code generation.
 pub(crate) struct ModuleCtx<'a> {
     /// Imported functions, occupying function indices `0..imports.len()`.
@@ -86,31 +119,13 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) imported_globals: Vec<(ValType, bool)>,
     /// Per-defined-global `(type, mutable)`, indexed after the imported globals.
     pub(crate) globals: Vec<(ValType, bool)>,
-    /// Whether the module declares linear memory (so `self.mem()` exists).
-    pub(crate) has_memory: bool,
-    /// The number of linear memories (imported first, then defined). Memory
-    /// operations carry a static index that must be below this.
-    pub(crate) n_memories: usize,
-    /// Per memory (indexed like the memory operands), whether it is 64-bit
-    /// (memory64 proposal), so its addresses and sizes are `i64`.
-    pub(crate) memory64: Vec<bool>,
-    /// True iff the module has exactly one memory and it is `shared`. When set,
-    /// linear memory is backed by a thread-shareable, lock-free `SharedMemory`
-    /// and the atomic load/store/RMW/cmpxchg/wait/notify ops lower to genuine
-    /// atomics.
-    pub(crate) memory_shared: bool,
-    /// Whether the module declares a table (so `self.table()` exists).
-    pub(crate) has_table: bool,
+    /// Linear-memory facts (see [`MemoryShape`]).
+    pub(crate) memory: MemoryShape,
     /// Whether the module has an injected host (`self.imports`), so an external
     /// funcref handle in a table can be resolved through the host.
     pub(crate) has_imports: bool,
-    /// Each table's element type (`funcref` or `externref`), in table-index
-    /// order; `table.get` pushes an operand of this type.
-    /// Per table: whether it is declared `i64`.
-    pub(crate) table64: Vec<bool>,
-    /// Per table: its declared maximum number of entries, if any.
-    pub(crate) table_max: Vec<Option<u32>>,
-    pub(crate) table_elements: Vec<ValType>,
+    /// Table facts (see [`TableShape`]).
+    pub(crate) table: TableShape,
     /// Per-data-segment: whether it is passive (so `memory.init`/`data.drop`
     /// can reference it through a `data{d}` field), indexed by data index.
     pub(crate) data_passive: Vec<bool>,
@@ -598,6 +613,8 @@ pub(crate) fn build_ctx<'a>(
         )
     });
     let needs_gc_types = needs_gc_types(parts, scan.uses_abstract_gc);
+    // The first table, then the extra tables: table-index order.
+    let tables = || table.into_iter().chain(extra_tables);
     let ctx = ModuleCtx {
         imports,
         funcs,
@@ -611,27 +628,19 @@ pub(crate) fn build_ctx<'a>(
         needs_gc_types,
         imported_globals: imported_globals.iter().map(|g| (g.ty, g.mutable)).collect(),
         globals: globals.iter().map(|g| (g.ty, g.mutable)).collect(),
-        has_memory,
-        n_memories: memories.len(),
-        memory64: memories.iter().map(|m| m.memory64).collect(),
-        memory_shared,
-        has_table,
+        memory: MemoryShape {
+            declared: has_memory,
+            count: memories.len(),
+            is64: memories.iter().map(|m| m.memory64).collect(),
+            shared: memory_shared,
+        },
         has_imports,
-        table_max: table
-            .into_iter()
-            .chain(extra_tables)
-            .map(|t| t.max)
-            .collect(),
-        table64: table
-            .into_iter()
-            .chain(extra_tables)
-            .map(|t| t.table64)
-            .collect(),
-        table_elements: table
-            .into_iter()
-            .chain(extra_tables)
-            .map(|t| t.element)
-            .collect(),
+        table: TableShape {
+            declared: has_table,
+            is64: tables().map(|t| t.table64).collect(),
+            max: tables().map(|t| t.max).collect(),
+            elements: tables().map(|t| t.element).collect(),
+        },
         data_passive: data.iter().map(|d| d.offset.is_none()).collect(),
         elem_passive: elements
             .iter()
@@ -847,7 +856,7 @@ fn generate_module_pieces_with(
 /// The shared-memory runtime is emitted whole, whatever the functions use, and
 /// under `typed_traps` it raises both memory traps itself.
 fn add_shared_memory_traps(deps: &mut ModuleDeps, ctx: &ModuleCtx<'_>) {
-    if ctx.typed_traps && ctx.memory_shared {
+    if ctx.typed_traps && ctx.memory.shared {
         deps.rt.extend([Rt::TrapMemoryOob, Rt::TrapUnalignedAtomic]);
     }
 }
