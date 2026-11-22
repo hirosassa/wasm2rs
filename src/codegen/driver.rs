@@ -343,7 +343,7 @@ pub(crate) struct ModuleParts<'a> {
     /// Every linear memory, in index order (imported memories first, then
     /// defined). Empty when the module declares none.
     pub(crate) memories: &'a [MemInfo],
-    pub(crate) data: &'a [DataSegment],
+    pub(crate) data: &'a [DataSegment<'a>],
     pub(crate) table: Option<&'a TableInfo>,
     /// Further defined tables (index 1..), after `table`. Only present when
     /// `table` is itself a defined (not imported) table.

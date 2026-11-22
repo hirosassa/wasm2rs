@@ -1061,10 +1061,10 @@ fn merge_tables(
     Ok(())
 }
 
-fn merge_segments(
+fn merge_segments<'b>(
     layout: &Layout,
-    ir: &mut ModuleIr<'_>,
-    appended: &[(usize, ModuleIr<'_>)],
+    ir: &mut ModuleIr<'b>,
+    appended: &[(usize, ModuleIr<'b>)],
 ) -> Result<(), TranspileError> {
     for (m, a) in appended {
         let m = *m;
@@ -1108,7 +1108,7 @@ fn merge_segments(
             ir.data.push(codegen::DataSegment {
                 offset: merged_offset(layout, ir, m, &seg.offset, "data segment")?,
                 mem_index,
-                bytes: seg.bytes.clone(),
+                bytes: seg.bytes,
             });
         }
     }

@@ -120,10 +120,11 @@ pub(crate) struct ElemSegment {
 /// `None` for a passive one (retained for `memory.init`). `mem_index` is the
 /// linear memory the (active) segment initialises; it is 0 for a passive
 /// segment (which names no memory until a `memory.init` selects one).
-pub(crate) struct DataSegment {
+pub(crate) struct DataSegment<'a> {
     pub offset: Option<SegOffset>,
     pub mem_index: u32,
-    pub bytes: Vec<u8>,
+    /// Borrowed from the input wasm, so a large segment is not copied into the IR.
+    pub bytes: &'a [u8],
 }
 
 /// A function type from the type section: its parameter and result types. Used
