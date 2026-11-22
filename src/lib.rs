@@ -487,7 +487,10 @@ impl TranspileOptions {
 /// binary. This manifest supplies a size-optimized-but-still-fast
 /// `[profile.release]`: `opt-level = 3` preserves the flattened-dispatch speed,
 /// while thin LTO, a single codegen unit and `strip` shrink the release binary
-/// without trading away speed. Panics deliberately keep unwinding (no
+/// without trading away speed. `[profile.dev]` sets `debug = 0` because a plain
+/// `cargo build` defaults to full debuginfo, which on a very large crate drives
+/// rustc to SIGBUS / ~12 GB; `[profile.release]` pins the same value so an
+/// inherited override cannot reintroduce it. Panics deliberately keep unwinding (no
 /// `panic = "abort"`): Wasm exception handling (including exceptions injected
 /// by `resume_throw`) is lowered to `catch_unwind`, and hosts contain traps the
 /// same way, which an abort profile would turn into a process abort.
@@ -509,7 +512,11 @@ pub fn cargo_manifest(package_name: &str) -> String {
          opt-level = 3\n\
          lto = \"thin\"\n\
          codegen-units = 1\n\
-         strip = true\n"
+         strip = true\n\
+         debug = 0\n\
+         \n\
+         [profile.dev]\n\
+         debug = 0\n"
     )
 }
 

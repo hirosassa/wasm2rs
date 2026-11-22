@@ -84,7 +84,7 @@ wasm2rs --dump module.wasm
 
 - **Single file** — when both `funcs_per_file` and `max_bytes_per_file` are `0` (the default), the whole module is emitted as one Rust source file (to `output`, or stdout if omitted).
 - **Split output** — when either cap is positive, `output` is treated as a directory.
-  wasm2rs writes a `lib.rs` crate root plus `funcs_0.rs`, `funcs_1.rs`, … chunk files, and also drops in a ready-to-use `Cargo.toml` (with a size-optimized `[profile.release]`).
+  wasm2rs writes a `lib.rs` crate root plus `funcs_0.rs`, `funcs_1.rs`, … chunk files, and also drops in a ready-to-use `Cargo.toml` (with a size-optimized `[profile.release]`: opt-level 3, thin LTO, one codegen unit, `strip`, `debug = 0`) and `[profile.dev] debug = 0`, so a plain `cargo build` doesn't make rustc run out of memory generating debuginfo for huge crates.
   Splitting keeps very large modules compilable while bounding peak memory.
   Build it directly:
 

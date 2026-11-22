@@ -45,6 +45,7 @@ fn manifest_release_profile_is_size_optimized_but_fast() {
         "lto = \"thin\"",
         "codegen-units = 1",
         "strip = true",
+        "debug = 0",
     ] {
         assert!(
             m.contains(needle),
@@ -75,4 +76,20 @@ fn manifest_is_stable_and_uses_edition_2024() {
     );
     // Deterministic output: the same package name yields byte-identical bytes.
     assert_eq!(cargo_manifest("m"), cargo_manifest("m"));
+}
+
+#[test]
+fn manifest_disables_debuginfo_in_the_dev_profile_too() {
+    // `cargo build` (dev) defaults to full debuginfo, which on a huge generated
+    // crate drives rustc to SIGBUS / ~12 GB; `[profile.dev]` must turn it off.
+    let m = cargo_manifest("m");
+    let dev = m
+        .split("[profile.dev]")
+        .nth(1)
+        .unwrap_or_else(|| panic!("manifest has no [profile.dev]:\n{m}"));
+    let dev = dev.split("\n[").next().unwrap_or(dev);
+    assert!(
+        dev.contains("debug = 0"),
+        "[profile.dev] must set debug = 0:\n{m}"
+    );
 }
