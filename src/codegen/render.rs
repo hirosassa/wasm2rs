@@ -2142,10 +2142,28 @@ fn dispatch_method_lines(
         .join(", ");
     let sep = if arg_list.is_empty() { "" } else { ", " };
 
-    let mut lines = vec![
-        format!("pub fn {name}({params}){ret} {{"),
-        "    match f {".to_string(),
-    ];
+    // A guarded dispatch is a thin wrapper that holds the counter around the `match`
+    // in `{name}_u`. Entering the counter inside the `match` itself would give each of
+    // its (often thousands of) arms a cleanup path and a stack frame, and turn the
+    // arms' tail calls into plain calls; the wrapper keeps the `match` frameless.
+    let guard_limit = ctx
+        .has_call_depth_dispatch_guard(type_index)
+        .then_some(ctx.call_depth_limit)
+        .flatten();
+    let mut lines = Vec::new();
+    let body_name = if let Some(limit) = guard_limit {
+        let tc_arg = if tc { ", __tc" } else { "" };
+        lines.push(format!("pub fn {name}({params}){ret} {{"));
+        lines.push(format!("    let __depth = CallDepth::enter({limit});"));
+        lines.push(format!("    self.{name}_u(f{sep}{arg_list}{tc_arg})"));
+        lines.push("}".to_string());
+        format!("{name}_u")
+    } else {
+        name
+    };
+    let vis = if guard_limit.is_some() { "" } else { "pub " };
+    lines.push(format!("{vis}fn {body_name}({params}){ret} {{"));
+    lines.push("    match f {".to_string());
     for &fidx in targets {
         let expr = if tc && ctx.has_tc_variant(fidx) {
             format!("self.func{fidx}_tc({arg_list}{sep}__tc)")
