@@ -1,0 +1,6 @@
+wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] [--data-files | --no-data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]
+wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files | --no-data-files] <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]
+wasm2rs --help | --version
+wasm2rs --dump <input.wasm>
+wasm2rs --extract-core <component.wasm> <output dir>
+wasm2rs --wit-host [--glue [--typed-traps | --no-typed-traps] [--external-types=<path>]] <component.wasm> [output]
