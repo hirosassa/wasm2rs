@@ -5,11 +5,36 @@ wasm2rs is also usable as a library. For a minimal example see the [README](../R
 ## Transpiling a module
 
 ```rust
-use wasm2rs::{TranspileOptions, transpile_with_options};
+use wasm2rs::{SplitOptions, TranspileOptions, Transpiler};
 
 let wasm: Vec<u8> = std::fs::read("module.wasm")?;
-let rust = transpile_with_options(&wasm, &TranspileOptions::default())?;
+
+// One source string.
+let rust = Transpiler::new(TranspileOptions::default()).transpile(&wasm)?;
+
+// A crate streamed file by file, large data segments in `data_{n}.bin` side files.
+Transpiler::new(TranspileOptions::default())
+    .with_split(SplitOptions { funcs_per_file: 500, max_bytes_per_file: 0 })
+    .with_data_files(true)
+    .run(&wasm, |file| {
+        // write `file.content` (`FileContent::Text` or `Bytes`) as `file.name`, next to `lib.rs`
+        Ok(())
+    })?;
 ```
+
+### `Transpiler` and `ComponentTranspiler`
+
+`Transpiler` is the entry point for a core module; `ComponentTranspiler` is the same for a component. Both are `#[non_exhaustive]` (built through `new` and the `with_*` methods, like `TranspileOptions`), `Clone` and `Default`, so a new axis never breaks a caller. State is set with `with_split(SplitOptions)` (default `SplitOptions::single_file()`) and `with_data_files(bool)` (default `false`); the terminal method picks the output:
+
+| Terminal | `Transpiler` | `ComponentTranspiler` |
+|---|---|---|
+| one source | `transpile(&wasm) -> String` | `transpile(&component) -> String`; `transpile_with_exports` also returns the `Vec<WitExport>` |
+| one source in three pieces | `transpile_pieces(&wasm) -> SourcePieces` | n/a |
+| files streamed to a sink | `run(&wasm, sink)` | `run(&component, sink) -> Vec<WitExport>` |
+
+The single-file terminals return `TranspileError::InvalidOptions` when a split or `with_data_files(true)` was configured, since a string cannot carry several files; `run` always works (without a split it emits one `lib.rs`).
+
+The older functions are thin wrappers over the builders and are not deprecated: `transpile`, `transpile_with_options`, `transpile_pieces_with_options`, `transpile_split[_with_options]`, `transpile_split_files[_with_options]`, `transpile_component`, `transpile_component_with_exports`, `transpile_component_split[_files]`. Their output is byte-identical to the builder's. The `wasm2rs::build` helpers are unchanged.
 
 `wasm2rs::dump(&wasm)` returns the same summary as `--dump` (a `ModuleSummary` that implements `Display`).
 `wasm2rs::extract_core_modules(&component)` returns a component's core modules as `Vec<Vec<u8>>`.

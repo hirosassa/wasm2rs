@@ -7,7 +7,8 @@
 //! GC, stack-switching continuations, and native WASI preview1 /
 //! wasi-threads. Entry points: [`transpile`], [`transpile_with_options`],
 //! [`transpile_split`] and [`transpile_split_with_options`]; a component goes in through
-//! [`transpile_component`].
+//! [`transpile_component`]. All of them are thin wrappers over the [`Transpiler`] and
+//! [`ComponentTranspiler`] builders.
 
 // Kept in source rather than in `[workspace.lints]`: the lints also reach the tests, which
 // panic by design. wasm2rs-wasi denies the same set (and more) in its own `lib.rs`.
@@ -32,15 +33,17 @@ mod dump;
 mod extract;
 mod link;
 mod parse;
+mod transpiler;
 mod wit;
 mod wit_abi;
 
 pub use component::{
-    ComponentOptions, transpile_component, transpile_component_split,
+    ComponentOptions, ComponentTranspiler, transpile_component, transpile_component_split,
     transpile_component_split_files, transpile_component_with_exports,
 };
 pub use dump::{ModuleSummary, dump};
 pub use extract::extract_core_modules;
+pub use transpiler::Transpiler;
 pub use wit::{
     WitAsyncAbi, WitExport, WitFunc, WitNaming, WitOptions, WitRecord, WitResource,
     WitStringEncoding, WitType, wit_exports, wit_functions, wit_host_glue,
@@ -177,6 +180,7 @@ impl OutputFile {
 
 /// A single-file output as three consecutive pieces: the text before the
 /// function bodies, the bodies (the bulk), and the text after them.
+#[derive(Debug, Clone)]
 pub struct SourcePieces {
     pub head: String,
     pub body: String,
@@ -208,6 +212,7 @@ impl SourcePieces {
 /// `max_bytes_per_file` bytes, whichever comes first (`0` disables that cap).
 /// The byte cap is what bounds peak memory when a module has a few very large
 /// functions, where a fixed function count can still produce a huge file.
+#[derive(Debug, Clone)]
 pub struct SplitOptions {
     /// The maximum number of defined functions per chunk file (`0` = no limit).
     pub funcs_per_file: usize,
@@ -215,6 +220,12 @@ pub struct SplitOptions {
     /// limit). Enforced at function boundaries, so a single larger function is
     /// still emitted whole.
     pub max_bytes_per_file: usize,
+}
+
+impl Default for SplitOptions {
+    fn default() -> Self {
+        Self::single_file()
+    }
 }
 
 impl SplitOptions {
@@ -565,7 +576,7 @@ pub(crate) fn reject_component(encoding: wasmparser::Encoding) -> Result<(), Tra
 /// use `transpile_split` when a module is large enough that one file is
 /// impractical to compile.
 pub fn transpile(wasm: &[u8]) -> Result<String, TranspileError> {
-    transpile_with_options(wasm, &TranspileOptions::default())
+    Transpiler::default().transpile(wasm)
 }
 
 /// Transpile a wasm binary, handing each generated [`SourceFile`] to `sink` as
@@ -580,13 +591,9 @@ pub fn transpile_split<F>(wasm: &[u8], opts: &SplitOptions, sink: F) -> Result<(
 where
     F: FnMut(SourceFile) -> Result<(), TranspileError>,
 {
-    transpile_split_impl(
-        wasm,
-        opts,
-        &TranspileOptions::default(),
-        false,
-        text_sink(sink),
-    )
+    Transpiler::default()
+        .with_split(opts.clone())
+        .run(wasm, text_sink(sink))
 }
 
 /// Transpile a wasm binary with explicit [`TranspileOptions`] into a single Rust
@@ -596,7 +603,7 @@ pub fn transpile_with_options(
     wasm: &[u8],
     opts: &TranspileOptions,
 ) -> Result<String, TranspileError> {
-    transpile_with_host_imports(wasm, opts).map(|(code, _)| code)
+    Transpiler::new(opts.clone()).transpile(wasm)
 }
 
 /// [`transpile_with_options`] that also returns the function imports of the module that its
@@ -701,7 +708,7 @@ pub fn transpile_pieces_with_options(
     wasm: &[u8],
     opts: &TranspileOptions,
 ) -> Result<SourcePieces, TranspileError> {
-    transpile_impl(wasm, opts, codegen::generate_module_pieces)
+    Transpiler::new(opts.clone()).transpile_pieces(wasm)
 }
 
 /// Split-transpile a wasm binary with explicit [`TranspileOptions`], handing each
@@ -716,7 +723,9 @@ pub fn transpile_split_with_options<F>(
 where
     F: FnMut(SourceFile) -> Result<(), TranspileError>,
 {
-    transpile_split_impl(wasm, split, opts, false, text_sink(sink))
+    Transpiler::new(opts.clone())
+        .with_split(split.clone())
+        .run(wasm, text_sink(sink))
 }
 
 /// [`transpile_split`] that also moves the bytes of each large data segment (4 KiB or more)
@@ -734,7 +743,10 @@ pub fn transpile_split_files<F>(
 where
     F: FnMut(OutputFile) -> Result<(), TranspileError>,
 {
-    transpile_split_files_with_options(wasm, opts, &TranspileOptions::default(), sink)
+    Transpiler::default()
+        .with_split(opts.clone())
+        .with_data_files(true)
+        .run(wasm, sink)
 }
 
 /// [`transpile_split_files`] with explicit [`TranspileOptions`].
@@ -747,7 +759,10 @@ pub fn transpile_split_files_with_options<F>(
 where
     F: FnMut(OutputFile) -> Result<(), TranspileError>,
 {
-    transpile_split_impl(wasm, split, opts, true, sink)
+    Transpiler::new(opts.clone())
+        .with_split(split.clone())
+        .with_data_files(true)
+        .run(wasm, sink)
 }
 
 /// Adapt a sink of source files to the file-generic one: the inline (no side files)
@@ -765,27 +780,6 @@ where
             "a side file was emitted without side files enabled".into(),
         )),
     }
-}
-
-fn transpile_split_impl<F>(
-    wasm: &[u8],
-    opts: &SplitOptions,
-    topts: &TranspileOptions,
-    data_files: bool,
-    mut sink: F,
-) -> Result<(), TranspileError>
-where
-    F: FnMut(OutputFile) -> Result<(), TranspileError>,
-{
-    transpile_impl(wasm, topts, |parts| {
-        codegen::generate_module_split(
-            parts,
-            opts.funcs_per_file,
-            opts.max_bytes_per_file,
-            data_files,
-            &mut sink,
-        )
-    })
 }
 
 /// Reject option combinations the module contradicts, and report whether

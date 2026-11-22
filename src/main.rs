@@ -327,22 +327,19 @@ fn run() -> Result<(), String> {
             // No manifest: the glue refers to the `wasm2rs-wasi` library, which only the
             // user's own `Cargo.toml` can depend on.
             return write_split(&dir, None, |sink| {
-                if data_files {
-                    wasm2rs::transpile_component_split_files(&wasm, &options, &split, |file| {
-                        sink_file(sink, file)
-                    })
-                } else {
-                    wasm2rs::transpile_component_split(&wasm, &options, &split, |file| {
-                        sink(&file.name, file.code.as_bytes())
-                    })
-                }
-                .map(|_| ())
+                wasm2rs::ComponentTranspiler::new(options)
+                    .with_split(split)
+                    .with_data_files(data_files)
+                    .run(&wasm, |file| sink_file(sink, file))
+                    .map(|_| ())
             });
         }
         if data_files_flag == Some(true) {
             return Err(DATA_FILES_NEEDS_SPLIT.to_string());
         }
-        let rust = wasm2rs::transpile_component(&wasm, &options).map_err(|e| e.to_string())?;
+        let rust = wasm2rs::ComponentTranspiler::new(options)
+            .transpile(&wasm)
+            .map_err(|e| e.to_string())?;
         return write_output(output, &rust);
     }
     if glue && !wit_host {
@@ -419,23 +416,19 @@ fn run() -> Result<(), String> {
             max_bytes_per_file,
         };
         return write_split(&dir, Some(cargo_manifest(&crate_name(&dir))), |sink| {
-            if data_files {
-                wasm2rs::transpile_split_files_with_options(&wasm, &split, &topts, |file| {
-                    sink_file(sink, file)
-                })
-            } else {
-                wasm2rs::transpile_split_with_options(&wasm, &split, &topts, |file| {
-                    sink(&file.name, file.code.as_bytes())
-                })
-            }
+            wasm2rs::Transpiler::new(topts)
+                .with_split(split)
+                .with_data_files(data_files)
+                .run(&wasm, |file| sink_file(sink, file))
         });
     }
     if data_files_flag == Some(true) {
         return Err(DATA_FILES_NEEDS_SPLIT.to_string());
     }
 
-    let pieces =
-        wasm2rs::transpile_pieces_with_options(&wasm, &topts).map_err(|e| e.to_string())?;
+    let pieces = wasm2rs::Transpiler::new(topts)
+        .transpile_pieces(&wasm)
+        .map_err(|e| e.to_string())?;
     write_with(output, |w| pieces.write_to(w))
 }
 

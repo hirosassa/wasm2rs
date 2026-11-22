@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use wasm2rs::{TranspileOptions, transpile_with_options};
+use wasm2rs::{TranspileOptions, Transpiler};
 
 /// (name, wat, index of the exported `run` function, `run` argument). The
 /// modules are stateless, so the generated code exposes free `funcN` functions.
@@ -22,7 +22,7 @@ const WORKLOADS: [(&str, &str, u32, i32); 2] = [
 fn build(dir: &Path, name: &str, wat: &str, f: u32, n: i32) -> PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let opts = TranspileOptions::default().with_named_exports(true);
-    let generated = transpile_with_options(&wasm, &opts).expect("transpile");
+    let generated = Transpiler::new(opts).transpile(&wasm).expect("transpile");
     let program = format!(
         "{generated}\n#[inline(never)]\nfn drive(n: i32) -> i32 {{ func{f}(n) }}\n\
          fn main() {{\n\
