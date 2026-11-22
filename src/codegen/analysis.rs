@@ -75,29 +75,14 @@ fn creates_abstract_gc(op: &Operator<'_>) -> bool {
 /// into one traversal; the booleans and per-function tables it returns feed the
 /// statefulness decision and the continuation fixpoints downstream.
 pub(crate) struct BodyScan {
-    /// Per defined function (0-based): the locals it writes with `local.set`/
-    /// `local.tee`. A written local is unstable (a read of it cannot be reordered
-    /// past a write) and needs a `mut` binding.
-    pub(crate) mutated: Vec<LocalFlags>,
-    /// Per defined function (0-based): the locals named by any `local.get`/
-    /// `local.set`/`local.tee`. A declared local outside this set is never
-    /// mentioned by the lowered body, so its zero-initialised binding is dead.
-    pub(crate) referenced: Vec<LocalFlags>,
+    /// Per defined function (0-based): its [`FuncFacts`].
+    pub(crate) facts: Vec<FuncFacts>,
     /// Continuation bodies: the target of a `ref.func` immediately followed by
     /// `cont.new` (the phase-4 pattern), sorted and deduplicated.
     pub(crate) cont_bodies: Vec<u32>,
     /// Per defined function (0-based): whether its own body has a `suspend`/
     /// `switch` control transfer. Seeds the `can_suspend` fixpoint.
     pub(crate) suspends: Vec<bool>,
-    /// Per defined function (0-based): whether any branch targets the function's
-    /// own outermost label (see [`FunctionLabelBranch`]), so the body is wrapped
-    /// in a synthetic block frame.
-    pub(crate) branches_to_function_label: Vec<bool>,
-    /// Per defined function (0-based): whether its body contains a `return`.
-    pub(crate) has_return: Vec<bool>,
-    /// Per defined function (0-based): whether its body contains a
-    /// `return_call`/`return_call_indirect`/`return_call_ref`.
-    pub(crate) has_tail_call: Vec<bool>,
     /// Per defined function (0-based): the callees of its direct
     /// `call`/`return_call` edges (full index space). Shared by the `can_suspend`
     /// and `step_functions` fixpoints so neither re-scans.
@@ -124,6 +109,27 @@ pub(crate) struct BodyScan {
     /// Every function named by a `ref.func` in a body (unsorted, may repeat):
     /// each can become a funcref value, so a `call_indirect` may reach it.
     pub(crate) ref_funcs: Vec<u32>,
+}
+
+/// What [`scan_bodies`] found in one defined function's body.
+pub(crate) struct FuncFacts {
+    /// The locals it writes with `local.set`/`local.tee`. A written local is
+    /// unstable (a read of it cannot be reordered past a write) and needs a `mut`
+    /// binding.
+    pub(crate) mutated: LocalFlags,
+    /// The locals named by any `local.get`/`local.set`/`local.tee`. A declared
+    /// local outside this set is never mentioned by the lowered body, so its
+    /// zero-initialised binding is dead.
+    pub(crate) referenced: LocalFlags,
+    /// Whether any branch targets the function's own outermost label (see
+    /// [`FunctionLabelBranch`]), so the body is wrapped in a synthetic block frame.
+    pub(crate) branches_to_function_label: bool,
+    /// Whether its body contains a `return` (only a continuation step lowers it
+    /// as a branch to the wrapping block).
+    pub(crate) has_return: bool,
+    /// Whether its body contains a `return_call`/`return_call_indirect`/
+    /// `return_call_ref`.
+    pub(crate) has_tail_call: bool,
 }
 
 /// A per-function flag for each local index, a dense replacement for a
@@ -377,13 +383,9 @@ pub(crate) fn scan_bodies(
         all
     };
     let mut scan = BodyScan {
-        mutated: Vec::with_capacity(funcs.len()),
-        referenced: Vec::with_capacity(funcs.len()),
+        facts: Vec::with_capacity(funcs.len()),
         cont_bodies: Vec::new(),
         suspends: Vec::with_capacity(funcs.len()),
-        branches_to_function_label: Vec::with_capacity(funcs.len()),
-        has_return: Vec::with_capacity(funcs.len()),
-        has_tail_call: Vec::with_capacity(funcs.len()),
         calls: Vec::with_capacity(funcs.len()),
         indirect_types: Vec::with_capacity(funcs.len()),
         resumes: Vec::with_capacity(funcs.len()),
@@ -394,14 +396,15 @@ pub(crate) fn scan_bodies(
         ref_funcs: Vec::new(),
     };
     for f in per_func {
-        scan.mutated.push(f.mutated);
-        scan.referenced.push(f.referenced);
+        scan.facts.push(FuncFacts {
+            mutated: f.mutated,
+            referenced: f.referenced,
+            branches_to_function_label: f.branches_to_function_label,
+            has_return: f.has_return,
+            has_tail_call: f.has_tail_call,
+        });
         scan.cont_bodies.extend(f.cont_bodies);
         scan.suspends.push(f.suspends);
-        scan.branches_to_function_label
-            .push(f.branches_to_function_label);
-        scan.has_return.push(f.has_return);
-        scan.has_tail_call.push(f.has_tail_call);
         scan.calls.push(f.calls);
         scan.indirect_types.push(f.indirect_types);
         scan.resumes.push(f.resumes);
@@ -979,6 +982,17 @@ mod tests {
             .collect()
     }
 
+    fn has_return(scan: &BodyScan) -> Vec<bool> {
+        scan.facts.iter().map(|f| f.has_return).collect()
+    }
+
+    fn branches_to_function_label(scan: &BodyScan) -> Vec<bool> {
+        scan.facts
+            .iter()
+            .map(|f| f.branches_to_function_label)
+            .collect()
+    }
+
     #[test]
     fn only_references_lowered_to_a_u32_handle_are_u32_refs() {
         use wasmparser::{PackedIndex, RefType};
@@ -1040,13 +1054,16 @@ mod tests {
 
         let scan = scan_bodies(&inputs, 1).unwrap();
 
-        let written =
-            |f: usize| -> Vec<u32> { (0..8).filter(|&l| scan.mutated[f].contains(l)).collect() };
+        let written = |f: usize| -> Vec<u32> {
+            (0..8)
+                .filter(|&l| scan.facts[f].mutated.contains(l))
+                .collect()
+        };
         assert_eq!(written(0), vec![0, 1]);
         assert_eq!(written(1), Vec::<u32>::new());
         assert_eq!(written(2), vec![2]);
         // A local index past anything the function writes is simply not mutated.
-        assert!(!scan.mutated[2].contains(1_000_000));
+        assert!(!scan.facts[2].mutated.contains(1_000_000));
     }
 
     #[test]
@@ -1083,12 +1100,12 @@ mod tests {
             let threaded = scan_bodies(&inputs, jobs).unwrap();
             assert_eq!(threaded.ref_funcs, serial.ref_funcs, "jobs={jobs}");
             assert_eq!(threaded.calls, serial.calls, "jobs={jobs}");
-            assert_eq!(threaded.has_return, serial.has_return, "jobs={jobs}");
-            assert_eq!(threaded.mutated.len(), serial.mutated.len(), "jobs={jobs}");
+            assert_eq!(has_return(&threaded), has_return(&serial), "jobs={jobs}");
+            assert_eq!(threaded.facts.len(), serial.facts.len(), "jobs={jobs}");
         }
         assert_eq!(serial.ref_funcs, (0..10).collect::<Vec<u32>>());
         assert_eq!(
-            serial.has_return,
+            has_return(&serial),
             (0..10).map(|i| i % 3 == 0).collect::<Vec<_>>()
         );
     }
@@ -1166,11 +1183,11 @@ mod tests {
         let scan = scan_bodies(&inputs, 1).unwrap();
 
         assert_eq!(
-            scan.branches_to_function_label,
+            branches_to_function_label(&scan),
             vec![false, true, true, true, false, false]
         );
         assert_eq!(
-            scan.has_return,
+            has_return(&scan),
             vec![false, false, false, false, true, false]
         );
     }
@@ -1196,6 +1213,6 @@ mod tests {
 
         let scan = scan_bodies(&inputs, 1).unwrap();
 
-        assert_eq!(scan.branches_to_function_label, vec![true, false]);
+        assert_eq!(branches_to_function_label(&scan), vec![true, false]);
     }
 }

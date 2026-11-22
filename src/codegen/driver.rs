@@ -45,22 +45,6 @@ pub(crate) struct TagTypes {
     pub(crate) results: Vec<Vec<ValType>>,
 }
 
-/// What [`scan_bodies`] found in one defined function's body.
-pub(crate) struct FuncFacts {
-    /// The locals it writes.
-    pub(crate) mutated: LocalFlags,
-    /// The locals its body names (see `BodyScan::referenced`).
-    pub(crate) referenced: LocalFlags,
-    /// Whether its body is wrapped in a synthetic block frame (it branches to its
-    /// own label, or — as a continuation step — returns).
-    pub(crate) branches_to_function_label: bool,
-    /// Whether its body has a `return` (only a continuation step lowers it as a
-    /// branch to the wrapping block).
-    pub(crate) has_return: bool,
-    /// Whether its body has a `return_call*`.
-    pub(crate) has_tail_call: bool,
-}
-
 /// Module-wide context shared by every function's code generation.
 pub(crate) struct ModuleCtx<'a> {
     /// Imported functions, occupying function indices `0..imports.len()`.
@@ -618,28 +602,7 @@ pub(crate) fn build_ctx<'a>(
         imports,
         funcs,
         tail_imports,
-        func_facts: scan
-            .mutated
-            .into_iter()
-            .zip(scan.referenced)
-            .zip(scan.branches_to_function_label)
-            .zip(scan.has_return)
-            .zip(scan.has_tail_call)
-            .map(
-                |(
-                    (((mutated, referenced), branches_to_function_label), has_return),
-                    has_tail_call,
-                )| {
-                    FuncFacts {
-                        mutated,
-                        referenced,
-                        branches_to_function_label,
-                        has_return,
-                        has_tail_call,
-                    }
-                },
-            )
-            .collect(),
+        func_facts: scan.facts,
         funcs_by_sig,
         types,
         type_kinds,
@@ -1130,16 +1093,12 @@ fn render_function_into(
     let defined = index
         .checked_sub(ctx.imports.len())
         .ok_or_else(no_scanned_body)?;
-    let FuncFacts {
-        mutated,
-        referenced,
-        branches_to_function_label: branches_to_label,
-        has_return,
-        has_tail_call,
-    } = ctx.func_facts.get(defined).ok_or_else(no_scanned_body)?;
+    let facts = ctx.func_facts.get(defined).ok_or_else(no_scanned_body)?;
+    let (mutated, referenced) = (&facts.mutated, &facts.referenced);
+    let branches_to_label = facts.branches_to_function_label;
     // A function that tail-calls itself loops instead of trampolining: its
     // parameters are reassigned, so they must be declared `mut`.
-    let self_loop = if !*branches_to_label && ctx.has_tc_variant(index) {
+    let self_loop = if !branches_to_label && ctx.has_tc_variant(index) {
         let own = index_u32(index)?;
         calls_itself_in_tail(input.body, own)?.then_some(own)
     } else {
@@ -1166,11 +1125,11 @@ fn render_function_into(
     // `cont_step_func{N}` state machine instead of an ordinary `func{N}`.
     if ctx.cont.step_set.binary_search(&index_u32(index)?).is_ok() {
         func.cont_step = true;
-        let wrap = *branches_to_label || *has_return || *has_tail_call;
+        let wrap = branches_to_label || facts.has_return || facts.has_tail_call;
         return func.emit_cont_step(index, input.params, input.body, wrap, line_prefix, out);
     }
     func.tc_enabled = ctx.has_tc_variant(index);
-    func.run(input.body, *branches_to_label)?;
+    func.run(input.body, branches_to_label)?;
     // A flattened body is a `loop { match pc }` (possibly split over sibling part
     // functions) that cannot reach the `__tc` slot, so such a function regenerates
     // with plain tail calls and only gets a forwarder `_tc` entry.
@@ -1183,7 +1142,7 @@ fn render_function_into(
             mutated,
             referenced,
         )?;
-        func.run(input.body, *branches_to_label)?;
+        func.run(input.body, branches_to_label)?;
     }
     func.finish(index, input.params, input.results, line_prefix, out)
 }
