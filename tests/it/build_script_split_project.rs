@@ -22,6 +22,7 @@ const MAIN_RS: &str = r#"mod foo {
 fn main() {
     let mut inst = foo::Instance::new();
     println!("{}", inst.add_one(41));
+    println!("{}", env!("OUT_DIR"));
 }
 "#;
 
@@ -73,16 +74,13 @@ wasm2rs = {{ path = {root:?}, default-features = false }}
     let run = Command::new(target.join("debug/project-split"))
         .output()
         .unwrap();
-    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "42");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("42"));
+    let out_foo = Path::new(lines.next().expect("OUT_DIR line")).join("foo");
 
     // The side files are where `lib.rs` expects them.
-    // The target dir is shared across runs, so take the newest build-script output.
-    let out_foo = std::fs::read_dir(target.join("debug/build"))
-        .unwrap()
-        .map(|e| e.unwrap().path().join("out/foo"))
-        .filter(|p| p.join("lib.rs").is_file())
-        .max_by_key(|p| p.join("lib.rs").metadata().unwrap().modified().unwrap())
-        .expect("OUT_DIR/foo/lib.rs");
+    assert!(out_foo.join("lib.rs").is_file());
     assert!(out_foo.join("funcs_0.rs").is_file());
     assert!(out_foo.join("data_0.bin").is_file());
     let _ = std::fs::remove_dir_all(dir);
