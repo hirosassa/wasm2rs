@@ -361,7 +361,7 @@ fn trimmed_data<'a>(
 /// so `memory.init` can copy from it on demand. Passive element segments
 /// likewise back `table.init`.
 fn segment_statics(
-    data: &[DataSegment],
+    data: &[DataSegment<'_>],
     trimmed: &[Option<TrimmedData<'_>>],
     elements: &[ElemSegment],
     mut side: Option<&mut DataFiles>,
@@ -371,7 +371,7 @@ fn segment_statics(
         let bytes = match trimmed.get(d).and_then(Option::as_ref) {
             Some(t) if t.bytes.is_empty() => continue,
             Some(t) => t.bytes,
-            None => &seg.bytes[..],
+            None => seg.bytes,
         };
         // A large segment's bytes go to a file `rustc` reads raw, instead of a
         // string literal it has to lex; `DATA{d}` keeps its type either way.
@@ -614,7 +614,7 @@ struct CtorPlan<'a> {
     /// Only active segments are copied at instantiation; passive ones are
     /// retained (see the `data{d}` fields) for `memory.init`. Each active data
     /// segment names the memory it initialises.
-    active: Vec<(usize, &'a DataSegment)>,
+    active: Vec<(usize, &'a DataSegment<'a>)>,
     active_elem: Vec<&'a ElemSegment>,
     /// The zero-trimmed copy of each data segment that has one (see
     /// [`trimmed_data`]), indexed like `parts.data`; the same one the segment
@@ -646,7 +646,7 @@ impl<'a> CtorPlan<'a> {
         layout: &'a Layout,
         trimmed: &'a [Option<TrimmedData<'a>>],
     ) -> Self {
-        let active: Vec<(usize, &DataSegment)> = parts
+        let active: Vec<(usize, &DataSegment<'_>)> = parts
             .data
             .iter()
             .enumerate()
@@ -687,7 +687,7 @@ impl<'a> CtorPlan<'a> {
     }
 
     /// The active data segments that target a given memory index, in order.
-    fn active_for(&self, mem: u32) -> Vec<(usize, &'a DataSegment)> {
+    fn active_for(&self, mem: u32) -> Vec<(usize, &'a DataSegment<'a>)> {
         self.active
             .iter()
             .copied()
@@ -718,7 +718,7 @@ impl<'a> CtorPlan<'a> {
     fn copy_data_seg(
         lines: &mut Vec<String>,
         d: usize,
-        seg: &DataSegment,
+        seg: &DataSegment<'_>,
         trimmed: Option<&TrimmedData<'_>>,
         target: &str,
         host: &str,

@@ -76,7 +76,7 @@ pub(crate) struct ModuleIr<'a> {
     /// Tables 1.. (imported ones first, then defined ones), after table 0.
     pub(crate) extra_tables: Vec<codegen::TableInfo>,
     pub(crate) elements: Vec<codegen::ElemSegment>,
-    pub(crate) data: Vec<codegen::DataSegment>,
+    pub(crate) data: Vec<codegen::DataSegment<'a>>,
     pub(crate) imports: Vec<codegen::ImportInfo>,
     /// Host function imports placed after the defined functions in the function index
     /// space (set only by the core linker, which cannot renumber the main module).
@@ -185,7 +185,7 @@ struct ModuleBuilder<'a, 'o> {
     /// For each defined global, its integer value if it is an immutable integer constant.
     global_ints: Vec<Option<codegen::ConstInt>>,
     elements: Vec<codegen::ElemSegment>,
-    data: Vec<codegen::DataSegment>,
+    data: Vec<codegen::DataSegment<'a>>,
     imports: Vec<codegen::ImportInfo>,
     imported_globals: Vec<codegen::ImportedGlobalInfo>,
     tags: Vec<codegen::TagInfo>,
@@ -640,7 +640,7 @@ impl<'a, 'o> ModuleBuilder<'a, 'o> {
             self.data.push(codegen::DataSegment {
                 offset,
                 mem_index,
-                bytes: segment.data.to_vec(),
+                bytes: segment.data,
             });
         }
         Ok(())
