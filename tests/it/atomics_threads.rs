@@ -570,3 +570,72 @@ fn notify_and_wait_trap_when_misaligned_or_out_of_bounds_on_shared_memory() {
         crate::atomics::notify_traps_main,
     );
 }
+
+#[test]
+fn shared_memory_rmw_ops_return_old_and_store_the_width_masked_result() {
+    // The shared-memory RMW path combines in `shared_combine` and masks to the access width;
+    // only `add` is exercised elsewhere. Each case checks the returned old value and the stored
+    // value, including wraparound below zero (i32, 8-bit) and bits above 32 (i64).
+    compile_run_raw(
+        "atomics_threads_rmw_ops",
+        r#"(module
+            (memory 1 1 shared)
+            (func (export "i32_sub") (result i32)
+              i32.const 0 i32.const 20 i32.atomic.store
+              i32.const 0 i32.const 5 i32.atomic.rmw.sub)
+            (func (export "i32_and") (result i32)
+              i32.const 0 i32.const 0xF0F0 i32.atomic.store
+              i32.const 0 i32.const 0x0FF0 i32.atomic.rmw.and)
+            (func (export "i32_or") (result i32)
+              i32.const 0 i32.const 0x0A i32.atomic.store
+              i32.const 0 i32.const 0x05 i32.atomic.rmw.or)
+            (func (export "i32_xor") (result i32)
+              i32.const 0 i32.const 0x0C i32.atomic.store
+              i32.const 0 i32.const 0x0A i32.atomic.rmw.xor)
+            (func (export "i32_xchg") (result i32)
+              i32.const 0 i32.const 100 i32.atomic.store
+              i32.const 0 i32.const 7 i32.atomic.rmw.xchg)
+            (func (export "i32_sub_wrap") (result i32)
+              i32.const 0 i32.const 3 i32.atomic.store
+              i32.const 0 i32.const 5 i32.atomic.rmw.sub)
+            (func (export "i8_sub_wrap") (result i32)
+              i32.const 0 i32.const 0 i32.atomic.store
+              i32.const 0 i32.const 1 i32.atomic.rmw8.sub_u)
+            (func (export "i64_sub") (result i64)
+              i32.const 0 i64.const 0x100000003 i64.atomic.store
+              i32.const 0 i64.const 5 i64.atomic.rmw.sub)
+            (func (export "i64_xor") (result i64)
+              i32.const 0 i64.const 0xFFFF0000FFFF0000 i64.atomic.store
+              i32.const 0 i64.const 0x0F0F0F0F0F0F0F0F i64.atomic.rmw.xor)
+            (func (export "i64_xchg") (result i64)
+              i32.const 0 i64.const 1 i64.atomic.store
+              i32.const 0 i64.const 0x8000000000000000 i64.atomic.rmw.xchg)
+            (func (export "get32") (result i32) i32.const 0 i32.atomic.load)
+            (func (export "get64") (result i64) i32.const 0 i64.atomic.load)
+            (func (export "get8") (result i32) i32.const 0 i32.atomic.load8_u))"#,
+        // func0-9 are the ops in order, func10/11/12 read the cell as i32/i64/u8
+        r#"fn main() {
+            let mut inst = Instance::new();
+            assert_eq!(inst.func0(), 20);
+            assert_eq!(inst.func10(), 15);
+            assert_eq!(inst.func1(), 0xF0F0);
+            assert_eq!(inst.func10(), 0x00F0);
+            assert_eq!(inst.func2(), 10);
+            assert_eq!(inst.func10(), 15);
+            assert_eq!(inst.func3(), 12);
+            assert_eq!(inst.func10(), 6);
+            assert_eq!(inst.func4(), 100);
+            assert_eq!(inst.func10(), 7);
+            assert_eq!(inst.func5(), 3);
+            assert_eq!(inst.func10() as u32, 0xFFFF_FFFE);
+            assert_eq!(inst.func6(), 0);
+            assert_eq!(inst.func12(), 0xFF);
+            assert_eq!(inst.func7(), 0x1_0000_0003);
+            assert_eq!(inst.func11() as u64, 0xFFFF_FFFE);
+            assert_eq!(inst.func8() as u64, 0xFFFF_0000_FFFF_0000);
+            assert_eq!(inst.func11() as u64, 0xF0F0_0F0F_F0F0_0F0F);
+            assert_eq!(inst.func9(), 1);
+            assert_eq!(inst.func11() as u64, 0x8000_0000_0000_0000);
+        }"#,
+    );
+}
