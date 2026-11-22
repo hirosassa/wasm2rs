@@ -11,12 +11,13 @@ use wasmparser::{
 };
 
 use crate::parse::parse_module;
+use crate::transpiler::require_single_file;
 use crate::wit::{
     CoreWiring, Supplier, core_wiring, is_wit_function, wit_functions, wit_host_glue_for_module,
 };
 use crate::{
-    OutputFile, SourceFile, SplitOptions, TranspileError, TranspileOptions, WitExport, WitOptions,
-    text_sink, transpile_ir_split_with_glue, wit_exports,
+    FileContent, OutputFile, SourceFile, SplitOptions, TranspileError, TranspileOptions, WitExport,
+    WitOptions, text_sink, transpile_ir_split_with_glue, wit_exports,
 };
 
 /// Options of [`transpile_component`].
@@ -49,6 +50,112 @@ impl Default for ComponentOptions {
     }
 }
 
+/// The [`Transpiler`](crate::Transpiler) of components, configured by chaining.
+///
+/// The glue (and the typed `Exports`) is appended to the root `lib.rs`, which is emitted last.
+/// See [`transpile_component`] for what is generated and which errors to expect.
+///
+/// ```
+/// use wasm2rs::{ComponentOptions, ComponentTranspiler, SplitOptions};
+///
+/// # fn main() -> Result<(), wasm2rs::TranspileError> {
+/// # let component = wat::parse_str("(component (core module (func (export \"f\"))))").unwrap();
+/// let split = SplitOptions { funcs_per_file: 500, max_bytes_per_file: 0 };
+/// let exports = ComponentTranspiler::new(ComponentOptions::default())
+///     .with_split(split)
+///     .with_data_files(true)
+///     .run(&component, |file| Ok(()))?;
+/// # let _ = exports;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// `#[non_exhaustive]`, so a new axis is not a breaking change.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ComponentTranspiler {
+    options: ComponentOptions,
+    split: SplitOptions,
+    data_files: bool,
+}
+
+impl ComponentTranspiler {
+    /// A transpiler for `options`, writing a single file with every data segment inline.
+    pub fn new(options: ComponentOptions) -> Self {
+        Self {
+            options,
+            ..Self::default()
+        }
+    }
+
+    /// Split the output across files (see [`SplitOptions`]). Only [`run`](Self::run) can emit
+    /// more than one file. Default: [`SplitOptions::single_file`].
+    #[must_use]
+    pub fn with_split(mut self, split: SplitOptions) -> Self {
+        self.split = split;
+        self
+    }
+
+    /// Move large data segments into `data_{n}.bin` side files, as
+    /// [`Transpiler::with_data_files`](crate::Transpiler::with_data_files). Only
+    /// [`run`](Self::run) can emit side files. Default: `false`.
+    #[must_use]
+    pub fn with_data_files(mut self, data_files: bool) -> Self {
+        self.data_files = data_files;
+        self
+    }
+
+    /// Transpile `component` into one Rust source: the program core module, then the `Glue` that
+    /// lowers the library's `Host` to the module's imports and, with
+    /// [`exports`](ComponentOptions::exports), the typed `Exports`.
+    ///
+    /// # Errors
+    ///
+    /// As [`transpile_component`], plus [`TranspileError::InvalidOptions`] if a split or
+    /// [`with_data_files`](Self::with_data_files) was configured (use [`run`](Self::run)).
+    pub fn transpile(&self, component: &[u8]) -> Result<String, TranspileError> {
+        self.transpile_with_exports(component).map(|(code, _)| code)
+    }
+
+    /// [`transpile`](Self::transpile), also returning the component's lifted exports (the
+    /// [`wit_exports`] result, without a second pass).
+    ///
+    /// # Errors
+    ///
+    /// As [`transpile`](Self::transpile).
+    pub fn transpile_with_exports(
+        &self,
+        component: &[u8],
+    ) -> Result<(String, Vec<WitExport>), TranspileError> {
+        require_single_file(&self.split, self.data_files, "ComponentTranspiler")?;
+        let mut code = String::new();
+        let exports = self.run(component, |file| match file.content {
+            FileContent::Text(text) => {
+                code.push_str(&text);
+                Ok(())
+            }
+            _ => Err(TranspileError::Internal(
+                "a side file was emitted without side files enabled".into(),
+            )),
+        })?;
+        Ok((code, exports))
+    }
+
+    /// Transpile `component`, handing each [`OutputFile`] to `sink` as it completes so the peak
+    /// memory stays around one file, and return the component's lifted exports. Without a split
+    /// the one `lib.rs` is byte-identical to [`transpile`](Self::transpile).
+    ///
+    /// # Errors
+    ///
+    /// As [`transpile_component`], plus whatever `sink` returns.
+    pub fn run<F>(&self, component: &[u8], sink: F) -> Result<Vec<WitExport>, TranspileError>
+    where
+        F: FnMut(OutputFile) -> Result<(), TranspileError>,
+    {
+        transpile_component_split_impl(component, &self.options, &self.split, self.data_files, sink)
+    }
+}
+
 /// Transpile `component` into one Rust source: the program core module, then the `Glue` that
 /// lowers the library's `Host` to the module's imports and, with
 /// [`exports`](ComponentOptions::exports), the typed `Exports`.
@@ -76,7 +183,7 @@ pub fn transpile_component(
     component: &[u8],
     options: &ComponentOptions,
 ) -> Result<String, TranspileError> {
-    transpile_component_with_exports(component, options).map(|(code, _)| code)
+    ComponentTranspiler::new(options.clone()).transpile(component)
 }
 
 /// [`transpile_component`], also returning the component's lifted exports.
@@ -92,13 +199,7 @@ pub fn transpile_component_with_exports(
     component: &[u8],
     options: &ComponentOptions,
 ) -> Result<(String, Vec<WitExport>), TranspileError> {
-    let mut code = String::new();
-    let exports =
-        transpile_component_split(component, options, &SplitOptions::single_file(), |file| {
-            code.push_str(&file.code);
-            Ok(())
-        })?;
-    Ok((code, exports))
+    ComponentTranspiler::new(options.clone()).transpile_with_exports(component)
 }
 
 /// [`transpile_component_with_exports`], handing each source file to `sink` as it completes
@@ -120,7 +221,9 @@ pub fn transpile_component_split<F>(
 where
     F: FnMut(SourceFile) -> Result<(), TranspileError>,
 {
-    transpile_component_split_impl(component, options, split, false, text_sink(sink))
+    ComponentTranspiler::new(options.clone())
+        .with_split(split.clone())
+        .run(component, text_sink(sink))
 }
 
 /// [`transpile_component_split`] that also moves the bytes of each large data segment into a
@@ -138,7 +241,10 @@ pub fn transpile_component_split_files<F>(
 where
     F: FnMut(OutputFile) -> Result<(), TranspileError>,
 {
-    transpile_component_split_impl(component, options, split, true, sink)
+    ComponentTranspiler::new(options.clone())
+        .with_split(split.clone())
+        .with_data_files(true)
+        .run(component, sink)
 }
 
 fn transpile_component_split_impl<F>(

@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use wasm2rs::{TranspileOptions, transpile_with_options};
+use wasm2rs::{TranspileOptions, Transpiler};
 
 /// (name, wat, `run` argument sized for roughly a second of work). `i32`, like the
 /// generated `run` parameter, so an oversized count fails here rather than in rustc.
@@ -75,7 +75,7 @@ fn build(dir: &Path, name: &str, wat: &str, n: i32, mode: Mode) -> (std::path::P
         .with_named_exports(true)
         .with_typed_traps(matches!(mode, Mode::Typed))
         .with_unsafe_memory(matches!(mode, Mode::Unsafe));
-    let generated = transpile_with_options(&wasm, &opts).expect("transpile");
+    let generated = Transpiler::new(opts).transpile(&wasm).expect("transpile");
     // `drive` is never inlined and the instance is opaque to the optimizer: with
     // the memory's length a visible constant, LLVM proves every access in bounds
     // and the safe and unsafe builds compile to identical code.

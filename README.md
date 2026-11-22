@@ -79,7 +79,7 @@ wasm2rs --dump module.wasm                       # inspect without generating co
 
 - **Single file**: when both `funcs_per_file` and `max_bytes_per_file` are `0` (the default), the module is emitted as one Rust source file (to `output`, or stdout).
 - **Split output**: when either cap is positive, `output` is a directory holding a `lib.rs` crate root, `funcs_0.rs`, `funcs_1.rs`, … and a ready-to-use `Cargo.toml`. Build it with `cargo build --release` inside that directory.
-- **Data files** (the default for split output; `--no-data-files` opts out): each data segment of 4 KiB or more is written to a `data_{n}.bin` file next to `lib.rs`, which `lib.rs` includes with `include_bytes!`, instead of being spelled as a string literal. The behaviour is identical; `rustc` just reads the bytes raw. Library: `transpile_split_files` / `transpile_split_files_with_options` / `transpile_component_split_files` hand `OutputFile`s (text or bytes) to the sink.
+- **Data files** (the default for split output; `--no-data-files` opts out): each data segment of 4 KiB or more is written to a `data_{n}.bin` file next to `lib.rs`, which `lib.rs` includes with `include_bytes!`, instead of being spelled as a string literal. The behaviour is identical; `rustc` just reads the bytes raw. Library: `Transpiler::new(opts).with_split(split).with_data_files(true).run(&wasm, sink)` (or `ComponentTranspiler`) hands `OutputFile`s (text or bytes) to the sink.
 
 ## Components
 
@@ -123,11 +123,13 @@ The examples build the component with `rustc -C opt-level=1`; set `WASM2RS_EXAMP
 ## Library API
 
 ```rust
-use wasm2rs::{TranspileOptions, transpile_with_options};
+use wasm2rs::{TranspileOptions, Transpiler};
 
 let wasm: Vec<u8> = std::fs::read("module.wasm")?;
-let rust = transpile_with_options(&wasm, &TranspileOptions::default())?;
+let rust = Transpiler::new(TranspileOptions::default()).transpile(&wasm)?;
 ```
+
+`Transpiler` (and `ComponentTranspiler` for a component) is the entry point for splitting, data side files and options: chain `with_split(..)` / `with_data_files(..)` and finish with `transpile`, `transpile_pieces` or `run(&wasm, sink)`. The public `transpile*` functions remain as thin wrappers.
 
 From a `build.rs` (`wasm2rs` as a build-dependency with `default-features = false`):
 

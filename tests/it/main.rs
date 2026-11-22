@@ -31,6 +31,7 @@ mod cont_handles;
 mod func_ref_casts;
 mod golden;
 mod single_file_pieces;
+mod transpiler_builder;
 
 mod active_segment_init;
 mod atomics;
