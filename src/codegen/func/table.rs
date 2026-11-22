@@ -42,7 +42,8 @@ fn bulk_init_indices(
 impl<'a> super::FuncGen<'a> {
     pub(super) fn is_table64(&self, table: u32) -> bool {
         self.ctx
-            .table64
+            .table
+            .is64
             .get(table as usize)
             .copied()
             .unwrap_or(false)
@@ -96,7 +97,8 @@ impl<'a> super::FuncGen<'a> {
     /// The declared element type of `table` (a `funcref` when unknown).
     fn table_element(&self, table: u32) -> ValType {
         self.ctx
-            .table_elements
+            .table
+            .elements
             .get(table as usize)
             .copied()
             .unwrap_or(ValType::FUNCREF)
@@ -249,7 +251,8 @@ impl<'a> super::FuncGen<'a> {
         // entry limit does.
         let limit = self
             .ctx
-            .table_max
+            .table
+            .max
             .get(table as usize)
             .copied()
             .flatten()
@@ -375,7 +378,7 @@ impl<'a> super::FuncGen<'a> {
         // `memory.init` copies into the memory named by `mem`; memory 0 keeps the
         // `mem_mut()` accessor, higher memories use their `mem{i}_mut()`. A shared
         // memory has no accessor — it locks its bytes for the whole copy instead.
-        let dst = if self.ctx.memory_shared {
+        let dst = if self.ctx.memory.shared {
             "self.memory.bytes()".to_string()
         } else {
             let (_, dst_get_mut) = mem_accessor(mem);
@@ -383,7 +386,7 @@ impl<'a> super::FuncGen<'a> {
         };
         // Unchecked memory access is opt-in and not wired through the shared
         // memory's lock, so it applies only to a non-shared memory.
-        let unchecked = self.ctx.unsafe_memory && !self.ctx.memory_shared;
+        let unchecked = self.ctx.unsafe_memory && !self.ctx.memory.shared;
         // An active segment is already dropped, so it reads as an empty slice.
         let seg = if self.is_passive(&self.ctx.data_passive, data_index, "data")? {
             format!("self.data{data_index}")
@@ -392,7 +395,7 @@ impl<'a> super::FuncGen<'a> {
         };
         let check = if unchecked {
             BulkCheck::Unchecked
-        } else if self.ctx.typed_traps && self.ctx.memory_shared {
+        } else if self.ctx.typed_traps && self.ctx.memory.shared {
             self.used_rt.insert(Rt::TrapMemoryOob);
             BulkCheck::TypedSegment("trap_memory_oob")
         } else {

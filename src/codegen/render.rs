@@ -184,7 +184,7 @@ pub(super) fn render_module_head(
     }
     // A shared module emits the thread-shareable `SharedMemory` runtime once,
     // at module scope, ahead of the `Instance` type that stores it.
-    if ctx.memory_shared {
+    if ctx.memory.shared {
         lines.extend(shared_memory_runtime_lines(ctx.typed_traps));
         lines.push(String::new());
     }
@@ -219,13 +219,13 @@ pub(super) fn render_module_head(
     inner.extend(wasi_method_lines(
         parts.imports,
         &layout,
-        ctx.memory_shared,
+        ctx.memory.shared,
         typed_trap_type,
     ));
     inner.extend(helper_method_lines(
         used,
         parts.memories,
-        ctx.memory_shared,
+        ctx.memory.shared,
         ctx.unsafe_memory,
         ctx.typed_traps,
     ));
@@ -313,7 +313,7 @@ fn trimmed_data<'a>(
 ) -> Vec<Option<TrimmedData<'a>>> {
     let mut written: Vec<(u32, u64, u64)> = Vec::new();
     let mut unknown: HashSet<u32> = HashSet::new();
-    let host_owned = layout.mem_imported || ctx.memory_shared;
+    let host_owned = layout.mem_imported || ctx.memory.shared;
     parts
         .data
         .iter()
@@ -471,7 +471,7 @@ fn instance_field_lines(
     // A single defined `shared` memory is a thread-shareable handle (cheap Arc
     // clone) rather than an owned `Vec<u8>`, so sibling instances on other
     // threads share the same linear memory.
-    if ctx.memory_shared {
+    if ctx.memory.shared {
         lines.push("    memory: SharedMemory,".to_string());
     } else {
         // Each defined memory is an owned buffer: memory 0 keeps the field name
@@ -658,7 +658,7 @@ impl<'a> CtorPlan<'a> {
             .filter(|e| e.offset.is_some())
             .collect();
         let data_in_module_order = layout.mem_imported
-            && !ctx.memory_shared
+            && !ctx.memory.shared
             && active.iter().any(|(_, d)| d.mem_index > 0);
         let post_init_data = data_in_module_order
             || (layout.mem_imported && active.iter().any(|(_, d)| d.mem_index == 0));
@@ -699,7 +699,7 @@ impl<'a> CtorPlan<'a> {
     /// so only elements repeat per instance (each sibling has its own host table);
     /// data for a host-owned shared memory is applied by `new` after the elements.
     fn data_after_elems(&self) -> bool {
-        self.ctx.memory_shared
+        self.ctx.memory.shared
             && self.parts.memories.first().is_some_and(|m| m.imported)
             && !self.active_for(0).is_empty()
     }
@@ -802,7 +802,8 @@ impl<'a> CtorPlan<'a> {
         }
         let gc_table = self
             .ctx
-            .table_elements
+            .table
+            .elements
             .get(seg.table as usize)
             .is_some_and(|e| is_gc_table_element(*e));
         for (k, f) in seg.funcs.iter().enumerate() {
@@ -1164,7 +1165,7 @@ fn constructor_lines(
 ) -> Result<Vec<String>, TranspileError> {
     let plan = CtorPlan::new(parts, ctx, layout, trimmed);
     let mut inner: Vec<String> = Vec::new();
-    if ctx.memory_shared {
+    if ctx.memory.shared {
         plan.shared_memory_init_lines(&mut inner)?;
     } else {
         plan.owned_memory_init_lines(&mut inner)?;
@@ -1219,7 +1220,7 @@ fn memory_accessor_lines(parts: &ModuleParts<'_>, ctx: &ModuleCtx<'_>) -> Vec<St
         .memories
         .iter()
         .enumerate()
-        .filter(|_| !ctx.memory_shared)
+        .filter(|_| !ctx.memory.shared)
     {
         let (get, get_mut, pub_get) = if i == 0 {
             (
@@ -1515,7 +1516,7 @@ fn helper_method_lines(
                     // `unsafe_memory` does not apply to a shared memory.
                     inner.extend(shared_helper_lines(helper));
                 } else {
-                    // `memories` is the same index-ordered sequence `ctx.memory64`
+                    // `memories` is the same index-ordered sequence `ctx.memory.is64`
                     // is derived from; each memory's `memory.grow` is bounded by
                     // its own maximum.
                     let info = memories.get(mem as usize);
@@ -2291,7 +2292,8 @@ fn import_trait_lines(
     for i in 0..imported_tables {
         let (get, get_mut) = table_accessor(index_u32(i)?);
         let elem = table_elem_rust(
-            ctx.table_elements
+            ctx.table
+                .elements
                 .get(i)
                 .copied()
                 .unwrap_or(ValType::FUNCREF),

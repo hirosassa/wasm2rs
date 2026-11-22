@@ -255,7 +255,7 @@ impl<'a> super::FuncGen<'a> {
         table_index: u32,
         tail: bool,
     ) -> Result<(), TranspileError> {
-        if !self.ctx.has_table {
+        if !self.ctx.table.declared {
             return Err(TranspileError::Unsupported(
                 "call_indirect without a table".into(),
             ));
