@@ -21,7 +21,7 @@ impl<'a> super::FuncGen<'a> {
         build: impl FnOnce(&str) -> String,
     ) -> Result<(), TranspileError> {
         let v = self.pop()?;
-        let shifted = format!("({} >> {})", v.code, lane as u32 * lane_bits);
+        let shifted = format!("({} >> {})", v.code, u32::from(lane) * lane_bits);
         self.push_combined(build(&shifted), result_ty, &[&v])
     }
 
@@ -38,7 +38,7 @@ impl<'a> super::FuncGen<'a> {
     ) -> Result<(), TranspileError> {
         let x = self.pop()?;
         let v = self.pop()?;
-        let shift = lane as u32 * lane_bits;
+        let shift = u32::from(lane) * lane_bits;
         let code = format!(
             "(({} & !({mask} << {shift})) | (({}) << {shift}))",
             v.code,

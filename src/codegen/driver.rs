@@ -54,19 +54,9 @@ pub(crate) struct ModuleCtx<'a> {
     /// Host imports occupying the indices after the defined functions (see
     /// `ModuleIr::tail_imports`); empty unless the module was linked.
     pub(crate) tail_imports: &'a [ImportInfo],
-    /// Per defined function (parallel to `funcs`): the locals it writes.
-    pub(crate) mutated_locals: Vec<LocalFlags>,
-    /// Per defined function, the locals its body names (see `BodyScan::referenced`).
-    pub(crate) referenced_locals: Vec<LocalFlags>,
-    /// Per defined function: whether its body is wrapped in a synthetic block
-    /// frame (it branches to its own label, or — as a continuation step — returns).
+    /// Per defined function (parallel to `funcs`): what the body scan found.
     /// Precomputed by [`scan_bodies`] so no function re-parses its body.
-    branches_to_function_label: Vec<bool>,
-    /// Per defined function: whether its body has a `return` (only a continuation
-    /// step lowers it as a branch to the wrapping block).
-    has_return: Vec<bool>,
-    /// Per defined function: whether its body has a `return_call*`.
-    has_tail_call: Vec<bool>,
+    func_facts: Vec<FuncFacts>,
     /// Function indices (imports then defined, ascending) grouped by exact
     /// `(params, results)` signature: the set of functions a `call_indirect`
     /// of that signature can reach. Built once so each call site and dispatch
@@ -228,7 +218,9 @@ impl ModuleCtx<'_> {
         let Some(defined) = fidx.checked_sub(self.imports.len()) else {
             return false;
         };
-        self.has_tail_call.get(defined).copied().unwrap_or(false)
+        self.func_facts
+            .get(defined)
+            .is_some_and(|f| f.has_tail_call)
             && u32::try_from(fidx).is_ok_and(|f| self.cont.step_set.binary_search(&f).is_err())
     }
 
@@ -610,11 +602,7 @@ pub(crate) fn build_ctx<'a>(
         imports,
         funcs,
         tail_imports,
-        mutated_locals: scan.mutated,
-        referenced_locals: scan.referenced,
-        branches_to_function_label: scan.branches_to_function_label,
-        has_return: scan.has_return,
-        has_tail_call: scan.has_tail_call,
+        func_facts: scan.facts,
         funcs_by_sig,
         types,
         type_kinds,
@@ -1105,18 +1093,9 @@ fn render_function_into(
     let defined = index
         .checked_sub(ctx.imports.len())
         .ok_or_else(no_scanned_body)?;
-    let mutated = ctx
-        .mutated_locals
-        .get(defined)
-        .ok_or_else(no_scanned_body)?;
-    let referenced = ctx
-        .referenced_locals
-        .get(defined)
-        .ok_or_else(no_scanned_body)?;
-    let flag = |flags: &[bool]| -> Result<bool, TranspileError> {
-        flags.get(defined).copied().ok_or_else(no_scanned_body)
-    };
-    let branches_to_label = flag(&ctx.branches_to_function_label)?;
+    let facts = ctx.func_facts.get(defined).ok_or_else(no_scanned_body)?;
+    let (mutated, referenced) = (&facts.mutated, &facts.referenced);
+    let branches_to_label = facts.branches_to_function_label;
     // A function that tail-calls itself loops instead of trampolining: its
     // parameters are reassigned, so they must be declared `mut`.
     let self_loop = if !branches_to_label && ctx.has_tc_variant(index) {
@@ -1146,7 +1125,7 @@ fn render_function_into(
     // `cont_step_func{N}` state machine instead of an ordinary `func{N}`.
     if ctx.cont.step_set.binary_search(&index_u32(index)?).is_ok() {
         func.cont_step = true;
-        let wrap = branches_to_label || flag(&ctx.has_return)? || flag(&ctx.has_tail_call)?;
+        let wrap = branches_to_label || facts.has_return || facts.has_tail_call;
         return func.emit_cont_step(index, input.params, input.body, wrap, line_prefix, out);
     }
     func.tc_enabled = ctx.has_tc_variant(index);

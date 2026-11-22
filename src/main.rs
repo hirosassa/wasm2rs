@@ -1,18 +1,18 @@
-//! Command-line entry point:
-//! `wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports]
-//! [--import-memory] [--reentrant-imports] [--data-files | --no-data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
-//! `wasm2rs --help` / `wasm2rs --version` to print the usage / the version, or
-//! `wasm2rs --dump <input.wasm>` to summarize a module, or
-//! `wasm2rs --extract-core <component.wasm> <dir>` to write a component's core
-//! modules to `<dir>/module{n}.wasm`, or
-//! `wasm2rs --wit-host [--glue [--typed-traps | --no-typed-traps] [--external-types=<path>]] <component.wasm> [output]` to write a
-//! typed `Host` trait for the interfaces the component imports (with `--glue`, also the `Glue`
-//! that lowers it to the flat `Imports` trait; with `--external-types=<path>`, only the `Glue`,
-//! naming the `Host` trait and the interface-qualified types of the library at `<path>`).
+//! Command-line entry point. Usage (the single source, `usage.txt`, also feeds `--help`
+//! and the synopsis of `docs/cli-reference.md`):
 //!
-//! `wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files | --no-data-files]
-//! <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]` to write a component's program (its core module, or the linked modules of an adapter component) plus the typed `Glue`
-//! and `Exports` (like `wasm2rs::transpile_component`).
+#![doc = "```text"]
+#![doc = include_str!("usage.txt")]
+#![doc = "```"]
+//!
+//! `--help` / `--version` print the usage / the version; `--dump` summarizes a module;
+//! `--extract-core` writes a component's core modules to `<dir>/module{n}.wasm`;
+//! `--wit-host` writes a typed `Host` trait for the interfaces the component imports (with
+//! `--glue`, also the `Glue` that lowers it to the flat `Imports` trait; with
+//! `--external-types=<path>`, only the `Glue`, naming the `Host` trait and the
+//! interface-qualified types of the library at `<path>`); `--component` writes a component's
+//! program (its core module, or the linked modules of an adapter component) plus the typed
+//! `Glue` and `Exports` (like `wasm2rs::transpile_component`).
 //!
 //! By default a split output moves each data segment of 4 KiB or more into a `data_{n}.bin`
 //! file next to `lib.rs`, which `lib.rs` includes with `include_bytes!`; `--no-data-files` keeps
@@ -37,6 +37,14 @@
     clippy::unwrap_in_result,
     clippy::cast_possible_truncation
 )]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::let_underscore_must_use
+    )
+)]
 
 use std::process::ExitCode;
 
@@ -57,7 +65,13 @@ use wasm2rs::{FileContent, SplitOptions, TranspileError, TranspileOptions, cargo
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] [--data-files | --no-data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files | --no-data-files] <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --help | --version\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--typed-traps | --no-typed-traps] [--external-types=<path>]] <component.wasm> [output]";
+/// The usage synopsis shared with the module doc and `docs/cli-reference.md`.
+const SYNOPSIS: &str = include_str!("usage.txt");
+
+/// The `--help` text: the synopsis behind a `usage: ` prefix, continuation lines aligned under it.
+fn usage() -> String {
+    format!("usage: {}", SYNOPSIS.trim_end().replace('\n', "\n       "))
+}
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -66,13 +80,15 @@ const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typ
 const WORKER_STACK: usize = 512 * 1024 * 1024;
 
 fn main() -> ExitCode {
-    let worker = std::thread::Builder::new()
+    let result = match std::thread::Builder::new()
         .stack_size(WORKER_STACK)
         .spawn(run)
-        .expect("spawn worker thread");
-    let result = match worker.join() {
-        Ok(result) => result,
-        Err(_) => Err("transpiler thread panicked".to_string()),
+    {
+        Ok(worker) => match worker.join() {
+            Ok(result) => result,
+            Err(_) => Err("transpiler thread panicked".to_string()),
+        },
+        Err(e) => Err(format!("cannot spawn the worker thread: {e}")),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -185,7 +201,7 @@ fn run() -> Result<(), String> {
         match arg.as_str() {
             "--" => options_ended = true,
             "--help" | "-h" => {
-                println!("{USAGE}");
+                println!("{}", usage());
                 return Ok(());
             }
             "--version" | "-V" => {
@@ -223,7 +239,7 @@ fn run() -> Result<(), String> {
     let typed_traps = typed_traps_flag.unwrap_or(TranspileOptions::default().typed_traps);
     let data_files = data_files_flag.unwrap_or(true);
     let mut args = positional.into_iter();
-    let input = args.next().ok_or(USAGE)?;
+    let input = args.next().ok_or_else(usage)?;
     let output = args.next();
     let funcs_per_file = parse_usize_arg(args.next(), "funcs_per_file")?;
     let max_bytes_per_file = parse_usize_arg(args.next(), "max_bytes_per_file")?;
@@ -448,7 +464,7 @@ fn parse_usize_arg(arg: Option<String>, name: &str) -> Result<usize, String> {
     match arg {
         Some(n) => n
             .parse::<usize>()
-            .map_err(|_| format!("invalid {name} {n:?}; {USAGE}")),
+            .map_err(|_| format!("invalid {name} {n:?}; {}", usage())),
         None => Ok(0),
     }
 }
@@ -507,20 +523,49 @@ fn write_split(
 
 #[cfg(test)]
 mod tests {
-    /// Every flag `USAGE` advertises must also be documented in the module doc, so
-    /// the two cannot drift apart.
-    #[test]
-    fn module_doc_mentions_every_usage_flag() {
-        let doc: String = include_str!("main.rs")
-            .lines()
-            .take_while(|l| l.starts_with("//!"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for flag in super::USAGE
-            .split(|c: char| !(c == '-' || c.is_ascii_alphanumeric()))
+    fn flags(text: &str) -> impl Iterator<Item = &str> {
+        text.split(|c: char| !(c == '-' || c.is_ascii_alphanumeric()))
             .filter(|t| t.starts_with("--"))
-        {
-            assert!(doc.contains(flag), "module doc is missing {flag}");
+    }
+
+    /// The synopsis block of `docs/cli-reference.md` is `usage.txt` verbatim.
+    #[test]
+    fn cli_reference_synopsis_is_usage_txt() {
+        let docs = include_str!("../docs/cli-reference.md");
+        let block = docs.split("```\n").nth(1).expect("synopsis block");
+        assert_eq!(block, super::SYNOPSIS);
+    }
+
+    /// Every flag the usage advertises has a row in the reference tables, and every flag
+    /// a row documents is in the usage.
+    #[test]
+    fn cli_reference_tables_match_usage_flags() {
+        let docs = include_str!("../docs/cli-reference.md");
+        let mut documented: Vec<&str> = docs
+            .lines()
+            .filter(|l| l.starts_with("| `--"))
+            .flat_map(|l| flags(l.split('|').nth(1).unwrap_or("")))
+            .collect();
+        let mut advertised: Vec<&str> = flags(super::SYNOPSIS).collect();
+        for list in [&mut documented, &mut advertised] {
+            list.sort_unstable();
+            list.dedup();
         }
+        // `--help`/`--version` are described in prose below the tables.
+        advertised.retain(|f| !matches!(*f, "--help" | "--version"));
+        assert_eq!(documented, advertised);
+    }
+
+    /// `--help` keeps its historical shape: one `usage:` line, then aligned alternatives.
+    #[test]
+    fn usage_aligns_continuation_lines() {
+        let text = super::usage();
+        assert!(text.starts_with("usage: wasm2rs "));
+        assert!(
+            text.lines()
+                .skip(1)
+                .all(|l| l.starts_with("       wasm2rs "))
+        );
+        assert!(!text.ends_with('\n'));
     }
 }
