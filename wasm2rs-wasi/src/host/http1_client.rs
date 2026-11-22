@@ -484,3 +484,101 @@ impl HttpClient for Http1Client {
         })
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use super::*;
+
+    fn split(url: &str) -> (String, u16, String) {
+        let (host, port, target) = split_url(url).unwrap();
+        (host.to_string(), port, target)
+    }
+
+    #[test]
+    fn split_url_reads_host_port_and_target() {
+        assert_eq!(split("http://a.test"), ("a.test".into(), 80, "/".into()));
+        assert_eq!(
+            split("http://a.test:8080/p?q=1#frag"),
+            ("a.test".into(), 8080, "/p?q=1".into())
+        );
+        // a query without a path gets the root path
+        assert_eq!(
+            split("http://a.test?q=1"),
+            ("a.test".into(), 80, "/?q=1".into())
+        );
+        // userinfo is dropped, an empty port means 80
+        assert_eq!(
+            split("http://u:pw@a.test:/"),
+            ("a.test".into(), 80, "/".into())
+        );
+    }
+
+    #[test]
+    fn split_url_keeps_ipv6_literals_whole() {
+        assert_eq!(
+            split("http://[::1]:8080/"),
+            ("[::1]".into(), 8080, "/".into())
+        );
+        // the colons inside the brackets are not a port separator
+        assert_eq!(split("http://[::1]/"), ("[::1]".into(), 80, "/".into()));
+        assert_eq!(
+            split("http://[2001:db8::1]"),
+            ("[2001:db8::1]".into(), 80, "/".into())
+        );
+        // an address ending in `::` followed by a bare colon is not an empty port
+        assert!(split_url("http://[fe80::]:/").is_ok());
+        // `a::` is a colon-ended host followed by a bare colon: no port can be read from it
+        assert!(split_url("http://a::/").is_err());
+    }
+
+    #[test]
+    fn check_field_refuses_each_bad_name_and_value_byte() {
+        assert!(check_field("x-ok", b"v \t value").is_ok());
+        for name in [
+            "",
+            "a b",
+            "a\tb",
+            "a:b",
+            "a\x7fb",
+            "caf\u{e9}",
+            "a\0b",
+            "a\nb",
+        ] {
+            assert!(check_field(name, b"v").is_err(), "name {name:?}");
+        }
+        for value in [&b"a\rb"[..], b"a\nb", b"a\0b"] {
+            assert!(check_field("x", value).is_err(), "value {value:?}");
+        }
+    }
+
+    #[test]
+    fn read_fields_accepts_exactly_the_head_limit_and_refuses_one_more() {
+        let section = |second: usize| {
+            let mut bytes = Vec::new();
+            for len in [32_768, second] {
+                bytes.extend_from_slice(b"a:");
+                bytes.extend(std::iter::repeat_n(b'v', len - 2));
+                bytes.push(b'\n');
+            }
+            bytes.push(b'\n');
+            bytes
+        };
+        let fields = read_fields(&mut section(MAX_HEAD - 32_768).as_slice()).unwrap();
+        assert_eq!(fields.len(), 2);
+        let err = read_fields(&mut section(MAX_HEAD - 32_768 + 1).as_slice()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_fields_refuses_a_name_that_is_empty_or_holds_whitespace() {
+        for line in [&b": v\n\n"[..], b"a b: v\n\n", b"a\tb: v\n\n"] {
+            let err = read_fields(&mut &line[..]).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{line:?}");
+        }
+        assert_eq!(
+            read_fields(&mut &b"x-a:  v \r\n\r\n"[..]).unwrap(),
+            [("x-a".to_string(), b"v".to_vec())]
+        );
+    }
+}

@@ -76,6 +76,35 @@ fn a_librarys_element_item_reading_an_imported_global_is_refused() {
     );
 }
 
+#[test]
+fn a_librarys_typed_reference_global_is_refused() {
+    assert_refused(
+        r#"(type $t (func))
+        (global (ref null $t) (ref.null $t))"#,
+        "typed reference in a global of a linked module",
+    );
+}
+
+#[test]
+fn a_librarys_function_type_with_a_typed_reference_is_refused() {
+    assert_refused(
+        r#"(type $t (func))
+        (type $takes (func (param (ref null $t))))"#,
+        "typed reference in a function type of a linked module",
+    );
+}
+
+#[test]
+fn a_librarys_untyped_reference_global_is_not_mistaken_for_a_typed_one() {
+    // `check_val_type` must refuse only concrete heap types: `funcref` is abstract.
+    let code = transpile_component(
+        &with_library("(global funcref (ref.null func))"),
+        &ComponentOptions::default(),
+    )
+    .unwrap();
+    assert!(code.contains("pub fn peek("), "{code}");
+}
+
 /// Control: the shared skeleton itself links, so the refusals above come from the library body.
 #[test]
 fn the_skeleton_with_a_benign_library_links() {

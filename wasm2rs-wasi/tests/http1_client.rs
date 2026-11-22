@@ -9,13 +9,23 @@ use std::thread::{self, JoinHandle};
 use wasm2rs_wasi::{Http1Client, HttpClient, HttpClientErrorKind, HttpRequest};
 
 /// Accepts one connection, reads the request off it and answers with `reply`.
-fn serve(reply: &'static [u8]) -> (String, JoinHandle<Seen>) {
+fn serve(reply: impl Into<Vec<u8>>) -> (String, JoinHandle<Seen>) {
+    let reply = reply.into();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let handle = thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         let seen = read_request(&stream);
-        stream.write_all(reply).unwrap();
+        // a client that rejects the reply early may close the connection mid-write
+        if let Err(e) = stream.write_all(&reply) {
+            assert!(
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                ),
+                "{e}"
+            );
+        }
         seen
     });
     (addr, handle)
@@ -256,4 +266,255 @@ fn userinfo_and_an_empty_port_in_the_url() {
     Http1Client::new().send(req).unwrap();
     let seen = server.join().unwrap();
     assert!(seen.head.iter().any(|l| l == &format!("host: {addr}")));
+}
+
+/// A `200` reply with `count` headers of about 1 KB each, after `content-length: 0`.
+fn fields_reply(count: usize) -> Vec<u8> {
+    let mut reply = b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n".to_vec();
+    for i in 0..count {
+        reply.extend_from_slice(format!("x-{i}: {}\r\n", "v".repeat(1000)).as_bytes());
+    }
+    reply.extend_from_slice(b"\r\n");
+    reply
+}
+
+fn send_err(reply: impl Into<Vec<u8>>) -> wasm2rs_wasi::HttpClientError {
+    let (addr, server) = serve(reply);
+    let err = Http1Client::new()
+        .send(request("GET", &addr))
+        .map(|_| ())
+        .unwrap_err();
+    server.join().unwrap();
+    err
+}
+
+#[test]
+fn a_malformed_status_line_is_a_protocol_error() {
+    for reply in [
+        &b"GARBAGE\r\n\r\n"[..],
+        b"HTTP/2 200 OK\r\n\r\n",
+        b"HTTP/1.1 abc OK\r\n\r\n",
+    ] {
+        let err = send_err(reply);
+        assert_eq!(err.kind(), &HttpClientErrorKind::HttpProtocol, "{err}");
+        assert!(err.to_string().contains("malformed status line"), "{err}");
+    }
+}
+
+#[test]
+fn a_connection_closed_before_the_head_is_terminated() {
+    let err = send_err(&b""[..]);
+    assert_eq!(err.kind(), &HttpClientErrorKind::ConnectionTerminated);
+}
+
+#[test]
+fn interim_responses_are_capped() {
+    let mut reply = b"HTTP/1.1 102 Processing\r\n\r\n".repeat(17);
+    reply.extend_from_slice(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+    let err = send_err(reply);
+    assert_eq!(err.kind(), &HttpClientErrorKind::HttpProtocol);
+    assert!(err.to_string().contains("too many interim"), "{err}");
+
+    // exactly at the cap the real response still gets through
+    let mut reply = b"HTTP/1.1 102 Processing\r\n\r\n".repeat(16);
+    reply.extend_from_slice(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+    let (addr, server) = serve(reply);
+    let response = Http1Client::new().send(request("GET", &addr)).unwrap();
+    server.join().unwrap();
+    assert_eq!(response.status, 200);
+}
+
+#[test]
+fn a_header_line_without_a_colon_is_a_protocol_error() {
+    let err = send_err(&b"HTTP/1.1 200 OK\r\nnot a header\r\n\r\n"[..]);
+    assert_eq!(err.kind(), &HttpClientErrorKind::HttpProtocol);
+    assert!(err.to_string().contains("malformed field line"), "{err}");
+}
+
+#[test]
+fn an_endless_line_and_an_oversized_head_are_refused() {
+    let mut reply = b"HTTP/1.1 200 ".to_vec();
+    reply.extend(std::iter::repeat_n(b'a', 70_000));
+    let err = send_err(reply);
+    assert_eq!(err.kind(), &HttpClientErrorKind::HttpProtocol);
+    assert!(err.to_string().contains("line too long"), "{err}");
+
+    let err = send_err(fields_reply(80));
+    assert_eq!(err.kind(), &HttpClientErrorKind::HttpProtocol);
+    assert!(err.to_string().contains("fields too large"), "{err}");
+
+    let err = send_err(&b"HTTP/1.1 200 OK"[..]);
+    assert_eq!(err.kind(), &HttpClientErrorKind::HttpProtocol);
+    assert!(err.to_string().contains("unterminated line"), "{err}");
+}
+
+#[test]
+fn a_chunk_not_followed_by_crlf_is_an_error() {
+    let (addr, server) =
+        serve(&b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n3\r\nabcXX\r\n0\r\n\r\n"[..]);
+    let response = Http1Client::new().send(request("GET", &addr)).unwrap();
+    server.join().unwrap();
+    let err = response
+        .body
+        .take(1 << 20)
+        .read_to_end(&mut Vec::new())
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(err.to_string().contains("missing chunk end"), "{err}");
+}
+
+#[test]
+fn an_unreadable_url_is_refused_before_connecting() {
+    for (url, needle) in [
+        ("http://127.0.0.1:99999/", "invalid port"),
+        ("http:///x", "no host"),
+        ("http://:80/", "no host"),
+        ("ftp://127.0.0.1/", "unsupported url"),
+    ] {
+        let mut req = request("GET", "127.0.0.1:1");
+        req.url = url.into();
+        let err = Http1Client::new().send(req).unwrap_err();
+        assert!(err.to_string().contains(needle), "{url}: {err}");
+    }
+}
+
+#[test]
+fn an_invalid_header_is_refused_without_being_sent() {
+    // accepts nothing: the connection completes in the backlog, then the request is rejected
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    for (name, value) in [
+        ("bad name", "v"),
+        ("", "v"),
+        ("x-a", "a\r\nx-injected: 1"),
+        ("x-b", "nul\0"),
+    ] {
+        let mut req = request("GET", &addr);
+        req.headers
+            .push((name.to_string(), value.as_bytes().to_vec()));
+        let err = Http1Client::new().send(req).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid header"),
+            "{name:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_silent_server_hits_the_first_byte_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let (release, hold) = std::sync::mpsc::channel::<()>();
+    let server = thread::spawn(move || {
+        let _stream = listener.accept().unwrap().0;
+        let _ = hold.recv();
+    });
+    let mut req = request("GET", &addr);
+    req.first_byte_timeout = Some(50_000_000);
+    let err = Http1Client::new().send(req).unwrap_err();
+    release.send(()).unwrap();
+    server.join().unwrap();
+    assert_eq!(err.kind(), &HttpClientErrorKind::ResponseTimeout);
+}
+
+#[test]
+fn a_guest_host_header_replaces_the_derived_one() {
+    let (addr, server) = serve(b"HTTP/1.1 204 No Content\r\n\r\n");
+    let mut req = request("GET", &addr);
+    req.headers.push(pair("Host", "virtual.test"));
+    Http1Client::new().send(req).unwrap();
+    let seen = server.join().unwrap();
+    let hosts: Vec<_> = seen
+        .head
+        .iter()
+        .filter(|l| l.to_ascii_lowercase().starts_with("host:"))
+        .collect();
+    assert_eq!(hosts, ["Host: virtual.test"]);
+}
+
+#[test]
+fn content_length_is_sent_for_a_bodyless_post_but_not_for_a_get() {
+    let length_of = |method: &str| {
+        let (addr, server) = serve(b"HTTP/1.1 204 No Content\r\n\r\n");
+        Http1Client::new().send(request(method, &addr)).unwrap();
+        let seen = server.join().unwrap();
+        seen.head
+            .iter()
+            .find(|l| l.starts_with("content-length:"))
+            .cloned()
+    };
+    assert_eq!(length_of("POST").as_deref(), Some("content-length: 0"));
+    assert_eq!(length_of("GET"), None);
+}
+
+#[test]
+fn a_content_length_body_cut_short_is_an_error_and_an_exact_one_is_not() {
+    let (addr, server) = serve(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nabc");
+    let response = Http1Client::new().send(request("GET", &addr)).unwrap();
+    server.join().unwrap();
+    let err = response
+        .body
+        .take(100)
+        .read_to_end(&mut Vec::new())
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+
+    let (addr, server) = serve(b"HTTP/1.1 200 OK\r\ncontent-length: 3\r\n\r\nabc");
+    let response = Http1Client::new().send(request("GET", &addr)).unwrap();
+    server.join().unwrap();
+    assert_eq!(read_body(response.body), b"abc");
+}
+
+#[test]
+fn a_stalled_body_hits_the_between_bytes_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let (release, hold) = std::sync::mpsc::channel::<()>();
+    let server = thread::spawn(move || {
+        let mut stream = listener.accept().unwrap().0;
+        let _ = read_request(&stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nab")
+            .unwrap();
+        let _ = hold.recv();
+    });
+    let mut req = request("GET", &addr);
+    req.between_bytes_timeout = Some(50_000_000);
+    let response = Http1Client::new().send(req).unwrap();
+    let mut body = response.body;
+    let mut got = [0u8; 2];
+    body.read_exact(&mut got).unwrap();
+    assert_eq!(&got, b"ab");
+    let err = body.read(&mut [0u8; 8]).unwrap_err();
+    release.send(()).unwrap();
+    server.join().unwrap();
+    assert!(
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_method_with_a_control_or_non_ascii_byte_is_refused() {
+    for method in ["", "GE T", "GE\x7fT", "G\u{c9}T", "GE\tT"] {
+        let err = Http1Client::new()
+            .send(request(method, "127.0.0.1:1"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid method"),
+            "{method:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_large_head_section_below_the_limit_is_accepted() {
+    // 30 KB of headers is far above any small constant and below the 64 KB limit
+    let (addr, server) = serve(fields_reply(30));
+    let response = Http1Client::new().send(request("GET", &addr)).unwrap();
+    server.join().unwrap();
+    assert_eq!(response.headers.len(), 31);
 }

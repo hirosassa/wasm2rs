@@ -239,3 +239,53 @@ fn modules_inside_a_nested_component_are_not_top_level_modules() {
     );
     assert!(code.contains("marker_only_here"), "{code}");
 }
+
+// --- types the reader cannot lower, refused only where a function uses them ---
+
+/// A lift of a core `f` taking `core_params`, typed `(func (param "x" <ty>))`; `types` declares
+/// what `ty` names and `options` are the `canon lift` options the type needs.
+fn param_of(types: &str, ty: &str, core_params: &str, options: &str) -> String {
+    format!(
+        r#"(component
+  (core module $m
+    (memory (export "mem") 1)
+    (func (export "alloc") (param i32 i32 i32 i32) (result i32) i32.const 0)
+    (func (export "f") (param {core_params})))
+  (core instance $i (instantiate $m))
+  (alias core export $i "f" (core func $f))
+  (alias core export $i "mem" (core memory $mem))
+  (alias core export $i "alloc" (core func $alloc))
+  {types}
+  (type $t (func (param "x" {ty})))
+  (func $l (type $t) (canon lift (core func $f) {options}))
+  (export "e" (func $l)))"#
+    )
+}
+
+// `wasmparser` refuses more than 32 flags itself, so the reader's own flag limit cannot be reached
+// through a valid component and has no test here.
+
+#[test]
+fn a_map_type_is_refused_where_used() {
+    let why = rejection(&param_of(
+        r#"(type $m (map string u32))"#,
+        "$m",
+        "i32 i32",
+        "(memory $mem) (realloc $alloc)",
+    ));
+    assert!(why.contains("unsupported: map in function `e`"), "{why}");
+}
+
+#[test]
+fn a_fixed_length_list_is_refused_where_used() {
+    let why = rejection(&param_of(
+        r#"(type $l (list u8 4))"#,
+        "$l",
+        "i32 i32 i32 i32",
+        "",
+    ));
+    assert!(
+        why.contains("unsupported: fixed-length list in function `e`"),
+        "{why}"
+    );
+}

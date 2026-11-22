@@ -160,3 +160,71 @@ impl HttpClient for UreqClient {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use HttpClientErrorKind as K;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn io_kind_maps_each_connection_failure_to_its_error_code() {
+        for (kind, expected) in [
+            (ErrorKind::ConnectionRefused, K::ConnectionRefused),
+            (ErrorKind::ConnectionReset, K::ConnectionTerminated),
+            (ErrorKind::ConnectionAborted, K::ConnectionTerminated),
+            (ErrorKind::BrokenPipe, K::ConnectionTerminated),
+            (ErrorKind::UnexpectedEof, K::ConnectionTerminated),
+            (ErrorKind::TimedOut, K::ConnectionTimeout),
+            (ErrorKind::PermissionDenied, K::Other),
+        ] {
+            assert_eq!(io_kind(kind), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn tls_kind_separates_certificate_failures_from_other_tls_errors() {
+        assert_eq!(
+            tls_kind("invalid peer certificate: UnknownIssuer"),
+            HttpClientErrorKind::TlsCertificate
+        );
+        assert_eq!(
+            tls_kind("received fatal alert: HandshakeFailure"),
+            HttpClientErrorKind::TlsProtocol
+        );
+    }
+
+    #[test]
+    fn classify_tells_a_failed_lookup_from_a_tls_failure_in_an_io_error() {
+        let lookup = ureq::Error::Io(std::io::Error::other(
+            "failed to lookup address information: nodename nor servname provided",
+        ));
+        assert_eq!(classify(&lookup), HttpClientErrorKind::DnsFailure);
+
+        let cert = ureq::Error::Io(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "invalid peer certificate: Expired",
+        ));
+        assert_eq!(classify(&cert), HttpClientErrorKind::TlsCertificate);
+
+        let plain = ureq::Error::Io(std::io::Error::from(ErrorKind::ConnectionRefused));
+        assert_eq!(classify(&plain), HttpClientErrorKind::ConnectionRefused);
+
+        assert_eq!(
+            classify(&ureq::Error::Timeout(ureq::Timeout::Connect)),
+            HttpClientErrorKind::ConnectionTimeout
+        );
+        assert_eq!(
+            classify(&ureq::Error::Timeout(ureq::Timeout::RecvResponse)),
+            HttpClientErrorKind::ResponseTimeout
+        );
+        assert_eq!(
+            classify(&ureq::Error::Tls("handshake failed")),
+            HttpClientErrorKind::TlsProtocol
+        );
+        assert_eq!(
+            classify(&ureq::Error::HostNotFound),
+            HttpClientErrorKind::DnsFailure
+        );
+    }
+}
