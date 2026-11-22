@@ -551,7 +551,11 @@ mod tests {
     fn usage_aligns_continuation_lines() {
         let text = super::usage();
         assert!(text.starts_with("usage: wasm2rs "));
-        assert!(text.lines().skip(1).all(|l| l.starts_with("       wasm2rs ")));
+        assert!(
+            text.lines()
+                .skip(1)
+                .all(|l| l.starts_with("       wasm2rs "))
+        );
         assert!(!text.ends_with('\n'));
     }
 }
