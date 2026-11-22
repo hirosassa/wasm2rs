@@ -145,6 +145,8 @@ mod foo {
 }
 ```
 
+For a split output or `data_{n}.bin` side files, pass a `Transpiler` to `wasm2rs::build::run_to_out_dir` and `include!` `$OUT_DIR/foo/lib.rs` ([docs/library-api.md](docs/library-api.md)).
+
 Or embed it in one line with the `wasm2rs-macros` crate:
 
 ```rust
