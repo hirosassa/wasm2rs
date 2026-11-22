@@ -168,7 +168,8 @@ pub(crate) enum Rt {
     Tc,
     /// The per-thread activation counter behind `TranspileOptions::call_depth_limit`:
     /// `CallDepth::enter()` bumps it (panicking with `call stack exhausted` past the
-    /// limit) and its `Drop` restores it, so unwinding keeps the count exact.
+    /// limit) and its `Drop` restores it, so unwinding keeps the count exact. Only the
+    /// functions `call_depth_guards` selects (those on a call-graph cycle) enter it.
     CallDepth,
     /// The out-of-line `call stack exhausted` trap `CallDepth::enter` raises.
     TrapCallStackExhausted,

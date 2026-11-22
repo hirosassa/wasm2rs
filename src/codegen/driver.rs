@@ -149,6 +149,12 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) simd_intrinsics: bool,
     /// Opt-in call-depth limit (see `TranspileOptions::call_depth_limit`).
     pub(crate) call_depth_limit: Option<u32>,
+    /// Per defined function: whether it carries the call-depth guard (see
+    /// [`call_depth_guards`]). Empty when `call_depth_limit` is unset.
+    pub(crate) call_depth_guarded: Vec<bool>,
+    /// The `call_ref_t{ti}` dispatch methods that enter the call-depth counter, by
+    /// function type index.
+    pub(crate) call_depth_guarded_dispatch: HashSet<u32>,
     /// The traps unwind with a typed `Wasm2RsTrap` payload (on by default; see
     /// `TranspileOptions::typed_traps`).
     pub(crate) typed_traps: bool,
@@ -224,6 +230,21 @@ impl ModuleCtx<'_> {
         };
         self.has_tail_call.get(defined).copied().unwrap_or(false)
             && u32::try_from(fidx).is_ok_and(|f| self.cont.step_set.binary_search(&f).is_err())
+    }
+
+    /// Whether the defined function at full index `fidx` carries the call-depth
+    /// guard: a limit is set and the function can lie on a call-graph cycle.
+    pub(crate) fn has_call_depth_guard(&self, fidx: usize) -> bool {
+        fidx.checked_sub(self.imports.len())
+            .and_then(|d| self.call_depth_guarded.get(d))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Whether the `call_ref_t{ti}` dispatch method of function type `type_index`
+    /// enters the call-depth counter (once for every indirect call of that type).
+    pub(crate) fn has_call_depth_dispatch_guard(&self, type_index: u32) -> bool {
+        self.call_depth_guarded_dispatch.contains(&type_index)
     }
 
     /// Whether `call_ref_t{ti}_tc`, the trampolined dispatch for function type
@@ -526,10 +547,22 @@ pub(crate) fn build_ctx<'a>(
         .iter()
         .flat_map(|e| e.funcs.iter())
         .chain(parts.global_funcs)
-        .chain(&scan.ref_funcs)
-        .chain(parts.exports.iter().map(|e| &e.func_index));
+        .chain(&scan.ref_funcs);
     for &f in named {
         if let Some(slot) = referenced.get_mut(f as usize) {
+            *slot = true;
+        }
+    }
+    // The call-depth guard placement needs the funcrefs a *running guest* can reach,
+    // which excludes a function merely exported: the host can only hand a funcref
+    // back through the sources `host_funcrefs` already covers.
+    let guest_referenced = parts
+        .opts
+        .call_depth_limit
+        .is_some()
+        .then(|| referenced.clone());
+    for e in parts.exports {
+        if let Some(slot) = referenced.get_mut(e.func_index as usize) {
             *slot = true;
         }
     }
@@ -542,7 +575,7 @@ pub(crate) fn build_ctx<'a>(
             *slot = false;
         }
     }
-    let func_decl_types = imports
+    let func_decl_types: Vec<Option<u32>> = imports
         .iter()
         .map(|im| Some(im.type_index))
         .chain(
@@ -551,8 +584,27 @@ pub(crate) fn build_ctx<'a>(
                 .zip(parts.live)
                 .map(|(f, live)| live.then_some(f.type_index)),
         )
-        .chain(tail_imports.iter().map(|im| Some(im.type_index)));
-    let func_targets = index_func_targets(type_kinds, type_rel, func_decl_types, &referenced);
+        .chain(tail_imports.iter().map(|im| Some(im.type_index)))
+        .collect();
+    let func_targets = index_func_targets(
+        type_kinds,
+        type_rel,
+        func_decl_types.iter().copied(),
+        &referenced,
+    );
+    let guest_targets = guest_referenced.map(|mut guest_referenced| {
+        for &f in &step_set {
+            if let Some(slot) = guest_referenced.get_mut(f as usize) {
+                *slot = false;
+            }
+        }
+        index_func_targets(
+            type_kinds,
+            type_rel,
+            func_decl_types.iter().copied(),
+            &guest_referenced,
+        )
+    });
     let needs_gc_types = needs_gc_types(parts, scan.uses_abstract_gc);
     let ctx = ModuleCtx {
         imports,
@@ -612,10 +664,24 @@ pub(crate) fn build_ctx<'a>(
         unsafe_memory: parts.opts.unsafe_memory,
         simd_intrinsics: parts.opts.simd_intrinsics,
         call_depth_limit: parts.opts.call_depth_limit,
+        call_depth_guarded: Vec::new(),
+        call_depth_guarded_dispatch: HashSet::new(),
         typed_traps: parts.opts.typed_traps,
         reentrant_imports: parts.reentrant_imports,
         split_dispatch: parts.opts.split_dispatch,
     };
+    let mut ctx = ctx;
+    if let Some(guest_targets) = &guest_targets {
+        let guards = call_depth_guards(
+            &ctx,
+            guest_targets,
+            &scan.calls,
+            &scan.indirect_types,
+            &scan.resumes,
+        );
+        ctx.call_depth_guarded = guards.funcs;
+        ctx.call_depth_guarded_dispatch = guards.dispatch;
+    }
     Ok((ctx, stateful))
 }
 /// The module-wide helper dependencies accumulated while generating every
@@ -644,6 +710,19 @@ impl ModuleDeps {
         self.state_structs.extend(meta.state_structs);
     }
 }
+/// A guarded dispatch method enters the call-depth counter, so the counter and its
+/// trap must exist whenever one is emitted.
+fn add_call_depth_dispatch_rt(deps: &mut ModuleDeps, ctx: &ModuleCtx<'_>) {
+    if deps
+        .dispatch_sigs
+        .iter()
+        .any(|&ti| ctx.has_call_depth_dispatch_guard(ti))
+    {
+        deps.rt.insert(Rt::CallDepth);
+        deps.rt.insert(Rt::TrapCallStackExhausted);
+    }
+}
+
 /// Rough output bytes per code-section byte (x2, i.e. 8.5), measured on a large module; only
 /// sizes the up-front reservation, so an underestimate costs a regrow at worst.
 const OUTPUT_PER_CODE_BYTE_X2: u64 = 17;
@@ -701,6 +780,7 @@ fn generate_module_pieces_with(
     if !deps.dispatch_sigs.is_empty() {
         deps.rt.insert(Rt::TrapIndirectTypeMismatch);
     }
+    add_call_depth_dispatch_rt(&mut deps, &ctx);
     add_shared_memory_traps(&mut deps, &ctx);
     add_gc_traps(&mut deps, &ctx);
     add_cont_traps(&mut deps, &ctx);
@@ -942,6 +1022,7 @@ pub(crate) fn generate_module_split(
     if !deps.dispatch_sigs.is_empty() {
         deps.rt.insert(Rt::TrapIndirectTypeMismatch);
     }
+    add_call_depth_dispatch_rt(&mut deps, &ctx);
     add_shared_memory_traps(&mut deps, &ctx);
     add_gc_traps(&mut deps, &ctx);
     add_cont_traps(&mut deps, &ctx);

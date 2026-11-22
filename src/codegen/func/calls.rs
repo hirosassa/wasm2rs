@@ -620,7 +620,8 @@ impl<'a> super::FuncGen<'a> {
         if has_tc_variant {
             self.used_rt.insert(Rt::Tc);
         }
-        if ctx.call_depth_limit.is_some() {
+        let guarded = ctx.has_call_depth_guard(index);
+        if guarded {
             self.used_rt.insert(Rt::CallDepth);
             self.used_rt.insert(Rt::TrapCallStackExhausted);
         }
@@ -744,7 +745,7 @@ impl<'a> super::FuncGen<'a> {
         // runs after this body returned (and dropped it), so a `return_call` chain
         // stays at one activation. The binding is named because `let _ =` would
         // drop the guard immediately.
-        if let Some(limit) = ctx.call_depth_limit {
+        if let (true, Some(limit)) = (guarded, ctx.call_depth_limit) {
             push_body_line(
                 out,
                 &format!("let __depth = CallDepth::enter({limit});"),

@@ -257,12 +257,28 @@ pub struct TranspileOptions {
     /// exhausts the native stack and aborts the whole host process, which no
     /// `catch_unwind` can intercept.
     ///
+    /// Only the places a recursion has to pass through are counted: every
+    /// recursion is a cycle in the call graph, so it is enough that each cycle
+    /// contains one counted node, either a function or the shared `call_ref_t{ti}`
+    /// dispatch method that every `call_indirect`/`call_ref` of a type goes through.
+    /// A leaf or otherwise acyclic function carries no counter and costs nothing.
+    /// The call graph over-approximates the run-time one (an indirect call may
+    /// reach every function of its type that a funcref can name; under
+    /// `reentrant_imports` a host import may call back any function), and a module
+    /// that uses continuations counts every function.
+    ///
+    /// So `limit` bounds the *counted* activations, not all frames: between two
+    /// counted frames there can be a run of uncounted ones (an acyclic call
+    /// chain), and the bound on the native stack is `limit` times the longest such
+    /// run plus one, in frames. Pick a limit your thread's stack can hold with that
+    /// in mind (the frame size depends on the module and the build profile).
+    ///
     /// The counter is per thread and unwinds with the stack, so a trap or a caught
     /// exception leaves it consistent. A `return_call*` does not deepen it: the
     /// trampoline (or self-loop) keeps a tail-calling chain at one activation.
-    /// Pick a limit your thread's stack can hold (the frame size depends on the
-    /// module and the build profile). Continuation step functions are not counted.
-    /// `Some(0)` traps on the first call. `None` (the default) emits no counter, so existing output is unchanged.
+    /// Continuation step functions are not counted. `Some(0)` traps on the first
+    /// call of a counted function. `None` (the default) emits no counter, so
+    /// existing output is unchanged.
     pub call_depth_limit: Option<u32>,
 
     /// Raise the traps of the runtime helpers as a typed payload instead of a message
