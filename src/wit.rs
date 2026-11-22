@@ -38,8 +38,12 @@ pub(crate) use exports::core_wiring;
 pub(crate) use wiring::{CoreWiring, HostFunc, ResourceOp, Supplier, WiredInstance};
 
 /// A WIT value type that a host function can take or return.
+///
+/// The enum is `#[non_exhaustive]`, so a new WIT type is not a breaking change: keep a `_` arm
+/// when matching on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(missing_docs, reason = "the variants are the WIT type names")]
+#[non_exhaustive]
 pub enum WitType {
     U8,
     U16,
@@ -143,7 +147,21 @@ pub struct WitFlags {
 }
 
 /// A function of an imported interface instance.
+///
+/// The struct is `#[non_exhaustive]`, so a new field is not a breaking change: get one from
+/// [`wit_functions`] and bind its fields with `WitFunc { name, .. }`.
+///
+/// ```compile_fail,E0639
+/// let _ = wasm2rs::WitFunc {
+///     interface: String::new(),
+///     name: String::new(),
+///     params: Vec::new(),
+///     result: None,
+///     is_async: false,
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WitFunc {
     /// The interface name as imported, e.g. `wasi:cli/environment@0.2.0`.
     pub interface: String,
