@@ -63,7 +63,7 @@ Main flags (all of them are described in [docs/cli-reference.md](docs/cli-refere
 | `--component` | Transpile a WebAssembly component (e.g. `wasm32-wasip2` output) in one step. |
 | `--dump` | Print a summary of the module and generate no code. |
 
-Also available: `--named-exports`, `--named-imports`, `--import-memory`, `--reentrant-imports`, `--split-dispatch`, `--call-depth-limit=N`, `--data-files`, `--no-typed-traps` (traps are typed `Wasm2RsTrap` payloads by default, which print nothing to stderr; this keeps the string panics), `--typed-traps` (the default), `--extract-core`, `--wit-host`, `--glue`, `--external-types`.
+Also available: `--named-exports`, `--named-imports`, `--import-memory`, `--reentrant-imports`, `--split-dispatch`, `--call-depth-limit=N`, `--no-data-files`, `--no-typed-traps` (traps are typed `Wasm2RsTrap` payloads by default, which print nothing to stderr; this keeps the string panics), `--typed-traps` (the default), `--extract-core`, `--wit-host`, `--glue`, `--external-types`.
 
 ### Examples
 
@@ -79,7 +79,7 @@ wasm2rs --dump module.wasm                       # inspect without generating co
 
 - **Single file**: when both `funcs_per_file` and `max_bytes_per_file` are `0` (the default), the module is emitted as one Rust source file (to `output`, or stdout).
 - **Split output**: when either cap is positive, `output` is a directory holding a `lib.rs` crate root, `funcs_0.rs`, `funcs_1.rs`, … and a ready-to-use `Cargo.toml`. Build it with `cargo build --release` inside that directory.
-- **Data files** (`--data-files`, split output only): each data segment of 4 KiB or more is written to a `data_{n}.bin` file next to `lib.rs`, which `lib.rs` includes with `include_bytes!`, instead of being spelled as a string literal. The behaviour is identical; `rustc` just reads the bytes raw. Library: `transpile_split_files` / `transpile_split_files_with_options` / `transpile_component_split_files` hand `OutputFile`s (text or bytes) to the sink.
+- **Data files** (the default for split output; `--no-data-files` opts out): each data segment of 4 KiB or more is written to a `data_{n}.bin` file next to `lib.rs`, which `lib.rs` includes with `include_bytes!`, instead of being spelled as a string literal. The behaviour is identical; `rustc` just reads the bytes raw. Library: `transpile_split_files` / `transpile_split_files_with_options` / `transpile_component_split_files` hand `OutputFile`s (text or bytes) to the sink.
 
 ## Components
 
@@ -116,7 +116,7 @@ The examples build the component with `rustc -C opt-level=1`; set `WASM2RS_EXAMP
 ### Known limits
 
 - **Large components: start at `opt-level=0`.** The JS and Python components produce 125 MB and 122 MB of Rust, and LLVM time is the bottleneck, not wasm2rs (about 1 s to transpile Python).
-- **Generated-code flags.** `--component` supports `--unsafe-memory`, `--simd-intrinsics`, `--typed-traps` / `--no-typed-traps`, `--jobs`, `--split-dispatch`, `--call-depth-limit`, `--external-types` and the split arguments (`funcs_per_file`, `max_bytes_per_file`, with `--data-files`; the split output has no `Cargo.toml`, since it depends on `wasm2rs-wasi`). It refuses `--entry-exports`, `--import-memory` and the `--named-*` / `--reentrant-imports` flags it sets itself.
+- **Generated-code flags.** `--component` supports `--unsafe-memory`, `--simd-intrinsics`, `--typed-traps` / `--no-typed-traps`, `--jobs`, `--split-dispatch`, `--call-depth-limit`, `--external-types` and the split arguments (`funcs_per_file`, `max_bytes_per_file`, with `--no-data-files` to opt out of the data side files; the split output has no `Cargo.toml`, since it depends on `wasm2rs-wasi`). It refuses `--entry-exports`, `--import-memory` and the `--named-*` / `--reentrant-imports` flags it sets itself.
 - **Linked core modules (adapters, dylink libraries) may only use MVP, sign-extension, saturating float-to-int, bulk-memory and reference-types operators.** Any other operator (SIMD, atomics, exceptions, ...) is refused with an error naming it; lifts that allocate through different `realloc` functions of several modules are also refused (#314).
 - `wasip2_serve` serves one request at a time over HTTP/1.x (listening on `127.0.0.1:8080` by default); `wasip2_run` and `wasip2_serve` have no outgoing HTTP client.
 

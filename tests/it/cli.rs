@@ -571,8 +571,8 @@ fn data_files_writes_the_segment_next_to_lib_rs() {
 }
 
 #[test]
-fn without_data_files_the_segment_stays_inline() {
-    let (dir, input) = write_data_wasm("no_data_files");
+fn split_output_writes_data_files_by_default() {
+    let (dir, input) = write_data_wasm("data_files_default");
     let out_dir = dir.join("out");
     let _ = std::fs::remove_dir_all(&out_dir);
 
@@ -583,9 +583,61 @@ fn without_data_files_the_segment_stays_inline() {
         .status()
         .expect("run wasm2rs");
     assert!(status.success());
+    assert_eq!(
+        std::fs::read(out_dir.join("data_0.bin")).unwrap(),
+        vec![0xab; 5000]
+    );
+    let root = std::fs::read_to_string(out_dir.join("lib.rs")).unwrap();
+    assert!(root.contains("include_bytes!(\"data_0.bin\")"), "{root}");
+}
+
+#[test]
+fn no_data_files_keeps_the_segment_inline_in_a_split_output() {
+    let (dir, input) = write_data_wasm("no_data_files");
+    let out_dir = dir.join("out");
+    let _ = std::fs::remove_dir_all(&out_dir);
+
+    let status = Command::new(wasm2rs_bin())
+        .arg("--no-data-files")
+        .arg(&input)
+        .arg(&out_dir)
+        .arg("1")
+        .status()
+        .expect("run wasm2rs");
+    assert!(status.success());
     assert!(!out_dir.join("data_0.bin").exists());
     let root = std::fs::read_to_string(out_dir.join("lib.rs")).unwrap();
     assert!(!root.contains("include_bytes!"), "{root}");
+}
+
+#[test]
+fn a_single_file_output_keeps_the_segment_inline() {
+    let (dir, input) = write_data_wasm("data_files_single");
+    let out = dir.join("out.rs");
+
+    let status = Command::new(wasm2rs_bin())
+        .arg(&input)
+        .arg(&out)
+        .status()
+        .expect("run wasm2rs");
+    assert!(status.success());
+    let rust = std::fs::read_to_string(&out).unwrap();
+    assert!(!rust.contains("include_bytes!"), "{rust}");
+}
+
+#[test]
+fn data_files_and_no_data_files_contradict_each_other() {
+    let (dir, input) = write_data_wasm("data_files_contradict");
+    let out = Command::new(wasm2rs_bin())
+        .args(["--data-files", "--no-data-files"])
+        .arg(&input)
+        .arg(dir.join("out"))
+        .arg("1")
+        .output()
+        .expect("run wasm2rs");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("contradict"), "{stderr}");
 }
 
 #[test]

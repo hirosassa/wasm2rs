@@ -1,6 +1,6 @@
 //! Command-line entry point:
 //! `wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports]
-//! [--import-memory] [--reentrant-imports] [--data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
+//! [--import-memory] [--reentrant-imports] [--data-files | --no-data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]`, or
 //! `wasm2rs --help` / `wasm2rs --version` to print the usage / the version, or
 //! `wasm2rs --dump <input.wasm>` to summarize a module, or
 //! `wasm2rs --extract-core <component.wasm> <dir>` to write a component's core
@@ -10,12 +10,14 @@
 //! that lowers it to the flat `Imports` trait; with `--external-types=<path>`, only the `Glue`,
 //! naming the `Host` trait and the interface-qualified types of the library at `<path>`).
 //!
-//! `wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files]
+//! `wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files | --no-data-files]
 //! <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]` to write a component's program (its core module, or the linked modules of an adapter component) plus the typed `Glue`
 //! and `Exports` (like `wasm2rs::transpile_component`).
 //!
-//! `--data-files` (only with a split output) moves each data segment of 4 KiB or more into a
-//! `data_{n}.bin` file next to `lib.rs`, which `lib.rs` includes with `include_bytes!`.
+//! By default a split output moves each data segment of 4 KiB or more into a `data_{n}.bin`
+//! file next to `lib.rs`, which `lib.rs` includes with `include_bytes!`; `--no-data-files` keeps
+//! them inline. `--data-files` states the default explicitly, and a single-file output (which
+//! always keeps data inline) refuses it.
 //!
 //! An unknown `--option` is refused; `--` ends the options, so a path that starts with `-` can
 //! still be given.
@@ -55,7 +57,7 @@ use wasm2rs::{FileContent, SplitOptions, TranspileError, TranspileOptions, cargo
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] [--data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files] <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --help | --version\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--typed-traps | --no-typed-traps] [--external-types=<path>]] <component.wasm> [output]";
+const USAGE: &str = "usage: wasm2rs [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--entry-exports=a,b] [--named-exports] [--named-imports] [--import-memory] [--reentrant-imports] [--data-files | --no-data-files] <input.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --component [--unsafe-memory] [--simd-intrinsics] [--typed-traps | --no-typed-traps] [--jobs=N] [--split-dispatch=N] [--call-depth-limit=N] [--external-types=<path>] [--data-files | --no-data-files] <component.wasm> [output] [funcs_per_file] [max_bytes_per_file]\n       wasm2rs --help | --version\n       wasm2rs --dump <input.wasm>\n       wasm2rs --extract-core <component.wasm> <output dir>\n       wasm2rs --wit-host [--glue [--typed-traps | --no-typed-traps] [--external-types=<path>]] <component.wasm> [output]";
 
 /// Worker-thread stack size. Flattening a deeply nested function recurses on the
 /// module's control-flow nesting, which a pathological module can drive into the
@@ -129,7 +131,8 @@ fn run() -> Result<(), String> {
     let mut named_imports = false;
     let mut import_memory = false;
     let mut reentrant_imports = false;
-    let mut data_files = false;
+    // `None` until `--data-files` / `--no-data-files` says; a split output then defaults to on.
+    let mut data_files_flag: Option<bool> = None;
     let mut entry_exports: Option<Vec<String>> = None;
     let mut split_dispatch = 0usize;
     let mut jobs = 0usize;
@@ -207,11 +210,18 @@ fn run() -> Result<(), String> {
             "--named-imports" => named_imports = true,
             "--import-memory" => import_memory = true,
             "--reentrant-imports" => reentrant_imports = true,
-            "--data-files" => data_files = true,
+            "--data-files" | "--no-data-files" => {
+                let on = arg == "--data-files";
+                if data_files_flag.is_some_and(|prev| prev != on) {
+                    return Err("--data-files and --no-data-files contradict each other".into());
+                }
+                data_files_flag = Some(on);
+            }
             _ => return Err(format!("unknown option {arg}; try --help")),
         }
     }
     let typed_traps = typed_traps_flag.unwrap_or(TranspileOptions::default().typed_traps);
+    let data_files = data_files_flag.unwrap_or(true);
     let mut args = positional.into_iter();
     let input = args.next().ok_or(USAGE)?;
     let output = args.next();
@@ -242,7 +252,8 @@ fn run() -> Result<(), String> {
             (named_imports, "--named-imports"),
             (import_memory, "--import-memory"),
             (reentrant_imports, "--reentrant-imports"),
-            (data_files, "--data-files"),
+            (data_files_flag == Some(true), "--data-files"),
+            (data_files_flag == Some(false), "--no-data-files"),
             (split_dispatch > 0, "--split-dispatch"),
             (jobs > 0, "--jobs"),
             (call_depth_limit.is_some(), "--call-depth-limit"),
@@ -312,11 +323,8 @@ fn run() -> Result<(), String> {
                 .map(|_| ())
             });
         }
-        if data_files {
-            return Err(
-                "--data-files needs a split output (funcs_per_file or max_bytes_per_file)"
-                    .to_string(),
-            );
+        if data_files_flag == Some(true) {
+            return Err(DATA_FILES_NEEDS_SPLIT.to_string());
         }
         let rust = wasm2rs::transpile_component(&wasm, &options).map_err(|e| e.to_string())?;
         return write_output(output, &rust);
@@ -406,7 +414,7 @@ fn run() -> Result<(), String> {
             }
         });
     }
-    if data_files {
+    if data_files_flag == Some(true) {
         return Err(DATA_FILES_NEEDS_SPLIT.to_string());
     }
 
