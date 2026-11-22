@@ -498,21 +498,17 @@ fn a_split_component_builds_with_the_glue_in_its_root() {
     assert!(root.code.contains("pub struct Glue"));
     assert!(chunks.iter().all(|f| !f.code.contains("pub struct Glue")));
 
-    let dir = std::env::temp_dir().join(format!("wasm2rs_component_split_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    for f in &files {
-        std::fs::write(dir.join(&f.name), &f.code).unwrap();
-    }
-    let out = Command::new("rustc")
-        .current_dir(&dir)
-        .args(["lib.rs", "--crate-type", "lib", "--edition", "2024", "-o"])
-        .arg(dir.join("libgen.rlib"))
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+    let sources: Vec<(&str, &str)> = files
+        .iter()
+        .map(|f| (f.name.as_str(), f.code.as_str()))
+        .collect();
+    // compiling is the check: the rlib is not run
+    crate::common::build_artifact(
+        "wasm2rs_component_split",
+        "lib.rs",
+        &sources,
+        &["--crate-type", "lib", "--edition", "2024"],
+        ".rlib",
     );
 }
 

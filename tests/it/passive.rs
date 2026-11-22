@@ -8,6 +8,8 @@
 
 use std::process::Command;
 
+use crate::common::compile_run;
+
 /// Run `bin`, assert it traps, and assert the panic text on stderr contains `needle`.
 fn assert_traps_with(bin: &std::path::Path, needle: &str) {
     let run = Command::new(bin).output().expect("run generated binary");
@@ -22,31 +24,8 @@ fn compile(test: &str, wat: &str, main_body: &str) -> std::path::PathBuf {
     // output produces (the typed OOB traps are covered by `typed_traps`).
     let generated = crate::common::transpile_untyped(&wasm);
 
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_passive_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
     let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let out = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr),
-    );
-    bin
+    crate::common::build(&format!("wasm2rs_passive_{test}"), &program)
 }
 
 fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
@@ -206,7 +185,7 @@ fn table_init_after_elem_drop_traps() {
 fn data_drop_in_a_module_with_no_memory_compiles() {
     // A passive segment is retained in the `Instance` even when the module has
     // no memory, table or import that would otherwise make it stateful.
-    crate::common::compile_run(
+    compile_run(
         "passive_no_memory_data_drop",
         r#"(module (data "x") (func (export "f") (data.drop 0)))"#,
         "let mut inst = Instance::new();\n inst.func0();",
@@ -215,7 +194,7 @@ fn data_drop_in_a_module_with_no_memory_compiles() {
 
 #[test]
 fn elem_drop_in_a_module_with_no_table_compiles() {
-    crate::common::compile_run(
+    compile_run(
         "passive_no_table_elem_drop",
         r#"(module (func $g) (elem $e func $g) (func (export "f") (elem.drop $e)))"#,
         "let mut inst = Instance::new();\n inst.func1();",

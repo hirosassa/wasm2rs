@@ -17,8 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use wasm2rs::{SourceFile, SplitOptions, transpile_split};
 
-/// The exact `rustc` flags every single-file build uses. Kept in one place so
-/// the cache key covers them: changing a flag must invalidate cached binaries.
+/// The `rustc` flags of the default build. Every build's flags are part of its
+/// cache key, so changing a flag (or passing a different set to [`build_artifact`])
+/// invalidates cached output.
 const RUSTC_FLAGS: &[&str] = &[
     "--edition",
     "2024",
@@ -44,15 +45,21 @@ fn rustc_version() -> &'static str {
     })
 }
 
-/// Content-addressed cache key for a generated program: identical `(program,
-/// flags, toolchain)` triples map to one key, distinct ones (almost surely) to
+/// Content-addressed cache key for a build: identical `(entry, files, flags, wasi
+/// digest, toolchain)` tuples map to one key, distinct ones (almost surely) to
 /// distinct keys. `DefaultHasher` uses fixed keys, so the digest is stable
 /// across processes and runs — a persistent on-disk cache relies on that.
-fn cache_key(program: &str, wasi: Option<&WasiLib>) -> String {
+fn cache_key(
+    entry: &str,
+    files: &[(&str, &[u8])],
+    flags: &[&str],
+    wasi: Option<&WasiLib>,
+) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    program.hash(&mut h);
+    entry.hash(&mut h);
+    files.hash(&mut h);
     wasi.map(|lib| lib.digest).hash(&mut h);
-    RUSTC_FLAGS.hash(&mut h);
+    flags.hash(&mut h);
     rustc_version().hash(&mut h);
     format!("gen-{:016x}", h.finish())
 }
@@ -83,8 +90,8 @@ pub fn transpile_files_capped(
     files
 }
 
-/// Transpile `wat` into a multi-file crate (splitting at `funcs_per_file`), write
-/// the files to a temp dir, append `fn main {{ main_body }}` to the crate root
+/// Transpile `wat` into a multi-file crate (splitting at `funcs_per_file`),
+/// append `fn main {{ main_body }}` to the crate root
 /// (`lib.rs`), compile the whole crate with `rustc -D warnings`, run it, and
 /// assert it exits 0. Returns the emitted file names in order so a test can also
 /// assert the split shape.
@@ -97,42 +104,23 @@ pub fn compile_run_split(
     let files = transpile_files(wat, funcs_per_file);
     let names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
 
-    let dir = scratch_dir(&format!("split-{name}"));
-    for f in &files {
-        let mut code = f.code.clone();
-        // The crate root is turned into a runnable binary by appending `main`.
-        if f.name == "lib.rs" {
-            code.push_str(&format!("\nfn main() {{\n{main_body}\n}}\n"));
-        }
-        std::fs::write(dir.join(&f.name), code).expect("write generated file");
-    }
-
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-    let out = Command::new("rustc")
-        .current_dir(&dir)
-        .arg("lib.rs")
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "multi-file crate failed to compile ({name}):\n--- files ---\n{}\n--- stderr ---\n{}",
-        names.join(", "),
-        String::from_utf8_lossy(&out.stderr),
-    );
-
+    let sources: Vec<(&str, Vec<u8>)> = files
+        .iter()
+        .map(|f| {
+            let mut code = f.code.clone();
+            // The crate root is turned into a runnable binary by appending `main`.
+            if f.name == "lib.rs" {
+                code.push_str(&format!("\nfn main() {{\n{main_body}\n}}\n"));
+            }
+            (f.name.as_str(), code.into_bytes())
+        })
+        .collect();
+    let bin = build_crate(name, "lib.rs", &sources);
     let run = Command::new(&bin).status().expect("run generated binary");
     assert!(
         run.success(),
         "generated program assertions failed:\n{name}"
     );
-    // only on success: a failed build's directory is left behind to inspect
-    std::fs::remove_dir_all(&dir).ok();
     names
 }
 
@@ -379,9 +367,54 @@ pub fn scratch_dir(label: &str) -> std::path::PathBuf {
 }
 
 fn build_with(name: &str, program: &str, wasi: Option<&WasiLib>) -> std::path::PathBuf {
+    build_files(
+        name,
+        "gen.rs",
+        &[("gen.rs", program.as_bytes())],
+        RUSTC_FLAGS,
+        BIN_SUFFIX,
+        wasi,
+    )
+}
+
+const BIN_SUFFIX: &str = if cfg!(windows) { ".exe" } else { "" };
+
+/// Like [`build`], for a crate of several files (`sources` are `(file name, bytes)`; `entry`
+/// is the crate root, compiled as a binary). Side files such as `include_bytes!` data go in
+/// `sources` too: the cache key covers every byte of them.
+pub fn build_crate<B: AsRef<[u8]>>(
+    name: &str,
+    entry: &str,
+    sources: &[(&str, B)],
+) -> std::path::PathBuf {
+    build_artifact(name, entry, sources, RUSTC_FLAGS, BIN_SUFFIX)
+}
+
+/// Like [`build`] with other `flags` (they replace the defaults, and are part of the cache
+/// key) and a different output kind: `suffix` is the artifact's extension (`".wasm"`,
+/// `".rlib"`, …). For a build that cannot use the defaults, e.g. a `--target` of a guest that
+/// another tool runs.
+pub fn build_artifact<B: AsRef<[u8]>>(
+    name: &str,
+    entry: &str,
+    sources: &[(&str, B)],
+    flags: &[&str],
+    suffix: &str,
+) -> std::path::PathBuf {
+    let files: Vec<(&str, &[u8])> = sources.iter().map(|(n, b)| (*n, b.as_ref())).collect();
+    build_files(name, entry, &files, flags, suffix, None)
+}
+
+fn build_files(
+    name: &str,
+    entry: &str,
+    files: &[(&str, &[u8])],
+    flags: &[&str],
+    suffix: &str,
+    wasi: Option<&WasiLib>,
+) -> std::path::PathBuf {
     let cache_dir = cache_dir();
-    let exe = if cfg!(windows) { ".exe" } else { "" };
-    let bin = cache_dir.join(format!("{}{exe}", cache_key(program, wasi)));
+    let bin = cache_dir.join(format!("{}{suffix}", cache_key(entry, files, flags, wasi)));
     if bin.exists() {
         prune::touch(&bin);
         return bin;
@@ -394,13 +427,14 @@ fn build_with(name: &str, program: &str, wasi: Option<&WasiLib>) -> std::path::P
     let uniq = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
     let work = cache_dir.join(format!("work-{name}-{}-{uniq}", std::process::id()));
     std::fs::create_dir_all(&work).expect("create work dir");
-    let src = work.join("gen.rs");
-    let staged = work.join(format!("gen{exe}"));
-    std::fs::write(&src, program).expect("write generated source");
+    let staged = work.join(format!("out{suffix}"));
+    for (file, bytes) in files {
+        std::fs::write(work.join(file), bytes).expect("write generated source");
+    }
 
     let mut cmd = Command::new("rustc");
-    cmd.current_dir(&work).arg(&src);
-    cmd.args(RUSTC_FLAGS);
+    cmd.current_dir(&work).arg(work.join(entry));
+    cmd.args(flags);
     if let Some(lib) = wasi {
         let mut extern_arg = std::ffi::OsString::from("wasm2rs_wasi=");
         extern_arg.push(&lib.rlib);
@@ -418,10 +452,15 @@ fn build_with(name: &str, program: &str, wasi: Option<&WasiLib>) -> std::path::P
     }
     cmd.arg("-o").arg(&staged);
     let out = cmd.output().expect("run rustc");
+    let head = files
+        .iter()
+        .find(|(n, _)| *n == entry)
+        .map(|(_, b)| String::from_utf8_lossy(b))
+        .unwrap_or_default();
     assert!(
         out.status.success(),
         "generated code failed to compile:\n{}\n--- stderr ---\n{}\n--- command ---\n{cmd:?}\n--- deps ---\n{}",
-        &program[..program.len().min(400)],
+        head.chars().take(400).collect::<String>(),
         String::from_utf8_lossy(&out.stderr),
         wasi.map(|lib| format!("{:?}", lib.deps))
             .unwrap_or_default(),
@@ -456,7 +495,8 @@ pub fn compile_run(name: &str, wat: &str, main_body: &str) {
     let run = Command::new(&bin).status().expect("run generated binary");
     assert!(
         run.success(),
-        "generated program assertions failed:\n{name}"
+        "generated program assertions failed:\n{name} ({})",
+        bin.display()
     );
 }
 

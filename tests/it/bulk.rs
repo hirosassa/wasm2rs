@@ -6,48 +6,16 @@
 
 use std::process::Command;
 
+use crate::common::compile_run;
+
 /// Transpile `wat`, wrap the output in a `main` running `main_body`, and compile
 /// it with `rustc -D warnings`. Returns the path to the built binary.
 fn compile(test: &str, wat: &str, main_body: &str) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
 
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_bulk_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
     let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let out = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr),
-    );
-    bin
-}
-
-/// Compile `wat` + `main_body` and run it, asserting the program exits
-/// successfully (its own `assert!`s hold and it does not trap).
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let bin = compile(test, wat, main_body);
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{test}"
-    );
+    crate::common::build(&format!("wasm2rs_bulk_{test}"), &program)
 }
 
 // A module exercising `memory.fill`/`memory.copy` alongside byte store/load so a
@@ -63,7 +31,7 @@ const MEM_M: &str = r#"
 
 #[test]
 fn memory_fill_sets_a_range() {
-    transpile_compile_run(
+    compile_run(
         "mem_fill",
         MEM_M,
         "let mut inst = Instance::new();\n    \
@@ -79,7 +47,7 @@ fn memory_fill_sets_a_range() {
 fn memory_copy_handles_overlap() {
     // Bytes 1,2,3 at [0..3] copied forward to [1..4] must land as 1,2,3 (memmove
     // semantics), leaving [0] untouched.
-    transpile_compile_run(
+    compile_run(
         "mem_copy",
         MEM_M,
         "let mut inst = Instance::new();\n    \
@@ -112,7 +80,7 @@ fn memory_fill_out_of_bounds_traps() {
 fn memory_fill_zero_len_at_end_does_not_trap() {
     // wasm allows a zero-length fill/copy whose offset equals the memory size
     // (size 65536 for one page); it must not trap.
-    transpile_compile_run(
+    compile_run(
         "mem_fill_zero_len",
         MEM_M,
         "let mut inst = Instance::new();\n    \
@@ -152,7 +120,7 @@ const TABLE_M: &str = r#"
 fn table_copy_moves_entries() {
     // Slot 1 (-> $b) is copied into slot 2, so an indirect call through slot 2
     // then dispatches to $b.
-    transpile_compile_run(
+    compile_run(
         "table_copy",
         TABLE_M,
         "let mut inst = Instance::new();\n    \

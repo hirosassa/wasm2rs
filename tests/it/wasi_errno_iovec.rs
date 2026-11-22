@@ -43,23 +43,10 @@ const MODULE: &str = r#"
 fn run(test: &str, extra: &str, setup: impl FnOnce(&std::path::Path)) {
     let wasm = wat::parse_str(MODULE).expect("valid wat");
     let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_wasierr_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
     let program = format!("{generated}\n{extra}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-    let out = Command::new("rustc")
-        .current_dir(&dir)
-        .arg(&src)
-        .args(["--edition", "2024", "-D", "warnings", "-o"])
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr),
-    );
+    let bin = crate::common::build(&format!("wasm2rs_wasierr_{test}"), &program);
+    // the binary runs in its own scratch dir: the cached one is shared
+    let dir = crate::common::scratch_dir(&format!("wasm2rs_wasierr_{test}"));
     setup(&dir);
     let out = Command::new(&bin)
         .current_dir(&dir)

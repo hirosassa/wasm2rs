@@ -203,11 +203,8 @@ fn a_rust_wasi_threads_command_counts_across_threads() {
         );
         return;
     }
-    let dir = work_dir("rust_command");
     // The guest asserts its own result; a failed assertion traps `_start`.
-    std::fs::write(
-        dir.join("threads.rs"),
-        r#"
+    let guest = r#"
 use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
 fn main() {
     let c = Arc::new(AtomicU32::new(0));
@@ -218,23 +215,15 @@ fn main() {
     for h in hs { h.join().unwrap(); }
     assert_eq!(c.load(Ordering::SeqCst), 4000);
 }
-"#,
-    )
-    .unwrap();
-    let status = Command::new("rustc")
-        .current_dir(&dir)
-        .args([
-            "--target",
-            "wasm32-wasip1-threads",
-            "-O",
-            "threads.rs",
-            "-o",
-            "threads.wasm",
-        ])
-        .status()
-        .expect("run rustc");
-    assert!(status.success(), "rustc failed");
-    let wasm = std::fs::read(dir.join("threads.wasm")).unwrap();
+"#;
+    let built = crate::common::build_artifact(
+        "sdk_rust_threads",
+        "threads.rs",
+        &[("threads.rs", guest.as_bytes())],
+        &["--target", "wasm32-wasip1-threads", "-O"],
+        ".wasm",
+    );
+    let wasm = std::fs::read(built).unwrap();
 
     let start = export_index(&wasm, "_start");
     let pages = imported_memory_pages(&wasm).expect("the module imports a shared memory");

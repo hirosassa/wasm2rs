@@ -5,46 +5,7 @@
 //! global/import, so they transpile to free `func{n}` functions; the generated
 //! Rust is compiled with `rustc -D warnings` and exercised.
 
-use std::process::Command;
-
-fn compile(test: &str, wat: &str, main_body: &str) -> std::path::PathBuf {
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_reference_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let out = Command::new("rustc")
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr),
-    );
-    bin
-}
-
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let bin = compile(test, wat, main_body);
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{test}"
-    );
-}
+use crate::common::compile_run;
 
 #[test]
 fn ref_is_null_distinguishes_null_from_a_function() {
@@ -56,7 +17,7 @@ fn ref_is_null_distinguishes_null_from_a_function() {
           (func (result i32) (ref.is_null (ref.null func)))
           (func (result i32) (ref.is_null (ref.func $target))))
         "#;
-    transpile_compile_run(
+    compile_run(
         "ref_is_null",
         wat,
         "assert_eq!(func1(), 1);\n    assert_eq!(func2(), 0);",
@@ -75,7 +36,7 @@ fn funcref_round_trips_through_a_local() {
             (local.set 0 (ref.func $target))
             (ref.is_null (local.get 0))))
         "#;
-    transpile_compile_run("funcref_local", wat, "assert_eq!(func1(), 0);");
+    compile_run("funcref_local", wat, "assert_eq!(func1(), 0);");
 }
 
 #[test]
@@ -87,7 +48,7 @@ fn funcref_passes_through_params_and_results() {
           (func $id (param funcref) (result funcref) (local.get 0))
           (func (result i32) (ref.is_null (call $id (ref.null func)))))
         "#;
-    transpile_compile_run("funcref_param", wat, "assert_eq!(func1(), 1);");
+    compile_run("funcref_param", wat, "assert_eq!(func1(), 1);");
 }
 
 #[test]
@@ -100,7 +61,7 @@ fn declared_element_segment_allows_ref_func() {
           (elem declare func $target)
           (func (result i32) (ref.is_null (ref.func $target))))
         "#;
-    transpile_compile_run("declared_elem", wat, "assert_eq!(func1(), 0);");
+    compile_run("declared_elem", wat, "assert_eq!(func1(), 0);");
 }
 
 #[test]
@@ -118,7 +79,7 @@ fn declared_before_passive_keeps_table_init_index_aligned() {
           (func (param i32 i32 i32) (table.init 1 (local.get 0) (local.get 1) (local.get 2)))
           (func (param i32) (result i32) (call_indirect (type $sig) (local.get 0))))
         "#;
-    transpile_compile_run(
+    compile_run(
         "declared_before_passive",
         wat,
         "let mut inst = Instance::new();\n    \

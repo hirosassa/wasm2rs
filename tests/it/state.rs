@@ -3,47 +3,11 @@
 //! the generated Rust with `rustc -D warnings`, and runs assertions against an
 //! `Instance` so the memory/global behaviour is verified end to end.
 
-use std::process::Command;
-
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_state_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let compile = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        compile.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&compile.stderr),
-    );
-
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{program}"
-    );
-}
+use crate::common::compile_run;
 
 #[test]
 fn mutable_global_accumulates() {
-    transpile_compile_run(
+    compile_run(
         "global",
         r#"
         (module
@@ -60,7 +24,7 @@ fn mutable_global_accumulates() {
 
 #[test]
 fn i32_store_load_roundtrip() {
-    transpile_compile_run(
+    compile_run(
         "mem_i32",
         r#"
         (module
@@ -77,7 +41,7 @@ fn i32_store_load_roundtrip() {
 
 #[test]
 fn narrow_stores_and_sign_extension() {
-    transpile_compile_run(
+    compile_run(
         "mem_narrow",
         r#"
         (module
@@ -101,7 +65,7 @@ fn narrow_stores_and_sign_extension() {
 
 #[test]
 fn i64_store_load_roundtrip() {
-    transpile_compile_run(
+    compile_run(
         "mem_i64",
         r#"
         (module
@@ -120,7 +84,7 @@ fn i64_store_load_roundtrip() {
 fn i64_negative_roundtrip_at_offset() {
     // A negative value exercises the sign bit through to_le_bytes/from_le_bytes,
     // and a non-zero memarg offset is folded into the effective address.
-    transpile_compile_run(
+    compile_run(
         "mem_i64_offset",
         r#"
         (module
@@ -136,7 +100,7 @@ fn i64_negative_roundtrip_at_offset() {
 
 #[test]
 fn float_store_load_roundtrip() {
-    transpile_compile_run(
+    compile_run(
         "mem_float",
         r#"
         (module
@@ -156,7 +120,7 @@ fn float_store_load_roundtrip() {
 
 #[test]
 fn i64_narrow_stores_and_sign_extension() {
-    transpile_compile_run(
+    compile_run(
         "mem_i64_narrow",
         r#"
         (module
@@ -189,7 +153,7 @@ fn rt_helper_prepended_before_instance() {
     // A stateful module (has memory) becomes a `struct Instance`; a runtime
     // free-function helper like `f32_min` must still be emitted at module scope
     // ahead of the struct so the generated code compiles and runs.
-    transpile_compile_run(
+    compile_run(
         "rt_stateful",
         r#"
         (module
@@ -204,7 +168,7 @@ fn rt_helper_prepended_before_instance() {
 
 #[test]
 fn memory_size_and_grow() {
-    transpile_compile_run(
+    compile_run(
         "mem_grow",
         r#"
         (module
@@ -239,7 +203,7 @@ fn memory_grow_past_declared_maximum_fails_and_preserves_size() {
     // `(memory 1 2)`: growing by two would reach three pages, past the declared
     // maximum, so it returns -1; the size and the existing bytes are untouched.
     // A negative operand is a huge unsigned page count and fails too.
-    transpile_compile_run(
+    compile_run(
         "mem_grow_past_max",
         &grow_size_wat("1 2"),
         "let mut inst = Instance::new();\n    \
@@ -256,7 +220,7 @@ fn memory_grow_past_declared_maximum_fails_and_preserves_size() {
 fn memory_grow_to_exactly_the_declared_maximum_succeeds() {
     // Growing to exactly two pages is allowed; one more page fails; growing by
     // zero (also at the maximum) returns the current size and changes nothing.
-    transpile_compile_run(
+    compile_run(
         "mem_grow_exact_max",
         &grow_size_wat("1 2"),
         "let mut inst = Instance::new();\n    \
@@ -275,7 +239,7 @@ fn memory_grow_to_exactly_the_declared_maximum_succeeds() {
 fn memory_grow_with_maximum_zero_or_equal_to_initial_always_fails() {
     // `(memory 0 0)` and `(memory 2 2)` cannot grow at all; growing by zero is
     // still fine.
-    transpile_compile_run(
+    compile_run(
         "mem_grow_max_zero",
         &grow_size_wat("0 0"),
         "let mut inst = Instance::new();\n    \
@@ -283,7 +247,7 @@ fn memory_grow_with_maximum_zero_or_equal_to_initial_always_fails() {
          assert_eq!(inst.func1(), 0);\n    \
          assert_eq!(inst.func0(0), 0);",
     );
-    transpile_compile_run(
+    compile_run(
         "mem_grow_initial_is_max",
         &grow_size_wat("2 2"),
         "let mut inst = Instance::new();\n    \
@@ -297,7 +261,7 @@ fn memory_grow_with_maximum_zero_or_equal_to_initial_always_fails() {
 fn memory_grow_without_declared_maximum_only_hits_the_wasm32_cap() {
     // No declared maximum: small growth succeeds, and growth past the 65536-page
     // wasm32 cap fails (checked before any allocation, so nothing big is made).
-    transpile_compile_run(
+    compile_run(
         "mem_grow_no_max",
         &grow_size_wat("1"),
         "let mut inst = Instance::new();\n    \
@@ -311,7 +275,7 @@ fn memory_grow_without_declared_maximum_only_hits_the_wasm32_cap() {
 #[test]
 fn store_at_offset_is_readable() {
     // A memarg offset is folded into the effective address.
-    transpile_compile_run(
+    compile_run(
         "mem_offset",
         r#"
         (module

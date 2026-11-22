@@ -744,28 +744,18 @@ fn compile_run_split_typed(dir_name: &str, wat: &str, main_body: &str) {
     })
     .expect("transpile ok");
     assert!(files.len() > 1, "expected a split output");
-    let dir = common::scratch_dir(dir_name);
-    for f in &files {
-        let mut code = f.code.clone();
-        if f.name == "lib.rs" {
-            code.push_str(&format!("{CATCH}\nfn main() {{\n{main_body} }}\n"));
-        }
-        std::fs::write(dir.join(&f.name), code).expect("write generated file");
-    }
-    let bin = dir.join("gen");
-    let out = Command::new("rustc")
-        .current_dir(&dir)
-        .args(["lib.rs", "--edition", "2024", "-o"])
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let sources: Vec<(&str, Vec<u8>)> = files
+        .iter()
+        .map(|f| {
+            let mut code = f.code.clone();
+            if f.name == "lib.rs" {
+                code.push_str(&format!("{CATCH}\nfn main() {{\n{main_body} }}\n"));
+            }
+            (f.name.as_str(), code.into_bytes())
+        })
+        .collect();
+    let bin = common::build_crate(dir_name, "lib.rs", &sources);
     assert!(Command::new(&bin).status().expect("run").success());
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

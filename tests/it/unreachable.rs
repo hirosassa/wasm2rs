@@ -3,37 +3,14 @@
 //! module is compiled with `rustc -D warnings`; the behaviour test asserts a
 //! live path returns normally, the trap tests assert the program panics.
 
-use std::process::Command;
+use crate::common::compile_run;
 
 fn compile(test: &str, wat: &str, main_body: &str) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
 
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_unreach_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
     let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let out = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr),
-    );
-    bin
+    crate::common::build(&format!("wasm2rs_unreach_{test}"), &program)
 }
 
 const M: &str = r#"
@@ -109,7 +86,7 @@ fn unreachable_routed_through_cold_helper() {
 /// its `end` must not close the live frame around it.
 #[test]
 fn a_try_table_in_dead_code_is_skipped() {
-    crate::common::compile_run(
+    compile_run(
         "dead_try_table",
         r#"(module (func (br 0) (try_table (result i32) (i32.const 1)) drop))"#,
         "func0();",
@@ -118,7 +95,7 @@ fn a_try_table_in_dead_code_is_skipped() {
 
 #[test]
 fn nested_try_tables_in_dead_code_are_skipped() {
-    crate::common::compile_run(
+    compile_run(
         "dead_try_table_nested",
         r#"(module (func (br 0)
             (try_table (result i32)

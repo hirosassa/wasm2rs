@@ -25,28 +25,7 @@ fn compile(test: &str, modules: &[(&str, &str)], extra: &str) -> std::path::Path
     program.push_str(extra);
     program.push('\n');
 
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_linking_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let out = Command::new("rustc")
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr),
-    );
-    bin
+    crate::common::build(&format!("wasm2rs_linking_{test}"), &program)
 }
 
 fn run_ok(test: &str, modules: &[(&str, &str)], extra: &str) {

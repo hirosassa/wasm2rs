@@ -2,51 +2,11 @@
 //! module, compiles the generated Rust with a real `rustc`, and runs assertions
 //! against the produced function so behaviour (not just syntax) is verified.
 
-use std::process::Command;
-
-/// Transpile `wat`, append `main_body` inside a `fn main()`, compile and run.
-/// Panics (failing the test) with the generated source if anything goes wrong.
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_cf_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let compile = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        // Deny warnings so any lint the generated code does not explicitly allow
-        // (e.g. genuinely unreachable code from a codegen bug) fails the test.
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        compile.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&compile.stderr),
-    );
-
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{program}",
-    );
-}
+use crate::common::compile_run;
 
 #[test]
 fn if_else_with_result() {
-    transpile_compile_run(
+    compile_run(
         "if_else",
         r#"
         (module
@@ -61,7 +21,7 @@ fn if_else_with_result() {
 
 #[test]
 fn loop_sums_one_to_n() {
-    transpile_compile_run(
+    compile_run(
         "loop_sum",
         r#"
         (module
@@ -83,7 +43,7 @@ fn loop_sums_one_to_n() {
 #[test]
 fn block_with_result_via_br_if() {
     // Returns 1 early when the argument is negative, otherwise 2.
-    transpile_compile_run(
+    compile_run(
         "block_result",
         r#"
         (module
@@ -101,7 +61,7 @@ fn block_with_result_via_br_if() {
 fn early_return_inside_block() {
     // Returns 222 when the argument is zero, 111 otherwise. Exercises `return`
     // (which makes the rest of the block unreachable) and a void block exit.
-    transpile_compile_run(
+    compile_run(
         "early_return",
         r#"
         (module
@@ -119,7 +79,7 @@ fn early_return_inside_block() {
 fn nested_loops_multiply() {
     // Computes n * m by incrementing an accumulator in a doubly-nested loop,
     // exercising distinct inner/outer loop labels and `continue`/`break`.
-    transpile_compile_run(
+    compile_run(
         "nested_loops",
         r#"
         (module
@@ -146,7 +106,7 @@ fn nested_loops_multiply() {
 
 #[test]
 fn br_table_selects_branch() {
-    transpile_compile_run(
+    compile_run(
         "br_table",
         r#"
         (module

@@ -8,43 +8,14 @@
 
 use std::process::Command;
 
+use crate::common::compile_run;
+
 fn compile(test: &str, wat: &str, main_body: &str) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
 
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_table_ops_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
     let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let out = Command::new("rustc")
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr),
-    );
-    bin
-}
-
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let bin = compile(test, wat, main_body);
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{test}"
-    );
+    crate::common::build(&format!("wasm2rs_table_ops_{test}"), &program)
 }
 
 fn expect_trap(test: &str, wat: &str, main_body: &str) {
@@ -68,7 +39,7 @@ const GET_SET_M: &str = r#"
 
 #[test]
 fn table_set_then_get_and_call() {
-    transpile_compile_run(
+    compile_run(
         "get_set",
         GET_SET_M,
         "let mut inst = Instance::new();\n    \
@@ -108,7 +79,7 @@ const SIZE_GROW_M: &str = r#"
 
 #[test]
 fn table_size_and_grow() {
-    transpile_compile_run(
+    compile_run(
         "size_grow",
         SIZE_GROW_M,
         "let mut inst = Instance::new();\n    \
@@ -133,7 +104,7 @@ const FILL_M: &str = r#"
 fn table_grow_returns_minus_one_when_unsatisfiable() {
     // A "negative" delta is a huge unsigned count; growth cannot be satisfied,
     // so `table.grow` must push -1 (and not abort) and leave the size unchanged.
-    transpile_compile_run(
+    compile_run(
         "grow_fail",
         SIZE_GROW_M,
         "let mut inst = Instance::new();\n    \
@@ -144,7 +115,7 @@ fn table_grow_returns_minus_one_when_unsatisfiable() {
 
 #[test]
 fn table_fill_writes_a_range() {
-    transpile_compile_run(
+    compile_run(
         "fill",
         FILL_M,
         "let mut inst = Instance::new();\n    \
@@ -169,7 +140,7 @@ fn table_grow_allocation_failure_returns_minus_one_instead_of_aborting() {
     // An unbounded table asked to grow by ~4G entries (16 GiB) must report -1
     // when the allocation fails, not abort the process. A global allocator that
     // refuses allocations over 1 GiB makes the failure deterministic.
-    transpile_compile_run(
+    compile_run(
         "table_grow_oom",
         r#"(module
             (table 0 funcref)
@@ -195,7 +166,7 @@ fn table64_nonempty_grow_allocation_failure_returns_minus_one_instead_of_abortin
     // An unbounded table asked to grow by ~4G entries (16 GiB) must report -1
     // when the allocation fails, not abort the process. A global allocator that
     // refuses allocations over 1 GiB makes the failure deterministic.
-    transpile_compile_run(
+    compile_run(
         "table64_grow_oom",
         r#"(module
             (table i64 2 funcref)

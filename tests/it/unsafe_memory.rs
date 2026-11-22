@@ -21,32 +21,11 @@ fn transpile_unsafe(wat: &str) -> String {
 }
 
 /// Compile `generated` (wrapped in a `main` running `main_body`) with `rustc -D
-/// warnings`, run it, and assert both the build and the run succeed. `test` names
-/// a per-invocation temp directory so parallel `rustc`s do not collide.
+/// warnings` (cached by content, see `common::build`), run it, and assert both the build and
+/// the run succeed. `test` only labels the build.
 fn compile_and_run(test: &str, generated: &str, main_body: &str) {
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_unsafe_mem_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
     let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let out = Command::new("rustc")
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr),
-    );
+    let bin = crate::common::build(&format!("wasm2rs_unsafe_mem_{test}"), &program);
     let run = Command::new(&bin).status().expect("run generated binary");
     assert!(run.success(), "generated program did not succeed: {test}");
 }

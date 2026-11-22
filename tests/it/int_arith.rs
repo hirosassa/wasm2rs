@@ -5,35 +5,14 @@
 
 use std::process::Command;
 
+use crate::common::compile_run;
+
 fn compile(test: &str, wat: &str, main_body: &str) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
 
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_intarith_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
     let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let out = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr),
-    );
-    bin
+    crate::common::build(&format!("wasm2rs_intarith_{test}"), &program)
 }
 
 fn expect_ok(test: &str, wat: &str, main_body: &str) {
@@ -193,7 +172,7 @@ fn constant_operand_traps_compile_and_trap_at_runtime() {
 
 #[test]
 fn constant_signed_remainder_of_min_by_minus_one_is_zero() {
-    crate::common::compile_run(
+    compile_run(
         "constdiv_rem_min",
         r#"(module (func (export "f") (result i32) i32.const -2147483648 i32.const -1 i32.rem_s))"#,
         "assert_eq!(func0(), 0);",
@@ -233,7 +212,7 @@ fn constant_divisor_traps_with_runtime_dividend() {
             "overflow",
         );
         // Same instruction, a dividend that is not MIN: no trap.
-        crate::common::compile_run(
+        compile_run(
             &format!("cdiv_rt_ovf_ok_{ty}"),
             &overflow,
             &format!("assert_eq!(func0(6), -6);\n    assert_eq!(func0({ty}::MAX), -{ty}::MAX);"),
@@ -262,7 +241,7 @@ fn dropped_constant_zero_divisor_still_traps() {
 /// unsigned ops treat -1 as the largest divisor rather than a trap.
 #[test]
 fn constant_nonzero_divisor_results() {
-    crate::common::compile_run(
+    compile_run(
         "cdiv_results",
         r#"(module
           (func (export "a") (param i32) (result i32) local.get 0 i32.const 3 i32.div_s)
@@ -318,7 +297,7 @@ fn constant_nonzero_divisor_is_not_materialized() {
 /// whole quotient rather than just the divisor.
 #[test]
 fn inlined_constant_quotient_feeds_cast_consumers() {
-    crate::common::compile_run(
+    compile_run(
         "cdiv_chain",
         r#"(module
           (func (export "a") (param i32) (result i32) local.get 0 i32.const 3 i32.div_s i32.const 5 i32.rem_u)

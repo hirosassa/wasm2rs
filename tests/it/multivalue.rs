@@ -3,48 +3,12 @@
 //! it back onto the operand stack. Each module is compiled with
 //! `rustc -D warnings` and exercised.
 
-use std::process::Command;
-
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_mv_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let compile = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        compile.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&compile.stderr),
-    );
-
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{program}"
-    );
-}
+use crate::common::compile_run;
 
 #[test]
 fn function_returns_a_pair() {
     // Swap: pushes arg1 then arg0, so the result tuple is (l1, l0).
-    transpile_compile_run(
+    compile_run(
         "pair",
         r#"
         (module
@@ -57,7 +21,7 @@ fn function_returns_a_pair() {
 
 #[test]
 fn function_returns_three_mixed_values() {
-    transpile_compile_run(
+    compile_run(
         "triple",
         r#"
         (module
@@ -71,7 +35,7 @@ fn function_returns_three_mixed_values() {
 #[test]
 fn call_destructures_multi_value_result() {
     // func0 returns (x, 2x); func1 calls it and adds the two results: 3x.
-    transpile_compile_run(
+    compile_run(
         "call",
         r#"
         (module
@@ -88,7 +52,7 @@ fn call_destructures_multi_value_result() {
 #[test]
 fn call_indirect_destructures_multi_value_result() {
     // Table slot 0 is func0 returning (x, x*x); func1 dispatches and adds them.
-    transpile_compile_run(
+    compile_run(
         "indirect",
         r#"
         (module

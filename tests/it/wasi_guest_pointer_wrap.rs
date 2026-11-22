@@ -98,8 +98,7 @@ fn spans_past_4g_trap_with_32bit_usize() {
             "{generated}\nfn main() {{ let mut m = Instance::new(); println!(\"RESULT {{}}\", m.func1()); }}\n"
         );
         let dir = common::scratch_dir(&format!("wasm2rs_wasi_wrap_w32_{name}"));
-        let (src, wasm, js) = (dir.join("m.rs"), dir.join("m.wasm"), dir.join("run.mjs"));
-        std::fs::write(&src, program).unwrap();
+        let js = dir.join("run.mjs");
         std::fs::write(
             &js,
             "import {WASI} from 'node:wasi'; import fs from 'node:fs';\n\
@@ -110,17 +109,12 @@ fn spans_past_4g_trap_with_32bit_usize() {
         )
         .unwrap();
         // Release: debug builds would panic on a usize overflow and mask a wrap.
-        let rc = Command::new("rustc")
-            .args(["--edition", "2024", "-O", "--target", "wasm32-wasip1"])
-            .arg(&src)
-            .arg("-o")
-            .arg(&wasm)
-            .output()
-            .unwrap();
-        assert!(
-            rc.status.success(),
-            "{}",
-            String::from_utf8_lossy(&rc.stderr)
+        let wasm = common::build_artifact(
+            &format!("wasm2rs_wasi_wrap_w32_{name}"),
+            "m.rs",
+            &[("m.rs", program.as_bytes())],
+            &["--edition", "2024", "-O", "--target", "wasm32-wasip1"],
+            ".wasm",
         );
         let out = Command::new("node")
             .arg("--no-warnings")

@@ -3,47 +3,11 @@
 //! assertions so the call behaviour (arguments, results, recursion, and
 //! free-fn vs `&mut self` method dispatch) is verified end to end.
 
-use std::process::Command;
-
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_calls_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let compile = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        compile.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&compile.stderr),
-    );
-
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{program}"
-    );
-}
+use crate::common::compile_run;
 
 #[test]
 fn direct_call_passes_arguments_and_result() {
-    transpile_compile_run(
+    compile_run(
         "direct",
         r#"
         (module
@@ -56,7 +20,7 @@ fn direct_call_passes_arguments_and_result() {
 
 #[test]
 fn recursive_call_sums_to_n() {
-    transpile_compile_run(
+    compile_run(
         "recursion",
         r#"
         (module
@@ -72,7 +36,7 @@ fn recursive_call_sums_to_n() {
 
 #[test]
 fn mutual_recursion_parity() {
-    transpile_compile_run(
+    compile_run(
         "mutual",
         r#"
         (module
@@ -97,7 +61,7 @@ fn operand_keeps_pre_call_value_when_callee_mutates_global() {
     // The left operand of the `add` reads global 0 *before* the call, and the
     // callee overwrites that global. Correct spill-before-call must freeze the
     // pre-call value (100), so the result is 100 + (100 + 1) = 201, not 101.
-    transpile_compile_run(
+    compile_run(
         "spill",
         r#"
         (module
@@ -116,7 +80,7 @@ fn operand_keeps_pre_call_value_when_callee_mutates_global() {
 fn void_call_in_stateful_module_dispatches_on_self() {
     // A module with a global becomes a `struct Instance`; the caller must
     // reach the callee through `self`, and the void call runs for its effect.
-    transpile_compile_run(
+    compile_run(
         "stateful",
         r#"
         (module
@@ -138,7 +102,7 @@ fn a_directly_recursive_function_compiles_without_warnings() {
     // `runaway` calls itself unconditionally (it would exhaust the stack if it
     // were ever called). rustc's `unconditional_recursion` lint must not make
     // the generated code fail `-D warnings`.
-    crate::common::compile_run(
+    compile_run(
         "calls_unconditional_recursion",
         r#"(module
           (func $runaway (export "runaway") (call $runaway))
