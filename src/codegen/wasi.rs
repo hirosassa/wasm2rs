@@ -558,8 +558,8 @@ fn expand_parts(body: &str, files: bool, access: WasiAccess) -> Vec<String> {
     let mut lines = Vec::new();
     'lines: for line in body.lines() {
         let mut line = line.to_string();
-        // Directives never nest and none spans lines, so one left-to-right scan
-        // per line suffices.
+        // Fragments hold no directives, and a multi-line one must be on a line of
+        // its own (it is flattened into a single line otherwise).
         while let Some((start, end, name, args)) = find_directive(&line) {
             let text = fragment(name, &args);
             if line.trim() == &line[start..end] {
@@ -580,7 +580,9 @@ fn find_directive(line: &str) -> Option<(usize, usize, &str, Vec<&str>)> {
     while let Some(at) = line[from..].find('@') {
         let start = from + at;
         let rest = &line[start + 1..];
-        let name_len = rest.find(|c: char| !c.is_ascii_lowercase() && c != '_')?;
+        let name_len = rest
+            .find(|c: char| !c.is_ascii_lowercase() && c != '_')
+            .unwrap_or(rest.len());
         if name_len > 0
             && rest[name_len..].starts_with('(')
             && let Some(close) = rest.find(")@")
@@ -750,7 +752,13 @@ mod tests {
                         locked_fds,
                         ..WasiAccess::default()
                     };
-                    expand_parts(body, files, access);
+                    let text = expand_parts(body, files, access).join("\n");
+                    // A wrong argument count or an unparsable directive would
+                    // otherwise survive as text and only fail in rustc.
+                    for n in 1..=4 {
+                        assert!(!text.contains(&format!("@{n}@")), "{header}: {text}");
+                    }
+                    assert!(find_directive(&text).is_none(), "{header}: {text}");
                 }
             }
         }
