@@ -34,7 +34,7 @@ Transpiler::new(TranspileOptions::default())
 
 The single-file terminals return `TranspileError::InvalidOptions` when a split or `with_data_files(true)` was configured, since a string cannot carry several files; `run` always works (without a split it emits one `lib.rs`).
 
-The older functions are thin wrappers over the builders and are not deprecated: `transpile`, `transpile_with_options`, `transpile_pieces_with_options`, `transpile_split[_with_options]`, `transpile_split_files[_with_options]`, `transpile_component`, `transpile_component_with_exports`, `transpile_component_split[_files]`. Their output is byte-identical to the builder's. The `wasm2rs::build` helpers are unchanged.
+The older functions are thin wrappers over the builders and are not deprecated: `transpile`, `transpile_with_options`, `transpile_pieces_with_options`, `transpile_split[_with_options]`, `transpile_split_files[_with_options]`, `transpile_component`, `transpile_component_with_exports`, `transpile_component_split[_files]`. Their output is byte-identical to the builder's. The `wasm2rs::build` helpers keep their signatures and behavior too; `build::run_to_out_dir` and friends (see *Using from `build.rs`*) are the builder-taking entry points.
 
 `wasm2rs::dump(&wasm)` returns the same summary as `--dump` (a `ModuleSummary` that implements `Display`).
 `wasm2rs::extract_core_modules(&component)` returns a component's core modules as `Vec<Vec<u8>>`.
@@ -84,6 +84,29 @@ mod run {
 ```
 
 Pass the name *without* the `.wasm` extension: `include_component!("run.wasm")` is a `compile_error!` that says so (the file is named after the input's file stem, `run.rs`). A dot inside the name (`include_component!("foo.bar")` for `assets/foo.bar.wasm`) is fine.
+
+### Split output and data side files from `build.rs`
+
+The helpers above write one file. To split a large module (rustc compiles several smaller files faster) or move big data segments into `data_{n}.bin` side files, hand a `Transpiler` / `ComponentTranspiler` to `wasm2rs::build::run_to_out_dir` (`run_to_dir` writes into an explicit directory without the Cargo output; `run_component_to_out_dir` / `run_component_to_dir` are the component versions). They write into the directory `$OUT_DIR/{name}` (`{file stem}` for a component), return the path of its `lib.rs`, and write `lib.rs` alone, byte-identical to `Transpiler::transpile` (`ComponentTranspiler::transpile` for a component), when the builder has no split and no data files:
+
+```rust
+// build.rs
+use wasm2rs::{SplitOptions, TranspileOptions, Transpiler};
+
+fn main() {
+    let t = Transpiler::new(TranspileOptions::default())
+        .with_split(SplitOptions { funcs_per_file: 500, max_bytes_per_file: 0 })
+        .with_data_files(true);
+    wasm2rs::build::run_to_out_dir(&t, "assets/foo.wasm", "foo").unwrap();
+}
+
+// src/lib.rs
+mod foo {
+    include!(concat!(env!("OUT_DIR"), "/foo/lib.rs"));
+}
+```
+
+The `mod funcs_{n};` and `include_bytes!` lines of the included `lib.rs` resolve next to it, so the whole directory works. Files from an earlier run that the new `lib.rs` no longer references are left in place. `wasm2rs_macros::include_component!` reads the single-file `{stem}.rs` of `transpile_component_to_out_dir` only; include a split component with `include!` of `{stem}/lib.rs`.
 
 ## Using the proc macro
 

@@ -44,6 +44,7 @@ mod br_table_try;
 mod br_table_values;
 mod build_cache;
 mod build_helper;
+mod build_script_split_project;
 mod bulk;
 mod call_depth_limit;
 mod call_indirect;

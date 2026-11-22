@@ -171,6 +171,32 @@ mod component {
     }
 
     #[test]
+    fn run_component_to_dir_matches_the_single_file_wrapper_and_splits() {
+        use wasm2rs::build::run_component_to_dir;
+        use wasm2rs::{ComponentTranspiler, SplitOptions};
+
+        let dir = scratch("run_split");
+        let wasm = component_of(WORLD, CORE);
+        let path = dir.join("hello.wasm");
+        std::fs::write(&path, &wasm).unwrap();
+
+        let single = run_component_to_dir(&ComponentTranspiler::default(), &dir, &path).unwrap();
+        assert_eq!(single, dir.join("hello").join("lib.rs"));
+        assert_eq!(
+            std::fs::read_to_string(single).unwrap(),
+            transpile_component(&wasm, &ComponentOptions::default()).unwrap()
+        );
+
+        let split = ComponentTranspiler::default().with_split(SplitOptions {
+            funcs_per_file: 1,
+            max_bytes_per_file: 0,
+        });
+        let root = run_component_to_dir(&split, dir.join("split"), &path).unwrap();
+        assert!(root.is_file());
+        assert!(dir.join("split/hello/funcs_0.rs").is_file());
+    }
+
+    #[test]
     fn the_out_dir_wrapper_requires_out_dir() {
         if std::env::var_os("OUT_DIR").is_some() {
             return;
@@ -180,5 +206,92 @@ mod component {
         std::fs::write(&path, component_of(WORLD, CORE)).unwrap();
         let err = transpile_component_to_out_dir(&path, &ComponentOptions::default()).unwrap_err();
         assert!(matches!(err, BuildError::MissingOutDir), "{err}");
+    }
+}
+
+// --- builders: split output and data side files ---
+
+mod builders {
+    use wasm2rs::build::{BuildError, run_to_dir};
+    use wasm2rs::{
+        FileContent, SplitOptions, TranspileOptions, Transpiler, transpile, transpile_split_files,
+    };
+
+    /// Many small functions, so a split of one function per file yields several chunks, plus a
+    /// data segment past the 4 KiB side-file threshold.
+    fn big_wat() -> String {
+        let mut s = String::from("(module (memory 1) (data (i32.const 0) \"");
+        s.push_str(&"ab".repeat(3000));
+        s.push_str("\")");
+        for i in 0..4 {
+            s.push_str(&format!(
+                "(func (export \"f{i}\") (param i32) (result i32) local.get 0 i32.const {i} i32.add)"
+            ));
+        }
+        s.push(')');
+        s
+    }
+
+    fn scratch(name: &str) -> (std::path::PathBuf, std::path::PathBuf, Vec<u8>) {
+        let dir =
+            std::env::temp_dir().join(format!("wasm2rs_builders_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm = wat::parse_str(big_wat()).unwrap();
+        let path = dir.join("foo.wasm");
+        std::fs::write(&path, &wasm).unwrap();
+        (dir, path, wasm)
+    }
+
+    #[test]
+    fn split_output_with_data_files_matches_the_sink_api() {
+        let (dir, wasm_path, wasm) = scratch("split");
+        let split = SplitOptions {
+            funcs_per_file: 1,
+            max_bytes_per_file: 0,
+        };
+        let t = Transpiler::new(TranspileOptions::default())
+            .with_split(split.clone())
+            .with_data_files(true);
+        let root = run_to_dir(&t, &dir, &wasm_path, "foo").unwrap();
+        assert_eq!(root, dir.join("foo").join("lib.rs"));
+
+        let mut expected = Vec::new();
+        transpile_split_files(&wasm, &split, |f| {
+            expected.push(f);
+            Ok(())
+        })
+        .unwrap();
+        assert!(expected.iter().any(|f| f.name.starts_with("data_")));
+        assert!(expected.iter().any(|f| f.name.starts_with("funcs_")));
+        for f in expected {
+            let got = std::fs::read(dir.join("foo").join(&f.name)).unwrap();
+            let want = match f.content {
+                FileContent::Text(s) => s.into_bytes(),
+                FileContent::Bytes(b) => b,
+                _ => unreachable!(),
+            };
+            assert_eq!(got, want, "{}", f.name);
+        }
+    }
+
+    #[test]
+    fn single_file_is_lib_rs_identical_to_transpile() {
+        let (dir, wasm_path, wasm) = scratch("single");
+        let t = Transpiler::default();
+        let root = run_to_dir(&t, &dir, &wasm_path, "foo").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root).unwrap(),
+            transpile(&wasm).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_missing_input_is_an_io_error_and_writes_nothing() {
+        let (dir, _, _) = scratch("missing");
+        let err =
+            run_to_dir(&Transpiler::default(), &dir, dir.join("nope.wasm"), "foo").unwrap_err();
+        assert!(matches!(err, BuildError::Io { .. }), "{err}");
+        assert!(!dir.join("foo").exists());
     }
 }
