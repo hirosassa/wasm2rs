@@ -754,6 +754,214 @@ pub(crate) fn default_value(ty: ValType, kinds: &[CompositeKind]) -> &'static st
     }
 }
 
+/// Where the call-depth guard (see `TranspileOptions::call_depth_limit`) goes.
+#[derive(Default)]
+pub(crate) struct CallDepthGuards {
+    /// Per defined function (0-based): whether its body enters the counter.
+    pub(crate) funcs: Vec<bool>,
+    /// The function type indices whose `call_ref_t{ti}` dispatch method enters the
+    /// counter, covering every `call_indirect`/`call_ref` of that type at once.
+    pub(crate) dispatch: HashSet<u32>,
+}
+
+/// Places the call-depth guard where it is needed, rather than on every function.
+///
+/// The guard exists to bound native recursion. A recursion, direct or through any
+/// mix of calls, is a cycle in the call graph, so it is enough that every cycle
+/// passes through at least one guarded node: each trip around the cycle then counts
+/// at least one activation and the limit trips. A function on no cycle (a leaf, or
+/// anything only ever called from above) can never be re-entered while active and
+/// pays nothing.
+///
+/// The graph over-approximates what can happen at run time:
+///
+/// * a direct `call`/`return_call` is an edge to its callee;
+/// * a `call_indirect`/`call_ref` (and `return_` form) is an edge to a *dispatch*
+///   node of its type, which has an edge to every function of a compatible type that
+///   a funcref can name (`targets`, per type index: those in an element segment, a
+///   `ref.func` or an initialiser, and every function when the host can mint
+///   funcrefs). The dispatch node is the generated `call_ref_t{ti}` method, so it
+///   can carry a guard of its own;
+/// * under `reentrant_imports`, a call to a host import (and a dispatch that can
+///   reach an external handle) is an edge to every defined function, since the host
+///   can call any of them back.
+///
+/// Guarding a dispatch node counts every indirect call of its type and no direct
+/// call, which is far cheaper than guarding the many functions that a coarse,
+/// signature-level indirect edge puts on a cycle (virtual calls make most of a C++
+/// module's functions look recursive, while indirect calls are rare next to direct
+/// ones). So every dispatch node starts out guarded, a depth-first search then
+/// marks the functions needed to break the remaining (direct) cycles (every cycle
+/// contains a DFS back edge `u -> v`, and `v` takes the guard), and a final pass
+/// drops each guard that the others already make redundant. The result is a
+/// sufficient set, not a minimum one.
+///
+/// A module with continuations falls back to guarding every function: their step
+/// functions cannot carry a guard, so a cycle through one could not be assigned a
+/// guard.
+///
+/// The recursion bound this gives is `limit` guarded activations times the longest
+/// run of unguarded frames between two guarded ones; that run lies on an acyclic
+/// path, so it is finite, but it is not 1.
+pub(crate) fn call_depth_guards(
+    ctx: &ModuleCtx<'_>,
+    targets: &[Vec<usize>],
+    calls: &[Vec<u32>],
+    indirect_types: &[Vec<u32>],
+    resumes: &[bool],
+) -> CallDepthGuards {
+    let n_funcs = calls.len();
+    let n_imports = ctx.imports.len();
+    if !ctx.cont.step_set.is_empty() || !ctx.cont.bodies.is_empty() || resumes.iter().any(|&r| r) {
+        return CallDepthGuards {
+            funcs: vec![true; n_funcs],
+            dispatch: HashSet::new(),
+        };
+    }
+    let defined = |f: usize| f.checked_sub(n_imports).filter(|&d| d < n_funcs);
+    let is_host_import = |callee: usize| {
+        let import = if callee < n_imports {
+            ctx.imports.get(callee)
+        } else {
+            ctx.tail_imports.get(callee - n_imports - n_funcs)
+        };
+        import.is_some_and(|im| im.wasi.is_none())
+    };
+
+    // Node ids: the defined functions, then one dispatch node per function type used
+    // by an indirect call, then (only if the host can re-enter) the host hub.
+    let mut hub_of_type: HashMap<u32, usize> = HashMap::new();
+    let mut hub_types: Vec<u32> = Vec::new();
+    let mut edges: Vec<Vec<usize>> = Vec::with_capacity(n_funcs);
+    let mut calls_host = vec![false; n_funcs];
+    for d in 0..n_funcs {
+        let mut out: Vec<usize> = Vec::new();
+        for &callee in &calls[d] {
+            let callee = callee as usize;
+            if let Some(cd) = defined(callee) {
+                out.push(cd);
+            } else if ctx.reentrant_imports {
+                calls_host[d] |= is_host_import(callee);
+            }
+        }
+        for &ty in &indirect_types[d] {
+            let next = n_funcs + hub_types.len();
+            let hub = *hub_of_type.entry(ty).or_insert_with(|| {
+                hub_types.push(ty);
+                next
+            });
+            out.push(hub);
+        }
+        edges.push(out);
+    }
+    let host_hub = (ctx.reentrant_imports && calls_host.iter().any(|&h| h)
+        || ctx.reentrant_imports && ctx.has_imports && !hub_types.is_empty())
+    .then_some(n_funcs + hub_types.len());
+    for (d, out) in edges.iter_mut().enumerate() {
+        if calls_host[d] {
+            out.extend(host_hub);
+        }
+    }
+    for &ty in &hub_types {
+        let mut out: Vec<usize> = targets
+            .get(ty as usize)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter_map(|&t| defined(t))
+            .collect();
+        // An external handle the host resolves may call back into the module.
+        if ctx.reentrant_imports && ctx.has_imports {
+            out.extend(host_hub);
+        }
+        edges.push(out);
+    }
+    if host_hub.is_some() {
+        edges.push((0..n_funcs).collect());
+    }
+
+    // Every dispatch node starts guarded; the DFS only walks unguarded nodes.
+    let n_nodes = edges.len();
+    let mut guarded = vec![false; n_nodes];
+    for slot in guarded
+        .iter_mut()
+        .take(n_funcs + hub_types.len())
+        .skip(n_funcs)
+    {
+        *slot = true;
+    }
+    // `state` is 0 unvisited, 1 on the stack, 2 finished.
+    let mut state = vec![0u8; n_nodes];
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for root in 0..n_nodes {
+        if state[root] != 0 || guarded[root] {
+            continue;
+        }
+        state[root] = 1;
+        stack.push((root, 0));
+        while let Some(top) = stack.last_mut() {
+            let (u, next) = *top;
+            let Some(&v) = edges[u].get(next) else {
+                state[u] = 2;
+                stack.pop();
+                continue;
+            };
+            top.1 += 1;
+            if guarded[v] {
+                continue;
+            }
+            match state[v] {
+                0 => {
+                    state[v] = 1;
+                    stack.push((v, 0));
+                }
+                // A back edge closes a cycle through `v`.
+                1 => guarded[v] = true,
+                _ => {}
+            }
+        }
+    }
+    // The DFS and the initial dispatch guards over-mark: drop a guard when the others
+    // already break every cycle through its node, i.e. the node cannot reach itself
+    // without crossing another guarded node. Functions go first, so a dispatch guard
+    // (the cheaper one) is the survivor when either would do.
+    let mut seen = vec![0u32; n_nodes];
+    let mut epoch = 0u32;
+    let mut work: Vec<usize> = Vec::new();
+    for g in (0..n_funcs).chain(n_funcs..n_funcs + hub_types.len()) {
+        if !guarded[g] {
+            continue;
+        }
+        guarded[g] = false;
+        epoch += 1;
+        work.clear();
+        work.extend(edges[g].iter().copied());
+        let mut on_cycle = false;
+        while let Some(v) = work.pop() {
+            if v == g {
+                on_cycle = true;
+                break;
+            }
+            if guarded[v] || seen[v] == epoch {
+                continue;
+            }
+            seen[v] = epoch;
+            work.extend(edges[v].iter().copied());
+        }
+        guarded[g] = on_cycle;
+    }
+    let dispatch = hub_types
+        .iter()
+        .enumerate()
+        .filter(|&(h, _)| guarded[n_funcs + h])
+        .map(|(_, &ty)| ty)
+        .collect();
+    guarded.truncate(n_funcs);
+    CallDepthGuards {
+        funcs: guarded,
+        dispatch,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "test code")]
 mod tests {
@@ -989,213 +1197,5 @@ mod tests {
         let scan = scan_bodies(&inputs, 1).unwrap();
 
         assert_eq!(scan.branches_to_function_label, vec![true, false]);
-    }
-}
-
-/// Where the call-depth guard (see `TranspileOptions::call_depth_limit`) goes.
-#[derive(Default)]
-pub(crate) struct CallDepthGuards {
-    /// Per defined function (0-based): whether its body enters the counter.
-    pub(crate) funcs: Vec<bool>,
-    /// The function type indices whose `call_ref_t{ti}` dispatch method enters the
-    /// counter, covering every `call_indirect`/`call_ref` of that type at once.
-    pub(crate) dispatch: HashSet<u32>,
-}
-
-/// Places the call-depth guard where it is needed, rather than on every function.
-///
-/// The guard exists to bound native recursion. A recursion, direct or through any
-/// mix of calls, is a cycle in the call graph, so it is enough that every cycle
-/// passes through at least one guarded node: each trip around the cycle then counts
-/// at least one activation and the limit trips. A function on no cycle (a leaf, or
-/// anything only ever called from above) can never be re-entered while active and
-/// pays nothing.
-///
-/// The graph over-approximates what can happen at run time:
-///
-/// * a direct `call`/`return_call` is an edge to its callee;
-/// * a `call_indirect`/`call_ref` (and `return_` form) is an edge to a *dispatch*
-///   node of its type, which has an edge to every function of a compatible type that
-///   a funcref can name (`targets`, per type index: those in an element segment, a
-///   `ref.func` or an initialiser, and every function when the host can mint
-///   funcrefs). The dispatch node is the generated `call_ref_t{ti}` method, so it
-///   can carry a guard of its own;
-/// * under `reentrant_imports`, a call to a host import (and a dispatch that can
-///   reach an external handle) is an edge to every defined function, since the host
-///   can call any of them back.
-///
-/// Guarding a dispatch node counts every indirect call of its type and no direct
-/// call, which is far cheaper than guarding the many functions that a coarse,
-/// signature-level indirect edge puts on a cycle (virtual calls make most of a C++
-/// module's functions look recursive, while indirect calls are rare next to direct
-/// ones). So every dispatch node starts out guarded, a depth-first search then
-/// marks the functions needed to break the remaining (direct) cycles (every cycle
-/// contains a DFS back edge `u -> v`, and `v` takes the guard), and a final pass
-/// drops each guard that the others already make redundant. The result is a
-/// sufficient set, not a minimum one.
-///
-/// A module with continuations falls back to guarding every function: their step
-/// functions cannot carry a guard, so a cycle through one could not be assigned a
-/// guard.
-///
-/// The recursion bound this gives is `limit` guarded activations times the longest
-/// run of unguarded frames between two guarded ones; that run lies on an acyclic
-/// path, so it is finite, but it is not 1.
-pub(crate) fn call_depth_guards(
-    ctx: &ModuleCtx<'_>,
-    targets: &[Vec<usize>],
-    calls: &[Vec<u32>],
-    indirect_types: &[Vec<u32>],
-    resumes: &[bool],
-) -> CallDepthGuards {
-    let n_funcs = calls.len();
-    let n_imports = ctx.imports.len();
-    if !ctx.cont.step_set.is_empty() || !ctx.cont.bodies.is_empty() || resumes.iter().any(|&r| r) {
-        return CallDepthGuards {
-            funcs: vec![true; n_funcs],
-            dispatch: HashSet::new(),
-        };
-    }
-    let defined = |f: usize| f.checked_sub(n_imports).filter(|&d| d < n_funcs);
-    let is_host_import = |callee: usize| {
-        let import = if callee < n_imports {
-            ctx.imports.get(callee)
-        } else {
-            ctx.tail_imports.get(callee - n_imports - n_funcs)
-        };
-        import.is_some_and(|im| im.wasi.is_none())
-    };
-
-    // Node ids: the defined functions, then one dispatch node per function type used
-    // by an indirect call, then (only if the host can re-enter) the host hub.
-    let mut hub_of_type: HashMap<u32, usize> = HashMap::new();
-    let mut hub_types: Vec<u32> = Vec::new();
-    let mut edges: Vec<Vec<usize>> = Vec::with_capacity(n_funcs);
-    let mut calls_host = vec![false; n_funcs];
-    for d in 0..n_funcs {
-        let mut out: Vec<usize> = Vec::new();
-        for &callee in &calls[d] {
-            let callee = callee as usize;
-            if let Some(cd) = defined(callee) {
-                out.push(cd);
-            } else if ctx.reentrant_imports {
-                calls_host[d] |= is_host_import(callee);
-            }
-        }
-        for &ty in &indirect_types[d] {
-            let next = n_funcs + hub_types.len();
-            let hub = *hub_of_type.entry(ty).or_insert_with(|| {
-                hub_types.push(ty);
-                next
-            });
-            out.push(hub);
-        }
-        edges.push(out);
-    }
-    let host_hub = (ctx.reentrant_imports && calls_host.iter().any(|&h| h)
-        || ctx.reentrant_imports && ctx.has_imports && !hub_types.is_empty())
-    .then_some(n_funcs + hub_types.len());
-    for (d, out) in edges.iter_mut().enumerate() {
-        if calls_host[d] {
-            out.extend(host_hub);
-        }
-    }
-    for &ty in &hub_types {
-        let mut out: Vec<usize> = targets
-            .get(ty as usize)
-            .map_or(&[][..], Vec::as_slice)
-            .iter()
-            .filter_map(|&t| defined(t))
-            .collect();
-        // An external handle the host resolves may call back into the module.
-        if ctx.reentrant_imports && ctx.has_imports {
-            out.extend(host_hub);
-        }
-        edges.push(out);
-    }
-    if host_hub.is_some() {
-        edges.push((0..n_funcs).collect());
-    }
-
-    // Every dispatch node starts guarded; the DFS only walks unguarded nodes.
-    let n_nodes = edges.len();
-    let mut guarded = vec![false; n_nodes];
-    for slot in guarded
-        .iter_mut()
-        .take(n_funcs + hub_types.len())
-        .skip(n_funcs)
-    {
-        *slot = true;
-    }
-    // `state` is 0 unvisited, 1 on the stack, 2 finished.
-    let mut state = vec![0u8; n_nodes];
-    let mut stack: Vec<(usize, usize)> = Vec::new();
-    for root in 0..n_nodes {
-        if state[root] != 0 || guarded[root] {
-            continue;
-        }
-        state[root] = 1;
-        stack.push((root, 0));
-        while let Some(top) = stack.last_mut() {
-            let (u, next) = *top;
-            let Some(&v) = edges[u].get(next) else {
-                state[u] = 2;
-                stack.pop();
-                continue;
-            };
-            top.1 += 1;
-            if guarded[v] {
-                continue;
-            }
-            match state[v] {
-                0 => {
-                    state[v] = 1;
-                    stack.push((v, 0));
-                }
-                // A back edge closes a cycle through `v`.
-                1 => guarded[v] = true,
-                _ => {}
-            }
-        }
-    }
-    // The DFS and the initial dispatch guards over-mark: drop a guard when the others
-    // already break every cycle through its node, i.e. the node cannot reach itself
-    // without crossing another guarded node. Functions go first, so a dispatch guard
-    // (the cheaper one) is the survivor when either would do.
-    let mut seen = vec![0u32; n_nodes];
-    let mut epoch = 0u32;
-    let mut work: Vec<usize> = Vec::new();
-    for g in (0..n_funcs).chain(n_funcs..n_funcs + hub_types.len()) {
-        if !guarded[g] {
-            continue;
-        }
-        guarded[g] = false;
-        epoch += 1;
-        work.clear();
-        work.extend(edges[g].iter().copied());
-        let mut on_cycle = false;
-        while let Some(v) = work.pop() {
-            if v == g {
-                on_cycle = true;
-                break;
-            }
-            if guarded[v] || seen[v] == epoch {
-                continue;
-            }
-            seen[v] = epoch;
-            work.extend(edges[v].iter().copied());
-        }
-        guarded[g] = on_cycle;
-    }
-    let dispatch = hub_types
-        .iter()
-        .enumerate()
-        .filter(|&(h, _)| guarded[n_funcs + h])
-        .map(|(_, &ty)| ty)
-        .collect();
-    guarded.truncate(n_funcs);
-    CallDepthGuards {
-        funcs: guarded,
-        dispatch,
     }
 }
