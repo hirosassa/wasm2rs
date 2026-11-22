@@ -3,47 +3,12 @@
 //! with parameters are covered separately (they need loop-carried variables).
 //! Each module is compiled with `rustc -D warnings` and exercised.
 
-use std::process::Command;
-
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_blockty_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let compile = Command::new("rustc")
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        compile.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&compile.stderr),
-    );
-
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{program}"
-    );
-}
+use crate::common::compile_run;
 
 #[test]
 fn block_produces_two_results_on_fallthrough() {
     // The block yields (0, 10); outside, i32.add sums them.
-    transpile_compile_run(
+    compile_run(
         "block_two_results",
         r#"
         (module
@@ -60,7 +25,7 @@ fn block_produces_two_results_on_fallthrough() {
 #[test]
 fn block_consumes_a_parameter() {
     // The block takes the outer value as a parameter, multiplies it by 3.
-    transpile_compile_run(
+    compile_run(
         "block_param",
         r#"
         (module
@@ -78,7 +43,7 @@ fn block_consumes_a_parameter() {
 fn if_takes_a_parameter_in_both_arms() {
     // The parameter (local 1) is on the stack before the `if`; both the `then`
     // and `else` arms consume it.
-    transpile_compile_run(
+    compile_run(
         "if_param",
         r#"
         (module
@@ -96,7 +61,7 @@ fn if_takes_a_parameter_in_both_arms() {
 fn block_parameter_survives_a_branch_out() {
     // The block takes a parameter, adds one, then branches out carrying the
     // single result.
-    transpile_compile_run(
+    compile_run(
         "block_param_br",
         r#"
         (module
@@ -115,7 +80,7 @@ fn block_parameter_survives_a_branch_out() {
 fn branch_carries_two_results_out_of_a_block() {
     // `br 0` breaks out of a two-result block carrying both values; the caller
     // sums them.
-    transpile_compile_run(
+    compile_run(
         "block_br_two_results",
         r#"
         (module
@@ -134,7 +99,7 @@ fn branch_carries_two_results_out_of_a_block() {
 fn if_without_else_forwards_the_parameter() {
     // A parameterised `if` with no `else`: on the false path the implicit else
     // forwards the parameter as the result.
-    transpile_compile_run(
+    compile_run(
         "if_no_else_param",
         r#"
         (module
@@ -150,7 +115,7 @@ fn if_without_else_forwards_the_parameter() {
 #[test]
 fn branch_out_of_an_outer_two_result_block() {
     // `br 1` skips the inner block and breaks out of the outer two-result block.
-    transpile_compile_run(
+    compile_run(
         "deep_br_two_results",
         r#"
         (module
@@ -173,7 +138,7 @@ fn branch_out_of_an_outer_two_result_block() {
 fn loop_branched_back_falls_through_with_two_results() {
     // A loop that is continued (via `br_if 0`) until local 0 hits zero, then
     // falls through yielding two values.
-    transpile_compile_run(
+    compile_run(
         "loop_targeted_two_results",
         r#"
         (module
@@ -195,7 +160,7 @@ fn loop_branched_back_falls_through_with_two_results() {
 #[test]
 fn nested_parameterised_blocks() {
     // The parameter threads through two nested parameterised blocks.
-    transpile_compile_run(
+    compile_run(
         "nested_param",
         r#"
         (module
@@ -215,7 +180,7 @@ fn nested_parameterised_blocks() {
 #[test]
 fn loop_falls_through_with_two_results() {
     // A loop that is never branched back to runs once and yields two values.
-    transpile_compile_run(
+    compile_run(
         "loop_two_results",
         r#"
         (module

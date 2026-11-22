@@ -3,49 +3,13 @@
 //! into `memory` before any function runs. Each test compiles the generated
 //! Rust with `rustc -D warnings` and reads the bytes back.
 
-use std::process::Command;
-
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_data_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let compile = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        compile.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&compile.stderr),
-    );
-
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{program}"
-    );
-}
+use crate::common::compile_run;
 
 #[test]
 fn active_data_segment_seeds_memory() {
     // Bytes 01 02 03 04 at offset 0 read back as the little-endian i32
     // 0x04030201.
-    transpile_compile_run(
+    compile_run(
         "seed",
         r#"
         (module
@@ -60,7 +24,7 @@ fn active_data_segment_seeds_memory() {
 
 #[test]
 fn multiple_segments_and_offsets() {
-    transpile_compile_run(
+    compile_run(
         "offsets",
         r#"
         (module
@@ -82,7 +46,7 @@ fn active_data_segment_round_trips_bytes_that_need_escaping() {
     // second line, where a `\` continuation would swallow it if unescaped; the
     // rest cover quote, backslash, whitespace controls, NUL and high bytes.
     let filler = "A".repeat(64);
-    transpile_compile_run(
+    compile_run(
         "escaping",
         &format!(
             r#"

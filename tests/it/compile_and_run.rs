@@ -21,10 +21,6 @@ fn generated_add_compiles_and_produces_correct_result() {
 
     let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
 
-    let dir = crate::common::scratch_dir("wasm2rs_it_add");
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
     // Wrap the generated function with a `main` that exercises it, including a
     // wrapping-overflow case to confirm wasm's modular arithmetic is preserved.
     let program = format!(
@@ -35,26 +31,7 @@ fn generated_add_compiles_and_produces_correct_result() {
          \x20   assert_eq!(func0(i32::MAX, 1), i32::MIN);\n\
          }}\n"
     );
-    std::fs::write(&src, program).expect("write generated source");
-
-    let compile = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        // Deny warnings so the generated code is proven to be warning-free.
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        compile.status.success(),
-        "generated code failed to compile:\n{}",
-        String::from_utf8_lossy(&compile.stderr),
-    );
+    let bin = crate::common::build("wasm2rs_it_add", &program);
 
     let run = Command::new(&bin).status().expect("run generated binary");
     assert!(run.success(), "generated program assertions failed");

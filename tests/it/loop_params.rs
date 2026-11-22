@@ -4,49 +4,14 @@
 //! reassigned before `continue`. Each module is compiled with `rustc -D
 //! warnings` and exercised.
 
-use std::process::Command;
-
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_loopparam_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let compile = Command::new("rustc")
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        compile.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&compile.stderr),
-    );
-
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{program}"
-    );
-}
+use crate::common::compile_run;
 
 #[test]
 fn single_parameter_carries_an_accumulator() {
     // The loop parameter carries a running total; local 0 is the counter.
     // Each iteration adds 10 and `br_if 0` continues carrying the new total;
     // the final fall-through leaves it as the result.
-    transpile_compile_run(
+    compile_run(
         "single_param_acc",
         r#"
         (module
@@ -69,7 +34,7 @@ fn single_parameter_carries_an_accumulator() {
 fn two_parameters_advance_together() {
     // A two-parameter loop carrying (x, y): each iteration advances to
     // (x+1, y+10) and continues while the counter (local 0) is non-zero.
-    transpile_compile_run(
+    compile_run(
         "two_param",
         r#"
         (module
@@ -102,7 +67,7 @@ fn two_parameters_are_swapped_each_iteration() {
     // Each iteration swaps the carried pair (a, b) -> (b, a) and continues via
     // `br_if 0` until the counter (local 0) reaches zero. Reordering the loop
     // parameters must not clobber one before the other is read.
-    transpile_compile_run(
+    compile_run(
         "swap_params",
         r#"
         (module
@@ -136,7 +101,7 @@ fn unconditional_branch_updates_the_loop_parameter() {
     // (local 0) hits zero the empty `then` arm forwards the accumulator as the
     // loop result; otherwise the `else` arm's *unconditional* `br 1` continues
     // the loop carrying the new accumulator.
-    transpile_compile_run(
+    compile_run(
         "uncond_br_param",
         r#"
         (module

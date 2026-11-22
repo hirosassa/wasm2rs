@@ -57,35 +57,24 @@ fn side_names(files: &[OutputFile]) -> Vec<&str> {
         .collect()
 }
 
-/// Write `files` (side files included) into a temp dir, append `main` to `lib.rs`, build with
-/// `rustc -D warnings` and run it.
+/// Append `main` to `lib.rs` of `files` (side files included), build the crate with
+/// `rustc -D warnings` (cached, see `common::build_crate`) and run it.
 fn compile_run(name: &str, files: &[OutputFile], main_body: &str) {
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_df_{name}"));
-    for f in files {
-        match &f.content {
-            FileContent::Text(code) => {
-                let mut code = code.clone();
-                if f.name == "lib.rs" {
-                    code.push_str(&format!("\nfn main() {{\n{main_body}\n}}\n"));
+    let sources: Vec<(&str, Vec<u8>)> = files
+        .iter()
+        .map(|f| {
+            let bytes = match &f.content {
+                FileContent::Text(code) if f.name == "lib.rs" => {
+                    format!("{code}\nfn main() {{\n{main_body}\n}}\n").into_bytes()
                 }
-                std::fs::write(dir.join(&f.name), code).expect("write source");
-            }
-            FileContent::Bytes(bytes) => std::fs::write(dir.join(&f.name), bytes).expect("write"),
-            _ => panic!("unknown file kind"),
-        }
-    }
-    let bin = dir.join("gen");
-    let out = Command::new("rustc")
-        .current_dir(&dir)
-        .args(["lib.rs", "--edition", "2024", "-D", "warnings", "-o"])
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "crate failed to compile ({name}):\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+                FileContent::Text(code) => code.clone().into_bytes(),
+                FileContent::Bytes(bytes) => bytes.clone(),
+                _ => panic!("unknown file kind"),
+            };
+            (f.name.as_str(), bytes)
+        })
+        .collect();
+    let bin = crate::common::build_crate(&format!("wasm2rs_df_{name}"), "lib.rs", &sources);
     assert!(
         Command::new(&bin).status().expect("run").success(),
         "generated program assertions failed: {name}"

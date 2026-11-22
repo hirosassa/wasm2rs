@@ -8,46 +8,11 @@
 //! A bug that mangled the literal (wrong type suffix, truncated bits, swapped
 //! index) would change the observed value and fail here.
 
-use std::process::Command;
-
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_global_init_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let compile = Command::new("rustc")
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        compile.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&compile.stderr),
-    );
-
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{program}"
-    );
-}
+use crate::common::compile_run;
 
 #[test]
 fn i64_global_initializer_keeps_its_value() {
-    transpile_compile_run(
+    compile_run(
         "i64",
         r#"
         (module
@@ -63,7 +28,7 @@ fn i64_global_initializer_keeps_its_value() {
 fn f32_global_initializer_keeps_its_bits() {
     // 1.5 is exactly representable; a bit-level mistake would still surface as a
     // different f32.
-    transpile_compile_run(
+    compile_run(
         "f32",
         r#"
         (module
@@ -77,7 +42,7 @@ fn f32_global_initializer_keeps_its_bits() {
 
 #[test]
 fn f64_global_initializer_keeps_its_bits() {
-    transpile_compile_run(
+    compile_run(
         "f64",
         r#"
         (module
@@ -93,7 +58,7 @@ fn f64_global_initializer_keeps_its_bits() {
 fn funcref_global_initializer_holds_the_function_index() {
     // A `ref.func $f` initializer becomes the function's index in the transpiler's
     // `u32` funcref representation. `$f` is function 0, the getter function 1.
-    transpile_compile_run(
+    compile_run(
         "funcref",
         r#"
         (module
@@ -115,7 +80,7 @@ fn null_funcref_global_initializer_is_the_null_sentinel() {
     // lowering. The getter (function 0) returns the raw funcref, and the
     // `ref.is_null` probe (function 1) must see it as null. A regression that
     // lowered null to `0` (a valid function index) would make `func1` return 0.
-    transpile_compile_run(
+    compile_run(
         "null_funcref",
         r#"
         (module
@@ -131,7 +96,7 @@ fn null_funcref_global_initializer_is_the_null_sentinel() {
 
 #[test]
 fn an_extended_const_i32_add_sub_mul_global_is_evaluated() {
-    transpile_compile_run(
+    compile_run(
         "ext_i32",
         r#"
         (module
@@ -151,7 +116,7 @@ fn an_extended_const_i32_add_sub_mul_global_is_evaluated() {
 
 #[test]
 fn an_extended_const_i32_global_wraps_on_overflow() {
-    transpile_compile_run(
+    compile_run(
         "ext_i32_wrap",
         r#"
         (module
@@ -168,7 +133,7 @@ fn an_extended_const_i32_global_wraps_on_overflow() {
 
 #[test]
 fn an_extended_const_i64_global_is_evaluated_and_wraps() {
-    transpile_compile_run(
+    compile_run(
         "ext_i64",
         r#"
         (module
@@ -188,7 +153,7 @@ fn an_extended_const_i64_global_is_evaluated_and_wraps() {
 
 #[test]
 fn a_nested_extended_const_global_is_evaluated() {
-    transpile_compile_run(
+    compile_run(
         "ext_nested",
         r#"
         (module
@@ -202,7 +167,7 @@ fn a_nested_extended_const_global_is_evaluated() {
 
 #[test]
 fn an_extended_const_data_offset_places_the_segment() {
-    transpile_compile_run(
+    compile_run(
         "ext_data_offset",
         r#"
         (module
@@ -218,7 +183,7 @@ fn an_extended_const_data_offset_places_the_segment() {
 
 #[test]
 fn an_extended_const_i64_data_offset_places_the_segment() {
-    transpile_compile_run(
+    compile_run(
         "ext_data_offset64",
         r#"
         (module
@@ -233,7 +198,7 @@ fn an_extended_const_i64_data_offset_places_the_segment() {
 
 #[test]
 fn an_extended_const_elem_offset_places_the_function() {
-    transpile_compile_run(
+    compile_run(
         "ext_elem_offset",
         r#"
         (module
@@ -309,7 +274,7 @@ fn an_i64_element_offset_is_rejected() {
 #[test]
 fn v128_global_initializer_keeps_the_lane_order() {
     // i32x4 lanes 1,2,3,4 are the little-endian bytes of this u128.
-    transpile_compile_run(
+    compile_run(
         "v128",
         r#"(module
           (global $g v128 (v128.const i32x4 1 2 3 4))
@@ -321,7 +286,7 @@ fn v128_global_initializer_keeps_the_lane_order() {
 
 #[test]
 fn a_mutable_v128_global_can_be_overwritten() {
-    transpile_compile_run(
+    compile_run(
         "v128_mut",
         r#"(module
           (global $g (mut v128) (v128.const i64x2 5 6))

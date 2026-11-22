@@ -3,47 +3,11 @@
 //! stateless, so the transpiler emits free functions; each is compiled with
 //! `rustc -D warnings` and exercised.
 
-use std::process::Command;
-
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_i64_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let compile = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        compile.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&compile.stderr),
-    );
-
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{program}"
-    );
-}
+use crate::common::compile_run;
 
 #[test]
 fn i64_arithmetic_and_bitwise_wrap() {
-    transpile_compile_run(
+    compile_run(
         "arith",
         r#"
         (module
@@ -66,7 +30,7 @@ fn i64_arithmetic_and_bitwise_wrap() {
 
 #[test]
 fn i64_comparisons_are_signed_and_unsigned() {
-    transpile_compile_run(
+    compile_run(
         "cmp",
         r#"
         (module
@@ -89,7 +53,7 @@ fn i64_comparisons_are_signed_and_unsigned() {
 fn i64_shifts_rotates_and_remaining_comparisons() {
     // Shift/rotate counts are masked mod 64, and the signed/unsigned split shows
     // up in rem_u and the gt/le/ge comparisons when the operands differ in sign.
-    transpile_compile_run(
+    compile_run(
         "shifts",
         r#"
         (module

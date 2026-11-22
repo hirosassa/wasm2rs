@@ -3,47 +3,11 @@
 //! stateless, so the transpiler emits free functions; each is compiled with
 //! `rustc -D warnings` and exercised.
 
-use std::process::Command;
-
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_float_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let compile = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        compile.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&compile.stderr),
-    );
-
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{program}"
-    );
-}
+use crate::common::compile_run;
 
 #[test]
 fn float_arithmetic() {
-    transpile_compile_run(
+    compile_run(
         "arith",
         r#"
         (module
@@ -61,7 +25,7 @@ fn float_arithmetic() {
 
 #[test]
 fn float_comparisons_with_nan() {
-    transpile_compile_run(
+    compile_run(
         "cmp",
         r#"
         (module
@@ -82,7 +46,7 @@ fn float_comparisons_with_nan() {
 fn float_min_max() {
     // wasm min/max propagate NaN and treat -0.0 as strictly less than +0.0,
     // unlike Rust's `f32::min`/`max`, so they need dedicated helpers.
-    transpile_compile_run(
+    compile_run(
         "minmax",
         r#"
         (module
@@ -107,7 +71,7 @@ fn float_min_max() {
 
 #[test]
 fn float_unary_math_and_copysign() {
-    transpile_compile_run(
+    compile_run(
         "unary",
         r#"
         (module
@@ -130,7 +94,7 @@ fn float_unary_math_and_copysign() {
 
 #[test]
 fn float_const_is_emitted_from_bits() {
-    transpile_compile_run(
+    compile_run(
         "const",
         r#"
         (module
@@ -143,7 +107,7 @@ fn float_const_is_emitted_from_bits() {
 
 #[test]
 fn f32_multiply_sqrt_rounding_and_ordering() {
-    transpile_compile_run(
+    compile_run(
         "f32more",
         r#"
         (module
@@ -170,7 +134,7 @@ fn f32_multiply_sqrt_rounding_and_ordering() {
 
 #[test]
 fn f64_arithmetic_rounding_ordering_and_copysign() {
-    transpile_compile_run(
+    compile_run(
         "f64more",
         r#"
         (module
@@ -206,7 +170,7 @@ fn f64_arithmetic_rounding_ordering_and_copysign() {
 fn nearest_rounds_ties_to_even() {
     // `nearest` is round-half-to-even, not away-from-zero: 2.5 and -2.5 round to
     // the even 2/-2, while 3.5 rounds up to the even 4.
-    transpile_compile_run(
+    compile_run(
         "nearest",
         r#"
         (module

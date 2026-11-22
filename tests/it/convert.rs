@@ -5,53 +5,21 @@
 
 use std::process::Command;
 
+use crate::common::compile_run;
+
 /// Transpile `wat`, wrap the output in a `main` running `main_body`, and compile
 /// it with `rustc -D warnings`. Returns the path to the built binary.
 fn compile(test: &str, wat: &str, main_body: &str) -> std::path::PathBuf {
     let wasm = wat::parse_str(wat).expect("valid wat");
     let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
 
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_convert_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
     let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let out = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        out.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr),
-    );
-    bin
-}
-
-/// Compile `wat` + `main_body` and run it, asserting the program exits
-/// successfully (its own `assert!`s hold and it does not trap).
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let bin = compile(test, wat, main_body);
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{test}"
-    );
+    crate::common::build(&format!("wasm2rs_convert_{test}"), &program)
 }
 
 #[test]
 fn integer_wrap_and_extend() {
-    transpile_compile_run(
+    compile_run(
         "wrap_extend",
         r#"
         (module
@@ -71,7 +39,7 @@ fn integer_wrap_and_extend() {
 
 #[test]
 fn int_float_conversions_and_demote_promote() {
-    transpile_compile_run(
+    compile_run(
         "convert",
         r#"
         (module
@@ -89,7 +57,7 @@ fn int_float_conversions_and_demote_promote() {
 
 #[test]
 fn reinterpret_bit_casts() {
-    transpile_compile_run(
+    compile_run(
         "reinterpret",
         r#"
         (module
@@ -104,7 +72,7 @@ fn reinterpret_bit_casts() {
 #[test]
 fn trapping_truncation_in_range() {
     // Non-saturating truncations return the truncated value for in-range inputs.
-    transpile_compile_run(
+    compile_run(
         "trunc_trap_ok",
         r#"
         (module
@@ -159,7 +127,7 @@ fn trunc_negative_to_unsigned_traps() {
 fn trapping_truncation_at_boundaries() {
     // Values right at the in-range edges must pass, exercising the `>=` vs `>`
     // asymmetry between f32 and f64 signed lower bounds.
-    transpile_compile_run(
+    compile_run(
         "trunc_bounds_ok",
         r#"
         (module
@@ -205,7 +173,7 @@ fn trunc_at_2_pow_31_traps() {
 
 #[test]
 fn saturating_truncation() {
-    transpile_compile_run(
+    compile_run(
         "trunc_sat",
         r#"
         (module
@@ -227,7 +195,7 @@ fn sixty_four_bit_and_signed_int_to_float_conversions() {
     // The 64-bit int->float conversions and the signed/unsigned variants: an
     // unsigned convert reads -1 as its wide positive bit pattern, a signed one
     // as -1.
-    transpile_compile_run(
+    compile_run(
         "int_to_float",
         r#"
         (module
@@ -251,7 +219,7 @@ fn sixty_four_bit_and_signed_int_to_float_conversions() {
 fn reinterpret_64bit_round_trips() {
     // reinterpret is a pure bit-cast: 1.0f64 has the bit pattern
     // 0x3FF0000000000000, and casting there and back is the identity.
-    transpile_compile_run(
+    compile_run(
         "reinterpret64",
         r#"
         (module

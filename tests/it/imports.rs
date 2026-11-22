@@ -5,48 +5,12 @@
 //! implementation. Each test defines a host type, compiles the generated Rust
 //! with `rustc -D warnings`, and drives the instance.
 
-use std::process::Command;
-
-fn transpile_compile_run(test: &str, wat: &str, main_body: &str) {
-    let wasm = wat::parse_str(wat).expect("valid wat");
-    let generated = wasm2rs::transpile(&wasm).expect("transpile ok");
-
-    let dir = crate::common::scratch_dir(&format!("wasm2rs_imports_{test}"));
-    let src = dir.join("gen.rs");
-    let bin = dir.join(if cfg!(windows) { "gen.exe" } else { "gen" });
-
-    let program = format!("{generated}\nfn main() {{\n{main_body}\n}}\n");
-    std::fs::write(&src, &program).expect("write generated source");
-
-    let compile = Command::new("rustc")
-        // Isolate each parallel rustc's codegen-unit temp objects per test dir.
-        .current_dir(&dir)
-        .arg(&src)
-        .arg("--edition")
-        .arg("2024")
-        .arg("-D")
-        .arg("warnings")
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .expect("run rustc");
-    assert!(
-        compile.status.success(),
-        "generated code failed to compile:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&compile.stderr),
-    );
-
-    let run = Command::new(&bin).status().expect("run generated binary");
-    assert!(
-        run.success(),
-        "generated program assertions failed:\n{program}"
-    );
-}
+use crate::common::compile_run;
 
 #[test]
 fn direct_call_to_imported_function() {
     // Import occupies function index 0, so the defined function is index 1.
-    transpile_compile_run(
+    compile_run(
         "direct",
         r#"
         (module
@@ -65,7 +29,7 @@ fn direct_call_to_imported_function() {
 #[test]
 fn void_import_and_multiple_imports() {
     // Two imports (index 0 void, index 1 returning), defined function index 2.
-    transpile_compile_run(
+    compile_run(
         "multi",
         r#"
         (module
@@ -87,7 +51,7 @@ fn void_import_and_multiple_imports() {
 
 #[test]
 fn imported_immutable_global_is_read_from_host() {
-    transpile_compile_run(
+    compile_run(
         "global_ro",
         r#"
         (module
@@ -106,7 +70,7 @@ fn imported_immutable_global_is_read_from_host() {
 #[test]
 fn a_global_initializer_may_read_an_imported_global() {
     // The initial value is the host's, read when the instance is built.
-    transpile_compile_run(
+    compile_run(
         "global_init_imported",
         r#"
         (module
@@ -125,7 +89,7 @@ fn a_global_initializer_may_read_an_imported_global() {
 
 #[test]
 fn an_extended_const_initializer_combines_an_imported_global() {
-    transpile_compile_run(
+    compile_run(
         "global_init_imported_arith",
         r#"
         (module
@@ -146,7 +110,7 @@ fn an_extended_const_initializer_combines_an_imported_global() {
 #[test]
 fn a_table_initializer_may_read_an_imported_funcref_global() {
     // Every initial entry holds the function the host's global names (function 0).
-    transpile_compile_run(
+    compile_run(
         "table_init_imported",
         r#"
         (module
@@ -169,7 +133,7 @@ fn a_table_initializer_may_read_an_imported_funcref_global() {
 #[test]
 fn an_active_element_item_may_read_an_imported_funcref_global() {
     // Slot 0 stays null (calling it traps); slot 1 holds the host's function.
-    transpile_compile_run(
+    compile_run(
         "elem_item_imported",
         r#"
         (module
@@ -193,7 +157,7 @@ fn an_active_element_item_may_read_an_imported_funcref_global() {
 #[test]
 fn a_data_offset_may_read_an_imported_global() {
     // The segment lands where the host's global says, resolved at instantiation.
-    transpile_compile_run(
+    compile_run(
         "data_offset_imported",
         r#"
         (module
@@ -213,7 +177,7 @@ fn a_data_offset_may_read_an_imported_global() {
 
 #[test]
 fn a_memory64_data_offset_may_read_an_imported_i64_global() {
-    transpile_compile_run(
+    compile_run(
         "data_offset_imported64",
         r#"
         (module
@@ -234,7 +198,7 @@ fn a_memory64_data_offset_may_read_an_imported_i64_global() {
 #[test]
 fn an_element_offset_may_combine_an_imported_global_with_extended_const() {
     // Slot = host's 1 + 1 = 2.
-    transpile_compile_run(
+    compile_run(
         "elem_offset_imported",
         r#"
         (module
@@ -258,7 +222,7 @@ fn an_element_offset_may_combine_an_imported_global_with_extended_const() {
 #[test]
 fn a_data_offset_past_the_end_traps_at_instantiation() {
     // The host's offset leaves no room for the byte: instantiation traps.
-    transpile_compile_run(
+    compile_run(
         "data_offset_imported_oob",
         r#"
         (module
@@ -278,7 +242,7 @@ fn a_data_offset_past_the_end_traps_at_instantiation() {
 fn imported_mutable_global_get_set_with_defined_global() {
     // Global 0 is the imported mutable global (host-backed); global 1 is a
     // defined mutable global, so its field must be named `g1`, not `g0`.
-    transpile_compile_run(
+    compile_run(
         "global_rw",
         r#"
         (module
@@ -303,7 +267,7 @@ fn imported_mutable_global_get_set_with_defined_global() {
 #[test]
 fn imported_function_and_global_share_no_index_space() {
     // Function import 0 and global import 0 are indexed independently.
-    transpile_compile_run(
+    compile_run(
         "func_and_global",
         r#"
         (module
@@ -325,7 +289,7 @@ fn imported_function_and_global_share_no_index_space() {
 fn call_indirect_dispatches_to_imported_function() {
     // The table slot holds function index 0, which is the import, so the
     // indirect call must dispatch into the injected host implementation.
-    transpile_compile_run(
+    compile_run(
         "indirect",
         r#"
         (module
@@ -353,7 +317,7 @@ fn compact_imports_with_per_item_types_keep_import_order() {
     // the defined function is index 3. Each import is distinguishable (negate,
     // a constant, increment) so a swapped or dropped index changes the result:
     // neg(inc(4)) + seven() = -5 + 7 = 2.
-    transpile_compile_run(
+    compile_run(
         "compact1",
         r#"
         (module
@@ -384,7 +348,7 @@ fn compact_imports_sharing_one_type_get_separate_host_methods() {
     // `(import "env" (item ..) (item ..) (func ..))` (compact encoding 2): one
     // type shared by every name. Each name is still its own import, so the host
     // supplies two distinct methods: double(3) + triple(3) = 6 + 9 = 15.
-    transpile_compile_run(
+    compile_run(
         "compact2",
         r#"
         (module

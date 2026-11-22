@@ -70,8 +70,7 @@ fn effective_address_overflow_traps_with_32bit_usize() {
     let dir =
         std::env::temp_dir().join(format!("wasm2rs_memory32_wrap_w32_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let (src, wasm, js) = (dir.join("m.rs"), dir.join("m.wasm"), dir.join("run.mjs"));
-    std::fs::write(&src, program).unwrap();
+    let js = dir.join("run.mjs");
     std::fs::write(
         &js,
         "import {WASI} from 'node:wasi'; import fs from 'node:fs';\n\
@@ -83,17 +82,12 @@ fn effective_address_overflow_traps_with_32bit_usize() {
     .unwrap();
     // Release mode: the original wrap is silent there (debug builds panic on
     // the overflow, which would mask it).
-    let rc = Command::new("rustc")
-        .args(["--edition", "2024", "-O", "--target", "wasm32-wasip1"])
-        .arg(&src)
-        .arg("-o")
-        .arg(&wasm)
-        .output()
-        .unwrap();
-    assert!(
-        rc.status.success(),
-        "{}",
-        String::from_utf8_lossy(&rc.stderr)
+    let wasm = common::build_artifact(
+        "wasm2rs_memory32_wrap_w32",
+        "m.rs",
+        &[("m.rs", program.as_bytes())],
+        &["--edition", "2024", "-O", "--target", "wasm32-wasip1"],
+        ".wasm",
     );
     let out = Command::new("node")
         .arg("--no-warnings")
