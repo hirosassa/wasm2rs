@@ -74,27 +74,6 @@ pub fn touch(path: &Path) {
     }
 }
 
-/// Whether anything in `path` (itself included) was modified at or after `cutoff`. Stops at the
-/// first such file, so a directory in use costs one look and only an idle one is walked whole.
-/// What cannot be read counts as in use: better to keep a directory than to remove one that a run
-/// is working in.
-fn modified_since(path: &Path, cutoff: SystemTime) -> bool {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return true;
-    };
-    if meta.modified().map_or(true, |m| m >= cutoff) {
-        return true;
-    }
-    if !meta.is_dir() {
-        return false;
-    }
-    let Ok(read) = fs::read_dir(path) else {
-        return true;
-    };
-    read.flatten()
-        .any(|child| modified_since(&child.path(), cutoff))
-}
-
 /// Size in bytes of the files under `path` and the newest mtime among them and the directories
 /// (`path` itself included). Symlinks are measured, not followed. What cannot be read counts as
 /// modified now, so that it is never taken for idle.
@@ -154,11 +133,10 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
         };
         let age = now.duration_since(modified).unwrap_or_default();
         if CHECKOUT_PREFIXES.iter().any(|p| name.starts_with(p)) && meta.is_dir() {
-            let idle = !modified_since(&item.path(), checkout_cutoff);
-            if idle && fs::remove_dir_all(item.path()).is_ok() {
+            let (modified, bytes) = tree_stats(&item.path(), now);
+            if modified < checkout_cutoff && fs::remove_dir_all(item.path()).is_ok() {
                 report.removed += 1;
             } else {
-                let (modified, bytes) = tree_stats(&item.path(), now);
                 live.push(Candidate {
                     modified,
                     bytes,
@@ -193,9 +171,12 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
         }
     }
     let mut total: u64 = live.iter().map(|c| c.bytes).sum();
+    // when what a build may be using exceeds the cap by itself, evicting the rest would only
+    // empty the cache without reaching it
+    let in_use: u64 = live.iter().filter(|c| !c.removable).map(|c| c.bytes).sum();
     live.sort_by_key(|c| c.modified);
     for c in live.iter().filter(|c| c.removable) {
-        if total <= policy.max_bytes {
+        if total <= policy.max_bytes || in_use > policy.max_bytes {
             break;
         }
         let is_dir = fs::symlink_metadata(&c.path).is_ok_and(|m| m.is_dir());

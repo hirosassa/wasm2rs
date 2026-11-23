@@ -271,8 +271,22 @@ fn a_recently_used_checkout_dir_or_wasi_lib_survives_the_cap() {
     prune(&dir, now, &capped(10));
     assert!(busy.exists());
     assert!(lib.exists());
-    // the unprotected entry is still taken, even though that cannot reach the cap
+    // dropping the entry could not reach the cap, so it would only cost a cold cache
+    assert!(old_entry.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn entries_go_when_that_brings_the_cache_under_the_cap_despite_what_is_in_use() {
+    let dir = scratch("budget-in-use-partial");
+    let now = SystemTime::now();
+    let busy = sized_checkout(&dir, "checkout-0000000000000001", 100, now, HOUR);
+    let old_entry = entry(&dir, "gen-a", 100, now, 3 * DAY);
+    let newer_entry = entry(&dir, "gen-b", 100, now, 2 * DAY);
+    prune(&dir, now, &capped(250));
+    assert!(busy.exists());
     assert!(!old_entry.exists());
+    assert!(newer_entry.exists());
     fs::remove_dir_all(&dir).ok();
 }
 
