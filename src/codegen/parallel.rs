@@ -395,14 +395,15 @@ mod tests {
     /// the workers asleep for good, and nothing inside the run can fail it.
     const HANG: Duration = Duration::from_secs(15);
 
-    /// Ends the test process if the returned sender is still alive after [`HANG`]: a
-    /// deadlocked run would otherwise stall the whole suite (and a `cargo mutants` run)
-    /// instead of failing. Dropping the sender disarms it.
+    /// Ends the test process if the returned sender is still alive [`HANG`] after it was
+    /// armed (a wall-clock limit, not a progress check): a deadlocked run would otherwise
+    /// stall the whole suite (and a `cargo mutants` run) instead of failing. Dropping the
+    /// sender disarms it.
     fn arm_watchdog(what: &'static str) -> mpsc::Sender<()> {
         let (disarm, disarmed) = mpsc::channel::<()>();
         thread::spawn(move || {
             if disarmed.recv_timeout(HANG) == Err(RecvTimeoutError::Timeout) {
-                eprintln!("{what}: deadlocked (no progress for {HANG:?})");
+                eprintln!("{what}: did not finish within {HANG:?}");
                 std::process::exit(1);
             }
         });
@@ -560,6 +561,9 @@ mod tests {
         grace: Duration,
         f: impl FnOnce() -> T + Send,
     ) -> (bool, T) {
+        // Aborting `shared` is meant to release `f`; if it does not (the abort check
+        // was lost), the join below would wait for ever.
+        let _watchdog = arm_watchdog("run_or_abort");
         let done = AtomicBool::new(false);
         thread::scope(|scope| {
             let handle = scope.spawn(|| {
