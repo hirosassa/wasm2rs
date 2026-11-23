@@ -907,3 +907,49 @@ fn generate_from_ir<R>(
     };
     generate(&parts)
 }
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn source_chains_through_in_function_to_the_parse_error() {
+        let parse = wasmparser::Parser::new(0)
+            .parse(b"not wasm", true)
+            .map(|_| ())
+            .unwrap_err();
+        let err = TranspileError::InFunction {
+            index: 3,
+            source: Box::new(TranspileError::Parse(parse)),
+        };
+        let inner = err.source().expect("InFunction exposes its cause");
+        assert!(inner.to_string().starts_with("failed to parse wasm"));
+        let root = inner.source().expect("Parse exposes the parser error");
+        assert!(root.source().is_none());
+        assert!(matches!(err.root(), TranspileError::Parse(_)));
+    }
+
+    #[test]
+    fn source_is_none_for_leaf_errors() {
+        assert!(TranspileError::StackUnderflow.source().is_none());
+        assert!(TranspileError::Internal("x".into()).source().is_none());
+    }
+
+    #[test]
+    fn into_string_is_head_body_tail_in_order() {
+        let pieces = SourcePieces {
+            head: "ab".into(),
+            body: "cde".into(),
+            tail: "f".into(),
+        };
+        assert_eq!(pieces.into_string(), "abcdef");
+        // A body shorter than the tail must not underflow the reserved size.
+        let pieces = SourcePieces {
+            head: String::new(),
+            body: "c".into(),
+            tail: "def".into(),
+        };
+        assert_eq!(pieces.into_string(), "cdef");
+    }
+}

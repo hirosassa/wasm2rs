@@ -1013,3 +1013,36 @@ fn madd_lines(name: &str, elem: &str, bytes: usize, neg: bool) -> Vec<String> {
         "}".to_string(),
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_helper_accepts_each_table_and_the_fixed_names_only() {
+        // Each table is checked on its own, so dropping one lookup is caught.
+        assert!(LANE.iter().all(|l| is_helper(l.name)));
+        assert!(WIDE.iter().all(|w| is_helper(w.name)));
+        assert!(REDUCE.iter().all(|r| is_helper(r.name)));
+        assert!(FIXED.iter().all(|f| is_helper(f)));
+        assert!(!is_helper("no_such_helper"));
+        assert!(!is_helper(""));
+    }
+
+    #[test]
+    fn rendered_helpers_end_in_one_newline_and_none_renders_empty() {
+        assert_eq!(render_simd_helpers(&HashSet::new(), false), "");
+        let out = render_simd_helpers(&HashSet::from(["i8x16_swizzle"]), false);
+        assert!(out.ends_with("}\n") && !out.ends_with("\n\n"), "{out:?}");
+        let two = render_simd_helpers(&HashSet::from(["i8x16_swizzle", "i8x16_shuffle"]), false);
+        assert!(two.contains("}\n\nfn "), "{two:?}");
+    }
+
+    #[test]
+    fn lane_masks_are_as_wide_as_the_lane() {
+        assert_eq!(umask(1), "u8");
+        assert_eq!(umask(2), "u16");
+        assert_eq!(umask(4), "u32");
+        assert_eq!(umask(8), "u64");
+    }
+}

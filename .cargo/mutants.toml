@@ -59,4 +59,21 @@ exclude_re = [
     # de-duplication of the resolver's answer: `getaddrinfo` with one socket type returns each
     # address once, and an external lookup is not a test input
     'delete ! in WasiHost::resolve_name',
+    # the worker stack size: flattening is iterative, so even a 100000-deep module runs in the
+    # 512 KiB that `*` -> `+` leaves; no input that transpiles in seconds tells them apart
+    '^src/main\.rs:\d+:\d+: replace \* with \+$',
+    # a lone start function needs no synthesized body: `link` takes `[only]` before it ever
+    # looks at `start_body`, so building one for `len == 1` too changes nothing
+    'src/link\.rs:\d+:\d+: replace > with >= in rewrite_bodies',
+    # input validation rejects an offset operand of the wrong width before `check_offset_width`
+    # runs, so the guards of its i32/i64 arms are defence in depth (its global-width check and
+    # the arms themselves are tested directly in `parse::tests`)
+    'src/parse\.rs:\d+:\d+: (replace|delete) .*(match guard|!) .*in check_offset_width',
+    # a scalar falls through to the variant-like arm, which answers the same: one i32 in
+    # `flatten`, and `(1, 1)` (a one-byte discriminant, no payload) for `bool`/`u8`/`s8` in
+    # `size_align`
+    'src/wit_abi\.rs:\d+:\d+: delete match arm WitType::Bool \| WitType::U8',
+    # a module without host imports records no `call_indirect` signatures that could receive
+    # external handles, so `has_imports && !sigs.is_empty()` and `||` agree on every module
+    'src/codegen/render/mod\.rs:\d+:\d+: replace && with \|\| in render_module_tail',
 ]

@@ -514,4 +514,62 @@ mod tests {
         ])));
         assert!(!mem(&variant(vec![None, Some(WitType::U8)])));
     }
+
+    fn handle() -> Arc<crate::wit::WitResource> {
+        Arc::new(crate::wit::WitResource {
+            name: "r".into(),
+            id: 0,
+            interface: None,
+        })
+    }
+
+    #[test]
+    fn handles_and_futures_and_streams_are_one_i32_in_memory() {
+        // A handle is a 4-byte, 4-aligned i32, unlike a variant-like fallback (1, 1).
+        assert_eq!(layout(&WitType::Own(handle())), (4, 4));
+        assert_eq!(layout(&WitType::Borrow(handle())), (4, 4));
+        assert_eq!(layout(&WitType::Future(None)), (4, 4));
+        assert_eq!(layout(&WitType::Stream(Some(arc(WitType::U8)))), (4, 4));
+        // so a record places the following byte after four bytes, not one
+        let r = record(vec![WitType::Own(handle()), WitType::U8]);
+        assert_eq!(layout(&r), (8, 4));
+    }
+
+    #[test]
+    fn a_tuple_is_laid_out_and_flattened_like_a_record() {
+        let t = WitType::Tuple(vec![arc(WitType::U8), arc(WitType::U32), arc(WitType::U8)]);
+        assert_eq!(layout(&t), (12, 4));
+        let t = WitType::Tuple(vec![arc(WitType::F64), arc(WitType::U8)]);
+        assert_eq!(flat(&t), vec![Flat::F64, Flat::I32]);
+    }
+
+    #[test]
+    fn memory_and_string_are_found_inside_a_tuple() {
+        let tuple = |t: WitType| WitType::Tuple(vec![arc(WitType::U8), arc(t)]);
+        let mem = |t: &WitType| needs_memory(t, &mut Budget::new()).unwrap();
+        let string = |t: &WitType| holds_string(t, &mut Budget::new()).unwrap();
+        assert!(mem(&tuple(WitType::String)));
+        assert!(string(&tuple(WitType::String)));
+        assert!(mem(&tuple(WitType::List(arc(WitType::U8)))));
+        assert!(!string(&tuple(WitType::List(arc(WitType::U8)))));
+        assert!(!mem(&tuple(WitType::U32)));
+        assert!(!string(&tuple(WitType::U32)));
+    }
+
+    #[test]
+    fn a_result_is_laid_out_like_the_variant_of_its_ok_and_err_payloads() {
+        let r = WitType::Result {
+            ok: Some(arc(WitType::U64)),
+            err: Some(arc(WitType::U8)),
+        };
+        assert_eq!(layout(&r), (16, 8));
+        assert_eq!(flat(&r), vec![Flat::I32, Flat::I64]);
+    }
+
+    #[test]
+    fn a_string_is_found_inside_a_list() {
+        let string = |t: &WitType| holds_string(t, &mut Budget::new()).unwrap();
+        assert!(string(&WitType::List(arc(WitType::String))));
+        assert!(!string(&WitType::List(arc(WitType::U8))));
+    }
 }

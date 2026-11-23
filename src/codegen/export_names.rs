@@ -306,6 +306,46 @@ mod tests {
     }
 
     #[test]
+    fn reserved_suffixes_belong_to_the_prefix_that_generates_them() {
+        // `_tc` and `_part{k}` are only generated for `func{N}`.
+        for name in ["func3_tc", "func3_part2", "func3_part2_mut"] {
+            assert!(is_reserved(name), "{name}");
+        }
+        // A non-numeric part is not a dispatch part, and no other prefix has parts or a `_tc`.
+        for name in [
+            "func3_partx",
+            "func3_part",
+            "mem0_tc",
+            "memory1_tc",
+            "mem0_part1",
+        ] {
+            assert!(!is_reserved(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn specialised_memory_helpers_need_a_numeric_memory_suffix() {
+        assert!(is_reserved("r32_m1"));
+        // `_m` alone and `_m` + a non-number are plain names, not a memory specialisation.
+        assert!(!is_reserved("r32_m"));
+        assert!(!is_reserved("r32_mx"));
+        assert!(!is_reserved("r32_m1x"));
+    }
+
+    #[test]
+    fn import_names_keep_a_global_accessor_stem_without_an_index() {
+        // Only `get_global{k}` / `set_global{k}` are trait members, not the bare stem.
+        for stem in ["get_global", "set_global"] {
+            let got = assign_import_names([("", stem, 0)]);
+            assert_eq!(got, [stem], "{stem}");
+        }
+        let got = assign_import_names([("", "get_global_x", 0), ("", "tablex_mut", 1)]);
+        assert_eq!(got, ["get_global_x", "tablex_mut"]);
+        let got = assign_import_names([("", "get_global2", 0)]);
+        assert_eq!(got, ["get_global2_"]);
+    }
+
+    #[test]
     fn assign_terminates_for_prefix_reserved_names() {
         let got = assign([
             ("wasi_x", 1),

@@ -389,7 +389,8 @@ fn run() -> Result<(), String> {
         refuse_extras(
             "--dump",
             "the input file",
-            output.is_some() || funcs_per_file > 0 || max_bytes_per_file > 0,
+            // The split sizes are positionals after the output, so they imply it.
+            output.is_some(),
         )?;
         let summary = wasm2rs::dump(&wasm).map_err(|e| e.to_string())?;
         print!("{summary}");

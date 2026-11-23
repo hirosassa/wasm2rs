@@ -50,6 +50,7 @@ mod call_depth_limit;
 mod call_indirect;
 mod calls;
 mod cli;
+mod codegen_branches;
 mod codegen_limits;
 mod compile_and_run;
 mod component_core_import_versions;

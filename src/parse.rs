@@ -1049,3 +1049,115 @@ fn type_relation(types: &wasmparser::types::Types) -> Result<codegen::TypeRel, T
         .collect();
     Ok(codegen::TypeRel { canon, canon_super })
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "test code")]
+mod tests {
+    use super::*;
+    use wasmparser::{BinaryReader, ConstExpr};
+
+    // Hand-assembled constant expressions: input validation rejects the ill-typed ones the
+    // checks below guard against, so they can only be exercised directly.
+    const END: u8 = 0x0b;
+    const GLOBAL_GET: u8 = 0x23;
+    const I32_CONST: u8 = 0x41;
+    const I64_CONST: u8 = 0x42;
+    const I32_ADD: u8 = 0x6a;
+    const I64_ADD: u8 = 0x7c;
+
+    fn expr(bytes: &[u8]) -> ConstExpr<'_> {
+        ConstExpr::new(BinaryReader::new(bytes, 0))
+    }
+
+    fn imported(ty: ValType, mutable: bool) -> codegen::ImportedGlobalInfo {
+        codegen::ImportedGlobalInfo { ty, mutable }
+    }
+
+    #[test]
+    fn only_an_imported_index_counts_as_reading_an_imported_global() {
+        let get = |i: u8| [GLOBAL_GET, i, END];
+        // One import: index 0 is the host's, index 1 is the first defined global.
+        assert!(reads_imported_global(&expr(&get(0)), 1).unwrap());
+        assert!(!reads_imported_global(&expr(&get(1)), 1).unwrap());
+        assert!(!reads_imported_global(&expr(&get(0)), 0).unwrap());
+        assert!(!reads_imported_global(&expr(&[I32_CONST, 1, END]), 1).unwrap());
+    }
+
+    fn width_ok(bytes: &[u8], wide: bool, globals: &[codegen::ImportedGlobalInfo]) -> bool {
+        check_offset_width(&expr(bytes), wide, globals, &[]).is_ok()
+    }
+
+    #[test]
+    fn offset_constants_and_arithmetic_must_have_the_offsets_width() {
+        let g32 = [imported(ValType::I32, false)];
+        let g64 = [imported(ValType::I64, false)];
+        // narrow offset: i32 operands only
+        assert!(width_ok(
+            &[GLOBAL_GET, 0, I32_CONST, 1, I32_ADD, END],
+            false,
+            &g32
+        ));
+        assert!(!width_ok(
+            &[GLOBAL_GET, 0, I64_CONST, 1, I64_ADD, END],
+            false,
+            &g32
+        ));
+        assert!(!width_ok(
+            &[GLOBAL_GET, 0, I64_CONST, 1, I32_ADD, END],
+            false,
+            &g32
+        ));
+        assert!(!width_ok(
+            &[GLOBAL_GET, 0, I32_CONST, 1, I64_ADD, END],
+            false,
+            &g32
+        ));
+        // wide offset: i64 operands only
+        assert!(width_ok(
+            &[GLOBAL_GET, 0, I64_CONST, 1, I64_ADD, END],
+            true,
+            &g64
+        ));
+        assert!(!width_ok(
+            &[GLOBAL_GET, 0, I32_CONST, 1, I32_ADD, END],
+            true,
+            &g64
+        ));
+        assert!(!width_ok(
+            &[GLOBAL_GET, 0, I32_CONST, 1, I64_ADD, END],
+            true,
+            &g64
+        ));
+        assert!(!width_ok(
+            &[GLOBAL_GET, 0, I64_CONST, 1, I32_ADD, END],
+            true,
+            &g64
+        ));
+        // the global's own width counts too
+        assert!(!width_ok(&[GLOBAL_GET, 0, END], true, &g32));
+        assert!(!width_ok(&[GLOBAL_GET, 0, END], false, &g64));
+        assert!(!width_ok(&[GLOBAL_GET, 5, END], false, &g32));
+    }
+
+    #[test]
+    fn a_reference_constant_reading_a_global_needs_an_immutable_imported_reference() {
+        let eval = |g: codegen::ImportedGlobalInfo| {
+            eval_ref_const(&expr(&[GLOBAL_GET, 0, END]), "elem", &[g], &[])
+        };
+        let funcref = ValType::Ref(wasmparser::RefType::FUNCREF);
+        assert!(matches!(
+            eval(imported(funcref, false)),
+            Ok(RefConst::Imported(0))
+        ));
+        assert!(eval(imported(funcref, true)).is_err());
+        assert!(eval(imported(ValType::I32, false)).is_err());
+        assert!(eval(imported(ValType::I32, true)).is_err());
+    }
+
+    #[test]
+    fn ref_null_is_the_null_handle() {
+        // `ref.null func`
+        let got = eval_ref_const(&expr(&[0xd0, 0x70, END]), "elem", &[], &[]).unwrap();
+        assert_eq!(got.handle(), Some(u32::MAX));
+    }
+}
