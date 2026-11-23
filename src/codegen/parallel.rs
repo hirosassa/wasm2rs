@@ -138,7 +138,7 @@ fn abort(shared: &Shared) {
 }
 
 /// Consumed pieces between wake-ups of throttled workers.
-fn wake_every(window: usize) -> usize {
+fn wake_interval(window: usize) -> usize {
     (window / WAKE_DIVISOR).max(1)
 }
 
@@ -232,7 +232,7 @@ where
     } = limits;
     let shared = Shared::new(window);
     let next = AtomicUsize::new(0);
-    let wake_every = wake_every(window);
+    let wake_every = wake_interval(window);
     thread::scope(|scope| {
         let worker = || {
             let _guard = AbortOnUnwind(&shared);
@@ -514,6 +514,7 @@ mod tests {
         // the check for, plus the exempt next-to-consume piece.
         assert!(max_ahead <= 2 + jobs + 1, "ran {max_ahead} ahead");
     }
+
     /// Long enough for a thread that can proceed to be scheduled, even on a loaded
     /// runner; the polls below return as soon as it has.
     const PROMPT: Duration = Duration::from_secs(5);
@@ -529,19 +530,17 @@ mod tests {
         done.load(Ordering::SeqCst)
     }
 
-    /// Runs `wait_for_room` and reports `(returned within grace, its answer)`. A call
-    /// still blocked after `grace` is released by aborting, so its answer is `false`.
-    fn wait_outcome(
+    /// Runs `f` on a thread and reports `(returned within grace, its answer)`. A call
+    /// still blocked after `grace` is released by aborting `shared`.
+    fn run_or_abort<T: Send>(
         shared: &Shared,
-        k: usize,
-        window: usize,
-        budget: usize,
         grace: Duration,
-    ) -> (bool, bool) {
+        f: impl FnOnce() -> T + Send,
+    ) -> (bool, T) {
         let done = AtomicBool::new(false);
         thread::scope(|scope| {
             let handle = scope.spawn(|| {
-                let answer = wait_for_room(shared, k, window, budget);
+                let answer = f();
                 done.store(true, Ordering::SeqCst);
                 answer
             });
@@ -553,59 +552,61 @@ mod tests {
         })
     }
 
+    fn wait_outcome(shared: &Shared, k: usize, budget: usize, grace: Duration) -> (bool, bool) {
+        run_or_abort(shared, grace, || wait_for_room(shared, k, WINDOW, budget))
+    }
+
+    /// The window of every `Shared` these tests build.
+    const WINDOW: usize = 4;
+
     fn proceeds(shared: &Shared, k: usize, budget: usize) -> bool {
-        wait_outcome(shared, k, 4, budget, PROMPT) == (true, true)
+        wait_outcome(shared, k, budget, PROMPT) == (true, true)
     }
 
     fn blocks(shared: &Shared, k: usize, budget: usize) -> bool {
         // Released by the abort that ends the grace period.
-        wait_outcome(shared, k, 4, budget, BLOCKED) == (false, false)
+        wait_outcome(shared, k, budget, BLOCKED) == (false, false)
     }
 
-    /// A shared state whose consumer is at function 3 with 100 parked bytes, window 4.
-    fn mid_run() -> Shared {
-        let shared = Shared::new(4);
+    /// A shared state whose consumer is at function 3 with `parked` bytes parked.
+    fn mid_run(parked: usize) -> Shared {
+        let shared = Shared::new(WINDOW);
         shared.consumed.store(3, Ordering::SeqCst);
-        shared.parked.store(100, Ordering::SeqCst);
-        shared
-    }
-
-    #[test]
-    fn a_worker_waits_for_the_window_edge() {
-        let shared = mid_run();
-        // 3 + 4 = 7 is the first function outside the window.
-        shared.parked.store(0, Ordering::SeqCst);
-        assert!(proceeds(&shared, 6, 100), "last function inside the window");
-        assert!(blocks(&shared, 7, 100), "first function outside the window");
-        assert!(
-            blocks(&mid_run_with_parked(0), 9, 100),
-            "well outside the window"
-        );
-    }
-
-    fn mid_run_with_parked(parked: usize) -> Shared {
-        let shared = mid_run();
         shared.parked.store(parked, Ordering::SeqCst);
         shared
     }
 
     #[test]
+    fn a_worker_waits_for_the_window_edge() {
+        // 3 + 4 = 7 is the first function outside the window.
+        assert!(
+            proceeds(&mid_run(0), 6, 100),
+            "last function inside the window"
+        );
+        assert!(
+            blocks(&mid_run(0), 7, 100),
+            "first function outside the window"
+        );
+        assert!(blocks(&mid_run(0), 9, 100), "well outside the window");
+    }
+
+    #[test]
     fn the_byte_budget_throttles_everything_but_the_next_piece() {
         // Under budget: a function ahead of the consumer may run.
-        assert!(proceeds(&mid_run_with_parked(99), 4, 100));
+        assert!(proceeds(&mid_run(99), 4, 100));
         // At the budget it may not (the limit is exclusive)...
-        assert!(blocks(&mid_run_with_parked(100), 4, 100));
-        assert!(blocks(&mid_run_with_parked(101), 4, 100));
+        assert!(blocks(&mid_run(100), 4, 100));
+        assert!(blocks(&mid_run(101), 4, 100));
         // ...except the piece the consumer needs next, or the run would stall.
-        assert!(proceeds(&mid_run_with_parked(100), 3, 100));
-        assert!(proceeds(&mid_run_with_parked(1_000), 3, 100));
+        assert!(proceeds(&mid_run(100), 3, 100));
+        assert!(proceeds(&mid_run(1_000), 3, 100));
     }
 
     #[test]
     fn a_throttled_worker_resumes_when_the_consumer_advances() {
-        let shared = mid_run_with_parked(0);
+        let shared = mid_run(0);
         let answer = thread::scope(|scope| {
-            let handle = scope.spawn(|| wait_for_room(&shared, 7, 4, 100));
+            let handle = scope.spawn(|| wait_for_room(&shared, 7, WINDOW, 100));
             thread::sleep(Duration::from_millis(20));
             shared.consumed.store(4, Ordering::SeqCst);
             shared.pass_gate();
@@ -617,12 +618,12 @@ mod tests {
 
     #[test]
     fn an_abort_releases_a_throttled_worker_with_false() {
-        let shared = mid_run_with_parked(0);
+        let shared = mid_run(0);
         shared.abort.store(true, Ordering::SeqCst);
         // Even with room, an aborted run tells the worker to stop...
-        assert_eq!(wait_outcome(&shared, 4, 4, 100, PROMPT), (true, false));
+        assert_eq!(wait_outcome(&shared, 4, 100, PROMPT), (true, false));
         // ...and without room it does not wait.
-        assert_eq!(wait_outcome(&shared, 7, 4, 100, PROMPT), (true, false));
+        assert_eq!(wait_outcome(&shared, 7, 100, PROMPT), (true, false));
     }
 
     #[test]
@@ -654,7 +655,7 @@ mod tests {
 
     #[test]
     fn taking_a_piece_advances_the_consumer_and_frees_its_bytes() {
-        let shared = Shared::new(4);
+        let shared = Shared::new(WINDOW);
         shared.consumed.store(5, Ordering::SeqCst);
         // Function 5 parks in slot 5 % 4.
         parked_piece(&shared, 5, "abcd");
@@ -671,7 +672,7 @@ mod tests {
 
     #[test]
     fn taking_a_failed_piece_frees_no_bytes() {
-        let shared = Shared::new(4);
+        let shared = Shared::new(WINDOW);
         shared.parked.store(7, Ordering::SeqCst);
         *lock_slot(shared.slot(0).unwrap()) = Some(Err(TranspileError::Internal("boom".into())));
         let piece = take_piece(&shared, 0, 1_000, usize::MAX).unwrap();
@@ -680,27 +681,13 @@ mod tests {
         assert_eq!(shared.consumed.load(Ordering::SeqCst), 1);
     }
 
-    /// Runs `take_piece` and reports `(returned within grace, its answer)`; a call
-    /// still blocked after `grace` is released by aborting.
     fn take_outcome(shared: &Shared, k: usize, grace: Duration) -> (bool, Option<Piece>) {
-        let done = AtomicBool::new(false);
-        thread::scope(|scope| {
-            let handle = scope.spawn(|| {
-                let piece = take_piece(shared, k, 1_000, usize::MAX);
-                done.store(true, Ordering::SeqCst);
-                piece
-            });
-            let finished = poll(&done, grace);
-            if !finished {
-                abort(shared);
-            }
-            (finished, handle.join().unwrap())
-        })
+        run_or_abort(shared, grace, || take_piece(shared, k, 1_000, usize::MAX))
     }
 
     #[test]
     fn an_aborted_consumer_does_not_wait_for_a_piece() {
-        let shared = Shared::new(4);
+        let shared = Shared::new(WINDOW);
         shared.abort.store(true, Ordering::SeqCst);
         let (finished, piece) = take_outcome(&shared, 0, PROMPT);
         assert!(finished, "take_piece slept although the run was aborted");
@@ -709,12 +696,12 @@ mod tests {
 
     #[test]
     fn a_consumer_waits_for_its_piece_until_one_lands() {
-        let shared = Shared::new(4);
+        let shared = Shared::new(WINDOW);
         let (finished, piece) = take_outcome(&shared, 0, BLOCKED);
         assert!(!finished, "take_piece returned without a piece");
         assert!(piece.is_none(), "an abort ends the wait with no piece");
 
-        let shared = Shared::new(4);
+        let shared = Shared::new(WINDOW);
         let piece = thread::scope(|scope| {
             let handle = scope.spawn(|| take_piece(&shared, 0, 1_000, usize::MAX));
             thread::sleep(Duration::from_millis(20));
@@ -728,23 +715,30 @@ mod tests {
 
     /// Takes function `k` (a piece of `len` bytes) while a worker, which has no room
     /// until the consumer advances, is throttled; reports whether the take woke it.
-    fn take_wakes_throttled_worker(k: usize, len: usize, wake_every: usize, budget: usize) -> bool {
-        let shared = Shared::new(4);
+    fn take_wakes_throttled_worker(
+        k: usize,
+        len: usize,
+        wake_every: usize,
+        budget: usize,
+        expect_wake: bool,
+    ) -> bool {
+        let shared = Shared::new(WINDOW);
         shared.consumed.store(k, Ordering::SeqCst);
         parked_piece(&shared, k, &"x".repeat(len));
-        // Function k + 4 is outside the window until k has been taken.
-        let worker_k = k + 4;
-        let grace = if wake_every == 1_000 && budget == 1_000 {
-            BLOCKED
-        } else {
-            PROMPT
-        };
+        // Function k + WINDOW is outside the window until k has been taken.
+        let worker_k = k + WINDOW;
+        // A wake-up is awaited until it comes; its absence is watched for briefly.
+        let grace = if expect_wake { PROMPT } else { BLOCKED };
+        let started = AtomicBool::new(false);
         let done = AtomicBool::new(false);
         thread::scope(|scope| {
             let handle = scope.spawn(|| {
-                wait_for_room(&shared, worker_k, 4, budget);
+                started.store(true, Ordering::SeqCst);
+                wait_for_room(&shared, worker_k, WINDOW, budget);
                 done.store(true, Ordering::SeqCst);
             });
+            // Only once the worker runs can the take be told apart from its start-up.
+            assert!(poll(&started, PROMPT));
             thread::sleep(Duration::from_millis(20));
             assert!(
                 !done.load(Ordering::SeqCst),
@@ -761,34 +755,34 @@ mod tests {
     #[test]
     fn the_consumer_wakes_throttled_workers_every_quarter_window() {
         // Taking function 1 completes the second of every two (`wake_every` = 2).
-        assert!(take_wakes_throttled_worker(1, 1, 2, 1_000));
+        assert!(take_wakes_throttled_worker(1, 1, 2, 1_000, true));
     }
 
     #[test]
     fn the_consumer_wakes_throttled_workers_at_every_step_over_budget() {
         // Parked bytes equal to the budget count as over it, whatever the step.
-        assert!(take_wakes_throttled_worker(0, 3, 1_000, 3));
+        assert!(take_wakes_throttled_worker(0, 3, 1_000, 3, true));
     }
 
     #[test]
     fn the_consumer_stays_quiet_between_wake_points_under_budget() {
-        assert!(!take_wakes_throttled_worker(0, 3, 1_000, 1_000));
+        assert!(!take_wakes_throttled_worker(0, 3, 1_000, 1_000, false));
     }
 
     #[test]
     fn wake_points_are_a_quarter_of_the_window_and_never_zero() {
-        assert_eq!(wake_every(256), 64);
-        assert_eq!(wake_every(8), 2);
-        assert_eq!(wake_every(7), 1);
-        assert_eq!(wake_every(1), 1);
-        assert_eq!(wake_every(0), 1);
+        assert_eq!(wake_interval(256), 64);
+        assert_eq!(wake_interval(8), 2);
+        assert_eq!(wake_interval(7), 1);
+        assert_eq!(wake_interval(1), 1);
+        assert_eq!(wake_interval(0), 1);
     }
 
     #[test]
     fn limits_scale_with_the_job_count() {
         let limits = Limits::for_jobs(4);
-        assert_eq!(limits.window, 4 * 256);
-        assert_eq!(limits.byte_budget, 4 * (16 << 20));
+        assert_eq!(limits.window, 4 * WINDOW_PER_JOB);
+        assert_eq!(limits.byte_budget, 4 * PARKED_BYTES_PER_JOB);
         // Saturates instead of wrapping.
         assert_eq!(Limits::for_jobs(usize::MAX).window, usize::MAX);
     }
@@ -808,13 +802,13 @@ mod tests {
 
     #[test]
     fn auto_jobs_stay_serial_below_the_threshold_and_cap_at_eight() {
-        let auto = thread::available_parallelism().map_or(1, |n| n.get().min(8));
+        let auto = thread::available_parallelism().map_or(1, |n| n.get().min(AUTO_MAX_JOBS));
         assert_eq!(resolve_jobs(0, 0), 0);
         assert_eq!(resolve_jobs(0, 1), 1);
-        assert_eq!(resolve_jobs(0, 511), 1);
-        assert_eq!(resolve_jobs(0, 512), auto.min(512));
+        assert_eq!(resolve_jobs(0, AUTO_MIN_FUNCS - 1), 1);
+        assert_eq!(resolve_jobs(0, AUTO_MIN_FUNCS), auto);
         assert_eq!(resolve_jobs(0, 100_000), auto);
-        assert!(auto <= 8);
+        assert!(auto <= AUTO_MAX_JOBS);
     }
 
     #[test]
@@ -835,6 +829,7 @@ mod tests {
             );
         }
     }
+
     /// Recurses through ~8 MiB of frames: far beyond a default thread stack's 2 MiB
     /// but well inside `WORKER_STACK`.
     fn burn_stack(depth: usize) -> usize {
