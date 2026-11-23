@@ -489,7 +489,7 @@ impl WasiHost {
         }
     }
 
-    /// Whether a trap is a [`WasiTrap`](crate::WasiTrap) payload instead of a message string
+    /// Whether a trap is a [`WasiTrap`] payload instead of a message string
     /// (off by default); see [`WasiHostBuilder::typed_traps`].
     pub fn with_typed_traps(mut self, on: bool) -> Self {
         self.typed_traps = on;
