@@ -1015,6 +1015,12 @@ fn madd_lines(name: &str, elem: &str, bytes: usize, neg: bool) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test code"
+)]
 mod tests {
     use super::*;
 
@@ -1044,5 +1050,145 @@ mod tests {
         assert_eq!(umask(2), "u16");
         assert_eq!(umask(4), "u32");
         assert_eq!(umask(8), "u64");
+    }
+
+    /// The `return ...;` line of `name`'s intrinsic block under `cfg`, if it has one.
+    fn intrinsic_return(name: &str, cfg: &str) -> Option<String> {
+        let lane = LANE.iter().find(|l| l.name == name)?;
+        let blocks = arch_blocks(lane);
+        let (_, body) = blocks.iter().find(|(c, _)| *c == cfg)?;
+        body.iter().find(|l| l.starts_with("return ")).cloned()
+    }
+
+    /// Asserts the block is one unsafe return of `call`, bit-inverted iff `inverted`.
+    fn assert_intrinsic(name: &str, cfg: &str, call: &str, inverted: bool) {
+        let line = intrinsic_return(name, cfg)
+            .unwrap_or_else(|| panic!("{name} has no intrinsic path under {cfg}"));
+        let head = if inverted {
+            "return !unsafe {"
+        } else {
+            "return unsafe {"
+        };
+        assert!(line.starts_with(head), "{name}: {line}");
+        assert!(line.contains(call), "{name}: expected `{call}` in {line}");
+    }
+
+    #[test]
+    fn neon_maps_each_integer_op_to_its_intrinsic_on_the_lane_type() {
+        let cases = [
+            ("i8x16_add", "vaddq_s8(t(a), t(b))", false),
+            ("i64x2_add", "vaddq_s64(t(a), t(b))", false),
+            ("i16x8_sub", "vsubq_s16(t(a), t(b))", false),
+            ("i64x2_sub", "vsubq_s64(t(a), t(b))", false),
+            ("i16x8_mul", "vmulq_s16(t(a), t(b))", false),
+            ("i32x4_mul", "vmulq_s32(t(a), t(b))", false),
+            ("i16x8_neg", "vnegq_s16(t(a))", false),
+            ("i64x2_neg", "vnegq_s64(t(a))", false),
+            ("i32x4_abs", "vabsq_s32(t(a))", false),
+            ("i64x2_abs", "vabsq_s64(t(a))", false),
+            ("i8x16_add_sat_u", "vqaddq_u8(t(a), t(b))", false),
+            ("i16x8_add_sat_s", "vqaddq_s16(t(a), t(b))", false),
+            ("i8x16_sub_sat_s", "vqsubq_s8(t(a), t(b))", false),
+            ("i16x8_sub_sat_u", "vqsubq_u16(t(a), t(b))", false),
+            ("i8x16_avgr_u", "vrhaddq_u8(t(a), t(b))", false),
+            ("i16x8_avgr_u", "vrhaddq_u16(t(a), t(b))", false),
+            ("i8x16_eq", "vceqq_s8(t(a), t(b))", false),
+            ("i64x2_eq", "vceqq_s64(t(a), t(b))", false),
+            ("i32x4_ne", "vceqq_s32(t(a), t(b))", true),
+            ("i64x2_ne", "vceqq_s64(t(a), t(b))", true),
+            ("i8x16_lt_s", "vcltq_s8(t(a), t(b))", false),
+            ("i16x8_lt_u", "vcltq_u16(t(a), t(b))", false),
+            ("i32x4_gt_s", "vcgtq_s32(t(a), t(b))", false),
+            ("i8x16_gt_u", "vcgtq_u8(t(a), t(b))", false),
+            ("i16x8_le_s", "vcleq_s16(t(a), t(b))", false),
+            ("i32x4_le_u", "vcleq_u32(t(a), t(b))", false),
+            ("i8x16_ge_s", "vcgeq_s8(t(a), t(b))", false),
+            ("i16x8_ge_u", "vcgeq_u16(t(a), t(b))", false),
+        ];
+        for (name, call, inverted) in cases {
+            assert_intrinsic(name, CFG_AARCH64, call, inverted);
+        }
+    }
+
+    #[test]
+    fn neon_has_no_path_where_the_instruction_does_not_exist() {
+        // No 64-bit lane multiply; popcount and the Q15 multiply are not one instruction.
+        for name in ["i64x2_mul", "i8x16_popcnt", "i16x8_q15mulr_sat_s"] {
+            assert_eq!(intrinsic_return(name, CFG_AARCH64), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn sse2_sizes_the_intrinsic_by_lane_width_in_bits() {
+        let cases = [
+            ("i8x16_add", "_mm_add_epi8(a, b)", false),
+            ("i16x8_add", "_mm_add_epi16(a, b)", false),
+            ("i32x4_add", "_mm_add_epi32(a, b)", false),
+            ("i64x2_add", "_mm_add_epi64(a, b)", false),
+            ("i8x16_sub", "_mm_sub_epi8(a, b)", false),
+            ("i64x2_sub", "_mm_sub_epi64(a, b)", false),
+            ("i16x8_mul", "_mm_mullo_epi16(a, b)", false),
+            ("i8x16_neg", "_mm_sub_epi8(_mm_setzero_si128(), a)", false),
+            ("i32x4_neg", "_mm_sub_epi32(_mm_setzero_si128(), a)", false),
+            ("i8x16_add_sat_s", "_mm_adds_epi8(a, b)", false),
+            ("i16x8_add_sat_u", "_mm_adds_epu16(a, b)", false),
+            ("i8x16_sub_sat_u", "_mm_subs_epu8(a, b)", false),
+            ("i16x8_sub_sat_s", "_mm_subs_epi16(a, b)", false),
+            ("i8x16_avgr_u", "_mm_avg_epu8(a, b)", false),
+            ("i16x8_avgr_u", "_mm_avg_epu16(a, b)", false),
+            ("i8x16_eq", "_mm_cmpeq_epi8(a, b)", false),
+            ("i32x4_eq", "_mm_cmpeq_epi32(a, b)", false),
+            ("i16x8_ne", "_mm_cmpeq_epi16(a, b)", true),
+            ("i32x4_ne", "_mm_cmpeq_epi32(a, b)", true),
+        ];
+        for (name, call, inverted) in cases {
+            assert_intrinsic(name, CFG_X86_64, call, inverted);
+        }
+    }
+
+    #[test]
+    fn sse2_derives_ordering_compares_from_signed_greater_than() {
+        // `<`/`>=` swap the operands, `<=`/`>=` invert the mask.
+        let cases = [
+            ("i8x16_gt_s", "_mm_cmpgt_epi8(a, b)", false),
+            ("i16x8_lt_s", "_mm_cmpgt_epi16(b, a)", false),
+            ("i32x4_le_s", "_mm_cmpgt_epi32(a, b)", true),
+            ("i8x16_ge_s", "_mm_cmpgt_epi8(b, a)", true),
+        ];
+        for (name, call, inverted) in cases {
+            assert_intrinsic(name, CFG_X86_64, call, inverted);
+            let line = intrinsic_return(name, CFG_X86_64).unwrap();
+            assert!(!line.contains("bias"), "signed lanes need no bias: {line}");
+        }
+        // Unsigned lanes flip the sign bit of both operands first.
+        for (name, call, inverted, bits) in [
+            ("i8x16_lt_u", "_mm_cmpgt_epi8(b, a)", false, 8),
+            ("i16x8_gt_u", "_mm_cmpgt_epi16(a, b)", false, 16),
+            ("i32x4_ge_u", "_mm_cmpgt_epi32(b, a)", true, 32),
+        ] {
+            assert_intrinsic(name, CFG_X86_64, call, inverted);
+            let line = intrinsic_return(name, CFG_X86_64).unwrap();
+            assert!(
+                line.contains(&format!("_mm_set1_epi{bits}(i{bits}::MIN)")),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn sse2_has_no_path_where_the_instruction_is_sse4_or_absent() {
+        for name in [
+            "i64x2_eq",
+            "i64x2_ne",
+            "i64x2_lt_s",
+            "i64x2_ge_s",
+            "i32x4_mul",
+            "i64x2_mul",
+            "i8x16_abs",
+            "i32x4_abs",
+            "i8x16_popcnt",
+        ] {
+            assert_eq!(intrinsic_return(name, CFG_X86_64), None, "{name}");
+        }
     }
 }
