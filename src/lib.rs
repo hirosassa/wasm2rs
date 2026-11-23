@@ -952,4 +952,19 @@ mod error_tests {
         };
         assert_eq!(pieces.into_string(), "cdef");
     }
+
+    #[test]
+    fn into_string_reserves_body_and_tail_in_one_growth() {
+        // The head's buffer holds one byte, so the 9 + 1 more must come from the single
+        // reserve: sized by the sum it ends exactly full, sized by anything smaller it
+        // regrows when the tail is pushed.
+        let pieces = SourcePieces {
+            head: String::from("a"),
+            body: "bcdefghij".into(),
+            tail: "k".into(),
+        };
+        let out = pieces.into_string();
+        assert_eq!(out, "abcdefghijk");
+        assert_eq!(out.capacity(), out.len());
+    }
 }
