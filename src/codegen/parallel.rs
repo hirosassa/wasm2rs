@@ -366,6 +366,7 @@ fn take_piece(shared: &Shared, k: usize, wake_every: usize, byte_budget: usize) 
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::sync::mpsc::{self, RecvTimeoutError};
     use std::time::{Duration, Instant};
 
     fn meta() -> GenMeta {
@@ -390,10 +391,29 @@ mod tests {
         Ok(meta())
     }
 
+    /// How long a run that must finish may take. A lost wake-up leaves the consumer and
+    /// the workers asleep for good, and nothing inside the run can fail it.
+    const HANG: Duration = Duration::from_secs(15);
+
+    /// Ends the test process if the returned sender is still alive after [`HANG`]: a
+    /// deadlocked run would otherwise stall the whole suite (and a `cargo mutants` run)
+    /// instead of failing. Dropping the sender disarms it.
+    fn arm_watchdog(what: &'static str) -> mpsc::Sender<()> {
+        let (disarm, disarmed) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            if disarmed.recv_timeout(HANG) == Err(RecvTimeoutError::Timeout) {
+                eprintln!("{what}: deadlocked (no progress for {HANG:?})");
+                std::process::exit(1);
+            }
+        });
+        disarm
+    }
+
     fn collect<G>(total: usize, jobs: usize, limits: Limits, generate: G) -> Vec<String>
     where
         G: Fn(usize, &mut String) -> Result<GenMeta, TranspileError> + Sync,
     {
+        let _watchdog = arm_watchdog("collect");
         let mut got = Vec::new();
         run_ordered(total, jobs, limits, &generate, &mut |src, _| {
             got.push(src.to_string());
@@ -441,6 +461,7 @@ mod tests {
 
     #[test]
     fn the_lowest_failing_index_surfaces_first() {
+        let _watchdog = arm_watchdog("the_lowest_failing_index_surfaces_first");
         let result = run_ordered(
             100,
             8,
@@ -461,6 +482,7 @@ mod tests {
 
     #[test]
     fn a_consumer_error_stops_the_run() {
+        let _watchdog = arm_watchdog("a_consumer_error_stops_the_run");
         let mut seen = 0usize;
         let result = run_ordered(
             100,
@@ -485,6 +507,7 @@ mod tests {
 
     #[test]
     fn the_byte_budget_bounds_how_far_workers_run_ahead() {
+        let _watchdog = arm_watchdog("the_byte_budget_bounds_how_far_workers_run_ahead");
         let generated = AtomicUsize::new(0);
         let mut consumed = 0usize;
         let mut max_ahead = 0usize;
@@ -604,6 +627,7 @@ mod tests {
 
     #[test]
     fn a_throttled_worker_resumes_when_the_consumer_advances() {
+        let _watchdog = arm_watchdog("a_throttled_worker_resumes_when_the_consumer_advances");
         let shared = mid_run(0);
         let answer = thread::scope(|scope| {
             let handle = scope.spawn(|| wait_for_room(&shared, 7, WINDOW, 100));
@@ -696,6 +720,7 @@ mod tests {
 
     #[test]
     fn a_consumer_waits_for_its_piece_until_one_lands() {
+        let _watchdog = arm_watchdog("a_consumer_waits_for_its_piece_until_one_lands");
         let shared = Shared::new(WINDOW);
         let (finished, piece) = take_outcome(&shared, 0, BLOCKED);
         assert!(!finished, "take_piece returned without a piece");
@@ -722,6 +747,7 @@ mod tests {
         budget: usize,
         expect_wake: bool,
     ) -> bool {
+        let _watchdog = arm_watchdog("take_wakes_throttled_worker");
         let shared = Shared::new(WINDOW);
         shared.consumed.store(k, Ordering::SeqCst);
         parked_piece(&shared, k, &"x".repeat(len));
@@ -780,9 +806,13 @@ mod tests {
 
     #[test]
     fn limits_scale_with_the_job_count() {
-        let limits = Limits::for_jobs(4);
-        assert_eq!(limits.window, 4 * WINDOW_PER_JOB);
-        assert_eq!(limits.byte_budget, 4 * PARKED_BYTES_PER_JOB);
+        // The documented per-job figures, not whatever the constants happen to hold.
+        let one = Limits::for_jobs(1);
+        assert_eq!(one.window, 256);
+        assert_eq!(one.byte_budget, 16 * 1024 * 1024);
+        let four = Limits::for_jobs(4);
+        assert_eq!(four.window, 4 * one.window);
+        assert_eq!(four.byte_budget, 4 * one.byte_budget);
         // Saturates instead of wrapping.
         assert_eq!(Limits::for_jobs(usize::MAX).window, usize::MAX);
     }
