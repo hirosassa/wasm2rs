@@ -87,6 +87,19 @@ struct Shared {
 }
 
 impl Shared {
+    fn new(window: usize) -> Self {
+        Self {
+            slots: (0..window).map(|_| Mutex::new(None)).collect(),
+            consumed: AtomicUsize::new(0),
+            parked: AtomicUsize::new(0),
+            consumer_waiting: AtomicBool::new(false),
+            abort: AtomicBool::new(false),
+            gate: Mutex::new(()),
+            ready: Condvar::new(),
+            room: Condvar::new(),
+        }
+    }
+
     fn slot(&self, k: usize) -> Option<&Mutex<Option<Piece>>> {
         self.slots.get(k.checked_rem(self.slots.len())?)
     }
@@ -122,6 +135,11 @@ fn abort(shared: &Shared) {
     shared.pass_gate();
     shared.ready.notify_all();
     shared.room.notify_all();
+}
+
+/// Consumed pieces between wake-ups of throttled workers.
+fn wake_interval(window: usize) -> usize {
+    (window / WAKE_DIVISOR).max(1)
 }
 
 /// The worker count for `requested` jobs (`0` = auto) over `live` functions.
@@ -212,18 +230,9 @@ where
         window,
         byte_budget,
     } = limits;
-    let shared = Shared {
-        slots: (0..window).map(|_| Mutex::new(None)).collect(),
-        consumed: AtomicUsize::new(0),
-        parked: AtomicUsize::new(0),
-        consumer_waiting: AtomicBool::new(false),
-        abort: AtomicBool::new(false),
-        gate: Mutex::new(()),
-        ready: Condvar::new(),
-        room: Condvar::new(),
-    };
+    let shared = Shared::new(window);
     let next = AtomicUsize::new(0);
-    let wake_every = (window / WAKE_DIVISOR).max(1);
+    let wake_every = wake_interval(window);
     thread::scope(|scope| {
         let worker = || {
             let _guard = AbortOnUnwind(&shared);
@@ -357,7 +366,7 @@ fn take_piece(shared: &Shared, k: usize, wake_every: usize, byte_budget: usize) 
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn meta() -> GenMeta {
         GenMeta {
@@ -504,5 +513,359 @@ mod tests {
         // Budget fits two pieces; each worker may add one it was already past
         // the check for, plus the exempt next-to-consume piece.
         assert!(max_ahead <= 2 + jobs + 1, "ran {max_ahead} ahead");
+    }
+
+    /// Long enough for a thread that can proceed to be scheduled, even on a loaded
+    /// runner; the polls below return as soon as it has.
+    const PROMPT: Duration = Duration::from_secs(5);
+    /// How long a thread that must stay blocked is watched. A too-short wait can only
+    /// miss a bug, never fail a correct build.
+    const BLOCKED: Duration = Duration::from_millis(150);
+
+    fn poll(done: &AtomicBool, grace: Duration) -> bool {
+        let deadline = Instant::now() + grace;
+        while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        done.load(Ordering::SeqCst)
+    }
+
+    /// Runs `f` on a thread and reports `(returned within grace, its answer)`. A call
+    /// still blocked after `grace` is released by aborting `shared`.
+    fn run_or_abort<T: Send>(
+        shared: &Shared,
+        grace: Duration,
+        f: impl FnOnce() -> T + Send,
+    ) -> (bool, T) {
+        let done = AtomicBool::new(false);
+        thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let answer = f();
+                done.store(true, Ordering::SeqCst);
+                answer
+            });
+            let finished = poll(&done, grace);
+            if !finished {
+                abort(shared);
+            }
+            (finished, handle.join().unwrap())
+        })
+    }
+
+    fn wait_outcome(shared: &Shared, k: usize, budget: usize, grace: Duration) -> (bool, bool) {
+        run_or_abort(shared, grace, || wait_for_room(shared, k, WINDOW, budget))
+    }
+
+    /// The window of every `Shared` these tests build.
+    const WINDOW: usize = 4;
+
+    fn proceeds(shared: &Shared, k: usize, budget: usize) -> bool {
+        wait_outcome(shared, k, budget, PROMPT) == (true, true)
+    }
+
+    fn blocks(shared: &Shared, k: usize, budget: usize) -> bool {
+        // Released by the abort that ends the grace period.
+        wait_outcome(shared, k, budget, BLOCKED) == (false, false)
+    }
+
+    /// A shared state whose consumer is at function 3 with `parked` bytes parked.
+    fn mid_run(parked: usize) -> Shared {
+        let shared = Shared::new(WINDOW);
+        shared.consumed.store(3, Ordering::SeqCst);
+        shared.parked.store(parked, Ordering::SeqCst);
+        shared
+    }
+
+    #[test]
+    fn a_worker_waits_for_the_window_edge() {
+        // 3 + 4 = 7 is the first function outside the window.
+        assert!(
+            proceeds(&mid_run(0), 6, 100),
+            "last function inside the window"
+        );
+        assert!(
+            blocks(&mid_run(0), 7, 100),
+            "first function outside the window"
+        );
+        assert!(blocks(&mid_run(0), 9, 100), "well outside the window");
+    }
+
+    #[test]
+    fn the_byte_budget_throttles_everything_but_the_next_piece() {
+        // Under budget: a function ahead of the consumer may run.
+        assert!(proceeds(&mid_run(99), 4, 100));
+        // At the budget it may not (the limit is exclusive)...
+        assert!(blocks(&mid_run(100), 4, 100));
+        assert!(blocks(&mid_run(101), 4, 100));
+        // ...except the piece the consumer needs next, or the run would stall.
+        assert!(proceeds(&mid_run(100), 3, 100));
+        assert!(proceeds(&mid_run(1_000), 3, 100));
+    }
+
+    #[test]
+    fn a_throttled_worker_resumes_when_the_consumer_advances() {
+        let shared = mid_run(0);
+        let answer = thread::scope(|scope| {
+            let handle = scope.spawn(|| wait_for_room(&shared, 7, WINDOW, 100));
+            thread::sleep(Duration::from_millis(20));
+            shared.consumed.store(4, Ordering::SeqCst);
+            shared.pass_gate();
+            shared.room.notify_all();
+            handle.join().unwrap()
+        });
+        assert!(answer);
+    }
+
+    #[test]
+    fn an_abort_releases_a_throttled_worker_with_false() {
+        let shared = mid_run(0);
+        shared.abort.store(true, Ordering::SeqCst);
+        // Even with room, an aborted run tells the worker to stop...
+        assert_eq!(wait_outcome(&shared, 4, 100, PROMPT), (true, false));
+        // ...and without room it does not wait.
+        assert_eq!(wait_outcome(&shared, 7, 100, PROMPT), (true, false));
+    }
+
+    #[test]
+    fn pass_gate_takes_the_gate() {
+        let shared = Shared::new(1);
+        let held = shared.gate();
+        let passed = AtomicBool::new(false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                shared.pass_gate();
+                passed.store(true, Ordering::SeqCst);
+            });
+            // A sleeper's re-check runs under the gate, so a notify may only follow
+            // once the gate has been free.
+            assert!(
+                !poll(&passed, BLOCKED),
+                "pass_gate returned while the gate was held"
+            );
+            drop(held);
+            assert!(poll(&passed, PROMPT));
+        });
+    }
+
+    fn parked_piece(shared: &Shared, k: usize, src: &str) {
+        let slot = shared.slot(k).unwrap();
+        *lock_slot(slot) = Some(Ok((src.to_string(), meta())));
+        shared.parked.fetch_add(src.len(), Ordering::SeqCst);
+    }
+
+    #[test]
+    fn taking_a_piece_advances_the_consumer_and_frees_its_bytes() {
+        let shared = Shared::new(WINDOW);
+        shared.consumed.store(5, Ordering::SeqCst);
+        // Function 5 parks in slot 5 % 4.
+        parked_piece(&shared, 5, "abcd");
+        parked_piece(&shared, 6, "xy");
+        let (src, _) = take_piece(&shared, 5, 1_000, usize::MAX).unwrap().unwrap();
+        assert_eq!(src, "abcd");
+        assert_eq!(shared.consumed.load(Ordering::SeqCst), 6);
+        assert_eq!(shared.parked.load(Ordering::SeqCst), 2);
+        assert!(
+            lock_slot(shared.slot(5).unwrap()).is_none(),
+            "the slot is emptied"
+        );
+    }
+
+    #[test]
+    fn taking_a_failed_piece_frees_no_bytes() {
+        let shared = Shared::new(WINDOW);
+        shared.parked.store(7, Ordering::SeqCst);
+        *lock_slot(shared.slot(0).unwrap()) = Some(Err(TranspileError::Internal("boom".into())));
+        let piece = take_piece(&shared, 0, 1_000, usize::MAX).unwrap();
+        assert!(matches!(piece, Err(TranspileError::Internal(m)) if m == "boom"));
+        assert_eq!(shared.parked.load(Ordering::SeqCst), 7);
+        assert_eq!(shared.consumed.load(Ordering::SeqCst), 1);
+    }
+
+    fn take_outcome(shared: &Shared, k: usize, grace: Duration) -> (bool, Option<Piece>) {
+        run_or_abort(shared, grace, || take_piece(shared, k, 1_000, usize::MAX))
+    }
+
+    #[test]
+    fn an_aborted_consumer_does_not_wait_for_a_piece() {
+        let shared = Shared::new(WINDOW);
+        shared.abort.store(true, Ordering::SeqCst);
+        let (finished, piece) = take_outcome(&shared, 0, PROMPT);
+        assert!(finished, "take_piece slept although the run was aborted");
+        assert!(piece.is_none());
+    }
+
+    #[test]
+    fn a_consumer_waits_for_its_piece_until_one_lands() {
+        let shared = Shared::new(WINDOW);
+        let (finished, piece) = take_outcome(&shared, 0, BLOCKED);
+        assert!(!finished, "take_piece returned without a piece");
+        assert!(piece.is_none(), "an abort ends the wait with no piece");
+
+        let shared = Shared::new(WINDOW);
+        let piece = thread::scope(|scope| {
+            let handle = scope.spawn(|| take_piece(&shared, 0, 1_000, usize::MAX));
+            thread::sleep(Duration::from_millis(20));
+            parked_piece(&shared, 0, "late");
+            shared.pass_gate();
+            shared.ready.notify_one();
+            handle.join().unwrap()
+        });
+        assert_eq!(piece.unwrap().unwrap().0, "late");
+    }
+
+    /// Takes function `k` (a piece of `len` bytes) while a worker, which has no room
+    /// until the consumer advances, is throttled; reports whether the take woke it.
+    fn take_wakes_throttled_worker(
+        k: usize,
+        len: usize,
+        wake_every: usize,
+        budget: usize,
+        expect_wake: bool,
+    ) -> bool {
+        let shared = Shared::new(WINDOW);
+        shared.consumed.store(k, Ordering::SeqCst);
+        parked_piece(&shared, k, &"x".repeat(len));
+        // Function k + WINDOW is outside the window until k has been taken.
+        let worker_k = k + WINDOW;
+        // A wake-up is awaited until it comes; its absence is watched for briefly.
+        let grace = if expect_wake { PROMPT } else { BLOCKED };
+        let started = AtomicBool::new(false);
+        let done = AtomicBool::new(false);
+        thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                started.store(true, Ordering::SeqCst);
+                wait_for_room(&shared, worker_k, WINDOW, budget);
+                done.store(true, Ordering::SeqCst);
+            });
+            // Only once the worker runs can the take be told apart from its start-up.
+            assert!(poll(&started, PROMPT));
+            thread::sleep(Duration::from_millis(20));
+            assert!(
+                !done.load(Ordering::SeqCst),
+                "the worker had room before the take"
+            );
+            take_piece(&shared, k, wake_every, budget).unwrap().unwrap();
+            let woken = poll(&done, grace);
+            abort(&shared);
+            handle.join().unwrap();
+            woken
+        })
+    }
+
+    #[test]
+    fn the_consumer_wakes_throttled_workers_every_quarter_window() {
+        // Taking function 1 completes the second of every two (`wake_every` = 2).
+        assert!(take_wakes_throttled_worker(1, 1, 2, 1_000, true));
+    }
+
+    #[test]
+    fn the_consumer_wakes_throttled_workers_at_every_step_over_budget() {
+        // Parked bytes equal to the budget count as over it, whatever the step.
+        assert!(take_wakes_throttled_worker(0, 3, 1_000, 3, true));
+    }
+
+    #[test]
+    fn the_consumer_stays_quiet_between_wake_points_under_budget() {
+        assert!(!take_wakes_throttled_worker(0, 3, 1_000, 1_000, false));
+    }
+
+    #[test]
+    fn wake_points_are_a_quarter_of_the_window_and_never_zero() {
+        assert_eq!(wake_interval(256), 64);
+        assert_eq!(wake_interval(8), 2);
+        assert_eq!(wake_interval(7), 1);
+        assert_eq!(wake_interval(1), 1);
+        assert_eq!(wake_interval(0), 1);
+    }
+
+    #[test]
+    fn limits_scale_with_the_job_count() {
+        let limits = Limits::for_jobs(4);
+        assert_eq!(limits.window, 4 * WINDOW_PER_JOB);
+        assert_eq!(limits.byte_budget, 4 * PARKED_BYTES_PER_JOB);
+        // Saturates instead of wrapping.
+        assert_eq!(Limits::for_jobs(usize::MAX).window, usize::MAX);
+    }
+
+    #[test]
+    fn explicit_jobs_are_capped_only_by_the_live_function_count() {
+        assert_eq!(resolve_jobs(3, 1_000), 3);
+        assert_eq!(
+            resolve_jobs(64, 1_000),
+            64,
+            "no auto cap on an explicit count"
+        );
+        assert_eq!(resolve_jobs(8, 3), 3);
+        assert_eq!(resolve_jobs(1, 1_000), 1);
+        assert_eq!(resolve_jobs(5, 0), 0);
+    }
+
+    #[test]
+    fn auto_jobs_stay_serial_below_the_threshold_and_cap_at_eight() {
+        let auto = thread::available_parallelism().map_or(1, |n| n.get().min(AUTO_MAX_JOBS));
+        assert_eq!(resolve_jobs(0, 0), 0);
+        assert_eq!(resolve_jobs(0, 1), 1);
+        assert_eq!(resolve_jobs(0, AUTO_MIN_FUNCS - 1), 1);
+        assert_eq!(resolve_jobs(0, AUTO_MIN_FUNCS), auto);
+        assert_eq!(resolve_jobs(0, 100_000), auto);
+        assert!(auto <= AUTO_MAX_JOBS);
+    }
+
+    #[test]
+    fn one_job_generates_on_the_callers_thread_and_more_on_workers() {
+        let caller = thread::current().id();
+        for (jobs, on_caller) in [(1, true), (2, false), (4, false)] {
+            let seen = Mutex::new(Vec::new());
+            let got = collect(40, jobs, Limits::for_jobs(jobs), |k, out: &mut String| {
+                seen.lock().unwrap().push(thread::current().id());
+                write_body(k, out)
+            });
+            assert_eq!(got, expected(40));
+            let ids = seen.into_inner().unwrap();
+            assert_eq!(ids.len(), 40);
+            assert!(
+                ids.iter().all(|id| (*id == caller) == on_caller),
+                "jobs = {jobs}"
+            );
+        }
+    }
+
+    /// Recurses through ~8 MiB of frames: far beyond a default thread stack's 2 MiB
+    /// but well inside `WORKER_STACK`.
+    fn burn_stack(depth: usize) -> usize {
+        let frame = [u8::try_from(depth % 251).unwrap(); 64 * 1024];
+        let below = if depth == 0 { 0 } else { burn_stack(depth - 1) };
+        usize::from(std::hint::black_box(&frame)[0]) + below
+    }
+
+    #[test]
+    fn workers_have_room_for_deep_recursion() {
+        let got = collect(4, 2, Limits::for_jobs(2), |k, out: &mut String| {
+            out.push_str(&burn_stack(128 + k).to_string());
+            Ok(meta())
+        });
+        assert_eq!(got.len(), 4);
+    }
+
+    #[test]
+    fn a_failing_function_is_named_by_its_index_after_the_imports() {
+        // Two imported functions, then two defined ones of which the second fails:
+        // its index in the shared index space is 2 + 1.
+        let wasm = wat::parse_str(
+            r#"(module
+                (import "env" "a" (func))
+                (import "env" "b" (func))
+                (tag $e (param v128))
+                (func (export "ok"))
+                (func (export "bad")
+                  v128.const i32x4 0 0 0 0
+                  throw $e))"#,
+        )
+        .unwrap();
+        let err = crate::transpile(&wasm).unwrap_err();
+        assert!(
+            matches!(&err, TranspileError::InFunction { index: 3, .. }),
+            "{err}"
+        );
     }
 }
