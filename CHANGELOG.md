@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.0] - 2026-11-24
 
-`wasm2rs` and `wasm2rs-macros` 0.7.0, `wasm2rs-wasi` 0.2.1. `wasm2rs-macros` has no API or code change; its version follows `wasm2rs`. `wasm2rs-wasi` 0.2.1 adds `Http1Client` (feature `http-client`) and maps an I/O error to the WASI errno through one helper that prefers the OS errno; it is a compatible change, so a patch bump.
+`wasm2rs` and `wasm2rs-macros` 0.7.0, `wasm2rs-wasi` 0.2.1. `wasm2rs-macros` has no API or code change; its version follows `wasm2rs`. `wasm2rs-wasi` 0.2.1 adds `Http1Client` (feature `http-client`) (a new type; no existing API changes, and `cargo-semver-checks` passes as a patch release).
 
 ### Added
 - `Transpiler` and `ComponentTranspiler`, builders that replace the product of `transpile*` function names: `Transpiler::new(opts).with_split(..).with_data_files(..).run(&wasm, sink)` (plus `transpile` / `transpile_pieces` for one source). The existing `transpile*` functions stay, as thin wrappers with byte-identical output. `SplitOptions` gains `Default`/`Debug`/`Clone`, `SourcePieces` `Debug`/`Clone`.
