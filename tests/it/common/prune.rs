@@ -103,20 +103,28 @@ fn tree_stats(path: &Path, now: SystemTime) -> (SystemTime, u64) {
         return (now, 0);
     };
     let mut newest = meta.modified().unwrap_or(now);
-    let mut bytes = if meta.is_dir() { 0 } else { meta.len() };
-    if meta.is_dir() {
-        match fs::read_dir(path) {
-            Ok(read) => {
-                for child in read.flatten() {
-                    let (m, b) = tree_stats(&child.path(), now);
-                    newest = newest.max(m);
-                    bytes = bytes.saturating_add(b);
-                }
-            }
-            Err(_) => newest = now,
-        }
+    if !meta.is_dir() {
+        return (newest, meta.len());
+    }
+    let Ok(read) = fs::read_dir(path) else {
+        return (now, 0);
+    };
+    let mut bytes = 0u64;
+    for child in read.flatten() {
+        let (m, b) = tree_stats(&child.path(), now);
+        newest = newest.max(m);
+        bytes = bytes.saturating_add(b);
     }
     (newest, bytes)
+}
+
+/// Something the size cap may remove, oldest `modified` first.
+struct Candidate {
+    modified: SystemTime,
+    bytes: u64,
+    path: PathBuf,
+    /// False for what a running build may be using.
+    removable: bool,
 }
 
 /// Prunes `dir` as of `now`: stale entries, the working directories of builds that died, the
@@ -136,8 +144,7 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
     let in_use_cutoff = now
         .checked_sub(policy.work_max_age)
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    // (mtime, bytes, path, may the cap remove it)
-    let mut live: Vec<(SystemTime, u64, PathBuf, bool)> = Vec::new();
+    let mut live: Vec<Candidate> = Vec::new();
     for item in read.flatten() {
         let name = item.file_name();
         let name = name.to_string_lossy();
@@ -147,13 +154,17 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
         };
         let age = now.duration_since(modified).unwrap_or_default();
         if CHECKOUT_PREFIXES.iter().any(|p| name.starts_with(p)) && meta.is_dir() {
-            if !modified_since(&item.path(), checkout_cutoff)
-                && fs::remove_dir_all(item.path()).is_ok()
-            {
+            let idle = !modified_since(&item.path(), checkout_cutoff);
+            if idle && fs::remove_dir_all(item.path()).is_ok() {
                 report.removed += 1;
-            } else if item.path().exists() {
-                let (newest, bytes) = tree_stats(&item.path(), now);
-                live.push((newest, bytes, item.path(), newest < in_use_cutoff));
+            } else {
+                let (modified, bytes) = tree_stats(&item.path(), now);
+                live.push(Candidate {
+                    modified,
+                    bytes,
+                    path: item.path(),
+                    removable: modified < in_use_cutoff,
+                });
             }
         } else if name.starts_with(WORK_PREFIX) {
             if age > policy.work_max_age && fs::remove_dir_all(item.path()).is_ok() {
@@ -165,29 +176,37 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
                     report.removed += 1;
                 }
             } else {
-                live.push((modified, meta.len(), item.path(), true));
+                live.push(Candidate {
+                    modified,
+                    bytes: meta.len(),
+                    path: item.path(),
+                    removable: true,
+                });
             }
         } else if meta.is_file() && name.starts_with(WASI_LIB_PREFIX) {
-            live.push((modified, meta.len(), item.path(), modified < in_use_cutoff));
+            live.push(Candidate {
+                modified,
+                bytes: meta.len(),
+                path: item.path(),
+                removable: modified < in_use_cutoff,
+            });
         }
     }
-    let mut total: u64 = live.iter().map(|(_, len, ..)| len).sum();
-    live.sort_by_key(|(modified, ..)| *modified);
-    for (_, len, path, removable) in live {
+    let mut total: u64 = live.iter().map(|c| c.bytes).sum();
+    live.sort_by_key(|c| c.modified);
+    for c in live.iter().filter(|c| c.removable) {
         if total <= policy.max_bytes {
             break;
         }
-        if !removable {
-            continue;
-        }
-        let removed = if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
-            fs::remove_dir_all(&path)
+        let is_dir = fs::symlink_metadata(&c.path).is_ok_and(|m| m.is_dir());
+        let removed = if is_dir {
+            fs::remove_dir_all(&c.path)
         } else {
-            fs::remove_file(&path)
+            fs::remove_file(&c.path)
         };
         if removed.is_ok() {
             report.removed += 1;
-            total = total.saturating_sub(len);
+            total = total.saturating_sub(c.bytes);
         }
     }
     // after the cap, which may have taken the directory a lock sits beside
