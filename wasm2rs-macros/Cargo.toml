@@ -1,6 +1,6 @@
 [package]
 name = "wasm2rs-macros"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version.workspace = true
 description = "Procedural macro that embeds a WebAssembly module as Rust source, via wasm2rs."
@@ -16,7 +16,7 @@ build = "build.rs"
 proc-macro = true
 
 [dependencies]
-wasm2rs = { version = "0.6.0", path = "..", default-features = false }
+wasm2rs = { version = "0.7.0", path = "..", default-features = false }
 
 [lints]
 workspace = true
