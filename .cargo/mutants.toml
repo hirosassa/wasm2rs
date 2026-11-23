@@ -76,4 +76,12 @@ exclude_re = [
     # a module without host imports records no `call_indirect` signatures that could receive
     # external handles, so `has_imports && !sigs.is_empty()` and `||` agree on every module
     'src/codegen/render/mod\.rs:\d+:\d+: replace && with \|\| in render_module_tail',
+    # with nothing to drop, `without_offsets` returns its input unchanged, so rewriting the tail
+    # with it is the same string as leaving it alone
+    'src/codegen/parens\.rs:\d+:\d+: replace match guard !drops\.is_empty\(\) with true in strip_redundant_parens_from',
+    # `s.get(len)` is `None`, which the loop's catch-all arm steps over exactly as the bound
+    # check would end the loop
+    'src/codegen/parens\.rs:\d+:\d+: replace < with <= in skip_block_comment',
+    # a comment that never advances loops forever: the run times out, which is a detection
+    'src/codegen/parens\.rs:\d+:\d+: replace == with != in skip_line_comment',
 ]

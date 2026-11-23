@@ -300,6 +300,16 @@ mod tests {
     }
 
     #[test]
+    fn block_tail_needs_both_a_leading_open_brace_and_a_trailing_close_brace() {
+        // `{` before but an operator after: the parentheses group an operand.
+        let src = "{ (a) + b }";
+        assert_eq!(strip(src), src);
+        // `}` after but a statement before: not the first thing in the block.
+        let src = "{ x; (a) }";
+        assert_eq!(strip(src), src);
+    }
+
+    #[test]
     fn keeps_block_like_tails() {
         // `if x {1} else {2} + 1` as a statement would end after the `if`.
         let src = "{ (if x { 1 } else { 2 } + 1) }";
@@ -367,6 +377,105 @@ mod tests {
         assert_eq!(strip(src), src);
         let src = "f((a)));";
         assert_eq!(strip(src), src);
+    }
+
+    #[test]
+    fn indexing_brackets_do_not_unbalance_the_scan() {
+        assert_eq!(strip("f(a[0], (b));"), "f(a[0], b);");
+        // A closer that does not match its opener stays unchanged.
+        let src = "f([(a));";
+        assert_eq!(strip(src), src);
+        let src = "f((a)];";
+        assert_eq!(strip(src), src);
+    }
+
+    #[test]
+    fn division_is_not_a_comment() {
+        assert_eq!(strip("f((a / b));"), "f(a / b);");
+        assert_eq!(strip("f((a / b), (c / d));"), "f(a / b, c / d);");
+    }
+
+    #[test]
+    fn line_comments_hide_their_delimiters() {
+        // An unbalanced `(` / `)` in a comment must not reach the stack.
+        assert_eq!(strip("// (\nf((a));"), "// (\nf(a);");
+        assert_eq!(strip("// )\nf((a));"), "// )\nf(a);");
+        // A comment running to the end of the input.
+        assert_eq!(strip("f((a)); // ("), "f(a); // (");
+        // Only the comment's own line is skipped.
+        assert_eq!(strip("// x\nf((a));"), "// x\nf(a);");
+    }
+
+    #[test]
+    fn block_comments_nest_and_end_at_their_closer() {
+        assert_eq!(strip("/* ( */ f((a));"), "/* ( */ f(a);");
+        assert_eq!(strip("/* /* */ ( */ f((a));"), "/* /* */ ( */ f(a);");
+        assert_eq!(strip("/* /* ( */ ( */ f((a));"), "/* /* ( */ ( */ f(a);");
+        // An unterminated comment is an imbalance, not a panic.
+        let src = "f((a)); /* (";
+        assert_eq!(strip(src), src);
+        let src = "f((a)); /*";
+        assert_eq!(strip(src), src);
+    }
+
+    #[test]
+    fn raw_strings_are_skipped_whole() {
+        // No escapes in a raw string: `\"` ends it.
+        assert_eq!(strip("f((a), r\"\\\");"), "f(a, r\"\\\");");
+        // Content before the closer, and a closer that needs its hashes.
+        assert_eq!(strip("f((a), r\"((\");"), "f(a, r\"((\");");
+        assert_eq!(strip("f((a), r#\"x\"y(\"#);"), "f(a, r#\"x\"y(\"#);");
+        assert_eq!(strip("f((a), br#\"(\"#);"), "f(a, br#\"(\"#);");
+        // An unterminated raw string is an imbalance.
+        let src = "f((a), r#\"( \"";
+        assert_eq!(strip(src), src);
+        // A variable named `r` is an identifier, not a raw string.
+        assert_eq!(strip("f((r), (a));"), "f(r, a);");
+        assert_eq!(strip("f((br), (a));"), "f(br, a);");
+        assert_eq!(strip("let r#type = (a);"), "let r#type = a;");
+    }
+
+    #[test]
+    fn raw_string_start_needs_a_token_boundary() {
+        use super::is_raw_string_start as raw;
+        assert!(raw(b"r\"x\"", 0));
+        assert!(raw(b"r#\"x\"#", 0));
+        assert!(raw(b"r##\"x\"##", 0));
+        assert!(raw(b"( r\"x\"", 2));
+        assert!(raw(b"(r\"x\"", 1));
+        assert!(raw(b"br\"x\"", 1));
+        assert!(raw(b" br#\"x\"#", 2));
+        // The `r` ends an identifier.
+        assert!(!raw(b"ar\"x\"", 1));
+        assert!(!raw(b"Zr\"x\"", 1));
+        assert!(!raw(b"9r\"x\"", 1));
+        assert!(!raw(b"_r\"x\"", 1));
+        // `b` prefix, but the `b` ends an identifier.
+        assert!(!raw(b"abr\"x\"", 2));
+        assert!(!raw(b"_br\"x\"", 2));
+        // No opening quote after the hashes.
+        assert!(!raw(b"r", 0));
+        assert!(!raw(b"r#x", 0));
+        assert!(!raw(b"r)", 0));
+        assert!(!raw(b"r ", 0));
+    }
+
+    #[test]
+    fn character_literals_with_escapes_end_at_their_quote() {
+        assert_eq!(strip("f(('\\''));"), "f('\\'');");
+        assert_eq!(strip("f(('\\n'));"), "f('\\n');");
+        assert_eq!(strip("f(('\\u{28}'));"), "f('\\u{28}');");
+        assert_eq!(strip("f(('\\\\'));"), "f('\\\\');");
+    }
+
+    #[test]
+    fn lifetimes_do_not_swallow_what_follows() {
+        // A one-letter lifetime then a closer: the closer must still be seen.
+        assert_eq!(strip("f((x as &'a), (y));"), "f(x as &'a, y);");
+        assert_eq!(strip("f(('a), (y));"), "f('a, y);");
+        // A multi-byte character literal is skipped whole.
+        assert_eq!(strip("f(('é'), ('('));"), "f('é', '(');");
+        assert_eq!(strip("f(('\u{1F600}'), (a));"), "f('\u{1F600}', a);");
     }
 
     #[test]
