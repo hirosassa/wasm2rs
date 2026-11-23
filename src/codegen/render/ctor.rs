@@ -211,7 +211,7 @@ impl<'a> CtorPlan<'a> {
 
     /// Emit `<target>[idx] = fu32;` for each active element segment entry;
     /// `target` is a defined table (`t`) or the host storage accessor
-    /// (`instance.table_mut()`). `imports` names the host an imported-global item or
+    /// (`instance.table_mut()`, with `host_owned` set). `imports` names the host an imported-global item or
     /// a runtime offset reads: the constructor's parameter, or the built instance's
     /// field once it has been moved in.
     fn copy_elem_seg(
@@ -219,6 +219,7 @@ impl<'a> CtorPlan<'a> {
         lines: &mut Vec<String>,
         seg: &ElemSegment,
         target: &str,
+        host_owned: bool,
         imports: &str,
         indent: &str,
     ) {
@@ -232,15 +233,22 @@ impl<'a> CtorPlan<'a> {
             }
             None => indent.to_string(),
         };
-        // An empty segment writes nothing, but an offset past the end of the
-        // table still traps at instantiation: check it with an empty slice.
-        if seg.funcs.is_empty() {
-            let off = if runtime.is_some() {
-                "off".to_string()
+        // The spec bounds-checks the whole segment before writing any slot, and
+        // a host-owned table keeps what was written before a trap, so it needs an
+        // up-front range check; a defined table is a local that a trap discards.
+        // An empty segment writes nothing but still traps past the end of the
+        // table. A lone slot is its own check, unless reading an imported global
+        // would call the host before the trap.
+        let len = seg.funcs.len();
+        let needs_check = len == 0 || (host_owned && (len > 1 || !seg.imported_items.is_empty()));
+        if needs_check {
+            let range = if runtime.is_some() {
+                format!("off..off.saturating_add({len})")
             } else {
-                elem_slot(base).to_string()
+                let end = base.saturating_add(u64::try_from(len).unwrap_or(u64::MAX));
+                format!("{}..{}", elem_slot(base), elem_slot(end))
             };
-            lines.push(format!("{ind}let _ = &{target}[{off}..{off}];"));
+            lines.push(format!("{ind}let _ = &{target}[{range}];"));
         }
         let gc_table = self
             .ctx
@@ -286,7 +294,7 @@ impl<'a> CtorPlan<'a> {
         indent: &str,
     ) {
         for seg in self.active_elem.iter().filter(|seg| seg.table == table_idx) {
-            self.copy_elem_seg(lines, seg, target, imports, indent);
+            self.copy_elem_seg(lines, seg, target, false, imports, indent);
         }
     }
 
@@ -415,7 +423,7 @@ impl<'a> CtorPlan<'a> {
             for seg in &self.active_elem {
                 let (_, get_mut) = table_accessor(seg.table);
                 let target = format!("instance.{get_mut}()");
-                self.copy_elem_seg(lines, seg, &target, "instance.imports", "    ");
+                self.copy_elem_seg(lines, seg, &target, true, "instance.imports", "    ");
             }
         }
     }
