@@ -25,7 +25,9 @@ const LOCK_SUFFIX: &str = ".lock";
 pub struct Policy {
     /// Entries unused for longer than this are removed.
     pub max_age: Duration,
-    /// Total size of the entries to keep; the least recently used go first.
+    /// Budget for the whole cache directory: the entries, the `wasm2rs-wasi` rlib copies and the
+    /// per-checkout directories together. The least recently used go first, except what was
+    /// touched within `work_max_age` (a build may be running in it).
     pub max_bytes: u64,
     /// Working directories older than this belong to a build that is no longer running.
     pub work_max_age: Duration,
@@ -72,29 +74,65 @@ pub fn touch(path: &Path) {
     }
 }
 
-/// Whether anything in `path` (itself included) was modified at or after `cutoff`. Stops at the
-/// first such file, so a directory in use costs one look and only an idle one is walked whole.
-/// What cannot be read counts as in use: better to keep a directory than to remove one that a run
-/// is working in.
-fn modified_since(path: &Path, cutoff: SystemTime) -> bool {
+/// Size in bytes of the files under `path` and the newest mtime among them and the directories
+/// (`path` itself included). Symlinks are measured, not followed. What cannot be read counts as
+/// modified now, so that it is never taken for idle.
+fn tree_stats(path: &Path, now: SystemTime) -> (SystemTime, u64) {
     let Ok(meta) = fs::symlink_metadata(path) else {
-        return true;
+        return (now, 0);
     };
-    if meta.modified().map_or(true, |m| m >= cutoff) {
-        return true;
-    }
+    let mut newest = meta.modified().unwrap_or(now);
     if !meta.is_dir() {
-        return false;
+        return (newest, meta.len());
     }
     let Ok(read) = fs::read_dir(path) else {
-        return true;
+        return (now, 0);
     };
-    read.flatten()
-        .any(|child| modified_since(&child.path(), cutoff))
+    let mut bytes = 0u64;
+    for child in read.flatten() {
+        let (m, b) = tree_stats(&child.path(), now);
+        newest = newest.max(m);
+        bytes = bytes.saturating_add(b);
+    }
+    (newest, bytes)
 }
 
-/// Prunes `dir` as of `now`: stale entries, then the least recently used beyond the size cap,
-/// the working directories of builds that died, and the directories of worktrees that went idle.
+/// Removes the directory `path` if nothing in it was modified at or after `cutoff`, checked again
+/// right before: a run may have started using it since the caller scanned it. The directory is
+/// first renamed away (to a `work-` name, which [`prune`] also sweeps should the deletion below be
+/// cut short), so that a run starting to use `path` meanwhile creates it afresh rather than
+/// writing into a tree that is being deleted. Returns whether it was taken; any doubt keeps it.
+pub fn remove_if_idle(path: &Path, cutoff: SystemTime, now: SystemTime) -> bool {
+    if tree_stats(path, now).0 >= cutoff {
+        return false;
+    }
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let taken = path.with_file_name(format!(
+        "{WORK_PREFIX}evicted-{}-{}",
+        std::process::id(),
+        name.to_string_lossy()
+    ));
+    if fs::rename(path, &taken).is_err() {
+        return false;
+    }
+    let _ = fs::remove_dir_all(&taken);
+    true
+}
+
+/// Something the size cap may remove, oldest `modified` first.
+struct Candidate {
+    modified: SystemTime,
+    bytes: u64,
+    path: PathBuf,
+    /// False for what a running build may be using.
+    removable: bool,
+}
+
+/// Prunes `dir` as of `now`: stale entries, the working directories of builds that died, the
+/// directories of worktrees that went idle, then the least recently used beyond the size cap
+/// (see [`Policy::max_bytes`]). Only the names this module knows are ever removed.
 pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
     let mut report = Report::default();
     let Ok(read) = fs::read_dir(dir) else {
@@ -105,7 +143,11 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
     let checkout_cutoff = now
         .checked_sub(policy.checkout_max_age)
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    let mut live: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+    // what a run that wrote this recently may still be using: the cap does not take it
+    let in_use_cutoff = now
+        .checked_sub(policy.work_max_age)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut live: Vec<Candidate> = Vec::new();
     for item in read.flatten() {
         let name = item.file_name();
         let name = name.to_string_lossy();
@@ -115,10 +157,16 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
         };
         let age = now.duration_since(modified).unwrap_or_default();
         if CHECKOUT_PREFIXES.iter().any(|p| name.starts_with(p)) && meta.is_dir() {
-            if !modified_since(&item.path(), checkout_cutoff)
-                && fs::remove_dir_all(item.path()).is_ok()
-            {
+            let (modified, bytes) = tree_stats(&item.path(), now);
+            if modified < checkout_cutoff && remove_if_idle(&item.path(), checkout_cutoff, now) {
                 report.removed += 1;
+            } else {
+                live.push(Candidate {
+                    modified,
+                    bytes,
+                    path: item.path(),
+                    removable: modified < in_use_cutoff,
+                });
             }
         } else if name.starts_with(WORK_PREFIX) {
             if age > policy.work_max_age && fs::remove_dir_all(item.path()).is_ok() {
@@ -130,22 +178,44 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
                     report.removed += 1;
                 }
             } else {
-                live.push((modified, meta.len(), item.path()));
+                live.push(Candidate {
+                    modified,
+                    bytes: meta.len(),
+                    path: item.path(),
+                    removable: true,
+                });
             }
+        } else if meta.is_file() && name.starts_with(WASI_LIB_PREFIX) {
+            live.push(Candidate {
+                modified,
+                bytes: meta.len(),
+                path: item.path(),
+                removable: modified < in_use_cutoff,
+            });
         }
     }
-    remove_orphaned_locks(dir, &mut report);
-    let mut total: u64 = live.iter().map(|(_, len, _)| len).sum();
-    live.sort();
-    for (_, len, path) in live {
-        if total <= policy.max_bytes {
+    let mut total: u64 = live.iter().map(|c| c.bytes).sum();
+    // when what a build may be using exceeds the cap by itself, evicting the rest would only
+    // empty the cache without reaching it
+    let in_use: u64 = live.iter().filter(|c| !c.removable).map(|c| c.bytes).sum();
+    live.sort_by_key(|c| c.modified);
+    for c in live.iter().filter(|c| c.removable) {
+        if total <= policy.max_bytes || in_use > policy.max_bytes {
             break;
         }
-        if fs::remove_file(path).is_ok() {
+        let is_dir = fs::symlink_metadata(&c.path).is_ok_and(|m| m.is_dir());
+        let removed = if is_dir {
+            remove_if_idle(&c.path, in_use_cutoff, now)
+        } else {
+            fs::remove_file(&c.path).is_ok()
+        };
+        if removed {
             report.removed += 1;
+            total = total.saturating_sub(c.bytes);
         }
-        total = total.saturating_sub(len);
     }
+    // after the cap, which may have taken the directory a lock sits beside
+    remove_orphaned_locks(dir, &mut report);
     report
 }
 
