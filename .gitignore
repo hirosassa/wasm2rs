@@ -18,3 +18,4 @@ tmp/
 /fuzz/target
 /fuzz/artifacts
 /fuzz/coverage
+/mutants.out*
