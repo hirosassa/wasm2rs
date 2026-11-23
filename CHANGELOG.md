@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.0] - 2026-11-24
 
-`wasm2rs` and `wasm2rs-macros` 0.7.0, `wasm2rs-wasi` 0.2.1. `wasm2rs-macros` has no API or code change; its version follows `wasm2rs`. `wasm2rs-wasi` 0.2.1 adds `Http1Client` (feature `http-client`) (a new type; no existing API changes, and `cargo-semver-checks` passes as a patch release).
+`wasm2rs` and `wasm2rs-macros` 0.7.0, `wasm2rs-wasi` 0.2.1. `wasm2rs-macros` has no API or code change; its version follows `wasm2rs`. `wasm2rs` 0.7.0 makes the WIT types `WitFunc` and `WitType` `#[non_exhaustive]` (see Breaking), so the minor bump (a breaking one for a 0.x crate) is deliberate. `wasm2rs-wasi` 0.2.1 adds `Http1Client` (feature `http-client`) (a new type; no existing API changes, and `cargo-semver-checks` passes as a patch release).
 
 ### Breaking
 - `WitFunc` and `WitType` are now `#[non_exhaustive]` (#445), so a field or a variant can be added without another breaking release, as for `WitExport`. Code outside the crate can no longer build a `WitFunc` with a struct literal, and must keep a `_` arm when matching on a `WitType`; read the values `wit_functions` and `wit_exports` return, and bind with `WitFunc { name, .. }`.
