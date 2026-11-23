@@ -50,9 +50,10 @@ only mismatch was the declared-maximum one below (since fixed in 0.3.0).
 | `tail-call` | `return_call`, `return_call_indirect` | 271 match, 29 skip |
 | `extended-const` | arithmetic in constant expressions | 278 match, 22 skip (was 36 unsupported, now supported) |
 | `exceptions` | `try_table`, `throw`, `exnref` | 281 match, 19 skip, no mismatch (was 6 unsupported: `br_table` out of a `try`) |
+| `threads` | atomics and shared memories | 3300 seeds (not 1–300) all agree with wasmtime; atomic accesses are also covered by a table-driven differential test (below) |
 
-Only memory 0 is hashed, so a bug confined to another memory shows up only through
-a call's result or trap.
+Only memory 0 is hashed (a shared memory 0 too: both sides read its bytes), so a bug
+confined to another memory shows up only through a call's result or trap.
 
 `memory64` findings:
 
@@ -72,3 +73,10 @@ New-profile findings (seeds 0–299):
   exception payloads are now supported, as is a `br_table` whose arms leave a `try`
   body. The profile has no `unsupported` modules left (seeds 1–300).
 - `tail-call`: no findings.
+- `threads`: wasm-smith generates atomics and shared memories; the harness enables
+  wasmtime's shared memory and hashes a shared memory 0 on both sides. A table-driven
+  test (`atomic_accesses_on_an_unshared_memory_agree_with_wasmtime`) runs every atomic
+  access family (loads, stores, all rmw operations, cmpxchg, wait, notify, fence) on an
+  unshared memory, 32-bit and memory64, at the harness's wild addresses and at fixed
+  aligned, misaligned and out-of-bounds cells; a second test checks that every family
+  returns a value and traps. No findings in 3300 seeds.

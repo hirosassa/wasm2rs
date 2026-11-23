@@ -161,7 +161,7 @@ impl ComponentTranspiler {
 /// [`exports`](ComponentOptions::exports), the typed `Exports`.
 ///
 /// The program module is the one that lifts the component's exports
-/// ([`wit_exports`](crate::wit_exports)); a component without exports uses the module that is
+/// ([`wit_exports`]); a component without exports uses the module that is
 /// instantiated with the lowered imports (a module that exports no function and has no start
 /// function is wiring, as `wit-component`'s fixup module, and is skipped). On this single-module
 /// path the other core modules (shims) are not emitted; see below for components that need them.
@@ -176,7 +176,7 @@ impl ComponentTranspiler {
 /// [`TranspileError::InvalidInput`] when the input is a core module (use
 /// [`transpile`](crate::transpile)), has no core module, or has several candidate modules and
 /// nothing tells them apart; plus every error of
-/// [`wit_exports`](crate::wit_exports), [`transpile_with_options`](crate::transpile_with_options) and
+/// [`wit_exports`], [`transpile_with_options`](crate::transpile_with_options) and
 /// [`wit_host_glue_with_options`](crate::wit_host_glue_with_options) (an export of a nested component, `compact-utf16` strings, an import
 /// lowered both as UTF-8 and as UTF-16, a shape the glue cannot lower). A malformed input is a [`TranspileError::Parse`].
 pub fn transpile_component(
@@ -188,9 +188,9 @@ pub fn transpile_component(
 
 /// [`transpile_component`], also returning the component's lifted exports.
 ///
-/// The exports are the [`wit_exports`](crate::wit_exports) result the transpilation needs
+/// The exports are the [`wit_exports`] result the transpilation needs
 /// anyway, so a caller that wants to inspect them (to check the component exports what it is
-/// about to call, say) does not need its own [`wit_exports`](crate::wit_exports) pass.
+/// about to call, say) does not need its own [`wit_exports`] pass.
 ///
 /// # Errors
 ///

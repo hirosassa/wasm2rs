@@ -21,6 +21,8 @@ method of `wasi:http` 0.2.0 is implemented:
   `incoming-body`) and `future-trailers`, on top of an `HttpClient` set on the builder.
 - **`UreqClient`**, an `ureq` client behind the `http-client` feature: no redirects, `ureq`'s default
   TLS, no trailers either way (a request with trailers is refused).
+- **`Http1Client`**, a client over `std::net` behind the same `http-client` feature: plain `http://` only
+  (no TLS, no proxy, no connection reuse), and it sends and receives trailers.
 - **Incoming side** (a guest exporting `incoming-handler#handle`: `incoming-request`,
   `outgoing-response`, `response-outparam`), driven by the embedder through
   `WasiHost::new_incoming_request`, `new_response_outparam` and `take_response`. `ServedResponse::body`
@@ -116,8 +118,9 @@ The `HttpClient` trait carries trailers both ways (breaking: new fields, no defa
   `some(ok(some(fields)))` (immutable fields), or `none` for no reader, an empty result, or a body that
   failed or was finished before it ended. A panicking reader fails the body read like a client error; a reader that never returns holds back the end of the body for the guest (the host has no timeout on it). Trailers of a served response body are checked the same way at `finish`.
 - **`UreqClient`** supports neither: a request with trailers is refused with an `HttpClientError`
-  (`internal-error` for the guest) and a response never has a trailers reader (`ureq` exposes none). A
-  client that really sends and receives trailers (hyper-based, ...) is future work.
+  (`internal-error` for the guest) and a response never has a trailers reader (`ureq` exposes none).
+  `Http1Client` supports both, over plain `http://` only. A client that carries trailers over TLS
+  (hyper-based, ...) is future work.
 
 ## Serving over TCP: `examples/wasip2_serve.rs`
 

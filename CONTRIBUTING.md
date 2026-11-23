@@ -118,8 +118,10 @@ v128/ref values, ...) are **skipped with a reason**, never dropped; run
 4. Add an entry under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md)
    ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format) for user-visible
    changes. Update README/docs if behavior or options change.
-5. CI must be green (fmt, clippy, tests on stable/beta/nightly, and the wasi-sdk /
-   emsdk E2E jobs).
+5. CI must be green: fmt, clippy and `cargo doc` (warnings denied) on stable, beta and
+   nightly; the tests run on stable only (beta and nightly just compile them);
+   the MSRV (1.89) check, `cargo-semver-checks`, `wasm2rs-wasi` on Windows, and the
+   wasi-sdk and emsdk E2E jobs.
 
 Commit messages: a short imperative summary, optionally with a `feat:` / `fix:` /
 `perf:` / `docs:` prefix as used in the history.

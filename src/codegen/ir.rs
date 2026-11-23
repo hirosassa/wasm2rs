@@ -97,7 +97,7 @@ pub(crate) struct TryState {
     /// function-wide return signal rather than the outcome variable).
     pub(crate) has_ret_escape: bool,
     /// Whether a `delegate` bypasses this try's body, so its landing pad must
-    /// first unwrap a [`Rt::DelegateExc`](super::Rt::DelegateExc) and re-raise.
+    /// first unwrap a [`Rt::DelegateExc`] and re-raise.
     pub(crate) unwrap_delegate: bool,
     /// The clauses of a `try_table`, lowered to handlers when the region ends.
     /// Empty for a legacy `try`.

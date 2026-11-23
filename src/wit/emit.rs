@@ -1,5 +1,5 @@
 //! Rendering the typed host trait (`pub trait Host` and the types it uses) from the
-//! functions read by [`read`](super::read).
+//! functions read by [`read`].
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};

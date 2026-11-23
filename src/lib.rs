@@ -271,7 +271,8 @@ pub struct TranspileOptions {
     pub simd_intrinsics: bool,
 
     /// Count the activations of the module's defined functions and trap with
-    /// `call stack exhausted` (a `panic!`) when a call would nest deeper than this
+    /// `call stack exhausted` (a typed `Wasm2RsTrap` by default, a string panic with
+    /// `typed_traps` off) when a call would nest deeper than this
     /// many frames (the `wasm2c` approach). Without it, unbounded guest recursion
     /// exhausts the native stack and aborts the whole host process, which no
     /// `catch_unwind` can intercept.
@@ -374,7 +375,9 @@ pub struct TranspileOptions {
     /// Also emit, for every exported (defined) function, a method or free function
     /// named after the export — `pub fn add(&mut self, a0: i32, a1: i32) -> i32`
     /// — that forwards to `func{N}`. The name is the export name made a snake_case
-    /// identifier; a clash with a keyword or a generated member appends `_`, and a
+    /// identifier; a clash with a keyword or a generated member appends `_` (a name
+    /// starting with a reserved prefix — `wasi_`, `cont_`, `call_ref_t` — gets
+    /// `export_` prepended instead), and a
     /// duplicate appends `_{function index}`. `func{N}` is kept either way. Off by
     /// default, so existing output is unchanged.
     pub named_exports: bool,

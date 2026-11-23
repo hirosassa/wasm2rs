@@ -36,7 +36,7 @@ pub(crate) fn strip_redundant_parens(src: &str) -> Cow<'_, str> {
     }
 }
 
-/// [`strip_redundant_parens`] applied to `out[start..]` in place. The common
+/// `strip_redundant_parens` applied to `out[start..]` in place. The common
 /// case of nothing to remove touches no bytes, and otherwise the tail is copied
 /// once to be rebuilt rather than split off, rebuilt and appended back.
 pub(crate) fn strip_redundant_parens_from(out: &mut String, start: usize) {
