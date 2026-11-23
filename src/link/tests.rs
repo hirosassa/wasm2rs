@@ -835,7 +835,10 @@ fn imports_that_cannot_be_bound_are_refused() {
             },
         ],
     );
-    assert!(what.contains("cycle"), "{what}");
+    assert!(
+        what.contains("function imports of linked modules form a cycle"),
+        "{what}"
+    );
 
     let what = link_error(
         &[wasm(main), wasm(looping)],
@@ -850,7 +853,10 @@ fn imports_that_cannot_be_bound_are_refused() {
             },
         ],
     );
-    assert!(what.contains("provided by"), "{what}");
+    assert!(
+        what.contains("function import of linked module 1 is provided by"),
+        "{what}"
+    );
 }
 
 #[test]

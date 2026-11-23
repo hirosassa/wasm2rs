@@ -500,3 +500,51 @@ fn i64_literal(value: i64) -> String {
         format!("{value}i64")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::byte_string_literal;
+
+    fn literal(bytes: &[u8]) -> String {
+        let mut out = String::new();
+        byte_string_literal(&mut out, bytes);
+        out
+    }
+
+    #[test]
+    fn byte_literal_escapes_everything_but_printable_ascii() {
+        // A space inside a line stays literal; quote, backslash, NUL, control and high
+        // bytes are escaped, and `\0` is the short form only for NUL.
+        assert_eq!(
+            literal(b"a b\"c\\d\0\n\xff~!"),
+            "a b\\x22c\\x5cd\\0\\x0a\\xff~!"
+        );
+    }
+
+    #[test]
+    fn byte_literal_escapes_a_leading_space() {
+        // The first byte of a line is escaped: a `\` continuation would eat it.
+        assert_eq!(literal(b" a"), "\\x20a");
+    }
+
+    #[test]
+    fn byte_literal_breaks_every_64_bytes_and_escapes_a_space_at_each_line_start() {
+        let mut bytes = vec![b'x'; 64];
+        bytes.extend_from_slice(b" y");
+        bytes.extend(std::iter::repeat_n(b'z', 62));
+        bytes.extend_from_slice(b" ");
+        let out = literal(&bytes);
+        let lines: Vec<&str> = out.split("\\\n").collect();
+        assert_eq!(lines.len(), 3, "{out}");
+        assert_eq!(lines[0], "x".repeat(64));
+        assert_eq!(lines[1], format!("\\x20y{}", "z".repeat(62)));
+        assert_eq!(lines[2], "\\x20");
+    }
+
+    #[test]
+    fn byte_literal_has_no_break_at_the_start_or_after_exactly_64_bytes() {
+        assert_eq!(literal(&[b'a'; 64]), "a".repeat(64));
+        assert!(!literal(&[b'a'; 65]).starts_with("\\\n"));
+        assert_eq!(literal(&[b'a'; 65]), format!("{}\\\na", "a".repeat(64)));
+    }
+}

@@ -894,6 +894,104 @@ mod tests {
         assert!(!is_linked(&component));
     }
 
+    /// A component lifting `$main`, which imports `import` (a WAT import line over module
+    /// `env`) from `$lib`, an earlier instance whose items are `lib_body`.
+    fn main_importing_from_a_sibling(import: &str, lib_body: &str, alias: &str) -> Vec<u8> {
+        with_unused_modules(import, lib_body, alias, 0)
+    }
+
+    /// Like [`main_importing_from_a_sibling`], with `unused` more (empty) core modules.
+    fn with_unused_modules(import: &str, lib_body: &str, alias: &str, unused: usize) -> Vec<u8> {
+        let extra = "(core module)\n    ".repeat(unused);
+        wat::parse_str(format!(
+            r#"(component
+    {extra}(core module $lib {lib_body})
+    (core module $main
+        {import}
+        (func (export "f") (result i32) i32.const 1))
+    (core instance $l (instantiate $lib))
+    {alias}
+    (core instance $m (instantiate $main (with "env" (instance $env))))
+    (func $f (result s32) (canon lift (core func $m "f")))
+    (export "f" (func $f)))"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_function_taken_from_a_sibling_module_is_linked() {
+        let component = main_importing_from_a_sibling(
+            r#"(import "env" "g" (func))"#,
+            r#"(func (export "g"))"#,
+            r#"(alias core export $l "g" (core func $g))
+    (core instance $env (export "g" (func $g)))"#,
+        );
+        assert!(is_linked(&component));
+    }
+
+    #[test]
+    fn a_function_is_taken_from_a_sibling_however_many_modules_the_component_has() {
+        let component = with_unused_modules(
+            r#"(import "env" "g" (func))"#,
+            r#"(func (export "g"))"#,
+            r#"(alias core export $l "g" (core func $g))
+    (core instance $env (export "g" (func $g)))"#,
+            2,
+        );
+        assert!(is_linked(&component));
+    }
+
+    #[test]
+    fn a_table_taken_from_a_sibling_module_is_linked() {
+        let component = main_importing_from_a_sibling(
+            r#"(import "env" "t" (table 1 funcref))"#,
+            r#"(table (export "t") 1 funcref)"#,
+            r#"(alias core export $l "t" (core table $t))
+    (core instance $env (export "t" (table $t)))"#,
+        );
+        assert!(is_linked(&component));
+    }
+
+    #[test]
+    fn a_global_taken_from_a_sibling_module_is_linked() {
+        let component = main_importing_from_a_sibling(
+            r#"(import "env" "g" (global i32))"#,
+            r#"(global (export "g") i32 (i32.const 3))"#,
+            r#"(alias core export $l "g" (core global $g))
+    (core instance $env (export "g" (global $g)))"#,
+        );
+        assert!(is_linked(&component));
+    }
+
+    #[test]
+    fn state_import_names_the_kind_only_for_a_linked_import_module() {
+        let linked: BTreeSet<String> = ["env".to_string()].into();
+        let table = TypeRef::Table(wasmparser::TableType {
+            element_type: wasmparser::RefType::FUNCREF,
+            table64: false,
+            initial: 1,
+            maximum: None,
+            shared: false,
+        });
+        let global = TypeRef::Global(wasmparser::GlobalType {
+            content_type: wasmparser::ValType::I32,
+            mutable: false,
+            shared: false,
+        });
+        let memory = TypeRef::Memory(wasmparser::MemoryType {
+            memory64: false,
+            shared: false,
+            initial: 1,
+            maximum: None,
+            page_size_log2: None,
+        });
+        assert_eq!(state_import("env", memory, &linked), Some("memory"));
+        assert_eq!(state_import("env", table, &linked), Some("table"));
+        assert_eq!(state_import("env", global, &linked), Some("global"));
+        assert_eq!(state_import("env", TypeRef::Func(0), &linked), None);
+        assert_eq!(state_import("other", table, &linked), None);
+    }
+
     fn split_files(component: &[u8], split: &SplitOptions) -> Vec<SourceFile> {
         let mut files = Vec::new();
         transpile_component_split(component, &ComponentOptions::default(), split, |f| {

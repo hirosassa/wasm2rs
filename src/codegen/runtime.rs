@@ -702,4 +702,77 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn untyped_trap_messages_are_the_wasm_spec_texts() {
+        let cases = [
+            (TrapVariant::Unreachable, "unreachable"),
+            (
+                TrapVariant::IndirectCallTypeMismatch,
+                "indirect call type mismatch",
+            ),
+            (TrapVariant::CallStackExhausted, "call stack exhausted"),
+            (
+                TrapVariant::InvalidConversionToInteger,
+                "invalid conversion to integer",
+            ),
+            (TrapVariant::IntegerOverflow, "integer overflow"),
+            (TrapVariant::IntegerDivideByZero, "integer divide by zero"),
+            (
+                TrapVariant::OutOfBoundsMemoryAccess,
+                "out of bounds memory access",
+            ),
+            (
+                TrapVariant::OutOfBoundsTableAccess,
+                "out of bounds table access",
+            ),
+            (
+                TrapVariant::UnalignedAtomicAccess,
+                "unaligned atomic access",
+            ),
+            (
+                TrapVariant::AtomicWaitOnUnsharedMemory,
+                "atomic wait on non-shared memory",
+            ),
+            (TrapVariant::NullReference, "null reference"),
+            (TrapVariant::CastFailure, "cast failure"),
+            (
+                TrapVariant::OutOfBoundsArrayAccess,
+                "out of bounds array access",
+            ),
+            (TrapVariant::InvalidExternRef, "invalid externref"),
+            (TrapVariant::ConsumedContinuation, "consumed continuation"),
+            (
+                TrapVariant::UnhandledSuspendTag,
+                "unhandled continuation suspend tag",
+            ),
+            (
+                TrapVariant::ContinuationTableExhausted,
+                "continuation table exhausted",
+            ),
+        ];
+        for (variant, text) in cases {
+            assert_eq!(variant.message(), text);
+        }
+    }
+
+    #[test]
+    fn splat_doubles_the_filled_width_until_all_128_bits_are_covered() {
+        assert_eq!(
+            splat_lines("s", "i32", "x as u8 as u128", 8),
+            [
+                "fn s(x: i32) -> u128 {",
+                "    let mut l = x as u8 as u128;",
+                "    l |= l << 8;",
+                "    l |= l << 16;",
+                "    l |= l << 32;",
+                "    l |= l << 64;",
+                "    l",
+                "}",
+            ]
+        );
+        // A 64-bit lane needs exactly one shift; a 128-bit width needs none.
+        assert_eq!(splat_lines("s", "i64", "x as u128", 64).len(), 5);
+        assert_eq!(splat_lines("s", "i64", "x as u128", 128).len(), 4);
+    }
 }
