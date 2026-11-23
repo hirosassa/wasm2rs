@@ -1,9 +1,10 @@
 //! Spec-testsuite (`.wast`) harness.
 //!
-//! Each `module` directive and the assertions that follow it become one
-//! generated Rust program (one `rustc` run): the module is transpiled and a
-//! `main` replays the assertions against `Instance`. Directives the harness
-//! cannot express yet are skipped *explicitly* and reported, never dropped.
+//! Each `module` directive and the assertions that follow it become one `mod`
+//! of a single generated Rust program per `.wast` file (one `rustc` run): the
+//! module is transpiled and its `__spec_run` replays the assertions against
+//! `Instance`. Directives the harness cannot express yet are skipped
+//! *explicitly* and reported, never dropped.
 
 use std::collections::HashMap;
 
@@ -38,6 +39,9 @@ struct Group {
     ctor: Option<String>,
     funcs: HashMap<String, u32>,
     body: String,
+    /// `<file>.wast:<line>` of the `module` directive, named in the output when
+    /// an assertion in this module fails.
+    location: String,
     /// A state-changing call was skipped: the module's later assertions would see
     /// stale state, so they are skipped too.
     tainted: bool,
@@ -545,6 +549,7 @@ fn start_group(wasm: Vec<u8>) -> Result<Group, String> {
         stateful,
         ctor,
         body,
+        location: String::new(),
         tainted: false,
     })
 }
@@ -574,6 +579,7 @@ fn assert_rejected(
 
 fn trapping_instantiation(wasm: Vec<u8>, message: &str, ctx: &str) -> Result<Group, String> {
     let mut group = start_group(wasm)?;
+    group.location = ctx.to_string();
     let ctor = group
         .ctor
         .take()
@@ -609,7 +615,8 @@ fn run_wast(name: &str, src: &str) -> Report {
         let (kind, outcome): (&str, Result<Option<String>, String>) = match directive {
             WastDirective::Module(module) => {
                 match encode_module(module).and_then(start_group) {
-                    Ok(group) => {
+                    Ok(mut group) => {
+                        group.location = ctx.clone();
                         groups.push(group);
                         module_ok = true;
                     }
@@ -743,12 +750,7 @@ fn run_wast(name: &str, src: &str) -> Report {
             }
         }
     }
-    for (i, group) in groups.iter().enumerate() {
-        run_group(&format!("{name}_{i}"), group);
-    }
-    for (i, group) in trap_groups.iter().enumerate() {
-        run_group(&format!("{name}_trap{i}"), group);
-    }
+    run_groups(name, &groups, &trap_groups);
     report.executed += trap_groups.len();
     eprintln!(
         "{name}: {} executed, {} skipped",
@@ -787,15 +789,46 @@ fn directive_location(directive: &WastDirective<'_>, src: &str, name: &str) -> S
     format!("{name}.wast:{}", line + 1)
 }
 
-/// Compile and run one group. A spec file calls only some of a module's
-/// functions, so the harness (not the generator) tolerates unused code; every
-/// other warning in the generated source is still an error.
-fn run_group(name: &str, group: &Group) {
-    let generated = transpile_module(&group.wasm).expect("transpile module");
-    let program = format!(
-        "#![allow(dead_code, unused_mut, unused_variables)]\n{generated}\nfn main() {{\n{}\n}}\n",
-        group.body
-    );
+/// Compile and run every group of one `.wast` file as a single program: each group
+/// is a `mod gN` (`trapN` for a trapping instantiation) with a `__spec_run`, and `main` calls
+/// them in order. One build and one spawn per file, not per module; the cost is that
+/// editing one module recompiles the whole file.
+///
+/// A spec file calls only some of a module's functions, so the harness (not the
+/// generator) tolerates unused code per module; every other warning in the generated
+/// source is still an error. `main` names each module before it runs, so the last
+/// name on stderr is the module whose assertion failed.
+fn run_groups(name: &str, groups: &[Group], trap_groups: &[Group]) {
+    let modules: Vec<(String, &Group)> = groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (format!("g{i}"), g))
+        .chain(
+            trap_groups
+                .iter()
+                .enumerate()
+                .map(|(i, g)| (format!("trap{i}"), g)),
+        )
+        .collect();
+    if modules.is_empty() {
+        return;
+    }
+    let mut program = String::new();
+    for (module, group) in &modules {
+        let generated = transpile_module(&group.wasm).expect("transpile module");
+        program.push_str(&format!(
+            "#[allow(dead_code, unused_mut, unused_variables)]\nmod {module} {{\n{generated}\npub fn __spec_run() {{\n{}\n}}\n}}\n",
+            group.body
+        ));
+    }
+    program.push_str("fn main() {\n");
+    for (module, group) in &modules {
+        program.push_str(&format!(
+            "eprintln!(\"module defined at {}\");\n{module}::__spec_run();\n",
+            group.location
+        ));
+    }
+    program.push_str("}\n");
     let bin = common::build(name, &program);
     let run = std::process::Command::new(&bin)
         .output()
@@ -1186,6 +1219,53 @@ fn assert_trap_fails_when_the_call_does_not_trap() {
 (assert_trap (invoke "id" (i32.const 1)) "unreachable")
 "#,
     );
+}
+
+/// All modules of a file run in one binary, so a failure must still say which module
+/// it was in and which `.wast` line asserted.
+#[test]
+#[should_panic(expected = "spec_batch_locates.wast:6")]
+fn a_failing_assertion_in_a_later_module_reports_its_wast_line() {
+    run_wast(
+        "spec_batch_locates",
+        r#"
+(module (func (export "one") (result i32) i32.const 1))
+(assert_return (invoke "one") (i32.const 1))
+(module (func (export "two") (result i32) i32.const 2))
+(assert_return (invoke "two") (i32.const 2))
+(assert_return (invoke "two") (i32.const 3))
+"#,
+    );
+}
+
+#[test]
+#[should_panic(expected = "module defined at spec_batch_module.wast:4")]
+fn a_failing_assertion_reports_the_module_it_ran_in() {
+    run_wast(
+        "spec_batch_module",
+        r#"
+(module (func (export "one") (result i32) i32.const 1))
+(assert_return (invoke "one") (i32.const 1))
+(module (func (export "two") (result i32) i32.const 2))
+(assert_return (invoke "two") (i32.const 3))
+"#,
+    );
+}
+
+#[test]
+fn modules_of_one_file_do_not_collide_on_names() {
+    let report = run_wast(
+        "spec_batch_names",
+        r#"
+(module (memory 1) (global $g (mut i32) (i32.const 7))
+  (func (export "g") (result i32) global.get $g))
+(assert_return (invoke "g") (i32.const 7))
+(module (memory 1) (global $g (mut i32) (i32.const 9))
+  (func (export "g") (result i32) global.get $g))
+(assert_return (invoke "g") (i32.const 9))
+"#,
+    );
+    assert_eq!(report.executed, 2);
 }
 
 #[test]
