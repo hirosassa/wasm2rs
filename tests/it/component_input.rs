@@ -581,3 +581,98 @@ fn a_split_component_moves_a_large_data_segment_to_a_side_file() {
     assert_eq!(inline.len(), 1);
     assert!(!inline[0].code.contains("include_bytes!"));
 }
+
+// --- the options a split component passes on ---
+
+/// The root and every chunk of a split component, in one string: a marker may land in any file.
+fn split_text(options: &ComponentOptions) -> String {
+    let split = SplitOptions {
+        funcs_per_file: 1,
+        max_bytes_per_file: 0,
+    };
+    split_component(options, &split)
+        .into_iter()
+        .map(|f| f.code)
+        .collect()
+}
+
+#[test]
+fn a_split_component_names_the_imports_after_the_wit_functions() {
+    let code = split_text(&ComponentOptions::default());
+    assert!(
+        code.contains("fn wasi_cli_environment_get_arguments("),
+        "{code}"
+    );
+    assert!(!code.contains("fn import0("), "{code}");
+}
+
+#[test]
+fn a_split_component_lends_the_instance_to_the_imports() {
+    let code = split_text(&ComponentOptions::default());
+    assert!(
+        code.contains("fn wasi_cli_stdout_get_stdout(&mut self, g: &mut Instance<Self>)"),
+        "{code}"
+    );
+}
+
+#[test]
+fn a_split_component_names_the_exports_after_the_wit_functions() {
+    let code = split_text(&ComponentOptions::default());
+    assert!(
+        code.contains("pub fn export_wasi_cli_run_0_2_0_run("),
+        "{code}"
+    );
+}
+
+#[test]
+fn a_split_component_follows_external_types() {
+    let external = split_text(&ComponentOptions::default());
+    assert!(external.contains("use wasm2rs_wasi::Host;"), "{external}");
+    let own = split_text(&ComponentOptions {
+        external_types: None,
+        ..ComponentOptions::default()
+    });
+    assert!(!own.contains("wasm2rs_wasi"), "{own}");
+}
+
+#[test]
+fn a_split_component_follows_exports() {
+    assert!(split_text(&ComponentOptions::default()).contains("pub trait Exports"));
+    let without = split_text(&ComponentOptions {
+        exports: false,
+        ..ComponentOptions::default()
+    });
+    assert!(!without.contains("pub trait Exports"), "{without}");
+}
+
+#[test]
+fn a_split_component_follows_typed_traps() {
+    assert!(split_text(&ComponentOptions::default()).contains("Wasm2RsGlueTrap"));
+    let code = split_text(&options_with_typed_traps(false));
+    assert!(!code.contains("Wasm2RsGlueTrap"), "{code}");
+}
+
+/// Exactly two core modules: the one that lifts the export takes a function from the other,
+/// which a host import cannot stand for, so the two are linked and the function is not
+/// offered to the host.
+#[test]
+fn a_module_taking_a_function_from_its_only_sibling_is_linked() {
+    let component = wat_component(
+        r#"
+(component
+  (core module $lib
+    (func (export "helper") (result i32) i32.const 7))
+  (core module $program
+    (import "lib" "helper" (func $helper (result i32)))
+    (func (export "marker_program") (result i32) call $helper))
+  (core instance $l (instantiate $lib))
+  (core instance $p (instantiate $program (with "lib" (instance $l))))
+  (func $f (result u32) (canon lift (core func $p "marker_program")))
+  (export "marker" (func $f)))
+"#,
+    );
+    let code = transpile_component(&component, &ComponentOptions::default()).unwrap();
+    // The sibling's body is part of the unit; as a lone module it would be a host import.
+    assert!(code.contains("7i32"), "the sibling is linked in: {code}");
+    assert!(!code.contains("trait Imports"), "{code}");
+}
