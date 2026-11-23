@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use super::helpers::{HELPER_ORDER, helper_name};
 use super::runtime::is_rt_name;
+use super::wasi::WasiFn;
 
 /// Rust keywords (strict, reserved and `self`-like) that cannot be used as a
 /// plain identifier.
@@ -123,7 +124,7 @@ pub(super) fn is_reserved(name: &str) -> bool {
     {
         return true;
     }
-    if has_reserved_prefix(name) {
+    if has_reserved_prefix(name) || WasiFn::ALL.iter().any(|w| w.method() == name) {
         return true;
     }
     // A memory helper (`r32`, `memory_grow`, …), possibly specialised to memory
@@ -302,6 +303,122 @@ mod tests {
         }
         for name in ["add", "func", "funcs", "table_x", "run"] {
             assert!(!is_reserved(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn reserved_covers_the_emscripten_import_bridge_methods() {
+        // Exporting one of these under `--named-exports` would redefine the
+        // `impl Instance` method of the same name (E0592).
+        for name in [
+            "emscripten_get_now",
+            "emscripten_noop0",
+            "emscripten_noop1",
+            "emscripten_noop2",
+            "emscripten_resize_heap",
+            "emscripten_init_main_thread_js",
+            "emscripten_pthread_create_js",
+        ] {
+            assert!(is_reserved(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn every_wasi_fn_method_is_reserved() {
+        for w in WasiFn::ALL {
+            assert!(is_reserved(w.method()), "{w:?}: {}", w.method());
+        }
+    }
+
+    #[test]
+    fn wasi_fn_all_lists_every_variant() {
+        let src = include_str!("wasi.rs");
+        let body = src
+            .split("pub(crate) enum WasiFn {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("WasiFn enum");
+        let declared: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("    ")?.strip_suffix(','))
+            .filter(|n| n.chars().all(|c| c.is_ascii_alphanumeric()))
+            .collect();
+        let listed: Vec<String> = WasiFn::ALL.iter().map(|w| format!("{w:?}")).collect();
+        assert_eq!(declared, listed);
+    }
+
+    /// Export names built from real-world shapes, reserved names and noise.
+    fn pseudo_random_names() -> Vec<String> {
+        let atoms = [
+            "add",
+            "run",
+            "new",
+            "type",
+            "func0",
+            "func3_tc",
+            "table1_mut",
+            "r32",
+            "r32_m1",
+            "wasi_x",
+            "cont_y",
+            "call_ref_t3",
+            "emscripten_get_now",
+            "emscripten_noop0",
+            "_emscripten_tls_init",
+            "myFunc",
+            "my-func",
+            "a.b",
+            "1st",
+            "",
+            "--",
+            "_",
+            "x",
+            "[callback][async-lift]slow",
+            "memory",
+            "main",
+            "wasi_fd_write",
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        (0..400)
+            .map(|_| {
+                let parts = next() % 3 + 1;
+                (0..parts)
+                    .map(|_| atoms[usize::try_from(next()).unwrap() % atoms.len()])
+                    .collect::<Vec<_>>()
+                    .join(if next() % 2 == 0 { "" } else { "-" })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn assign_output_is_unique_valid_and_not_reserved() {
+        let names = pseudo_random_names();
+        for chunk in names.chunks(12) {
+            let exports: Vec<(&str, u32)> = chunk
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.as_str(), u32::try_from(i).unwrap()))
+                .collect();
+            let got = assign(exports.iter().copied());
+            assert_eq!(got.len(), exports.len());
+            let unique: HashSet<&String> = got.iter().collect();
+            assert_eq!(unique.len(), got.len(), "{chunk:?} -> {got:?}");
+            for ident in &got {
+                assert!(!is_reserved(ident), "{chunk:?} -> {ident}");
+                assert!(
+                    ident.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                        && ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        // A lone `_` is the wildcard, not an identifier.
+                        && ident != "_",
+                    "invalid identifier {ident:?} from {chunk:?}"
+                );
+            }
         }
     }
 

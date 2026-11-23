@@ -90,6 +90,66 @@ fn wasi_fn_template(w: WasiFn, files: bool) -> Option<&'static str> {
 }
 
 impl WasiFn {
+    /// Every variant, so a name reserved against the generated `Instance` methods
+    /// (see `export_names::is_reserved`) follows [`WasiFn::method`]. A test checks
+    /// the list against the enum's source.
+    pub(super) const ALL: &[WasiFn] = &[
+        WasiFn::ProcExit,
+        WasiFn::FdWrite,
+        WasiFn::FdRead,
+        WasiFn::FdClose,
+        WasiFn::FdSeek,
+        WasiFn::FdFdstatGet,
+        WasiFn::ArgsSizesGet,
+        WasiFn::ArgsGet,
+        WasiFn::EnvironSizesGet,
+        WasiFn::EnvironGet,
+        WasiFn::ClockTimeGet,
+        WasiFn::RandomGet,
+        WasiFn::PathOpen,
+        WasiFn::FdPrestatGet,
+        WasiFn::FdPrestatDirName,
+        WasiFn::FdFilestatGet,
+        WasiFn::SchedYield,
+        WasiFn::ClockResGet,
+        WasiFn::FdPread,
+        WasiFn::FdPwrite,
+        WasiFn::PathFilestatGet,
+        WasiFn::PathCreateDirectory,
+        WasiFn::PathRemoveDirectory,
+        WasiFn::PathUnlinkFile,
+        WasiFn::PathRename,
+        WasiFn::PathSymlink,
+        WasiFn::PathLink,
+        WasiFn::FdReaddir,
+        WasiFn::FdTell,
+        WasiFn::FdSync,
+        WasiFn::FdDatasync,
+        WasiFn::FdAdvise,
+        WasiFn::FdAllocate,
+        WasiFn::FdFilestatSetSize,
+        WasiFn::FdFilestatSetTimes,
+        WasiFn::PathFilestatSetTimes,
+        WasiFn::PathReadlink,
+        WasiFn::FdFdstatSetFlags,
+        WasiFn::FdFdstatSetRights,
+        WasiFn::FdRenumber,
+        WasiFn::PollOneoff,
+        WasiFn::SockAccept,
+        WasiFn::SockRecv,
+        WasiFn::SockSend,
+        WasiFn::SockShutdown,
+        WasiFn::ProcRaise,
+        WasiFn::ThreadSpawn,
+        WasiFn::PthreadCreateJs,
+        WasiFn::EmscriptenNoop0,
+        WasiFn::EmscriptenNoop1,
+        WasiFn::EmscriptenNoop2,
+        WasiFn::EmscriptenInitMainThread,
+        WasiFn::EmscriptenGetNow,
+        WasiFn::EmscriptenResizeHeap,
+    ];
+
     /// Match a `(module, name)` import against the native WASI subset. The
     /// signature must match too, so a mis-typed import is left to the host
     /// trait rather than bound to a wrong native body.
