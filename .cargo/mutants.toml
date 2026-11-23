@@ -2,6 +2,9 @@
 # (add `--features http-client` for host/ureq_client.rs). Every exclusion below is a mutant
 # that no test can tell from the original, with the reason.
 exclude_re = [
+    # a `struct.*`/`array.*` operator needs a struct/array type in the module, and the type
+    # section already reports `gc`, so the `Struct || Array` arm of `Features::note` adds nothing
+    'src/dump\.rs:383:\d+: replace \|\| with && in Features::note',
     # `read_component` hands the payloads of nested components and modules to `Reader::feed`
     # only through `depth`; a nested section already marks the shim `opaque`, and a core module
     # cannot nest, so reading a payload deeper than one level changes nothing observable.

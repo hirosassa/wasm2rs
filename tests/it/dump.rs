@@ -344,3 +344,111 @@ fn compact_import_groups_are_listed_item_by_item_with_their_own_signatures() {
         );
     }
 }
+
+/// The `features:` line alone, so a test can tell `gc` from `gc, continuations`.
+fn features(wat: &str) -> String {
+    let text = summary(wat);
+    text.lines()
+        .find(|l| l.starts_with("features: "))
+        .unwrap_or_else(|| panic!("no features line in {text}"))
+        .to_string()
+}
+
+#[test]
+fn the_host_trait_count_excludes_native_wasi_and_non_host_imports() {
+    let text = summary(
+        r#"(module
+            (import "wasi_snapshot_preview1" "proc_exit" (func (param i32)))
+            (import "env" "log" (func (param i32)))
+            (import "env" "g" (global i32))
+            (import "env" "shared" (memory 1 1 shared))
+            (import "env" "e" (tag (param i32))))"#,
+    );
+    assert!(
+        text.contains("host trait: required (2 import(s))"),
+        "{text}"
+    );
+}
+
+#[test]
+fn defined_tags_are_counted_alongside_imported_ones() {
+    let defined = summary(r#"(module (tag (param i32)) (tag))"#);
+    assert!(defined.contains("tags: 2"), "{defined}");
+    let both = summary(r#"(module (import "env" "e" (tag)) (tag) (tag))"#);
+    assert!(both.contains("tags: 3"), "{both}");
+}
+
+#[test]
+fn a_struct_or_array_type_alone_is_gc_and_not_continuations() {
+    // No operator uses the type, so only the type section can report the proposal.
+    for ty in ["(type (struct (field i32)))", "(type (array i8))"] {
+        let line = features(&format!("(module {ty})"));
+        assert_eq!(line, "features: gc", "{ty}");
+    }
+    let cont = features(r#"(module (type $f (func)) (type (cont $f)))"#);
+    assert_eq!(cont, "features: continuations");
+}
+
+#[test]
+fn only_the_exact_thread_spawn_import_enables_wasi_threads() {
+    let wrong_name = features(r#"(module (import "wasi" "other" (func)))"#);
+    assert_eq!(wrong_name, "features: none");
+    let wrong_module =
+        features(r#"(module (import "env" "thread-spawn" (func (param i32) (result i32))))"#);
+    assert_eq!(wrong_module, "features: none");
+}
+
+/// Each gc operator that needs no struct/array type is reported on its own: the
+/// operator classification must not depend on a type having set the flag.
+#[test]
+fn each_gc_operator_is_classified_as_gc() {
+    let bodies = [
+        (
+            "ref.test",
+            "(func (param anyref) (result i32) local.get 0 ref.test (ref null i31))",
+        ),
+        (
+            "ref.cast",
+            "(func (param anyref) (result i31ref) local.get 0 ref.cast (ref null i31))",
+        ),
+        (
+            "br_on_cast",
+            "(func (param anyref) (result i31ref)
+               (block $l (result i31ref)
+                 local.get 0
+                 br_on_cast $l anyref i31ref
+                 drop
+                 ref.null i31))",
+        ),
+        (
+            "any.convert_extern",
+            "(func (param externref) (result anyref) local.get 0 any.convert_extern)",
+        ),
+        (
+            "extern.convert_any",
+            "(func (param anyref) (result externref) local.get 0 extern.convert_any)",
+        ),
+        ("ref.i31", "(func (result i31ref) i32.const 1 ref.i31)"),
+        (
+            "i31.get_s",
+            "(func (param i31ref) (result i32) local.get 0 i31.get_s)",
+        ),
+    ];
+    for (op, body) in bodies {
+        let line = features(&format!("(module {body})"));
+        assert_eq!(line, "features: gc", "{op}");
+    }
+}
+
+#[test]
+fn exception_operators_are_classified_as_exceptions() {
+    let eh = [
+        ("try_table", "(tag $e) (func (try_table))"),
+        ("throw", "(tag $e) (func (throw $e))"),
+        ("throw_ref", "(func (param exnref) local.get 0 throw_ref)"),
+    ];
+    for (op, body) in eh {
+        let line = features(&format!("(module {body})"));
+        assert_eq!(line, "features: exceptions", "{op}");
+    }
+}
