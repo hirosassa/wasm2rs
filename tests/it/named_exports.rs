@@ -89,6 +89,24 @@ fn names_clashing_with_generated_members_get_a_suffix() {
 }
 
 #[test]
+fn exports_named_like_an_emscripten_import_bridge_method_get_a_suffix() {
+    // The imports are bound to native `Instance` methods of the same names, so
+    // re-exporting them used to define each method twice (E0592).
+    run_named(
+        "named_emscripten_bridge_clash",
+        r#"(module
+            (import "env" "emscripten_get_now" (func $now (result f64)))
+            (import "env" "emscripten_resize_heap" (func $resize (param i32) (result i32)))
+            (memory 1)
+            (func (export "emscripten_get_now") (result f64) call $now)
+            (func (export "emscripten_resize_heap") (param i32) (result i32)
+              local.get 0 call $resize))"#,
+        "let mut inst = Instance::new();\n assert!(inst.emscripten_get_now_() >= 0.0);\n \
+         assert_eq!(inst.emscripten_resize_heap_(1 << 30), 0);",
+    );
+}
+
+#[test]
 fn an_exported_wasi_thread_start_keeps_its_single_wrapper() {
     run_named(
         "named_wasi_thread_start",
