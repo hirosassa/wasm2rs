@@ -1,6 +1,6 @@
 [package]
 name = "wasm2rs"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version.workspace = true
 description = "Transpile WebAssembly binaries into standalone native Rust source code."

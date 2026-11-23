@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-24
+
+`wasm2rs` and `wasm2rs-macros` 0.7.0, `wasm2rs-wasi` 0.2.1. `wasm2rs-macros` has no API or code change; its version follows `wasm2rs`. `wasm2rs-wasi` 0.2.1 adds `Http1Client` (feature `http-client`) and maps an I/O error to the WASI errno through one helper that prefers the OS errno; it is a compatible change, so a patch bump.
+
 ### Added
 - `Transpiler` and `ComponentTranspiler`, builders that replace the product of `transpile*` function names: `Transpiler::new(opts).with_split(..).with_data_files(..).run(&wasm, sink)` (plus `transpile` / `transpile_pieces` for one source). The existing `transpile*` functions stay, as thin wrappers with byte-identical output. `SplitOptions` gains `Default`/`Debug`/`Clone`, `SourcePieces` `Debug`/`Clone`.
 - `wasm2rs::build::run_to_out_dir` / `run_to_dir` and `run_component_to_out_dir` / `run_component_to_dir`: build-script entry points that take a `Transpiler` / `ComponentTranspiler`, so a `build.rs` can write split output and `data_{n}.bin` side files into `$OUT_DIR/{name}/` and `include!` its `lib.rs`. The existing `build` helpers are unchanged.
@@ -757,7 +761,8 @@ bounds checks, and trap behaviour).
   faster code on modules trusted to stay in bounds (an out-of-bounds access
   becomes undefined behaviour instead of a wasm trap).
 
-[Unreleased]: https://github.com/hirosassa/wasm2rs/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/hirosassa/wasm2rs/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/hirosassa/wasm2rs/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/hirosassa/wasm2rs/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/hirosassa/wasm2rs/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/hirosassa/wasm2rs/compare/wasm2rs-macros-v0.3.1...v0.4.0
