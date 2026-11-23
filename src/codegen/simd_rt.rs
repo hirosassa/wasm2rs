@@ -1020,10 +1020,7 @@ mod tests {
 
     #[test]
     fn is_helper_accepts_each_table_and_the_fixed_names_only() {
-        for name in [LANE[0].name, WIDE[0].name, REDUCE[0].name, FIXED[0]] {
-            assert!(is_helper(name), "{name}");
-        }
-        // Each table is checked on its own: no other table's name accepts it.
+        // Each table is checked on its own, so dropping one lookup is caught.
         assert!(LANE.iter().all(|l| is_helper(l.name)));
         assert!(WIDE.iter().all(|w| is_helper(w.name)));
         assert!(REDUCE.iter().all(|r| is_helper(r.name)));
