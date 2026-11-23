@@ -411,15 +411,13 @@ mod tests {
             assert_eq!(unique.len(), got.len(), "{chunk:?} -> {got:?}");
             for ident in &got {
                 assert!(!is_reserved(ident), "{chunk:?} -> {ident}");
-                let mut chars = ident.chars();
                 assert!(
-                    chars
-                        .next()
-                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                        && ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                    ident.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                        && ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        // A lone `_` is the wildcard, not an identifier.
+                        && ident != "_",
                     "invalid identifier {ident:?} from {chunk:?}"
                 );
-                assert_ne!(ident, "_", "{chunk:?}");
             }
         }
     }
