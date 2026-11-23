@@ -232,15 +232,20 @@ impl<'a> CtorPlan<'a> {
             }
             None => indent.to_string(),
         };
-        // An empty segment writes nothing, but an offset past the end of the
-        // table still traps at instantiation: check it with an empty slice.
-        if seg.funcs.is_empty() {
-            let off = if runtime.is_some() {
-                "off".to_string()
+        // The spec bounds-checks the whole segment before writing any slot, and
+        // a host-owned table keeps what was written before a trap, so check the
+        // range up front. An empty segment writes nothing but still traps when
+        // its offset is past the end of the table. A single slot is checked by
+        // its own write.
+        let len = seg.funcs.len();
+        if len != 1 {
+            let range = if runtime.is_some() {
+                format!("off..off.saturating_add({len})")
             } else {
-                elem_slot(base).to_string()
+                let end = base.saturating_add(u64::try_from(len).unwrap_or(u64::MAX));
+                format!("{}..{}", elem_slot(base), elem_slot(end))
             };
-            lines.push(format!("{ind}let _ = &{target}[{off}..{off}];"));
+            lines.push(format!("{ind}let _ = &{target}[{range}];"));
         }
         let gc_table = self
             .ctx

@@ -604,3 +604,80 @@ fn an_imported_table64_is_indexed_and_sized_by_i64() {
     let run = Command::new(&bin).status().expect("run generated binary");
     assert!(run.success(), "imported table64 failed");
 }
+
+#[test]
+fn an_out_of_bounds_element_segment_leaves_the_imported_table_untouched() {
+    // The spec bounds-checks a whole segment before writing it: a two-slot segment
+    // at the last slot of a one-slot host table traps without writing slot 0.
+    let wat = r#"
+        (module
+          (import "env" "tbl" (table 1 funcref))
+          (elem (i32.const 0) $f $f)
+          (func $f))
+        "#;
+    let extra = r#"
+        static DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        struct Host { table: Vec<u32> }
+        impl Drop for Host {
+            fn drop(&mut self) {
+                if self.table[0] != u32::MAX { DIRTY.store(true, std::sync::atomic::Ordering::SeqCst); }
+            }
+        }
+        impl Imports for Host {
+            fn table(&self) -> &[u32] { &self.table }
+            fn table_mut(&mut self) -> &mut Vec<u32> { &mut self.table }
+        }
+        fn main() {
+            let host = Host { table: vec![u32::MAX; 1] };
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Instance::new(host)));
+            assert!(r.is_err(), "the segment should trap");
+            assert!(!DIRTY.load(std::sync::atomic::Ordering::SeqCst), "slot 0 was written before the trap");
+        }
+    "#;
+    let bin = compile("elem_partial", wat, extra);
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn an_out_of_bounds_runtime_offset_element_segment_leaves_the_imported_table_untouched() {
+    // The same, for a segment whose offset is an imported global.
+    let wat = r#"
+        (module
+          (import "env" "g" (global i32))
+          (import "env" "tbl" (table 1 funcref))
+          (elem (global.get 0) $f $f)
+          (func $f))
+        "#;
+    let extra = r#"
+        static DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        struct Host { table: Vec<u32> }
+        impl Drop for Host {
+            fn drop(&mut self) {
+                if self.table[0] != u32::MAX { DIRTY.store(true, std::sync::atomic::Ordering::SeqCst); }
+            }
+        }
+        impl Imports for Host {
+            fn get_global0(&self) -> i32 { 0 }
+            fn table(&self) -> &[u32] { &self.table }
+            fn table_mut(&mut self) -> &mut Vec<u32> { &mut self.table }
+        }
+        fn main() {
+            let host = Host { table: vec![u32::MAX; 1] };
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Instance::new(host)));
+            assert!(r.is_err(), "the segment should trap");
+            assert!(!DIRTY.load(std::sync::atomic::Ordering::SeqCst), "slot 0 was written before the trap");
+        }
+    "#;
+    let bin = compile("elem_partial_runtime", wat, extra);
+    let run = Command::new(&bin).output().expect("run generated binary");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
