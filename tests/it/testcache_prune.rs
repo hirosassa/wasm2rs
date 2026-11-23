@@ -118,10 +118,21 @@ fn files_that_are_not_cache_entries_are_left_alone() {
 /// Creates the per-checkout directory `name` holding a file of the given age, nested so that the
 /// directory's own mtime says nothing about the use of what is inside.
 fn checkout(dir: &Path, name: &str, now: SystemTime, inner_age: Duration) -> PathBuf {
+    sized_checkout(dir, name, 10, now, inner_age)
+}
+
+/// [`checkout`] whose one file holds `len` bytes.
+fn sized_checkout(
+    dir: &Path,
+    name: &str,
+    len: usize,
+    now: SystemTime,
+    inner_age: Duration,
+) -> PathBuf {
     let path = dir.join(name);
     let debug = path.join("wasi-target/debug");
     fs::create_dir_all(&debug).unwrap();
-    entry(&debug, "libx.rlib", 10, now, inner_age);
+    entry(&debug, "libx.rlib", len, now, inner_age);
     // creating the file touched the directories above it
     for sub in ["wasi-target/debug", "wasi-target", ""] {
         set_age(&path.join(sub), now, 100 * DAY);
@@ -169,6 +180,180 @@ fn legacy_per_checkout_entries_are_aged_out_by_their_newest_inner_mtime() {
     assert!(!idle_lock.exists());
     assert!(used.exists());
     assert!(used_lock.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+fn capped(max_bytes: u64) -> Policy {
+    Policy {
+        max_bytes,
+        ..policy()
+    }
+}
+
+const HOUR: Duration = Duration::from_secs(60 * 60);
+
+#[test]
+fn an_idle_checkout_dir_counts_toward_the_cap_and_goes_first_when_it_is_the_least_recently_used() {
+    let dir = scratch("budget-checkout");
+    let now = SystemTime::now();
+    let entry_kept = entry(&dir, "gen-a", 100, now, DAY);
+    let idle = sized_checkout(&dir, "checkout-0000000000000001", 100, now, 3 * DAY);
+    let report = prune(&dir, now, &capped(150));
+    assert!(!idle.exists());
+    assert!(entry_kept.exists());
+    assert_eq!(report.removed, 1);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_checkout_dir_newer_than_a_cache_entry_is_kept_while_the_entry_goes() {
+    let dir = scratch("budget-order");
+    let now = SystemTime::now();
+    let old_entry = entry(&dir, "gen-a", 100, now, 5 * DAY);
+    let newer = sized_checkout(&dir, "checkout-0000000000000001", 100, now, 2 * DAY);
+    prune(&dir, now, &capped(150));
+    assert!(!old_entry.exists());
+    assert!(newer.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn an_idle_wasi_lib_counts_toward_the_cap() {
+    let dir = scratch("budget-lib");
+    let now = SystemTime::now();
+    let lib = entry(
+        &dir,
+        "libwasm2rs_wasi-0000000000000001.rlib",
+        100,
+        now,
+        3 * DAY,
+    );
+    let kept = entry(&dir, "gen-a", 100, now, DAY);
+    prune(&dir, now, &capped(150));
+    assert!(!lib.exists());
+    assert!(kept.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn nothing_is_removed_when_the_whole_cache_fits_the_cap() {
+    let dir = scratch("budget-fits");
+    let now = SystemTime::now();
+    let e = entry(&dir, "gen-a", 100, now, 3 * DAY);
+    let lib = entry(
+        &dir,
+        "libwasm2rs_wasi-0000000000000001.rlib",
+        100,
+        now,
+        3 * DAY,
+    );
+    let c = sized_checkout(&dir, "checkout-0000000000000001", 100, now, 3 * DAY);
+    let report = prune(&dir, now, &capped(300));
+    assert_eq!(report, Default::default());
+    assert!(e.exists() && lib.exists() && c.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A build that wrote something in the last hours may be running: the cap never takes it.
+#[test]
+fn a_recently_used_checkout_dir_or_wasi_lib_survives_the_cap() {
+    let dir = scratch("budget-in-use");
+    let now = SystemTime::now();
+    let busy = sized_checkout(&dir, "checkout-0000000000000001", 100, now, HOUR);
+    let lib = entry(
+        &dir,
+        "libwasm2rs_wasi-0000000000000001.rlib",
+        100,
+        now,
+        HOUR,
+    );
+    let old_entry = entry(&dir, "gen-a", 100, now, 3 * DAY);
+    prune(&dir, now, &capped(10));
+    assert!(busy.exists());
+    assert!(lib.exists());
+    // the unprotected entry is still taken, even though that cannot reach the cap
+    assert!(!old_entry.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn one_recent_file_deep_inside_protects_a_checkout_dir_from_the_cap() {
+    let dir = scratch("budget-deep");
+    let now = SystemTime::now();
+    let path = sized_checkout(&dir, "checkout-0000000000000001", 100, now, 30 * DAY - DAY);
+    entry(&path.join("wasi-target/debug"), "fresh.o", 1, now, HOUR);
+    prune(&dir, now, &capped(10));
+    assert!(path.join("wasi-target/debug/libx.rlib").exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn over_the_cap_only_cache_entries_are_removed_never_what_lies_beside_or_outside_them() {
+    let root = scratch("budget-outside");
+    let now = SystemTime::now();
+    let dir = root.join("cache");
+    fs::create_dir_all(&dir).unwrap();
+    let outside_file = entry(&root, "gen-outside", 1000, now, 90 * DAY);
+    let outside_dir = sized_checkout(&root, "checkout-0000000000000009", 1000, now, 90 * DAY);
+    let notes = entry(&dir, "notes.txt", 1000, now, 90 * DAY);
+    let foreign_dir = dir.join("unrelated");
+    fs::create_dir_all(&foreign_dir).unwrap();
+    entry(&foreign_dir, "x", 1000, now, 90 * DAY);
+    let stamp = entry(&dir, ".pruned", 0, now, 90 * DAY);
+    let idle = sized_checkout(&dir, "checkout-0000000000000001", 100, now, 3 * DAY);
+    prune(&dir, now, &capped(0));
+    assert!(!idle.exists());
+    assert!(outside_file.exists());
+    assert!(outside_dir.join("wasi-target/debug/libx.rlib").exists());
+    assert!(notes.exists());
+    assert!(foreign_dir.join("x").exists());
+    assert!(stamp.exists());
+    fs::remove_dir_all(&root).ok();
+}
+
+/// Removing a checkout dir removes the link, not what it points at.
+#[cfg(unix)]
+#[test]
+fn a_symlink_inside_an_evicted_checkout_dir_does_not_take_its_target_along() {
+    let root = scratch("budget-symlink");
+    let now = SystemTime::now();
+    let dir = root.join("cache");
+    fs::create_dir_all(&dir).unwrap();
+    let precious = root.join("precious");
+    fs::create_dir_all(&precious).unwrap();
+    fs::write(precious.join("data"), "keep").unwrap();
+    let idle = sized_checkout(&dir, "checkout-0000000000000001", 100, now, 3 * DAY);
+    std::os::unix::fs::symlink(&precious, idle.join("link")).unwrap();
+    // the link was just made, so look from ten days on: everything is idle by then
+    prune(&dir, now + 10 * DAY, &capped(0));
+    assert!(!idle.exists());
+    assert!(precious.join("data").exists());
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn the_lock_of_a_legacy_dir_goes_with_it_when_the_cap_evicts_it_and_stays_with_a_kept_one() {
+    let dir = scratch("budget-legacy");
+    let now = SystemTime::now();
+    let idle = sized_checkout(&dir, "wasi-target-00000000000000aa", 100, now, 3 * DAY);
+    let idle_lock = entry(&dir, "wasi-target-00000000000000aa.lock", 0, now, 3 * DAY);
+    let busy = sized_checkout(&dir, "wasi-target-00000000000000bb", 100, now, HOUR);
+    let busy_lock = entry(&dir, "wasi-target-00000000000000bb.lock", 0, now, 3 * DAY);
+    prune(&dir, now, &capped(150));
+    assert!(!idle.exists());
+    assert!(!idle_lock.exists());
+    assert!(busy.exists());
+    assert!(busy_lock.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn prune_unused_still_leaves_checkout_dirs_alone_whatever_the_cap() {
+    let dir = scratch("unused-vs-budget");
+    let now = SystemTime::now();
+    let checkout = sized_checkout(&dir, "checkout-0000000000000001", 100, now, 3 * DAY);
+    prune_unused(&dir, now - Duration::from_secs(60));
+    assert!(checkout.exists());
     fs::remove_dir_all(&dir).ok();
 }
 

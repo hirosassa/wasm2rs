@@ -285,6 +285,7 @@ pub fn resolve_cache_dir(over: Option<&std::ffi::OsStr>) -> std::path::PathBuf {
 }
 
 /// The shared cache directory, created, and pruned once per process (see [`prune`]).
+/// `$WASM2RS_TESTCACHE_MAX_GIB` caps the whole of it, checkout directories included.
 ///
 /// Shared by every checkout on purpose: what it holds directly (`gen-*`, `ex-*`, the
 /// `wasm2rs-wasi` rlib copies) is content-addressed and published by atomic rename, so concurrent
@@ -305,6 +306,9 @@ fn cache_dir() -> std::path::PathBuf {
             .is_some_and(|age| age < std::time::Duration::from_secs(10 * 60));
         if !recent {
             std::fs::write(&stamp, b"").ok();
+            // the size cap covers the checkout directories too: mark this one as in use first, so
+            // that the prune below cannot take the build this very process is about to use
+            mark_checkout_used(&dir);
             prune::prune(
                 &dir,
                 std::time::SystemTime::now(),
@@ -342,11 +346,14 @@ pub fn checkout_dir_in(
 /// used once per process so that [`prune`] does not take a checkout that is being worked in for an
 /// abandoned one.
 fn checkout_dir() -> std::path::PathBuf {
+    mark_checkout_used(&cache_dir())
+}
+
+/// Creates this checkout's directory under the cache root `root` and marks it as used, once per
+/// process. Returns the directory.
+fn mark_checkout_used(root: &std::path::Path) -> std::path::PathBuf {
     static USED: OnceLock<()> = OnceLock::new();
-    let dir = checkout_dir_in(
-        &cache_dir(),
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
-    );
+    let dir = checkout_dir_in(root, std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
     std::fs::create_dir_all(&dir).expect("create checkout dir");
     USED.get_or_init(|| std::fs::write(dir.join(".used"), b"").expect("mark checkout dir used"));
     dir
