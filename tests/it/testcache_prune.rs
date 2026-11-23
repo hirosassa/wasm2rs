@@ -7,7 +7,7 @@ use std::fs::{self, File, FileTimes};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::common::prune::{Policy, prune, prune_unused};
+use crate::common::prune::{Policy, prune, prune_unused, remove_if_idle};
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -368,6 +368,34 @@ fn prune_unused_still_leaves_checkout_dirs_alone_whatever_the_cap() {
     let checkout = sized_checkout(&dir, "checkout-0000000000000001", 100, now, 3 * DAY);
     prune_unused(&dir, now - Duration::from_secs(60));
     assert!(checkout.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// What a run that starts using an idle checkout dir just as a prune reaches it relies on: the
+/// directory is looked at again right before it is taken.
+#[test]
+fn a_dir_that_was_used_after_the_scan_is_not_removed() {
+    let dir = scratch("recheck");
+    let now = SystemTime::now();
+    let path = sized_checkout(&dir, "checkout-0000000000000001", 100, now, 3 * DAY);
+    let cutoff = now - HOUR;
+    // another run marks it used between the prune's scan and its removal
+    entry(&path, ".used", 0, now, Duration::from_secs(1));
+    assert!(!remove_if_idle(&path, cutoff, now));
+    assert!(path.join("wasi-target/debug/libx.rlib").exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// The directory leaves its name at once (a rename), so a run that starts using it afterwards gets
+/// a fresh one instead of writing into a tree that is being deleted.
+#[test]
+fn an_idle_dir_is_taken_by_name_first_and_leaves_nothing_behind() {
+    let dir = scratch("tombstone");
+    let now = SystemTime::now();
+    let path = sized_checkout(&dir, "checkout-0000000000000001", 100, now, 3 * DAY);
+    assert!(remove_if_idle(&path, now - HOUR, now));
+    assert!(!path.exists());
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
     fs::remove_dir_all(&dir).ok();
 }
 

@@ -97,6 +97,30 @@ fn tree_stats(path: &Path, now: SystemTime) -> (SystemTime, u64) {
     (newest, bytes)
 }
 
+/// Removes the directory `path` if nothing in it was modified at or after `cutoff`, checked again
+/// right before: a run may have started using it since the caller scanned it. The directory is
+/// first renamed away (to a `work-` name, which [`prune`] also sweeps should the deletion below be
+/// cut short), so that a run starting to use `path` meanwhile creates it afresh rather than
+/// writing into a tree that is being deleted. Returns whether it was taken; any doubt keeps it.
+pub fn remove_if_idle(path: &Path, cutoff: SystemTime, now: SystemTime) -> bool {
+    if tree_stats(path, now).0 >= cutoff {
+        return false;
+    }
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let taken = path.with_file_name(format!(
+        "{WORK_PREFIX}evicted-{}-{}",
+        std::process::id(),
+        name.to_string_lossy()
+    ));
+    if fs::rename(path, &taken).is_err() {
+        return false;
+    }
+    let _ = fs::remove_dir_all(&taken);
+    true
+}
+
 /// Something the size cap may remove, oldest `modified` first.
 struct Candidate {
     modified: SystemTime,
@@ -134,7 +158,7 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
         let age = now.duration_since(modified).unwrap_or_default();
         if CHECKOUT_PREFIXES.iter().any(|p| name.starts_with(p)) && meta.is_dir() {
             let (modified, bytes) = tree_stats(&item.path(), now);
-            if modified < checkout_cutoff && fs::remove_dir_all(item.path()).is_ok() {
+            if modified < checkout_cutoff && remove_if_idle(&item.path(), checkout_cutoff, now) {
                 report.removed += 1;
             } else {
                 live.push(Candidate {
@@ -181,11 +205,11 @@ pub fn prune(dir: &Path, now: SystemTime, policy: &Policy) -> Report {
         }
         let is_dir = fs::symlink_metadata(&c.path).is_ok_and(|m| m.is_dir());
         let removed = if is_dir {
-            fs::remove_dir_all(&c.path)
+            remove_if_idle(&c.path, in_use_cutoff, now)
         } else {
-            fs::remove_file(&c.path)
+            fs::remove_file(&c.path).is_ok()
         };
-        if removed.is_ok() {
+        if removed {
             report.removed += 1;
             total = total.saturating_sub(c.bytes);
         }
