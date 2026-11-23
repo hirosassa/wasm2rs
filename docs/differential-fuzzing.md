@@ -79,4 +79,4 @@ New-profile findings (seeds 0–299):
   access family (loads, stores, all rmw operations, cmpxchg, wait, notify, fence) on an
   unshared memory, 32-bit and memory64, at the harness's wild addresses and at fixed
   aligned, misaligned and out-of-bounds cells; a second test checks that every family
-  returns a value and traps. No findings in 3300 seeds.
+  reaches both a value and a trap (the waits only trap, the fence never does). No findings in 3300 seeds.
