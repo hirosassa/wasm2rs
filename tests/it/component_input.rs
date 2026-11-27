@@ -4,8 +4,9 @@
 use std::process::Command;
 
 use wasm2rs::{
-    ComponentOptions, SourceFile, SplitOptions, TranspileError, TranspileOptions, dump, transpile,
-    transpile_component, transpile_component_split, transpile_component_with_exports, wit_exports,
+    ComponentOptions, DEFAULT_SPLIT_DISPATCH as DEFAULT_SPLIT_ARMS, SourceFile, SplitOptions,
+    TranspileError, TranspileOptions, dump, transpile, transpile_component,
+    transpile_component_split, transpile_component_with_exports, wit_exports,
 };
 
 use crate::common;
@@ -690,8 +691,6 @@ fn switch_component(cases: usize) -> Vec<u8> {
         crate::split_dispatch::switch_body(cases)
     ))
 }
-
-use wasm2rs::DEFAULT_SPLIT_DISPATCH as DEFAULT_SPLIT_ARMS;
 
 #[test]
 fn a_component_splits_a_dispatch_past_the_default_cap() {
