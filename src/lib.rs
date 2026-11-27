@@ -38,8 +38,8 @@ mod wit;
 mod wit_abi;
 
 pub use component::{
-    ComponentOptions, ComponentTranspiler, transpile_component, transpile_component_split,
-    transpile_component_split_files, transpile_component_with_exports,
+    ComponentOptions, ComponentTranspiler, DEFAULT_SPLIT_DISPATCH, transpile_component,
+    transpile_component_split, transpile_component_split_files, transpile_component_with_exports,
 };
 pub use dump::{ModuleSummary, dump};
 pub use extract::extract_core_modules;

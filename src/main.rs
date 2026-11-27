@@ -150,7 +150,8 @@ fn run() -> Result<(), String> {
     // `None` until `--data-files` / `--no-data-files` says; a split output then defaults to on.
     let mut data_files_flag: Option<bool> = None;
     let mut entry_exports: Option<Vec<String>> = None;
-    let mut split_dispatch = 0usize;
+    // `None` until `--split-dispatch=N` says; `--component` then keeps its own default.
+    let mut split_dispatch: Option<usize> = None;
     let mut jobs = 0usize;
     let mut call_depth_limit: Option<u32> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -161,9 +162,10 @@ fn run() -> Result<(), String> {
             continue;
         }
         if let Some(n) = arg.strip_prefix("--split-dispatch=") {
-            split_dispatch = n
-                .parse()
-                .map_err(|_| format!("invalid --split-dispatch value: {n}"))?;
+            split_dispatch = Some(
+                n.parse()
+                    .map_err(|_| format!("invalid --split-dispatch value: {n}"))?,
+            );
             continue;
         }
         if let Some(n) = arg.strip_prefix("--call-depth-limit=") {
@@ -270,7 +272,7 @@ fn run() -> Result<(), String> {
             (reentrant_imports, "--reentrant-imports"),
             (data_files_flag == Some(true), "--data-files"),
             (data_files_flag == Some(false), "--no-data-files"),
-            (split_dispatch > 0, "--split-dispatch"),
+            (split_dispatch.unwrap_or(0) > 0, "--split-dispatch"),
             (jobs > 0, "--jobs"),
             (call_depth_limit.is_some(), "--call-depth-limit"),
             (entry_exports.is_some(), "--entry-exports"),
@@ -313,7 +315,7 @@ fn run() -> Result<(), String> {
                 .with_simd_intrinsics(simd_intrinsics)
                 .with_typed_traps(typed_traps)
                 .with_call_depth_limit(call_depth_limit)
-                .with_split_dispatch(split_dispatch)
+                .with_split_dispatch(split_dispatch.unwrap_or(defaults.transpile.split_dispatch))
                 .with_jobs(jobs),
             external_types: external_types.or(defaults.external_types),
             ..defaults
@@ -401,7 +403,7 @@ fn run() -> Result<(), String> {
         .with_simd_intrinsics(simd_intrinsics)
         .with_typed_traps(typed_traps)
         .with_call_depth_limit(call_depth_limit)
-        .with_split_dispatch(split_dispatch)
+        .with_split_dispatch(split_dispatch.unwrap_or(0))
         .with_entry_exports(entry_exports)
         .with_jobs(jobs)
         .with_named_exports(named_exports)

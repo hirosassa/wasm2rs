@@ -19,7 +19,7 @@ use crate::common;
 /// non-fusible dispatch arm, so the flattened function has ~`cases` arms — a
 /// controlled way to exceed a small `split_dispatch` threshold. The caller wraps
 /// this with the module/function that reads `$r`.
-fn switch_body(cases: usize) -> String {
+pub(crate) fn switch_body(cases: usize) -> String {
     // An outer `$exit` lets each in-range case skip the default body: cases branch
     // to `$exit`, only the `$default` target falls through to the `r = 999` line.
     let mut body = String::from("(block $exit\n(block $default\n");

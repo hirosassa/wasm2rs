@@ -30,7 +30,8 @@ pub struct ComponentOptions {
     /// Options of the core module's transpilation. `named_imports`, `named_exports` and
     /// `reentrant_imports` are **always switched on**, whatever they are set to here: the
     /// generated glue calls the module through those names and shapes, and does not build
-    /// without them. Every other field is used as given.
+    /// without them. Every other field is used as given; the default sets
+    /// [`split_dispatch`](TranspileOptions::split_dispatch) to [`DEFAULT_SPLIT_DISPATCH`] (`0` opts out).
     pub transpile: TranspileOptions,
     /// The Rust path of a library that declares `Host` and the interface types, which the
     /// glue then refers to (see [`WitOptions::external_types`]); types only the exports use are
@@ -40,10 +41,17 @@ pub struct ComponentOptions {
     pub exports: bool,
 }
 
+/// The default [`TranspileOptions::split_dispatch`] of a component: a flattened dispatch past this
+/// many arms is emitted as sibling part functions. Guests such as the jco (JavaScript) component
+/// carry 40 K-line dispatches that LLVM did not finish at `-C opt-level=1` whole (80+ minutes);
+/// cut into parts of this size it builds in minutes (see `docs/component-toolchain-survey.md`,
+/// F4). A smaller dispatch is untouched, and `0` restores the whole function.
+pub const DEFAULT_SPLIT_DISPATCH: usize = 512;
+
 impl Default for ComponentOptions {
     fn default() -> Self {
         Self {
-            transpile: TranspileOptions::default(),
+            transpile: TranspileOptions::default().with_split_dispatch(DEFAULT_SPLIT_DISPATCH),
             external_types: Some("wasm2rs_wasi".to_string()),
             exports: true,
         }
