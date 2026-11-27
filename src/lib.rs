@@ -38,8 +38,8 @@ mod wit;
 mod wit_abi;
 
 pub use component::{
-    ComponentOptions, ComponentTranspiler, transpile_component, transpile_component_split,
-    transpile_component_split_files, transpile_component_with_exports,
+    ComponentOptions, ComponentTranspiler, DEFAULT_SPLIT_DISPATCH, transpile_component,
+    transpile_component_split, transpile_component_split_files, transpile_component_with_exports,
 };
 pub use dump::{ModuleSummary, dump};
 pub use extract::extract_core_modules;
@@ -349,6 +349,8 @@ pub struct TranspileOptions {
     /// many smaller ones the Rust backend can optimise (and codegen-parallelise)
     /// independently — without changing what it computes. The value caps the arms
     /// per part; `0` (the default) keeps each flattened function whole.
+    /// [`ComponentOptions::default`] sets [`DEFAULT_SPLIT_DISPATCH`] instead; a
+    /// `ComponentOptions` built with its own `transpile` field gets only what that field says.
     pub split_dispatch: usize,
 
     /// Emit only the functions reachable from these exported functions, plus the

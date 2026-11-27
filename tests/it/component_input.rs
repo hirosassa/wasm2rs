@@ -4,8 +4,9 @@
 use std::process::Command;
 
 use wasm2rs::{
-    ComponentOptions, SourceFile, SplitOptions, TranspileError, TranspileOptions, dump, transpile,
-    transpile_component, transpile_component_split, transpile_component_with_exports, wit_exports,
+    ComponentOptions, DEFAULT_SPLIT_DISPATCH as DEFAULT_SPLIT_ARMS, SourceFile, SplitOptions,
+    TranspileError, TranspileOptions, dump, transpile, transpile_component,
+    transpile_component_split, transpile_component_with_exports, wit_exports,
 };
 
 use crate::common;
@@ -675,4 +676,58 @@ fn a_module_taking_a_function_from_its_only_sibling_is_linked() {
     // The sibling's body is part of the unit; as a lone module it would be a host import.
     assert!(code.contains("7i32"), "the sibling is linked in: {code}");
     assert!(!code.contains("trait Imports"), "{code}");
+}
+
+// --- the default `split_dispatch` of a component (#331) ---
+
+/// A component whose one lifted function is a flattened dispatch of about `cases` arms.
+fn switch_component(cases: usize) -> Vec<u8> {
+    wat_component(&format!(
+        "(component (core module $m (func (export \"f\") (param $sel i32) (result i32) (local $r i32)\n\
+         {}(local.get $r)))\n\
+         (core instance $i (instantiate $m))\n\
+         (func $f (param \"sel\" u32) (result u32) (canon lift (core func $i \"f\")))\n\
+         (export \"f\" (func $f)))",
+        crate::split_dispatch::switch_body(cases)
+    ))
+}
+
+#[test]
+fn a_component_splits_a_dispatch_past_the_default_cap() {
+    let code = transpile_component(
+        &switch_component(DEFAULT_SPLIT_ARMS + 50),
+        &ComponentOptions::default(),
+    )
+    .unwrap();
+    assert!(code.contains("_part0("), "dispatch not split: {code}");
+}
+
+#[test]
+fn a_component_keeps_a_dispatch_within_the_default_cap_whole() {
+    let code = transpile_component(&switch_component(100), &ComponentOptions::default()).unwrap();
+    assert!(code.contains("match pc {"), "not flattened: {code}");
+    assert!(!code.contains("_part0("), "split below the cap: {code}");
+}
+
+#[test]
+fn an_explicit_zero_keeps_a_component_dispatch_whole() {
+    let options = ComponentOptions {
+        transpile: TranspileOptions::default().with_split_dispatch(0),
+        ..ComponentOptions::default()
+    };
+    let code = transpile_component(&switch_component(DEFAULT_SPLIT_ARMS + 50), &options).unwrap();
+    assert!(!code.contains("_part0("), "split despite 0: {code}");
+}
+
+#[test]
+fn the_cli_component_flag_splits_by_default_and_zero_opts_out() {
+    let (_dir, input) = cli_input("split_default", &switch_component(DEFAULT_SPLIT_ARMS + 50));
+    let split = cli_ok(&["--component".as_ref(), input.as_os_str()]);
+    assert!(split.contains("_part0("), "dispatch not split");
+    let whole = cli_ok(&[
+        "--component".as_ref(),
+        "--split-dispatch=0".as_ref(),
+        input.as_os_str(),
+    ]);
+    assert!(!whole.contains("_part0("), "split despite 0");
 }

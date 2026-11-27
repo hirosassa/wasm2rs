@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `ComponentOptions::default()` and the CLI's `--component` now set `split_dispatch` to `DEFAULT_SPLIT_DISPATCH` (512): a flattened dispatch past 512 arms is emitted as sibling part functions, as `--split-dispatch=512` did. LLVM at `-C opt-level=1` did not finish the 13.9 MB jco (JavaScript) component whole (more than 80 minutes, #331); with the default it builds in 345 s (11.5 GB peak RSS) and runs. The Python component (`componentize-py`) builds in 207 s instead of 337 s. A dispatch of 512 arms or fewer is unchanged, so most components generate the same code. `--split-dispatch=0` (CLI) or `TranspileOptions::with_split_dispatch(0)` in `ComponentOptions::transpile` keeps every function whole.
+
 ## [0.7.0] - 2026-11-24
 
 `wasm2rs` and `wasm2rs-macros` 0.7.0, `wasm2rs-wasi` 0.2.1. `wasm2rs-macros` has no API or code change; its version follows `wasm2rs`. `wasm2rs` 0.7.0 makes the WIT types `WitFunc` and `WitType` `#[non_exhaustive]` (see Breaking), so the minor bump (a breaking one for a 0.x crate) is deliberate. `wasm2rs-wasi` 0.2.1 adds `Http1Client` (feature `http-client`) (a new type; no existing API changes, and `cargo-semver-checks` passes as a patch release).
