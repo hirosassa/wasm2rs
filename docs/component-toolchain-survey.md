@@ -17,7 +17,7 @@ directory; the commands are below so the survey can be repeated.
 | B | `wasm32-wasip1` core + `wasm-tools component new --adapt` (command adapter) | 2.2 MB, main + adapter module | **works** (L3 linking; run in 7.0 s with the `wasm2rs-wasi` build, rustc 1.6 s): prints `hello from rust`. The first run failed only in `wasip2_run`, which looked for `wasi:cli/run@0.2.0` while the adapter exports `@0.2.3` |
 | C | Go (`GOOS=wasip1`) + the same adapter | 2.5 MB, main + adapter module | **runs when the environment is empty; fails with an environment, on wasmtime too** (#311): transpiles and builds (about 3 min in total; rustc 168 s, 4.3 GB peak RSS at `-C opt-level=1`). With an inherited environment it traps with `assertion failed at adapter line 2745` (the adapter's `State` magic) because the adapter's two extra pages (36 -> 38) overlap Go's heap range (`bloc` 36 pages, `blocMax` 38 pages). The same failure reproduces on wasmtime v30.0.0 with `-S inherit-env`; `wasmtime run` passes an empty environment by default, and `env -i` makes the wasm2rs program print `hello from go`. Not a wasm2rs defect: a Go + adapter incompatibility |
 | D | `jco componentize` (StarlingMonkey, JS) | 13.9 MB | **works at `-C opt-level=0`** (2026-11-13, after F3 and F4-1): prints `hello from js`; `wasip2_run` end to end took **88 s** (rustc 73 s, 7.6 GB peak RSS; the binary is 45 MB and starts in 0.8 s). At `-C opt-level=1`, the `wasip2_run` default, LLVM did **not finish in 80 minutes** whole (single codegen unit, 125 MB `program.rs`; stuck in IR passes / the machine scheduler of one huge function, and `-C llvm-args=-enable-misched=false` did not help in 40 minutes). **Fixed by #331 (2026-11-27):** `--component` now splits a flattened dispatch past 512 arms by default (F4), and `wasip2_run` at `-C opt-level=1` end to end took **345 s** (11.5 GB peak RSS) and prints `hello from js`. `WASM2RS_EXAMPLE_OPT_LEVEL=0` selects the level for the example |
-| E | `componentize-py` (CPython 3.14) | 17.6 MB, 14 core modules (12 without the shim and fixup) | **works** (F2-1 to F2-4, 2026-11-13): transpiles in 1.1 s to a 122 MB source, builds and runs `wasi:cli/run` printing `hello from python`; `wasip2_run` end to end took **337 s** (`rustc -C opt-level=1`, 7.5 GB peak RSS) after F4-1 removed the redundant parentheses. `run` works without calling `exports#init` first (the build-time init transform already ran). See [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md), section 9 |
+| E | `componentize-py` (CPython 3.14) | 17.6 MB, 14 core modules (12 without the shim and fixup) | **works** (F2-1 to F2-4, 2026-11-13): transpiles in 1.1 s to a 122 MB source, builds and runs `wasi:cli/run` printing `hello from python`; `wasip2_run` end to end took **337 s** (`rustc -C opt-level=1`, 7.5 GB peak RSS) after F4-1 removed the redundant parentheses. `run` works without calling `exports#init` first (the build-time init transform already ran). Since #488 the default `split_dispatch` (512) makes the build 36% faster than `--split-dispatch=0` and costs 5-6% of steady-state speed (F4, runtime cost). See [f2-dynamic-linking-design.md](f2-dynamic-linking-design.md), section 9 |
 | F | Rust `wasm32-wasip2` + `wasi` 0.14 crate, `wasi:http` handler | 114 KB, one core module | **works** (2026-11-14): `wasip2_serve` answers `200`, a header, a body naming the request path and a trailer (`curl -i` shows it after the last chunk); build and start 8 s with the `wasm2rs-wasi` build. It exports `incoming-handler@0.2.12`, which `wasip2_serve` refused until it accepted any patch version (see G1). `#[ignore]` test: `WASM2RS_HTTP_HELLO_COMPONENT` |
 | G | `jco componentize` (StarlingMonkey, JS), `fetch` event | 13.0 MB | **works at `-C opt-level=0`** (2026-11-14): `200`, header and body over `wasip2_serve`; 86 s from start to listening. `-C opt-level=1` builds since #331 (the default `split_dispatch`, F4) |
 | H | `componentize-py`, `IncomingHandler` | 18.4 MB | **works at `-C opt-level=0`** (2026-11-14): `200`, header and body over `wasip2_serve`, also for a second request; 75 s from start to listening |
@@ -116,6 +116,25 @@ Smaller parts are not faster below 512 and larger ones are slower, so the defaul
 prints `hello from go`. A dispatch of 512 arms or fewer
 generates the same code as before. A per-function `optnone` is not needed (and has no
 stable attribute), nor are `#[inline(never)]`/`#[cold]` or more codegen units.
+
+**Runtime cost of splitting (Python, case E, #488).** Same component (componentize-py 0.25.1,
+18.4 MB), `-C opt-level=1`, one Apple Silicon machine, median of 5 interleaved runs per setting.
+`wasip2_run` cannot switch the split, so a working copy was patched to read `WASM2RS_SPLIT`.
+
+| | `--split-dispatch=512` | `--split-dispatch=0` | diff |
+|---|---|---|---|
+| whole build | 236 s | 369 s | -36% |
+| peak RSS / binary | 7.3 GB / 28.4 MB | 7.1 GB / 28.5 MB | |
+| `hello` start + run | 0.016 s | 0.014 s | noise (build-time init already ran) |
+| `fib(27)` + 3 M-iteration loop (whole process) | 1.076 s | 1.021 s | +5.4% (ranges do not overlap) |
+| of which `fib(27)` (one run, indicative) | 0.174 s | 0.152 s | |
+| of which 3 M-iteration loop | 0.866 s | 0.855 s | about +1% |
+
+Splitting does not affect startup, and costs 5-6% on a light, CPython-interpreter-bound
+workload, so the shorter build wins. Use `--split-dispatch=0` when execution speed matters most
+(JS does not finish unsplit at `opt-level=1`, so it has no such option). The suspected cause is
+calls between parts and LLVM optimizing per part; this was not isolated. Caveats: only a plain
+`fib` and an integer loop, one machine, and no JS comparison because unsplit JS never finishes.
 
 ### G1. `wasip2_serve` refused handlers exported at a newer patch version (F)
 
